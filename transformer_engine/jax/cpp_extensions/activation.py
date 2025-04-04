@@ -936,7 +936,7 @@ def act_lu(
         rowwise_scale_inv = jnp.squeeze(rowwise_scale_inv, axis=-2)  # Remove act axis
     if quantizer.q_axis in (QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE):
         colwise_output_shape = output_shape
-        if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
             colwise_output_shape = multidim_transpose(output_shape)
         colwise_casted_output = colwise_casted_output.reshape(colwise_output_shape)
         if len(colwise_scale_inv.shape) > 1:
@@ -1078,7 +1078,7 @@ def quantize_dact_dbias(
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING) and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

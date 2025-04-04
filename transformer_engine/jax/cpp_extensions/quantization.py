@@ -546,7 +546,7 @@ def _quantize_impl(
         is_outer=True,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING) and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

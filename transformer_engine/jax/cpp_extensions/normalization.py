@@ -845,7 +845,7 @@ def layernorm_fwd(
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -873,7 +873,7 @@ def layernorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
@@ -1027,7 +1027,7 @@ def rmsnorm_fwd(
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -1055,7 +1055,7 @@ def rmsnorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
