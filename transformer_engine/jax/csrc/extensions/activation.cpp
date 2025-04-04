@@ -46,13 +46,6 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
 
   if (is_fp8_dtype(out_dtype)) {
-    output_tensor.set_rowwise_scale_inv(
-        scale_inv_buf->untyped_data(),
-        convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-        std::vector<size_t>{
-            product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
-            scale_inv_buf->dimensions().back()});
-
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
@@ -255,13 +248,6 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto output_tensor = TensorWrapper(scaling_mode);
   output_tensor.set_rowwise_data(output, out_dtype, output_shape);
   if (is_fp8_dtype(out_dtype)) {
-    output_tensor.set_rowwise_scale_inv(
-        scale_inv_buf->untyped_data(),
-        convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-        std::vector<size_t>{
-            product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
-            scale_inv_buf->dimensions().back()});
-
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
