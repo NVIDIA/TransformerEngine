@@ -100,11 +100,13 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   int a_storage_outer_dim;
   int b_storage_outer_dim;
   if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
-    // For this scaling mode, the quantizer stores
-    // rowwise data and transposes the data for columnwise
-    // data so the physical layout is always row major
-    // and the transA and transB values to pass to cublas
-    // should always be TN.
+    // For this scaling mode, a quantized tensor of the data is stored
+    // in a row major layout for rowwise data and a quantized tensor of
+    // the transpose of the data is also stored in row major layout.
+    //
+    // cublas will be called with "TN", but Transformer engine uses
+    // the "TN" parameters to choose between rowwise and columnwise
+    // row major tensors.
 
     a_storage_outer_dim = m;
     b_storage_outer_dim = n;
