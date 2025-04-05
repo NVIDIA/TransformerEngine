@@ -106,6 +106,7 @@ fp8_recipes = [
     None,  # Test non-FP8
     recipe.MXFP8BlockScaling(),  # Test default
     recipe.Float8CurrentScaling(),  # Test default
+    recipe.Float8BlockScaling(),  # Test default
     recipe.DelayedScaling(),  # Test default
     recipe.DelayedScaling(  # Test most_recent algo
         amax_history_len=16,
