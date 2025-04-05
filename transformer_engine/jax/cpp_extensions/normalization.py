@@ -847,7 +847,7 @@ def layernorm_fwd(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out, mu, rsigma = layernorm_fwd(
-            x=x.astype(jnp.float32),
+            x=x,
             gamma=gamma,
             beta=beta,
             zero_centered_gamma=zero_centered_gamma,
@@ -1042,7 +1042,7 @@ def rmsnorm_fwd(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out, rsigma = rmsnorm_fwd(
-            x=x.astype(jnp.float32),
+            x=x,
             gamma=gamma,
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
