@@ -110,6 +110,8 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto output_tensor = TensorWrapper(scaling_mode);
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
 
+  NVTE_CHECK(jax_scaling_mode != JAXScalingMode::CURRENT_TENSOR_SCALING, "Current tensor scaling does not support fused operations. Please call this primitive in higher-precision then quantize with current scaling.");
+
   if (is_fp8_dtype(out_dtype)) {
     output_tensor.set_rowwise_scale_inv(
         scale_inv_buf->untyped_data(),
@@ -120,6 +122,8 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   }
 
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
+    NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
+    NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
     cudaMemsetAsync(amax, 0, sizeof(float), stream);
     output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});

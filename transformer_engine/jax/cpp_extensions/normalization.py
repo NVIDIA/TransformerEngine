@@ -26,6 +26,7 @@ from .misc import (
     te_dtype_to_jax_dtype,
     NamedSharding,
 )
+from .quantization import quantize
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -112,7 +113,7 @@ class NormFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),  # wtype
             jax_dtype_to_te_dtype(out_dtype),
             norm_type,
-            scaling_mode.get_nvte_scaling_mode(),  # scaling mode
+            scaling_mode.value.value,  # scaling mode
             zero_centered_gamma,
             epsilon,
             get_forward_sm_margin(),
@@ -842,6 +843,19 @@ def layernorm_fwd(
             is_outer=True,
         )
         return output, mu, rsigma
+    
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out, mu, rsigma = layernorm_fwd(
+            x=x.astype(jnp.float32),
+            gamma=gamma,
+            beta=beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out = quantize(out, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
@@ -1024,6 +1038,18 @@ def rmsnorm_fwd(
             is_outer=True,
         )
         return output, rsigma
+    
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out, rsigma = rmsnorm_fwd(
+            x=x.astype(jnp.float32),
+            gamma=gamma,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out = quantize(out, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, rsigma
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling

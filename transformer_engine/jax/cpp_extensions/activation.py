@@ -26,7 +26,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_quantize_dbias, _jax_dbias, quantize_dbias
+from .quantization import _jax_quantize_dbias, _jax_dbias, quantize, quantize_dbias
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -486,7 +486,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
                 gi_hidden_size,
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(out_dtype),
-                ScalingMode(scaling_mode).get_nvte_scaling_mode(),
+                scaling_mode.value,
                 is_2x,
             )
             wkspace_aval = x_aval.update(
@@ -907,6 +907,16 @@ def act_lu(
         )
         out = out.reshape(output_shape)
         return out
+    
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out = act_lu(
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            quantizer=None,
+        )
+        out = quantize(out, quantizer=quantizer, dq_dtype=x.dtype)
+        return out
 
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
@@ -1032,6 +1042,18 @@ def quantize_dact_dbias(
         if is_dbias:
             dbias = _jax_dbias(output).astype(x.dtype)
         return output.astype(x.dtype), dbias
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out, dbias = quantize_dact_dbias(
+            dz=dz.astype(jnp.float32),
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            is_dbias=is_dbias,
+            quantizer=None,
+        )
+        out = quantize(out, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, dbias
 
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale

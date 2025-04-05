@@ -363,7 +363,7 @@ class CurrentScaleQuantizer(Quantizer):
         Returns:
             Tuple of (children, aux_data) for tree operations
         """
-        children = (self.scale, self.amax_history)
+        children = ()
         aux_data = (self.q_dtype, self.scaling_mode, self.q_axis)
         return (children, aux_data)
 
