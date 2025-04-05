@@ -7,6 +7,7 @@
 
 #include "extensions.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/recipe.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
@@ -86,7 +87,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
             scale_inv_buf->dimensions().back()});
   }
 
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+  if (jax_scaling_mode == JAXScalingMode::DELAYED_TENSOR_SCALING) {
     float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
     float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
     NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
@@ -94,6 +95,29 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
     cudaMemsetAsync(amax_out, 0, sizeof(float), stream);
     output_tensor.set_amax(amax_out, DType::kFloat32, std::vector<size_t>{1});
+  }
+
+  if (jax_scaling_mode == JAXScalingMode::CURRENT_TENSOR_SCALING) {
+    float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+    float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
+    NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
+    NVTE_CHECK(amax_out != nullptr, "amax must be provided for delayed tensor scaling");
+    output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+    cudaMemsetAsync(amax_out, 0, sizeof(float), stream);
+    output_tensor.set_amax(amax_out, DType::kFloat32, std::vector<size_t>{1});
+
+    nvte_compute_amax(input_tensor.data(),  // input data
+                     output_tensor.data(),  // output data (for amax)
+                     stream);
+
+    QuantizationConfigWrapper quant_config;
+    /** defaults for now, TODO(Jeremy) move to parameter */
+    bool force_pow_2_scales = false;
+    float amax_epsilon = 0.0;
+    quant_config.set_force_pow_2_scales(force_pow_2_scales);
+    quant_config.set_amax_epsilon(amax_epsilon);
+    nvte_compute_scale_from_amax(output_tensor.data(), quant_config, stream);
+    output_tensor.set_amax(nullptr, DType::kFloat32, std::vector<size_t>{1});
   }
 
   if (quantize_axis == QuantizeAxis::COLWISE || quantize_axis == QuantizeAxis::ROWWISE_COLWISE) {
