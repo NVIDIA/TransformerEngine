@@ -54,7 +54,8 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto *input = input_buf.untyped_data();
 
-  auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
+  auto const jax_scaling_mode = static_cast<JAXScalingMode>(scaling_mode_enum);
+  auto const scaling_mode = jaxScalingModeToNVTEScalingMode(jax_scaling_mode);
   auto const quantize_axis = static_cast<QuantizeAxis>(quantize_axis_enum);
 
   auto *output = output_buf->untyped_data();

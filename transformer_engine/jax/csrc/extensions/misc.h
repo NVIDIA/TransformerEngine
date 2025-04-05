@@ -40,5 +40,18 @@ enum class QuantizeAxis {
   ROWWISE_COLWISE,
 };
 
+
+enum class JAXScalingMode {
+  // Note: these start at 100 to avoid conflicting with NVTEScalingMode. These are distinct as what the information the common kernels
+  // need versus the framework extensions is different. For example, the TE common kernels treat delayed scaling and current scaling the same and both are marked as NVTE_DELAYED_TENSOR_SCALING, it is up to the frameworks to handle current scaling differently, such as calculating the amax beforehand and passing nullptr as the amax_ptr in nvte_quantize to prevent recalculating the fused amax.
+  INVALID_SCALING = 100,
+  NO_SCALING = 101,
+  DELAYED_TENSOR_SCALING = 102,
+  CURRENT_TENSOR_SCALING = 103,
+  MXFP8_1D_SCALING = 104,
+};
+
+NVTEScalingMode jaxScalingModeToNVTEScalingMode(JAXScalingMode scaling_mode);
+
 }  // namespace jax
 }  // namespace transformer_engine

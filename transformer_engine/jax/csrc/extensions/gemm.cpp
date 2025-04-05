@@ -23,7 +23,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
                            uint8_t *rhs_sinv_ptr, const DType &rhs_sinv_dtype, uint8_t *bias_ptr,
                            const DType &bias_dtype, uint8_t *out_ptr, const DType &out_dtype,
                            uint8_t *workspace_ptr, const size_t workspace_size, size_t num_gemms,
-                           int32_t *dim_list_ptr, const int64_t &scaling_mode,
+                           int32_t *dim_list_ptr, const NVTEScalingMode &scaling_mode,
                            cudaStream_t stream) {
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
@@ -119,7 +119,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
       lhs_wrapper_list.push_back(std::move(lhs_i));
       rhs_wrapper_list.push_back(std::move(rhs_i));
     } else {
-      NVTE_ERROR("Unsupported scaling mode: ", scaling_mode);
+      NVTE_ERROR("Unsupported scaling mode: ", static_cast<std::underlying_type<NVTEScalingMode>::type>(scaling_mode));
     }
 
     auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
@@ -169,7 +169,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_flatten,
                           Buffer_Type lhs_sinv_flatten, Buffer_Type rhs_flatten,
                           Buffer_Type rhs_sinv_flatten, Buffer_Type bias_flatten,
                           Buffer_Type dim_list, Result_Type out_flatten,
-                          Result_Type workspace_flatten, int64_t num_gemms, int64_t scaling_mode) {
+                          Result_Type workspace_flatten, int64_t num_gemms, int64_t scaling_mode_enum) {
+  auto const jax_scaling_mode = static_cast<JAXScalingMode>(scaling_mode_enum);
+  auto const scaling_mode = jaxScalingModeToNVTEScalingMode(jax_scaling_mode);
+
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_flatten.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_flatten.untyped_data());

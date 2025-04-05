@@ -225,7 +225,7 @@ class NormFwdPrimitive(BasePrimitive):
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             sm_margin=sm_margin,
-            scaling_mode=scaling_mode.get_nvte_scaling_mode(),
+            scaling_mode=scaling_mode.value.value,
             is_2x=is_2x,
         )
 

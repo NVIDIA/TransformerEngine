@@ -168,7 +168,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             ctx,
             x,
             scale,
-            scaling_mode=ScalingMode(scaling_mode).get_nvte_scaling_mode(),
+            scaling_mode=scaling_mode.value,
             q_axis=q_axis,
             is_dbias=is_dbias,
         )

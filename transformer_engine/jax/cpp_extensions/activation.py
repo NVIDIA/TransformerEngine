@@ -172,7 +172,7 @@ class ActLuPrimitive(BasePrimitive):
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
         out = ffi.ffi_lowering(ActLuPrimitive.name)(
-            ctx, x, scale, act_enum=act_enum, scaling_mode=ScalingMode(scaling_mode).get_nvte_scaling_mode(), is_2x=is_2x
+            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode.value, is_2x=is_2x
         )
         return out
 
@@ -543,7 +543,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             dz,
             x,
             scale,
-            scaling_mode=ScalingMode(scaling_mode).get_nvte_scaling_mode(),
+            scaling_mode=scaling_mode.value,
             is_2x=is_2x,
             is_dbias=is_dbias,
             act_enum=int(act_enum),

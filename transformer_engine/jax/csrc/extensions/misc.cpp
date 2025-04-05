@@ -26,5 +26,21 @@ std::vector<size_t> Shape::to_vector() const {
   return shape;
 }
 
+NVTEScalingMode jaxScalingModeToNVTEScalingMode(JAXScalingMode scaling_mode) {
+  switch (scaling_mode) {
+    case JAXScalingMode::NO_SCALING:
+      return NVTE_NO_SCALING;
+    case JAXScalingMode::DELAYED_TENSOR_SCALING:
+      return NVTE_DELAYED_TENSOR_SCALING;
+    case JAXScalingMode::CURRENT_TENSOR_SCALING:
+      return NVTE_DELAYED_TENSOR_SCALING;
+    case JAXScalingMode::MXFP8_1D_SCALING:
+      return NVTE_MXFP8_1D_SCALING;
+    default:
+      assert(false && "Invalid JAX scaling mode");
+      return NVTE_INVALID_SCALING;
+  }
+}
+
 }  // namespace jax
 }  // namespace transformer_engine

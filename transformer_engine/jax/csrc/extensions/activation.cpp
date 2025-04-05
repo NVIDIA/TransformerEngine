@@ -42,7 +42,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto n = input_dims.back();
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   auto act_len = input_dims[input_dims.size() - 2];
-  auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
+  auto const jax_scaling_mode = static_cast<JAXScalingMode>(scaling_mode_enum);
+  auto const scaling_mode = jaxScalingModeToNVTEScalingMode(jax_scaling_mode);
   auto is_2x = static_cast<bool>(is_2x_int);
 
   auto input_shape = std::vector<size_t>{m, act_len * n};
@@ -134,12 +135,15 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
 
 pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType out_dtype,
-                                                   int scaling_mode, bool is_2x) {
+                                                   int scaling_mode_enum, bool is_2x) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto dact_input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto output_shape = std::vector<size_t>{batch_size, hidden_size};
   auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
   auto dbias_shape = std::vector<size_t>{hidden_size};
+
+  auto const jax_scaling_mode = static_cast<JAXScalingMode>(scaling_mode_enum);
+  auto const scaling_mode = jaxScalingModeToNVTEScalingMode(jax_scaling_mode);
 
   // Evil hack to specify TE impl
   // Note: nvte_quantize_dbias_dgelu chooses its internal impl based
@@ -153,7 +157,7 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
   auto dact_input_tensor =
       TensorWrapper(reinterpret_cast<void *>(&temp), dact_input_shape, in_dtype);
   auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
-  auto output_tensor = TensorWrapper(static_cast<NVTEScalingMode>(scaling_mode));
+  auto output_tensor = TensorWrapper(scaling_mode);
   output_tensor.set_rowwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_shape);
   // Only the pointers will be checked for scale_inv, thus the shapes do not matter
   if (is_fp8_dtype(out_dtype)) {
@@ -202,7 +206,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto *input = input_buf.untyped_data();
   auto *act_input = act_input_buf.untyped_data();
 
-  auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
+  auto const jax_scaling_mode = static_cast<JAXScalingMode>(scaling_mode_enum);
+  auto const scaling_mode = jaxScalingModeToNVTEScalingMode(jax_scaling_mode);
 
   auto *output = output_buf->untyped_data();
   auto *output_trans = output_trans_buf->untyped_data();

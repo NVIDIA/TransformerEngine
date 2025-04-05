@@ -150,6 +150,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("COLWISE", transformer_engine::jax::QuantizeAxis::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeAxis::ROWWISE_COLWISE)
       .export_values();
+
+  pybind11::enum_<JAXScalingMode>(m, "JAXScalingMode", pybind11::module_local())
+      .value("INVALID_SCALING", JAXScalingMode::INVALID_SCALING)
+      .value("NO_SCALING", JAXScalingMode::NO_SCALING)
+      .value("DELAYED_TENSOR_SCALING", JAXScalingMode::DELAYED_TENSOR_SCALING)
+      .value("CURRENT_TENSOR_SCALING", JAXScalingMode::CURRENT_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", JAXScalingMode::MXFP8_1D_SCALING)
+      .export_values();
 }
 
 }  // namespace jax

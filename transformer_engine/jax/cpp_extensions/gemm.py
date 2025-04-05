@@ -98,7 +98,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias_contig,
             dim_list,
             num_gemms=num_gemms,
-            scaling_mode=ScalingMode(scaling_mode).get_nvte_scaling_mode(),
+            scaling_mode=scaling_mode.value,
         )
 
     @staticmethod
