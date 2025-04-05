@@ -582,9 +582,9 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   const size_t B0 = inputB->flat_first_dim();
   const size_t B1 = inputB->flat_last_dim();
 
-  const int m = transa == CUBLAS_OP_T ? A0 : A1;
-  const int k = transa == CUBLAS_OP_T ? A1 : A0;
-  const int n = transb == CUBLAS_OP_T ? B1 : B0;
+  const int m = transa ? A0 : A1;
+  const int k = transa ? A1 : A0;
+  const int n = transb ? B1 : B0;
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, k, n,
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
@@ -618,9 +618,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
                  is_delayed_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
 
-  const int m = transa == CUBLAS_OP_T ? inputA->data.shape[0] : inputA->data.shape[1];
-  const int k = transa == CUBLAS_OP_T ? inputA->data.shape[1] : inputA->data.shape[0];
-  const int n = transb == CUBLAS_OP_T ? inputB->data.shape[0] : inputB->data.shape[1];
+  const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
+  const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];
+  const int n = transb ? inputB->data.shape[1] : inputB->data.shape[0];
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, k, n,
               (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
