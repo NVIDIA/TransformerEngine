@@ -55,6 +55,7 @@ fp8_recipes = [
     recipe.DelayedScaling(),
     recipe.MXFP8BlockScaling(),
     recipe.Float8CurrentScaling(),
+    recipe.Float8BlockScaling(),
 ]
 
 # Supported data types

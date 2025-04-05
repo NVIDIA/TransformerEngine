@@ -234,7 +234,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             }
 
             # Construct builder class for quantized tensors
-            self._quantizers[mode] = recipe_state.make_quantizers()
+            self._quantizers[mode] = recipe_state.make_quantizers(fp8_output=False)
 
     def _update_quantization_recipe_state(
         self,

@@ -56,9 +56,11 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -170,9 +172,48 @@ class _LayerNormLinear(torch.autograd.Function):
                 columnwise_usage
                 and with_input_all_gather
                 and not isinstance(input_quantizer, MXFP8Quantizer)
+                and not isinstance(input_quantizer, Float8BlockQuantizer)
             ):
                 columnwise_usage = False
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+
+        # Configure quantizer for normalization output
+        with_quantized_norm = fp8 and not return_layernorm_output
+        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
+        # so we need to set with_quantized_norm to False
+        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
+            with_quantized_norm = False
+        if isinstance(input_quantizer, Float8BlockQuantizer):
+            # Quantizer has not been fused with norm yet.
+            with_quantized_norm = False
+        if with_quantized_norm:
+            if with_input_all_gather:
+                if isinstance(input_quantizer, MXFP8Quantizer):
+                    with_quantized_norm = False
+
+        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+        if (
+            fp8
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
+            input_quantizer.set_usage(rowwise=True, columnwise=False)
+
+        ub_obj_fprop = None
+        ln_out = None
+        # For DelayScaling, output of normalization will be in fp8.
+        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
+        if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
+            ub_obj_fprop = get_ub(ub_name + "_fprop")
+            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
+        elif with_quantized_norm:
+            if with_input_all_gather:
+                input_quantizer.set_usage(rowwise=True, columnwise=False)
+            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
+        else:
+            ln_out = torch.empty_like(
+                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
+            )
 
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
@@ -199,6 +240,8 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_total = None
         ub_obj_fprop = None
         if with_input_all_gather:
+            # TODO(kwyss): Support FP8 allgather for FP8 block quantization.
+            force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
@@ -210,7 +253,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 if fp8:
-                    if not with_quantized_norm:
+                    if not (with_quantized_norm or force_high_precision_gather):
                         ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:
@@ -689,6 +732,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
+                    if ctx.input_quantizer is not None and not isinstance(
+                        ln_out_total, QuantizedTensor
+                    ):
+                        # Async gather in BF16 does not asynchronously
+                        # call quantizer after gather.
+                        ln_out_total = ctx.input_quantizer(ln_out_total)
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):
