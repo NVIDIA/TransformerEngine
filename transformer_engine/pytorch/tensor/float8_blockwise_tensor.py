@@ -496,7 +496,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
-            dst.dtype = src.dtype
 
         # Check that tensor dimensions match
         if (
