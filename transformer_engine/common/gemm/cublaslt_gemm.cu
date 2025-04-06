@@ -229,11 +229,10 @@ namespace transformer_engine {
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu,
-                 cublasOperation_t transa, cublasOperation_t transb, bool grad, void *workspace,
-                 size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, cudaStream_t stream) {
+                 const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
+                 cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
+                 bool accumulate, bool use_split_accumulator, int math_sm_count, int m_split,
+                 int n_split, bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();
@@ -245,8 +244,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const int n = transb == CUBLAS_OP_T ? B1 : B0;
   const int k = transa == CUBLAS_OP_T ? A1 : A0;
   NVTE_CHECK((transb == CUBLAS_OP_T ? B0 : B1) == k,
-             "GEMM inputs have incompatible dimensions (A is ",
-             A0, "x", A1, ", B is ", B0, "x", B1, ")");
+             "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
+             ")");
   const int ldd = m;
 
   // Return immediately if GEMM is trivial
@@ -597,10 +596,9 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
   Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
 
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream);
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              accumulate, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -628,10 +626,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
                  is_delayed_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              accumulate, use_split_accumulator, math_sm_count, m_split, n_split, gemm_producer,
+              inputCounter, stream);
 }
 
 void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
