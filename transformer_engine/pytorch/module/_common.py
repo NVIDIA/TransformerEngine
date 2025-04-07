@@ -234,7 +234,6 @@ class WeightGradStore:
         """
         if split_bw:
             self.context = queue.Queue()
-            assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enabling split_bw"
             assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
             self.enabled = split_bw
         else:
@@ -278,7 +277,7 @@ class WeightGradStore:
         assert self.enabled == True, "split_bw is not enabled"
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
-            return func(*tensor_list)
+            return func(*tensor_list), tensor_list
         else:
             rank = torch.distributed.get_rank()
             raise Exception(f"Pop empty queue. rank {rank}")

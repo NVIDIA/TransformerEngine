@@ -357,6 +357,9 @@ class _GroupedLinear(torch.autograd.Function):
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
+            
+            if ctx.wgrad_store.split_bw():
+                wgrad_list = [None] * ctx.num_gemms
 
             if not ctx.use_bias or (ctx.wgrad_store.split_bw() and not ctx.fp8):
                 grad_biases = [None] * ctx.num_gemms
@@ -474,7 +477,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
+        self.wgrad_store = WeightGradStore(split_bw)
 
         self._offsets = {"input": 0, "weight": num_gemms, "output": 2 * num_gemms, "grad_output": 0}
 
@@ -698,7 +701,13 @@ class GroupedLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
-            _, grad_biases_, _ = self.wgrad_store.pop()
+            (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
+            wgrad_list = tensor_list[2]
+            if not self.fuse_wgrad_accumulation:
+                for i in range(self.num_gemms):
+                    weight_param = getattr(self, f"weight{i}")
+                    if weight_param.grad is None:
+                        weight_param.grad = wgrad_list[i].to(weight_param.dtype)
             if self.use_bias:
                 for i in range(self.num_gemms):
                     bias_param = getattr(self, f"bias{i}")
