@@ -242,6 +242,7 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
 
         # Cast weight to expected dtype
+        ctx.weight_quantizer = weight_quantizer
         if not fp8:
             quantized_weight = False
             weightmat = cast_if_needed(weight, activation_dtype)
@@ -651,6 +652,11 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
+            if ctx.weight_quantizer is not None:
+                weight.update_usage(
+                    rowwise_usage=ctx.weight_quantizer.rowwise_usage,
+                    columnwise_usage=ctx.weight_quantizer.columnwise_usage,
+                )
             dgrad, *_ = general_gemm(
                 weight,
                 grad_output,

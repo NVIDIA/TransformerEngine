@@ -301,6 +301,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_total = ln_out
 
         # Cast weights to expected dtype
+        ctx.fc1_weight_quantizer = fc1_weight_quantizer
+        ctx.fc2_weight_quantizer = fc2_weight_quantizer
         if not fp8:
             fc1_weight_final = cast_if_needed(fc1_weight, activation_dtype)
             fc2_weight_final = cast_if_needed(fc2_weight, activation_dtype)
@@ -749,6 +751,11 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # FC2 DGRAD; Unconditional
+            if ctx.fc2_weight_quantizer is not None:
+                ctx.fc2_weight.update_usage(
+                    rowwise_usage=ctx.fc2_weight_quantizer.rowwise_usage,
+                    columnwise_usage=ctx.fc2_weight_quantizer.columnwise_usage,
+                )
             gemm_output, *_ = general_gemm(
                 fc2_weight,
                 grad_output,
@@ -895,6 +902,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_dgrad_bulk = ub_obj_fc1_wgrad.get_buffer(None)
 
             # FC1 DGRAD: Unconditional
+            if ctx.fc1_weight_quantizer is not None:
+                ctx.fc1_weight.update_usage(
+                    rowwise_usage=ctx.fc1_weight_quantizer.rowwise_usage,
+                    columnwise_usage=ctx.fc1_weight_quantizer.columnwise_usage,
+                )
             fc1_dgrad, *_, fc1_dgrad_rs_out = general_gemm(
                 fc1_weight,
                 dact,
