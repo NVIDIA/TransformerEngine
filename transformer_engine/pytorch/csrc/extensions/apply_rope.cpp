@@ -53,9 +53,10 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
-    nvte_fused_rope_thd_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                                output_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h, d, d2,
-                                stride_t, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+    nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                            output_cu.data(), qkv_format, interleaved, cp_size, cp_rank, max_s, b,
+                            h, d, d2, stride_t, /*stride_b=*/0, stride_h, stride_d,
+                            at::cuda::getCurrentCUDAStream());
 
     return output;
   }
@@ -85,9 +86,10 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
               "expected the last dim of the input tensor equals or is "
               "greater than the freqs tensor");
 
-  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), qkv_format,
-                          interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
-                          stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+  auto cu_seqlens_cu = transformer_engine::TensorWrapper();  // empty cu_seqlens tensor
+  nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(), output_cu.data(),
+                          qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s,
+                          stride_b, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
@@ -138,10 +140,10 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
-    nvte_fused_rope_thd_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                                 input_grads_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h,
-                                 d, d2, stride_t, stride_h, stride_d,
-                                 at::cuda::getCurrentCUDAStream());
+    nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                             input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank,
+                             max_s, b, h, d, d2, stride_t, /*stride_b=*/0, stride_h, stride_d,
+                             at::cuda::getCurrentCUDAStream());
 
     return input_grads;
   }
@@ -175,9 +177,11 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
               "expected the last dim of the output_grads tensor equals or is "
               "greater than the freqs tensor");
 
-  nvte_fused_rope_backward(output_grads_cu.data(), freqs_cu.data(), input_grads_cu.data(),
-                           qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s,
-                           stride_b, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+  auto cu_seqlens_cu = transformer_engine::TensorWrapper();  // empty cu_seqlens tensor
+  nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                           input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank, s, b,
+                           h, d, d2, stride_s, stride_b, stride_h, stride_d,
+                           at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }
