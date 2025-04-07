@@ -263,7 +263,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 (recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState))
                 or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
                 or (
-                    recipe.fp8blockwise()
+                    recipe.float8_block_scaling()
                     and not isinstance(recipe_state, Float8BlockScalingRecipeState)
                 )
             )

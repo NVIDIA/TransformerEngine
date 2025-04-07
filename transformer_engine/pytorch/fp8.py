@@ -815,7 +815,7 @@ class RecipeState(abc.ABC):
             cls = MXFP8BlockScalingRecipeState
         elif recipe.float8_current_scaling():
             cls = Float8CurrentScalingRecipeState
-        elif recipe.fp8blockwise():
+        elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")

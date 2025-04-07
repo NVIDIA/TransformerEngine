@@ -567,7 +567,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
@@ -681,7 +681,7 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
@@ -1536,7 +1536,7 @@ def test_grouped_linear_accuracy(
         pytest.skip("MXFP8 unsupported for grouped linear.")
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
-    if recipe.fp8blockwise():
+    if recipe.float8_block_scaling():
         pytest.skip("Grouped linear for FP8 blockwise unsupported.")
 
     config = model_configs[model]
@@ -1733,7 +1733,7 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip("MXFP8 unsupported for grouped linear.")
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
-    if recipe.fp8blockwise():
+    if recipe.float8_block_scaling():
         pytest.skip("Float8 block scaling unsupported for grouped linear.")
 
     config = model_configs[model]
@@ -1945,7 +1945,7 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]

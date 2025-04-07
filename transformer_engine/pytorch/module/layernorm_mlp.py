@@ -105,7 +105,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         }
     # no activation fusion written yet
     # Per-tensor current scaling or fp8 blockwise scaling: []
-    if recipe.float8_current_scaling() or recipe.fp8blockwise():
+    if recipe.float8_current_scaling() or recipe.float8_block_scaling():
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "relu": (tex.relu, tex.drelu, None),
@@ -384,7 +384,7 @@ class _LayerNormMLP(torch.autograd.Function):
             act_out, _, fc1_out, _ = fc1_outputs
         else:
             fc1_out, *_ = fc1_outputs
-            if fp8 and FP8GlobalStateManager.get_fp8_recipe().fp8blockwise():
+            if fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling():
                 # tex.quantize does not support GELU fusion for blockwise.
                 act_out = activation_func(fc1_out, None)
                 act_out = tex.quantize(act_out, fc2_input_quantizer)
@@ -769,7 +769,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     grad_output.update_usage(rowwise_usage=True, columnwise_usage=True)
 
                 grad_arg = True
-                if ctx.fp8 and ctx.fp8_recipe.fp8blockwise():
+                if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling():
                     grad_arg = False
                 fc2_wgrad, fc2_bias_grad_, *_ = general_gemm(
                     act_out,
@@ -789,7 +789,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     out=origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
                 if fc2_bias_grad is None:
-                    if ctx.fp8 and ctx.fp8_recipe.fp8blockwise() and fc2_bias is not None:
+                    if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling() and fc2_bias is not None:
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
                         fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
                     fc2_bias_grad = fc2_bias_grad_

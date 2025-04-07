@@ -100,7 +100,7 @@ class TestFP8RecipeLinearBase:
         # Expected tensor names based on the naming template
         if recipe.float8_current_scaling():
             scaling_type = "ScalingType.PER_TENSOR"
-        elif recipe.fp8blockwise():
+        elif recipe.float8_block_scaling():
             scaling_type = "ScalingType.VECTOR_TILED_X_AND_G_BLOCK_TILED_W"
         else:
             scaling_type = "Unknown"
@@ -443,7 +443,7 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         # Expected tensor names based on the naming template
         if recipe.float8_current_scaling():
             scaling_type = "ScalingType.PER_TENSOR"
-        elif recipe.fp8blockwise():
+        elif recipe.float8_block_scaling():
             scaling_type = "ScalingType.VECTOR_TILED_X_AND_G_BLOCK_TILED_W"
         else:
             scaling_type = "Unknown"
