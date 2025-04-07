@@ -111,10 +111,10 @@ void performTest() {
     }
     return nvte_tensor_list;
   };
-  nvte_multi_cast_transpose(num_tensors,
-                            make_nvte_vector(input_list).data(),
-                            make_nvte_vector(output_list).data(),
-                            0);
+  nvte_multi_quantize(num_tensors,
+                      make_nvte_vector(input_list).data(),
+                      make_nvte_vector(output_list).data(),
+                      0);
 
   // Reference implementation
   compute_ref<InputType, OutputType>(ref_input_list,
