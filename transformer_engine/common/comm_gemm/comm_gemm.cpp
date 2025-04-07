@@ -32,6 +32,8 @@ namespace {
 using CalComm = std::unique_ptr<std::remove_pointer_t<cal_comm_t>, decltype(&cal_comm_destroy)>;
 using CudaStream =
     std::unique_ptr<std::remove_pointer_t<cudaStream_t>, decltype(&cudaStreamDestroy)>;
+using CudaEvent =
+    std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, decltype(&cudaEventDestroy)>;
 using CublasMp =
     std::unique_ptr<std::remove_pointer_t<cublasMpHandle_t>, decltype(&cublasMpDestroy)>;
 using CublasMpGrid =
@@ -69,9 +71,14 @@ struct CommGemmCtx {
   int64_t rank;
   CalComm cal_comm;
   CudaStream stream;
+  CudaEvent event;
   CublasMp cublas_mp;
   CublasMpGrid grid_col_major;
   CublasMpGrid grid_row_major;
+  CublasMpMatrixDesc a_desc;
+  CublasMpMatrixDesc b_desc;
+  CublasMpMatrixDesc d_desc;
+  CublasMpMatmulDesc matmul_desc;
   void* workspace;
   size_t workspace_size;
 };
@@ -81,59 +88,50 @@ namespace {
 void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, int64_t n, int64_t k,
                    const Tensor* a, const Tensor* b, const Tensor* d, const Tensor* bias,
                    const Tensor* pre_act_out, bool transa, bool transb, bool grad, bool accumulate,
-                   int comm_sm_count) {
+                   int comm_sm_count, cudaStream_t main_stream) {
   const auto a0 = a->flat_first_dim();
   const auto a1 = a->flat_last_dim();
   const auto b0 = b->flat_first_dim();
   const auto b1 = b->flat_last_dim();
 
-  cublasMpMatrixDescriptor_t a_desc_raw{};
   if (transa)
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorCreate(k, m, a1, a0, 0, 0, a1,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, a1, a0, 0, 0, a1,
                                                        get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), &a_desc_raw));
+                                                       ctx->grid_row_major.get(), ctx->a_desc.get()));
   else
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorCreate(m, k, a0, a1, 0, 0, a0,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, a0, a1, 0, 0, a0,
                                                        get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), &a_desc_raw));
-  CublasMpMatrixDesc a_desc(a_desc_raw, cublasMpMatrixDescriptorDestroy);
-
-  cublasMpMatrixDescriptor_t b_desc_raw{};
+                                                       ctx->grid_row_major.get(), ctx->a_desc.get()));
   if (transb)
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorCreate(n, k, b1, b0, 0, 0, b1,
-                                                       get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), &b_desc_raw));
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, b1, b0, 0, 0, b1,
+                                                       get_cuda_dtype(b->dtype()),
+                                                       ctx->grid_row_major.get(), ctx->b_desc.get()));
   else
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorCreate(k, n, b0, b1, 0, 0, b0,
-                                                       get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), &b_desc_raw));
-  CublasMpMatrixDesc b_desc(b_desc_raw, cublasMpMatrixDescriptorDestroy);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, b0, b1, 0, 0, b0,
+                                                       get_cuda_dtype(b->dtype()),
+                                                       ctx->grid_row_major.get(), ctx->b_desc.get()));
+  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, a0, b1, 0, 0, a0,
+                                                   get_cuda_dtype(d->dtype()),
+                                                   ctx->grid_col_major.get(), ctx->d_desc.get()));
 
-  cublasMpMatrixDescriptor_t d_desc_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorCreate(
-      m, n, a0, b1, 0, 0, a0, get_cuda_dtype(a->dtype()), ctx->grid_col_major.get(), &d_desc_raw));
-  CublasMpMatrixDesc d_desc(d_desc_raw, cublasMpMatrixDescriptorDestroy);
-
-  cublasMpMatmulDescriptor_t matmul_desc_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorCreate(&matmul_desc_raw, CUBLAS_COMPUTE_32F));
-  CublasMpMatmulDesc matmul_desc(matmul_desc_raw, cublasMpMatmulDescriptorDestroy);
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
-      matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSA, &trans_a, sizeof trans_a));
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSA, &trans_a, sizeof trans_a));
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
-      matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSB, &trans_b, sizeof trans_b));
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_TRANSB, &trans_b, sizeof trans_b));
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
-      matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo, sizeof algo));
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo, sizeof algo));
 
-  float alpha = 1.0;
-  float beta = accumulate ? 1.0 : 0.0;
+  NVTE_CHECK_CUBLASMP(cublasMpStreamSet(ctx->cublas_mp.get(), main_stream));
 
   size_t wrksp_size_device{};
   size_t wrksp_size_host{};
 
+  float alpha = 1.0;
+  float beta = accumulate ? 1.0 : 0.0;
   std::tuple args{ctx->cublas_mp.get(),
-                  matmul_desc.get(),
+                  ctx->matmul_desc.get(),
                   m,
                   n,
                   k,
@@ -141,20 +139,20 @@ void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, i
                   a->data.dptr,
                   1,
                   1,
-                  a_desc.get(),
+                  ctx->a_desc.get(),
                   b->data.dptr,
                   1,
                   1,
-                  b_desc.get(),
+                  ctx->b_desc.get(),
                   &beta,
                   d->data.dptr,
                   1,
                   1,
-                  d_desc.get(),
+                  ctx->d_desc.get(),
                   d->data.dptr,
                   1,
                   1,
-                  d_desc.get()};
+                  ctx->d_desc.get()};
   NVTE_CHECK_CUBLASMP(
       std::apply(cublasMpMatmul_bufferSize,
                  std::tuple_cat(args, std::tuple{&wrksp_size_device, &wrksp_size_host})));
@@ -170,6 +168,9 @@ void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, i
       std::apply(cublasMpMatmul,
                  std::tuple_cat(args, std::tuple{ctx->workspace, ctx->workspace_size,
                                                  workspace_host.data(), workspace_host.size()})));
+
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->event.get(), main_stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream.get(), ctx->event.get(), 0));
 }
 
 }  // namespace
@@ -190,6 +191,9 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
   cudaStream_t stream_raw{};
   NVTE_CHECK_CUDA(cudaStreamCreate(&stream_raw));
   CudaStream stream(stream_raw, cudaStreamDestroy);
+  cudaEvent_t event_raw{};
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&event_raw, cudaEventDisableTiming));
+  CudaEvent event(event_raw, cudaEventDestroy);
   cublasMpHandle_t cublasmp_raw{};
   NVTE_CHECK_CUBLASMP(cublasMpCreate(&cublasmp_raw, stream.get()));
   CublasMp cublas_mp(cublasmp_raw, cublasMpDestroy);
@@ -203,28 +207,52 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
                                          cal_comm.get(), &row_major_raw));
   CublasMpGrid row_major(row_major_raw, cublasMpGridDestroy);
 
+  cublasMpMatrixDescriptor_t raw{};
+  NVTE_CHECK_CUBLASMP(
+      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
+  CublasMpMatrixDesc a_desc(raw, cublasMpMatrixDescriptorDestroy);
+  NVTE_CHECK_CUBLASMP(
+      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
+  CublasMpMatrixDesc b_desc(raw, cublasMpMatrixDescriptorDestroy);
+  NVTE_CHECK_CUBLASMP(
+      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
+  CublasMpMatrixDesc d_desc(raw, cublasMpMatrixDescriptorDestroy);
+
+  cublasMpMatmulDescriptor_t matmul_raw{};
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorCreate(&matmul_raw, CUBLAS_COMPUTE_32F));
+  CublasMpMatmulDesc matmul_desc(matmul_raw, cublasMpMatmulDescriptorDestroy);
+
   return new CommGemmCtx{
       .nranks = nranks,
       .rank = rank,
       .cal_comm = std::move(cal_comm),
       .stream = std::move(stream),
+      .event = std::move(event),
       .cublas_mp = std::move(cublas_mp),
       .grid_col_major = std::move(col_major),
       .grid_row_major = std::move(row_major),
+      .a_desc = std::move(a_desc),
+      .b_desc = std::move(b_desc),
+      .d_desc = std::move(d_desc),
+      .matmul_desc = std::move(matmul_desc),
   };
 }
 
-void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) noexcept { delete ctx; }
+void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) {
+    nvshmemx_sync_all_on_stream(ctx->stream.get());
+    NVTE_CHECK_CAL(cal_comm_barrier(ctx->cal_comm.get(), ctx->stream.get()));
+    delete ctx;
+}
 
 void nvte_comm_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                     const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                     const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                    bool accumulate, int comm_sm_count) {
+                    bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
   auto ta = static_cast<const Tensor*>(a);
   auto tb = static_cast<const Tensor*>(b);
   auto td = static_cast<const Tensor*>(d);
   auto tbias = static_cast<const Tensor*>(bias);
   auto tpre_act_out = static_cast<const Tensor*>(pre_act_out);
   cublasmp_gemm(ctx, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P, m, n, k, ta, tb, td, tbias, tpre_act_out,
-                transa, transb, grad, accumulate, comm_sm_count);
+                transa, transb, grad, accumulate, comm_sm_count, main_stream);
 }
