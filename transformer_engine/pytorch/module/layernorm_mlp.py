@@ -1502,7 +1502,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, num_gemms=2) as inp:
 
-            quantizers = self._get_quantizers(fp8_output) if not debug else self._get_debug_quantizers(fp8_output)
+            quantizers = (
+                self._get_quantizers(fp8_output)
+                if not debug
+                else self._get_debug_quantizers(fp8_output)
+            )
             if debug:
                 if not any_feature_enabled(quantizers):
                     quantizers = self._get_quantizers(fp8_output)
@@ -1643,7 +1647,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
             if fp8_output:
-                fc2_output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_OUTPUT]
+                fc2_output_quantizer = self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM2_OUTPUT
+                ]
             if torch.is_grad_enabled():
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
