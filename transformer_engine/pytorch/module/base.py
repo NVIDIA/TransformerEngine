@@ -1079,7 +1079,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 tex.quantize(tensor, quantizer, out, skip_update_flag)
 
-        if not needs_quantized_gemm(type(out)):  # only holds for debug quantizer
+        if not needs_quantized_gemm(out):  # only holds for debug quantizer
             assert (
                 out.dtype == workspace_dtype
             ), "Activation dtype cannot be changed with nvidia-dlframework-inspect."
