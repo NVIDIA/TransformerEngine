@@ -443,7 +443,7 @@ class _LayerNormMLP(torch.autograd.Function):
         )
 
         # Weight with column-wise usage is needed for dgrad GEMM.
-        if is_grad_enabled and inp.requires_grad:
+        if is_grad_enabled:
             if isinstance(fc1_weight_final, QuantizedTensor):
                 fc1_weight_final.update_usage(columnwise_usage=True)
             if isinstance(fc2_weight_final, QuantizedTensor):
@@ -1495,6 +1495,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
+        fp8_output = False
+        if self.ub_overlap_rs:
+            if get_ub("fc2_fprop").is_fp8_ubuf():
+                fp8_output = True
+
         with self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
@@ -1520,7 +1525,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_grad_input_quantizer,
                 fc2_grad_weight_quantizer,
                 fc2_grad_output_quantizer,
-            ) = quantizers
+            ) = self._get_quantizers(fp8_output)
 
             # Get weight tensors
             fc1_weight = self.fc1_weight
@@ -1611,7 +1616,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             return out, ln_out
         return out
 
-    def _get_quantizers(self):
+    def _get_quantizers(self, fp8_output):
         (
             fc1_input_quantizer,
             fc1_weight_quantizer,
@@ -1637,6 +1642,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
+            if fp8_output:
+                output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_OUTPUT]
             if torch.is_grad_enabled():
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
