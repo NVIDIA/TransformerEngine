@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import itertools
 import os
 from contextlib import contextmanager
 from collections import deque
@@ -826,7 +827,7 @@ class RecipeState(abc.ABC):
         )
 
     @abc.abstractmethod
-    def make_quantizers(self, fp8_output: bool = True) -> list:
+    def make_quantizers(self) -> list:
         """Convert recipe state to quantizers.
 
         Quantizers are builder classes for quantized tensors. They are
@@ -876,7 +877,7 @@ class DelayedScalingRecipeState(RecipeState):
             device=device,
         )
 
-    def make_quantizers(self, fp8_output: bool = True) -> list:
+    def make_quantizers(self) -> list:
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.float8_tensor import Float8Quantizer
 
@@ -916,7 +917,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
             device = torch.device("cuda")
         self.device = device
 
-    def make_quantizers(self, fp8_output: bool = True) -> list:
+    def make_quantizers(self) -> list:
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         return [
@@ -953,7 +954,7 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         if device is None:
             device = torch.device("cuda")
 
-    def make_quantizers(self, fp8_output: bool = True) -> list:
+    def make_quantizers(self) -> list:
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.mxfp8_tensor import MXFP8Quantizer
 
@@ -993,7 +994,7 @@ class Float8BlockScalingRecipeState(RecipeState):
             device = torch.device("cuda")
         self.device = device
 
-    def make_quantizers(self, fp8_output: bool = True) -> list:
+    def make_quantizers(self) -> list:
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
@@ -1001,73 +1002,65 @@ class Float8BlockScalingRecipeState(RecipeState):
             # The index convention (coming from base.py set_meta_tensor)
             # is somewhat awkward, and doesn't play nicely with QuantizeOp,
             # which is not associated with a GEMM.
-
-            # Handle ops that do not support FP8 gemm output.
-            quantizers_per_gemm = 3 if fp8_output else 2
-            assert self.num_quantizers % quantizers_per_gemm == 0
-            num_gemms = self.num_quantizers // quantizers_per_gemm
-
-            quantizers = []
-            for _ in range(num_gemms):
-                quantizers.append(
-                    Float8BlockQuantizer(
-                        fp8_dtype=self.qx_dtype,
-                        rowwise=True,
-                        columnwise=True,
-                        amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
-                        force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
-                        block_scaling_dim=self.recipe.x_block_scaling_dim,
-                    )
-                )
-                quantizers.append(
-                    Float8BlockQuantizer(
-                        fp8_dtype=self.qx_dtype,
-                        rowwise=True,
-                        columnwise=True,
-                        amax_epsilon=self.recipe.fp8_quant_fwd_weight.amax_epsilon,
-                        force_pow_2_scales=self.recipe.fp8_quant_fwd_weight.power_2_scale,
-                        block_scaling_dim=self.recipe.w_block_scaling_dim,
-                    )
-                )
-                if fp8_output:
-                    quantizers.append(
-                        Float8BlockQuantizer(
-                            fp8_dtype=self.qx_dtype,
-                            rowwise=True,
-                            columnwise=True,
-                            amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
-                            force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
-                            block_scaling_dim=self.recipe.x_block_scaling_dim,
-                        )
-                    )
-            return quantizers
-
-        assert self.mode == "backward", f"Unexpected mode {self.mode}"
-        quantizers_per_gemm = 2 if fp8_output else 1
-        assert self.num_quantizers % quantizers_per_gemm == 0
-        num_gemms = self.num_quantizers // quantizers_per_gemm
-
-        quantizers = []
-        for _ in range(num_gemms):
-            quantizers.append(
-                Float8BlockQuantizer(
-                    fp8_dtype=self.qgrad_dtype,
-                    rowwise=True,
-                    columnwise=True,
-                    amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
-                    force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
-                    block_scaling_dim=self.recipe.grad_block_scaling_dim,
+            assert self.num_quantizers % 3 == 0  # x, w, output per gemm
+            return list(
+                itertools.chain.from_iterable(
+                    [
+                        [
+                            Float8BlockQuantizer(
+                                fp8_dtype=self.qx_dtype,
+                                rowwise=True,
+                                columnwise=True,
+                                amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
+                                force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
+                                block_scaling_dim=self.recipe.x_block_scaling_dim,
+                            ),
+                            Float8BlockQuantizer(
+                                fp8_dtype=self.qw_dtype,
+                                rowwise=True,
+                                columnwise=True,
+                                amax_epsilon=self.recipe.fp8_quant_fwd_weight.amax_epsilon,
+                                force_pow_2_scales=self.recipe.fp8_quant_fwd_weight.power_2_scale,
+                                block_scaling_dim=self.recipe.w_block_scaling_dim,
+                            ),
+                            Float8BlockQuantizer(
+                                fp8_dtype=self.qx_dtype,
+                                rowwise=True,
+                                columnwise=True,
+                                amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
+                                force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
+                                block_scaling_dim=self.recipe.x_block_scaling_dim,
+                            ),
+                        ]
+                        for _ in range(self.num_quantizers // 3)
+                    ]
                 )
             )
-            if fp8_output:
-                quantizers.append(
-                    Float8BlockQuantizer(
-                        fp8_dtype=self.qgrad_dtype,
-                        rowwise=True,
-                        columnwise=True,
-                        amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
-                        force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
-                        block_scaling_dim=self.recipe.grad_block_scaling_dim,
-                    )
-                )
-        return quantizers
+
+        assert self.mode == "backward", f"Unexpected mode {self.mode}"
+        assert self.num_quantizers % 2 == 0  # grad_output and grad_input per gemm
+        return list(
+            itertools.chain.from_iterable(
+                [
+                    [
+                        Float8BlockQuantizer(
+                            fp8_dtype=self.qgrad_dtype,
+                            rowwise=True,
+                            columnwise=True,
+                            amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
+                            force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
+                            block_scaling_dim=self.recipe.grad_block_scaling_dim,
+                        ),
+                        Float8BlockQuantizer(
+                            fp8_dtype=self.qgrad_dtype,
+                            rowwise=True,
+                            columnwise=True,
+                            amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
+                            force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
+                            block_scaling_dim=self.recipe.grad_block_scaling_dim,
+                        ),
+                    ]
+                    for _ in range(self.num_quantizers // 2)
+                ]
+            )
+        )

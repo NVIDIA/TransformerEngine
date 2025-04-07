@@ -234,7 +234,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             }
 
             # Construct builder class for quantized tensors
-            self._quantizers[mode] = recipe_state.make_quantizers(fp8_output=False)
+            self._quantizers[mode] = recipe_state.make_quantizers()
 
     def _update_quantization_recipe_state(
         self,
@@ -260,7 +260,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = self._fp8_metas[mode][fp8_meta_key]
             need_to_reset_recipe_state = (
                 recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState)
-            ) or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
+            ) or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState)
+            ) or (recipe.fp8blockwise() and not isinstance(recipe_state, Float8BlockScaling))
             if need_to_reset_recipe_state:
                 self._reset_quantization_recipe_state(recipe=recipe)
                 return
