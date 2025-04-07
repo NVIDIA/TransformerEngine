@@ -23,8 +23,8 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("seq_length", [2048])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("seq_length", [2048, 4096])
+@pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("margin", [0, 10])
 @pytest.mark.parametrize("transpose", [None, (0, 1), (2, 3)])
@@ -100,7 +100,7 @@ def test_fused_rope(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
 @pytest.mark.parametrize("transpose", [None, (1, 2)])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])

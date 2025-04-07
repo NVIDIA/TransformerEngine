@@ -18,6 +18,14 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   TORCH_CHECK(freqs.scalar_type() == at::ScalarType::Float,
               "Dtype of the freqs tensor must be float");
 
+  // output
+  auto act_options = at::TensorOptions().dtype(input.scalar_type()).device(input.device());
+  auto output = at::empty(input.sizes(), act_options);
+
+  auto input_cu = makeTransformerEngineTensor(input);
+  auto freqs_cu = makeTransformerEngineTensor(freqs);
+  auto output_cu = makeTransformerEngineTensor(output);
+
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     TORCH_CHECK(input.dim() == 3, "expected 3D tensor");
     TORCH_CHECK(cu_seqlens.has_value(), "expected cu_seqlens tensor");
@@ -43,14 +51,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     const int max_s = freqs.size(0);
     const int d2 = freqs.size(3);
 
-    // output
-    auto act_options = at::TensorOptions().dtype(input.scalar_type()).device(input.device());
-    auto output = at::empty(input.sizes(), act_options);
-
-    auto input_cu = makeTransformerEngineTensor(input);
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
-    auto freqs_cu = makeTransformerEngineTensor(freqs);
-    auto output_cu = makeTransformerEngineTensor(output);
 
     nvte_fused_rope_thd_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                                 output_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h, d, d2,
@@ -84,14 +85,6 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
               "expected the last dim of the input tensor equals or is "
               "greater than the freqs tensor");
 
-  // output
-  auto act_options = at::TensorOptions().dtype(input.scalar_type()).device(input.device());
-  auto output = at::empty(input.sizes(), act_options);
-
-  auto input_cu = makeTransformerEngineTensor(input);
-  auto freqs_cu = makeTransformerEngineTensor(freqs);
-  auto output_cu = makeTransformerEngineTensor(output);
-
   nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), qkv_format,
                           interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
                           stride_h, stride_d, at::cuda::getCurrentCUDAStream());
@@ -109,6 +102,14 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
               "expected the second and third dims of the freqs tensor equal 1");
   TORCH_CHECK(freqs.scalar_type() == at::ScalarType::Float,
               "Dtype of the freqs tensor must be float");
+
+  auto act_options =
+      at::TensorOptions().dtype(output_grads.scalar_type()).device(output_grads.device());
+  auto input_grads = at::empty(output_grads.sizes(), act_options);
+
+  auto output_grads_cu = makeTransformerEngineTensor(output_grads);
+  auto freqs_cu = makeTransformerEngineTensor(freqs);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     TORCH_CHECK(output_grads.dim() == 3, "expected 3D tensor");
@@ -135,14 +136,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
     const int max_s = freqs.size(0);
     const int d2 = freqs.size(3);
 
-    auto act_options =
-        at::TensorOptions().dtype(output_grads.scalar_type()).device(output_grads.device());
-    auto input_grads = at::empty(output_grads.sizes(), act_options);
-
-    auto output_grads_cu = makeTransformerEngineTensor(output_grads);
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
-    auto freqs_cu = makeTransformerEngineTensor(freqs);
-    auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
     nvte_fused_rope_thd_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                                  input_grads_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h,
@@ -180,14 +174,6 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   TORCH_CHECK(d >= d2,
               "expected the last dim of the output_grads tensor equals or is "
               "greater than the freqs tensor");
-
-  auto act_options =
-      at::TensorOptions().dtype(output_grads.scalar_type()).device(output_grads.device());
-  auto input_grads = at::empty(output_grads.sizes(), act_options);
-
-  auto output_grads_cu = makeTransformerEngineTensor(output_grads);
-  auto freqs_cu = makeTransformerEngineTensor(freqs);
-  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   nvte_fused_rope_backward(output_grads_cu.data(), freqs_cu.data(), input_grads_cu.data(),
                            qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s,
