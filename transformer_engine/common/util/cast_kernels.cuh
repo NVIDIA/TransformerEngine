@@ -1259,6 +1259,30 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
           workspace_tensor, stream);
       break;
     }
+    case NVTE_BLOCK_SCALING_2D: {
+      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
+      constexpr bool force_pow_2_scales = true;
+      quantize_transpose_square_blockwise(
+          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+          output_tensor->data, output_tensor->columnwise_data,
+          /*epsilon=*/0.0,
+          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D: {
+      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
+      constexpr bool force_pow_2_scales = true;
+      quantize_transpose_vector_blockwise(
+          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+          output_tensor->data, output_tensor->columnwise_data,
+          /*epsilon=*/0.0,
+          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+      break;
+    }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }

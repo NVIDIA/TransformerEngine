@@ -81,6 +81,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int k, const int lda, const int ldb) {
   using namespace transformer_engine;
+  // FIXME(kwyss): 1x128 by 128x128 GEMM is part of the subchannel design.
+  // Must either force them both into a common block scaling mode or loosen this
+  // restriction.
   NVTE_CHECK(A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
@@ -90,6 +93,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   ret.lda = lda;
   ret.ldb = ldb;
 
+  // FIXME(kwyss): 128x128 by 128x128 GEMMs and 1x128 by 128x128 GEMMs need cases
+  // or need to be treated as `is_tensor_scaling`.
   if (is_tensor_scaling(A.scaling_mode)) {
     ret.A = A.data.dptr;
     ret.A_scale_inv = A.scale_inv.dptr;
@@ -243,6 +248,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                      &fastAccuMode, sizeof(fastAccuMode)));
+
+    // FIXME(kwyss): Add binding code for 128x128 block quantized 1x128 block quantized
+    // GEMM types.
 
     // Scaling factors.
 #if CUDA_VERSION >= 12080
