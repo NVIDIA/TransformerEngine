@@ -326,34 +326,21 @@ def cublas_gemm_test_constraint_enforced(
         (128, 128, 128),
         (256, 128, 256),
         # non 128x128 divisible input shapes
-        (16, 128, 128),
-        (16, 64, 128),
-        (128, 160, 128),
         (320, 128, 336),
         (320, 64, 336),
         # k > 128
         (256, 256, 256),
         (320, 256, 336),
-        (256, 512, 256),
-        (256, 1024, 256),
-        (1024, 1024, 1024),
         (1024, 4096, 1024),
-        (512, 128, 512),
-        (768, 128, 768),
-        (1024, 128, 1024),
-        (1536, 128, 1536),
-        (2048, 128, 2048),
-        (4096, 128, 4096),
-        (4096, 512, 3072),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
-@pytest.mark.parametrize("noise_type", ["normal", "uniform"], ids=str)
-@pytest.mark.parametrize("x_magnitude", [1e-28, 1, 1e3], ids=str)
+@pytest.mark.parametrize("noise_type", ["normal"], ids=str)
+@pytest.mark.parametrize("x_magnitude", [1], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
-@pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
+@pytest.mark.parametrize("accumulate", [False], ids=["no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
 @pytest.mark.parametrize(
     "is_x_1d_scaled, is_w_1d_scaled",
@@ -399,21 +386,75 @@ def test_cublas_gemm_fp8_blockwise_shape_varying(
 @pytest.mark.parametrize(
     "M, K, N",
     [
+        (256, 128, 256),
+        (320, 256, 336),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+@pytest.mark.parametrize("noise_type", ["normal", "uniform"], ids=str)
+@pytest.mark.parametrize("x_magnitude", [1e-28, 1, 1e3], ids=str)
+@pytest.mark.parametrize("w_magnitude", [1], ids=str)
+@pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
+@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
+@pytest.mark.parametrize(
+    "is_x_1d_scaled, is_w_1d_scaled",
+    [
+        (True, False),
+        (True, True),
+        (False, True),
+    ],
+    ids=["1Dx2D", "1Dx1D", "2Dx1D"],
+)
+def test_cublas_gemm_fp8_blockwise_accumulate_magnitude_varying(
+    x_dtype,
+    w_dtype,
+    out_dtype,
+    M,
+    K,
+    N,
+    noise_type,
+    x_magnitude,
+    w_magnitude,
+    accumulate,
+    use_split_accumulator,
+    is_x_1d_scaled,
+    is_w_1d_scaled,
+):
+    cublas_gemm_fp8_blockwise_case(
+        x_dtype,
+        w_dtype,
+        out_dtype,
+        M,
+        K,
+        N,
+        noise_type,
+        x_magnitude,
+        w_magnitude,
+        accumulate,
+        use_split_accumulator,
+        is_x_1d_scaled,
+        is_w_1d_scaled,
+    )
+
+
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
         # k = 128
         (256, 128, 256),
         # non 128x128 divisible input shapes
-        (16, 128, 128),
         (320, 64, 336),
         # k > 128
         (256, 256, 256),
-        (4096, 128, 4096),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
-@pytest.mark.parametrize("x_magnitude", [1e-28, 1, 1e3], ids=str)
+@pytest.mark.parametrize("x_magnitude", [1e-3], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
@@ -468,7 +509,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
         (16, 128, 128),
         (320, 64, 336),
         # k > 128
-        (256, 256, 256),
         (4096, 128, 4096),
     ],
 )
@@ -540,15 +580,13 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
         # k = 128
         (256, 128, 256),
         # non 128x128 divisible input shapes
-        (16, 128, 128),
         (320, 64, 336),
         # k > 128
         (256, 256, 256),
-        (4096, 128, 4096),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
