@@ -6,9 +6,9 @@
 from typing import Tuple, Sequence, Union, Dict, List
 from functools import partial, reduce
 import operator
-from transformer_engine_jax import get_device_compute_capability
 import jax
 import jax.numpy as jnp
+from transformer_engine_jax import get_device_compute_capability
 
 from .base import BasePrimitive, register_primitive
 
@@ -183,10 +183,9 @@ def __jitted_jax_gemm_delayed_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     # Reshape + Transpose
     # [..., M, K] -> [B, M, K]
     # [..., K, M] -> [B, M, K]
-    lhs_3d = _shape_normalization(lhs_dq, lhs_dn, lhs.layout == "N")
-    rhs_3d = _shape_normalization(rhs_dq, rhs_dn, rhs.layout == "T")
+    lhs_3d = _shape_normalization(lhs_dq, lhs_dn, lhs.data_layout == "N")
+    rhs_3d = _shape_normalization(rhs_dq, rhs_dn, rhs.data_layout == "T")
 
-    # _shape_normalization ensures contracting_dims=2 and batch_dims=0
     dim_nums = (((2,), (2,)), ((0,), (0,)))
     out_3d = jax.lax.dot_general(
         lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
@@ -203,9 +202,9 @@ def _jax_gemm_delayed_scaling_fp8(
     ), "rhs does not have delayed tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
-    if lhs.layout == "T":
+    if lhs.data_layout == "T":
         lhs_contract = tuple((lhs.data.ndim - 1 - i) % lhs.data.ndim for i in lhs_contract)
-    if rhs.layout == "T":
+    if rhs.data_layout == "T":
         rhs_contract = tuple((rhs.data.ndim - 1 - i) % rhs.data.ndim for i in rhs_contract)
 
     lhs_dn = (lhs_contract, lhs_batch)
@@ -403,19 +402,19 @@ def grouped_gemm(
             lhs_shape = lhs.data.shape
             rhs_shape = rhs.data.shape
             out_dtype = lhs.dq_dtype
-            # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal layout
+            # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal data_layout
             if lhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
                 assert not (
                     lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
                 ), "FP8 GEMM does not support E5M2 * E5M2"
                 ((lhs_contract_dim,), (rhs_contract_dim,)) = contracting_dims
-                if lhs.layout == "T":
+                if lhs.data_layout == "T":
                     lhs_contract_dim = (lhs_contract_dim - 1) % lhs.data.ndim
-                if rhs.layout == "T":
+                if rhs.data_layout == "T":
                     rhs_contract_dim = (rhs_contract_dim - 1) % rhs.data.ndim
                 dim_nums = ((lhs_contract_dim,), (rhs_contract_dim,)), ((), ())
         else:
-            # For jnp.ndarray, only consider contracting_dims, layout is always NN
+            # For jnp.ndarray, only consider contracting_dims, data_layout is always NN
             scaling_mode = ScalingMode.NVTE_NO_SCALING
             lhs_shape = lhs.shape
             rhs_shape = rhs.shape
@@ -432,8 +431,8 @@ def grouped_gemm(
             lhs_3d = _shape_normalization(lhs, lhs_dn)
             rhs_3d = _shape_normalization(rhs, rhs_dn)
         elif scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
-            lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.layout == "N")
-            rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.layout == "T")
+            lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
+            rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
         elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
             lhs_3d = _shape_normalization(lhs.data, lhs_dn)
             rhs_3d = _shape_normalization(rhs.data, rhs_dn)
@@ -491,6 +490,11 @@ def grouped_gemm(
     rhs_scale_inv_contig = jnp.concatenate(rhs_scale_inv_contig_)
     bias_contig = jnp.empty(0) if bias_list is None else jnp.concatenate(bias_contig_)
     dim_list = jnp.array(dims, dtype=jnp.int32)
+
+    # TE/common does not support NVTE_NO_SCALING yet
+    # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
+    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
 
     # Perform batched GEMM on flattened inputs
     out_contig = GroupedGemmPrimitive.outer_primitive.bind(

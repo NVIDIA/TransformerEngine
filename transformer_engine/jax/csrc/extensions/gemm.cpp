@@ -44,12 +44,12 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
   cudaStreamSynchronize(stream);
 
   // Notes on matrix layouts and transpose:
-  // Jax uses row-major layout, on entering this function, each input matrix pair:
+  // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
   //   B: row-major with size [n, k], needs transpose,
   // on exiting this function, JAX expect:
   //   C: row-major with size [m, n].
-  // cuBLAS uses column-major layout, in this view, each input matrix pair:
+  // cuBLAS uses column-major data_layout, in this view, each input matrix pair:
   //   A: column-major with size [k, m], needs transpose,
   //   B: column-major with size [k, n].
   // If we call cuBLAS GEMM for A * B, the output will be:
@@ -90,7 +90,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_NO_SCALING || scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       auto lhs_i = TensorWrapper(static_cast<void *>(lhs_ptr), lhs_shape, lhs_dtype, nullptr,
                                  nullptr, reinterpret_cast<float *>(lhs_sinv_ptr));
       auto rhs_i = TensorWrapper(static_cast<void *>(rhs_ptr), rhs_shape, rhs_dtype, nullptr,
