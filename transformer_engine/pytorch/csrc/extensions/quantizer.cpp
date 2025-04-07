@@ -323,7 +323,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
                  "Expected 1 or 2. Got ",
                  block_scaling_dim);
     }
-    scale_inv_rowwise = at::empty({sinv0, sinv1}, scale_opts);
+    scale_inv_rowwise =
+        at::empty({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts);
     tensor.set_rowwise_data(data_rowwise.data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(scale_inv_rowwise.data_ptr(), DType::kFloat32,
                                  std::vector<size_t>{sinv0, sinv1});
@@ -359,7 +360,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
                  block_scaling_dim);
     }
     data_colwise = at::empty(torch_columnwise_shape, opts);
-    scale_inv_colwise = at::empty({sinv0, sinv1}, scale_opts);
+    scale_inv_colwise =
+        at::empty({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts);
 
     tensor.set_columnwise_data(data_colwise.data_ptr(), this->dtype, columnwise_shape);
     tensor.set_columnwise_scale_inv(scale_inv_colwise.data_ptr(), DType::kFloat32,

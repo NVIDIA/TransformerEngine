@@ -491,6 +491,11 @@ def grouped_gemm(
     bias_contig = jnp.empty(0) if bias_list is None else jnp.concatenate(bias_contig_)
     dim_list = jnp.array(dims, dtype=jnp.int32)
 
+    # TE/common does not support NVTE_NO_SCALING yet
+    # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
+    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+
     # Perform batched GEMM on flattened inputs
     out_contig = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_contig,
