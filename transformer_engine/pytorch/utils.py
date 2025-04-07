@@ -236,11 +236,18 @@ def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
     )
 
 
-def is_bf16_compatible() -> None:
+def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+def supports_fp8_transposes() -> bool:
+    """Checks whether the device supports non-TN layouts
+    for FP8 GEMMs.
+    """
+    return torch.cuda.get_device_capability() >= (10, 0)
 
 
 @functools.lru_cache(maxsize=None)

@@ -264,10 +264,12 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             p.main_grad = torch.zeros_like(p)
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
-    loss = te_out.sum()
-    loss.backward()
+    # Arbitrary number of steps to ensure enough gradient to accumulate.
+    for _ in range(50):
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+            te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
+        loss = te_out.sum()
+        loss.backward()
     torch.cuda.synchronize()
 
     for name, p in block.named_parameters():

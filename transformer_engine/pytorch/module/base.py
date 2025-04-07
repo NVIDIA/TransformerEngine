@@ -38,6 +38,7 @@ from ..cpp_extensions import (
 )
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
+from ..utils import supports_fp8_transposes
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -48,6 +49,7 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
+_MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = tex.get_stream_priority_range()
 layers_atomic_ring_exchange = []
 
 
@@ -239,6 +241,8 @@ def initialize_ub(
             "atomic_gemm": False,
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
+            "comm_priority": _MAX_STREAM_PRIORITY,
+            "gemm_priority": _MIN_STREAM_PRIORITY,
         }
         return default_cfg
 
@@ -254,6 +258,8 @@ def initialize_ub(
         atomic_gemm: int = 0,
         use_ce: bool = True,
         fp8_buf: bool = False,
+        comm_priority: int = 0,
+        gemm_priority: int = 0,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -311,6 +317,8 @@ def initialize_ub(
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 use_ce,  # Use copy engine for P2P communications
                 ub_callbacks,
+                comm_priority,
+                gemm_priority,
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -329,6 +337,8 @@ def initialize_ub(
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 ub_callbacks,
+                comm_priority,
+                gemm_priority,
             )
         _ub_communicators[name] = ub_obj
 
@@ -732,6 +742,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             R4: bias gradient on R1.
 
         """
+        # TODO(ksivaman): Needs cleanup.
+
         if isinstance(grad_output, Float8Tensor):
             grad_output._data = grad_output._data.contiguous()
         else:
@@ -779,10 +791,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_output_c = grad_output_mat
             if not ctx.ub_overlap_ag:
                 grad_output_c, _ = gather_along_first_dim(grad_output_c, ctx.tp_group)
-                if not isinstance(grad_output_c, Float8Tensor):
-                    grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                if not supports_fp8_transposes():
+                    if not isinstance(grad_output_c, Float8Tensor):
+                        grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+                    else:
+                        grad_output_t = grad_output_c.transpose_2d()
                 else:
-                    grad_output_t = grad_output_c.transpose_2d()
+                    grad_output_t = None
             else:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(1)
                 grad_output_t = None
@@ -794,24 +809,50 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             grad_output_mat_no_fp8 = grad_output_mat
             if isinstance(grad_output_mat, Float8Tensor):
                 grad_output_mat_no_fp8 = grad_output_mat.from_float8(grad_output_mat.dtype)
-            grad_bias, grad_output_c, grad_output_t = fp8_cast_transpose_bgrad_fused(
-                grad_output_mat_no_fp8,
-                ctx.fp8_meta["scaling_bwd"],
-                tex.FP8BwdTensors.GRAD_OUTPUT1,
-                fp8_dtype_backward,
-            )
+            if not supports_fp8_transposes():
+                grad_bias, grad_output_c, grad_output_t = fp8_cast_transpose_bgrad_fused(
+                    grad_output_mat_no_fp8,
+                    ctx.fp8_meta["scaling_bwd"],
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    fp8_dtype_backward,
+                )
+            else:
+                # Unfused bias to avoid transpose for blackwell.
+                grad_bias, grad_output_c = tex.fp8_cast_dbias(
+                    grad_output_mat_no_fp8,
+                    ctx.fp8_meta["scaling_bwd"].scale,
+                    ctx.fp8_meta["scaling_bwd"].amax_history,
+                    ctx.fp8_meta["scaling_bwd"].scale_inv,
+                    fp8_dtype_backward,
+                    [-1, -1, 1],
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                    tex.FP8BwdTensors.GRAD_OUTPUT1,
+                )
+                grad_output_t = None
         else:
             if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                 if isinstance(grad_output_mat, Float8Tensor):
                     grad_output_c = grad_output_mat
-                    grad_output_t = grad_output_c.transpose_2d()
-                else:
+                    if not supports_fp8_transposes():
+                        grad_output_t = grad_output_c.transpose_2d()
+                    else:
+                        grad_output_t = None
+                elif not supports_fp8_transposes():
                     grad_output_c, grad_output_t = fp8_cast_transpose_fused(
                         grad_output_mat,
                         ctx.fp8_meta["scaling_bwd"],
                         tex.FP8BwdTensors.GRAD_OUTPUT1,
                         fp8_dtype_backward,
                     )
+                else:
+                    grad_output_c = cast_to_fp8(
+                        grad_output_mat,
+                        ctx.fp8_meta["scaling_bwd"],
+                        tex.FP8BwdTensors.GRAD_OUTPUT1,
+                        fp8_dtype_backward,
+                    )
+                    grad_output_t = None
             else:
                 grad_output_t = None
                 if not isinstance(grad_output_mat, Float8Tensor):

@@ -190,7 +190,7 @@ def cuda_path() -> Tuple[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90;100;120")
 
 
 def cuda_version() -> Tuple[int, ...]:

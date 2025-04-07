@@ -25,7 +25,7 @@ typedef char *ExtComm;
 #endif
 
 #define NVTE_MAX_REGIONS 16
-#define NVTE_MAX_SMS 32
+#define NVTE_MAX_SMS 64
 #define NVTE_MAX_OPS 32
 #define NVTE_MAX_PEERS 8192
 #define NVTE_MAX_REQUESTS 1024

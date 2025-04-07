@@ -18,6 +18,7 @@ def cast_to_fp8(
     fp8_meta_tensor: Optional[tex.FP8TensorMeta],
     fp8_tensor: Union[tex.FP8FwdTensors, tex.FP8BwdTensors, None],
     otype: tex.DType,
+    noop: Optional[torch.Tensor] = None,
     out: Optional[torch.Tensor] = None,
     scale: Optional[torch.Tensor] = None,
     amax: Optional[torch.Tensor] = None,
@@ -49,12 +50,15 @@ def cast_to_fp8(
             otype,
         )
     else:
+        if noop is None:
+            noop = torch.Tensor()
         torch.ops.tex_ts.cast_to_fp8_noalloc_ts(
             inp,
             fp8_scales["scale"],
             out,
             fp8_scales["amax"],
             fp8_scales["scale_inv"],
+            noop,
             fp8_scales_offsets["scale_offset"],
             otype,
         )

@@ -29,6 +29,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     requires_grad,
+    supports_fp8_transposes,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -109,8 +110,9 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
         if ub_overlap_ag:
+            training_only = bool(int(os.getenv("NVTE_TP_OVERLAP_TRAINING_ONLY", "0")))
             tp_world_size = get_distributed_world_size(tp_group)
-            if tp_world_size == 1 or (not is_grad_enabled):
+            if tp_world_size == 1 or (training_only and not is_grad_enabled):
                 ub_overlap_ag = False
         if ub_overlap_ag:
             dim_size = list(inputmat.size())
@@ -503,6 +505,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_algo = None
                 ub_obj = None
 
+            online_transpose = supports_fp8_transposes()
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -521,7 +524,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _ = tex.fp8_gemm(
-                    weight_fp8.transpose_2d(),
+                    weight_fp8._data if online_transpose else weight_fp8.transpose_2d(),
                     weight_fp8._scale_inv,
                     0,
                     weight_fp8._fp8_dtype,
@@ -536,6 +539,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     out_type,
                     get_workspace(),
                     out=dgrad,
+                    layout="NN" if online_transpose else "TN",
                     use_split_accumulator=_2X_ACC_DGRAD,
                     ub_algo=ub_algo,
                     ub=ub_obj,
@@ -544,7 +548,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     fp8_meta_tensor=meta_tensor,
                     D_dtype=out_te_type,
                 )
-                clear_tensor_data(grad_output_c)
+                if not online_transpose:
+                    clear_tensor_data(grad_output_c)
             else:
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
@@ -589,22 +594,29 @@ class _LayerNormLinear(torch.autograd.Function):
                         else:
                             dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                        if not online_transpose:
+                            ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                            wgrad_input = ln_out_total_t
+                            wgrad_grad_output = grad_output_t
+                        else:
+                            wgrad_input = ln_out_total
+                            wgrad_grad_output = grad_output_c
                         wgrad, _ = tex.fp8_gemm(
-                            ln_out_total_t,
+                            wgrad_input,
                             ln_out_scale_inv,
                             0,
                             fp8_dtype_forward,
                             (
-                                grad_output_t._data
-                                if isinstance(grad_output_t, Float8Tensor)
-                                else grad_output_t
+                                wgrad_grad_output._data
+                                if isinstance(wgrad_grad_output, Float8Tensor)
+                                else wgrad_grad_output
                             ),
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT1,
                             fp8_dtype_backward,
                             ctx.activation_dtype,
                             get_workspace(),
+                            layout="NT" if online_transpose else "TN",
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
@@ -614,7 +626,10 @@ class _LayerNormLinear(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
-                        clear_tensor_data(ln_out_total_t, grad_output_t)
+                        if not online_transpose:
+                            clear_tensor_data(ln_out_total_t, grad_output_t)
+                        else:
+                            clear_tensor_data(grad_output_c)
                     else:
                         ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             ln_out_total,

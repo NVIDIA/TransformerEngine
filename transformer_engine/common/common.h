@@ -34,6 +34,29 @@ struct SimpleTensor {
   SimpleTensor(void *dptr, const std::vector<size_t> &shape, DType dtype)
       : dptr(dptr), shape(shape), dtype(dtype) {}
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
+
+  int numel() const {
+    size_t acc = 1;
+    for (const auto &dim : shape) {
+      acc *= dim;
+    }
+    return acc;
+  }
+};
+
+class ScalingMode : public NVTEScalingMode {
+ public:
+  ScalingMode() {
+    x = -1;
+    y = -1;
+    delayed_scaling = true;
+  }
+
+  ScalingMode(const NVTEScalingMode &other) {
+    x = other.x;
+    y = other.y;
+    delayed_scaling = other.delayed_scaling;
+  }
 };
 
 struct Tensor {
@@ -42,11 +65,22 @@ struct Tensor {
   SimpleTensor scale;
   SimpleTensor scale_inv;
 
+  ScalingMode scaling_mode;
+
   Tensor()
       : data(),
         amax(nullptr, {1}, DType::kFloat32),
         scale(nullptr, {1}, DType::kFloat32),
-        scale_inv(nullptr, {1}, DType::kFloat32) {}
+        scale_inv(nullptr, {1}, DType::kFloat32),
+        scaling_mode() {}
+
+  int numel() const {
+    size_t acc = 1;
+    for (const auto &dim : data.shape) {
+      acc *= dim;
+    }
+    return acc;
+  }
 };
 
 template <typename T>
@@ -61,6 +95,7 @@ using fp16 = half;
 using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
+using fp8e8m0 = __nv_fp8_e8m0;
 
 namespace detail {
 
@@ -261,6 +296,30 @@ void CheckInputTensor(const Tensor &t, const std::string &name);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
 bool is_fp8_dtype(const DType t);
+
+template <typename T>
+std::string to_string(const std::vector<T> &v) {
+  std::string s = "(";
+  for (size_t i = 0; i < v.size(); ++i) {
+    s += std::to_string(v[i]);
+    if (i < v.size() - 1) {
+      s += ", ";
+    }
+  }
+  s += ")";
+  return s;
+}
+
+std::string to_string(const DType type);
+std::string to_string(const ScalingMode &type);
+
+inline bool is_tensor_scaling(const ScalingMode &mode) { return (mode.x == -1) && (mode.y == -1); }
+
+inline bool is_delayed_tensor_scaling(const ScalingMode &mode) {
+  return is_tensor_scaling(mode) && mode.delayed_scaling;
+}
+
+bool is_columnwise_block_scaling(const Tensor *t);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *

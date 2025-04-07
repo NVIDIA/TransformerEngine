@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include "common/util/system.h"
 #include "userbuffers.h"
 
 #define MAX_THREADS 1024
@@ -2514,30 +2515,172 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
 }
 
-template <typename fp8type>
+struct uint16 {
+  uint4 u;
+  uint4 v;
+  uint4 s;
+  uint4 t;
+};
+
+struct uint8 {
+  uint4 u;
+  uint4 v;
+};
+
+template <int BYTES>
+struct BytesToType {};
+
+template <>
+struct BytesToType<64> {
+  using Type = uint16;
+  static_assert(sizeof(Type) == 64);
+};
+
+template <>
+struct BytesToType<32> {
+  using Type = uint8;
+  static_assert(sizeof(Type) == 32);
+};
+
+template <>
+struct BytesToType<16> {
+  using Type = uint4;
+  static_assert(sizeof(Type) == 16);
+};
+
+template <typename DType, int n>
+class VectorizedStorage {
+ public:
+  using LType = typename BytesToType<sizeof(DType) * n>::Type;
+  constexpr static int nvec = n;
+  union vectorized_storage {
+    LType aligned;
+    DType separate[nvec];  // NOLINT(*)
+
+    inline __device__ vectorized_storage() {}
+    inline __device__ ~vectorized_storage() {}
+  } scratch_;
+
+  inline __device__ VectorizedStorage() {}
+  inline __device__ VectorizedStorage(const VectorizedStorage<DType, n> &y2) {
+    scratch_.aligned = y2.scratch_.aligned;
+  }
+  inline __device__ VectorizedStorage(const LType &y2) { scratch_.aligned = y2; }
+  inline __device__ VectorizedStorage<DType, n> &operator+=(
+      const VectorizedStorage<DType, n> &rhs) {
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      scratch_.separate[i] = add_elem(scratch_.separate[i], rhs.scratch_.separate[i]);
+    }
+    return *this;
+  }
+  inline __device__ ~VectorizedStorage() {}
+};
+
+// Returns const LType is DType is const
+template <typename DType, typename LType>
+struct select_const {
+  using type = LType;
+};
+
+template <typename DType, typename LType>
+struct select_const<const DType, LType> {
+  using type = const LType;
+};
+
+/* \brief Helper class that enables accessing multiple values of type DType
+          as 1 value of type LType. Additional aligned template argument
+          allows performance optimizations if the pointer and the size of
+          the allocation is aligned to sizeof(LType) / sizeof(DType) elements.
+*/
+template <typename DType, int nvec>
+class VectorizedAccessor {
+ public:
+  using StorageType = VectorizedStorage<typename std::remove_const<DType>::type, nvec>;
+  using LType = typename select_const<DType, typename StorageType::LType>::type;
+  StorageType storage_;
+
+  LType *aligned_ptr_;
+  size_t n_elems_;
+
+  inline __device__ VectorizedAccessor(DType *const ptr, const size_t size) {
+    aligned_ptr_ = reinterpret_cast<LType *>(ptr);
+    n_elems_ = (size + nvec - 1) / nvec;
+  }
+
+  inline __device__ DType *separate() { return storage_.scratch_.separate; }
+  inline __device__ void load(const size_t id, const size_t N) {
+    storage_.scratch_.aligned = aligned_ptr_[id];
+  }
+};
+
+/* \brief Class used for vectorized read-only access. */
+template <typename DType, int nvec>
+class VectorizedLoader : public VectorizedAccessor<const DType, nvec> {
+ public:
+  inline __device__ VectorizedLoader(const DType *ptr, const size_t N)
+      : VectorizedAccessor<const DType, nvec>(ptr, N) {}
+};
+
+/* \brief Class used for vectorized writable access. */
+template <typename DType, int nvec>
+class VectorizedStorer : public VectorizedAccessor<DType, nvec> {
+ public:
+  inline __device__ VectorizedStorer(half *ptr, const size_t N)
+      : VectorizedAccessor<DType, nvec>(ptr, N) {}
+
+  inline __device__ void store(const size_t id, const size_t N) {
+    this->aligned_ptr_[id] = this->storage_.scratch_.aligned;
+  }
+};
+
+template <typename fp8type, int nvec>
 __global__ void __launch_bounds__(MAX_THREADS / 4)
     reduce_fp8_in_bf16_out_cuda(void *inputs, void *output, const float *scale,
-                                const int num_inputs, const int input_size) {
-  const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+                                const int num_inputs, const int input_size,
+                                const int num_aligned_elements_per_input,
+                                const int tot_input_size) {
   fp8type *inputs_fp8 = reinterpret_cast<fp8type *>(inputs);
-  float accum_buf = static_cast<float>(inputs_fp8[tid]) * (*scale);
-#pragma unroll
-  for (int i = 1; i < num_inputs; i++) {
-    accum_buf += static_cast<float>(inputs_fp8[tid + input_size * i]) * (*scale);
-  }
   half *output_half = reinterpret_cast<half *>(output);
-  output_half[tid] = (half)accum_buf;
+
+  VectorizedLoader<fp8type, nvec> loader(inputs_fp8, tot_input_size);
+  VectorizedStorer<half, nvec> storer(output_half, input_size);
+
+  const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  float accum_buf[nvec];
+
+  loader.load(tid, tot_input_size);
+#pragma unroll
+  for (int i = 0; i < nvec; ++i) {
+    accum_buf[i] = static_cast<float>(loader.separate()[i]) * (*scale);
+  }
+#pragma unroll
+  for (int input_id = 1; input_id < num_inputs; ++input_id) {
+    loader.load(tid + num_aligned_elements_per_input * input_id, tot_input_size);
+#pragma unroll
+    for (int i = 0; i < nvec; ++i) {
+      accum_buf[i] += static_cast<float>(loader.separate()[i]) * (*scale);
+      if (input_id == num_inputs-1) {
+        storer.separate()[i] = static_cast<half>(accum_buf[i]);
+      }
+    }
+  }
+  storer.store(tid, input_size);
 }
 
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_inputs,
                             int input_size, cudaStream_t stream) {
+  const int nvec = 32;
+  assert(input_size % nvec == 0);
+  const int num_aligned_elements_per_input = input_size / nvec;
+  const int tot_input_size = input_size * num_inputs;
   size_t num_threads = MAX_THREADS / 4;
-  size_t num_blocks = (input_size + num_threads - 1) / num_threads;
+  size_t num_blocks = (num_aligned_elements_per_input + num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
-  reduce_fp8_in_bf16_out_cuda<fp8type>
-      <<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, input_size);
+  reduce_fp8_in_bf16_out_cuda<fp8type, nvec><<<grid, block, 0, stream>>>(
+    inputs, output, scale, num_inputs, input_size, num_aligned_elements_per_input, tot_input_size);
 }
 
 template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,

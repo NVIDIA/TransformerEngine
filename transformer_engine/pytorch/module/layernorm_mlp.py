@@ -35,6 +35,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     requires_grad,
+    supports_fp8_transposes,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -143,7 +144,12 @@ class _LayerNormMLP(torch.autograd.Function):
 
         tp_world_size = get_distributed_world_size(tp_group)
         if ub_overlap_ag:
-            if tp_world_size == 1 or (not is_grad_enabled) or return_layernorm_output:
+            training_only = bool(int(os.getenv("NVTE_TP_OVERLAP_TRAINING_ONLY", "0")))
+            if (
+                tp_world_size == 1
+                or (training_only and not is_grad_enabled)
+                or return_layernorm_output
+            ):
                 ub_overlap_ag = False
         if ub_overlap_ag:
             ub_obj_lnout = get_ub("fc1_fprop")
@@ -639,13 +645,14 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
+            online_transpose = supports_fp8_transposes()
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
                 # FC2 DGRAD; Unconditional
                 fc2_dgrad, _ = tex.fp8_gemm(
-                    fc2_weight_fp8.transpose_2d(),
+                    fc2_weight_fp8._data if online_transpose else fc2_weight_fp8.transpose_2d(),
                     fc2_weight_fp8._scale_inv,
                     0,
                     fc2_weight_fp8._fp8_dtype,
@@ -655,37 +662,44 @@ class _LayerNormMLP(torch.autograd.Function):
                     fp8_dtype_backward,
                     ctx.activation_dtype,
                     get_workspace(),
+                    layout="NN" if online_transpose else "TN",
                     use_split_accumulator=_2X_ACC_DGRAD,
                     ub_algo=ub_algo if ctx.ub_overlap_ag else None,
                     ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
                 )
                 if ctx.ub_overlap_ag:
-                    grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                clear_tensor_data(grad_output_c)
+                    if online_transpose:
+                        grad_output_t = grad_output_c
+                    else:
+                        grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
 
                 # FC2 WGRAD
                 if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                     if fc2_weight.requires_grad:
-                        gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
-                        clear_tensor_data(gelu_out)
+                        if not online_transpose:
+                            fc2_wgrad_input = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
+                            clear_tensor_data(gelu_out)
+                        else:
+                            fc2_wgrad_input = gelu_out
                         fc2_wgrad, _ = tex.fp8_gemm(
-                            gelu_out_t,
+                            fc2_wgrad_input,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM2_INPUT,
                             fp8_dtype_forward,
-                            grad_output_t,
+                            grad_output_c if online_transpose else grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT1,
                             fp8_dtype_backward,
                             ctx.activation_dtype,
                             get_workspace(),
+                            layout="NT" if online_transpose else "TN",
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                         )
-                        clear_tensor_data(gelu_out_t, grad_output_t)
+                        clear_tensor_data(fc2_wgrad_input, grad_output_c, grad_output_t)
 
-                    if ctx.activation == "gelu":
+                    if ctx.activation == "gelu" and not online_transpose:
                         fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_dgelu_fused(
                             fc2_dgrad,
                             fc1_out,
@@ -694,13 +708,41 @@ class _LayerNormMLP(torch.autograd.Function):
                             fp8_dtype_backward,
                         )
                     else:
-                        dgelu = activation_func(fc2_dgrad, fc1_out, TE_DType[fc2_dgrad.dtype])
-                        fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_fused(
-                            dgelu,
-                            ctx.fp8_meta["scaling_bwd"],
-                            tex.FP8BwdTensors.GRAD_OUTPUT2,
-                            fp8_dtype_backward,
-                        )
+                        if not online_transpose:
+                            dgelu = activation_func(fc2_dgrad, fc1_out, TE_DType[fc2_dgrad.dtype])
+                            fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_fused(
+                                dgelu,
+                                ctx.fp8_meta["scaling_bwd"],
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                                fp8_dtype_backward,
+                            )
+                        elif online_transpose and fc2_dgrad.shape != fc1_out.shape:
+                            dgelu = activation_func(fc2_dgrad, fc1_out, TE_DType[fc2_dgrad.dtype])
+                            fc1_bias_grad, dgelu = tex.fp8_cast_dbias(
+                                dgelu,
+                                ctx.fp8_meta["scaling_bwd"].scale,
+                                ctx.fp8_meta["scaling_bwd"].amax_history,
+                                ctx.fp8_meta["scaling_bwd"].scale_inv,
+                                fp8_dtype_backward,
+                                [-1, -1, 1],
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                            )
+                        else:
+                            fc1_bias_grad, dgelu = tex.fp8_cast_dbias_dgelu(
+                                fc2_dgrad,
+                                fc1_out,
+                                ctx.fp8_meta["scaling_bwd"].scale,
+                                ctx.fp8_meta["scaling_bwd"].amax_history,
+                                ctx.fp8_meta["scaling_bwd"].scale_inv,
+                                fp8_dtype_backward,
+                                [-1, -1, 1],
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                                tex.FP8BwdTensors.GRAD_OUTPUT2,
+                            )
+                            dgelu_t = None
                     clear_tensor_data(fc1_out)
                 else:
                     if fc2_weight.requires_grad:
@@ -797,7 +839,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj = None
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
-                    fc1_weight_fp8.transpose_2d(),
+                    fc1_weight_fp8._data if online_transpose else fc1_weight_fp8.transpose_2d(),
                     fc1_weight_fp8._scale_inv,
                     0,
                     fc1_weight_fp8._fp8_dtype,
@@ -808,6 +850,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     out_type,
                     get_workspace(),
                     out=fc1_dgrad,
+                    layout="NN" if online_transpose else "TN",
                     use_split_accumulator=_2X_ACC_DGRAD,
                     ub_algo=ub_algo,
                     ub=ub_obj,
@@ -936,18 +979,22 @@ class _LayerNormMLP(torch.autograd.Function):
                         else:
                             fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                        if online_transpose:
+                            fc1_wgrad_input = ln_out_total
+                        else:
+                            fc1_wgrad_input = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         fc1_wgrad, _ = tex.fp8_gemm(
-                            ln_out_total_t,
+                            fc1_wgrad_input,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
                             fp8_dtype_forward,
-                            dgelu_t,
+                            dgelu if online_transpose else dgelu_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT2,
                             fp8_dtype_backward,
                             ctx.activation_dtype,
                             get_workspace(),
+                            layout="NT" if online_transpose else "TN",
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
@@ -957,7 +1004,8 @@ class _LayerNormMLP(torch.autograd.Function):
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
-                        clear_tensor_data(ln_out_total_t, dgelu_t)
+                        if not online_transpose:
+                            clear_tensor_data(fc1_wgrad_input, dgelu_t)
                     else:
                         ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             ln_out_total,

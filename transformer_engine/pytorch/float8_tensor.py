@@ -12,8 +12,9 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from .constants import TE_DType
-from .cpp_extensions import fp8_cast_transpose_fused
+from .cpp_extensions import fp8_cast_transpose_fused, cast_to_fp8
 from .fp8 import FP8GlobalStateManager
+from .utils import supports_fp8_transposes
 
 aten = torch.ops.aten
 c10d = torch.ops.c10d
@@ -704,33 +705,45 @@ class Float8Tensor(torch.Tensor):
                 "FP8 cast-transpose is only supported for `Float8Tensor`s with FP8 metadata "
             )
 
-        # Construct transpose cache if needed
-        transpose = self._transpose
-        if transpose is None or not transpose.is_contiguous():
-            transpose = torch.empty(
-                (data.size(1), data.size(0)),
-                dtype=torch.uint8,
-                device=data.device,
-            )
-            self._transpose = transpose
-            noop_flag = None
-
-        # Launch cast-transpose kernel
         fp8_meta_index = int(self._fp8_meta_index)
         fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
             forward=self._fp8_meta_forward,
         )
         fp8_meta = self._fp8_meta[fp8_meta_key]
-        fp8_cast_transpose_fused(
-            tensor,
-            fp8_meta,
-            fp8_meta_index,
-            self._fp8_dtype,
-            cast_out=data,
-            transpose_out=transpose,
-            scale_inv=self._scale_inv,
-            noop_flag=noop_flag,
-        )
+        if supports_fp8_transposes():
+            # No need for transpose on Blackwell, so just cast
+            cast_to_fp8(
+                tensor,
+                fp8_meta,
+                fp8_meta_index,
+                self._fp8_dtype,
+                noop=noop_flag,
+                out=data,
+            )
+            self._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
+        else:
+            # Construct transpose cache if needed
+            transpose = self._transpose
+            if transpose is None or not transpose.is_contiguous():
+                transpose = torch.empty(
+                    (data.size(1), data.size(0)),
+                    dtype=torch.uint8,
+                    device=data.device,
+                )
+                self._transpose = transpose
+                noop_flag = None
+
+            # Launch cast-transpose kernel
+            fp8_cast_transpose_fused(
+                tensor,
+                fp8_meta,
+                fp8_meta_index,
+                self._fp8_dtype,
+                cast_out=data,
+                transpose_out=transpose,
+                scale_inv=self._scale_inv,
+                noop_flag=noop_flag,
+            )
         self._transpose_invalid = False
 
     @torch.no_grad()
@@ -844,6 +857,7 @@ class Float8Tensor(torch.Tensor):
                     dst._data.view(1, -1),
                     amax,
                     dst._scale_inv,
+                    torch.Tensor(),
                     dst._fp8_dtype,
                 )
 

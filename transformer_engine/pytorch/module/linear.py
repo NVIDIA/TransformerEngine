@@ -26,6 +26,7 @@ from ..utils import (
     clear_tensor_data,
     init_method_constant,
     requires_grad,
+    supports_fp8_transposes,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -106,16 +107,21 @@ class _Linear(torch.autograd.Function):
 
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            needs_transpose = (
+                not fp8_meta["recipe"].override_linear_precision.wgrad
+                and is_grad_enabled
+                and weight.requires_grad
+                and not sequence_parallel
+                and not supports_fp8_transposes()
+            )
             if isinstance(inputmat, Float8Tensor):
                 inputmat_scale_inv = inputmat._scale_inv
+                if needs_transpose:
+                    # FP8 input for forward, FP8 input transpose for backward wgrad
+                    inputmat_t = inputmat.transpose_2d()
             else:
                 inputmat_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
-                if (
-                    not fp8_meta["recipe"].override_linear_precision.wgrad
-                    and is_grad_enabled
-                    and weight.requires_grad
-                    and not sequence_parallel
-                ):
+                if needs_transpose:
                     # FP8 input for forward, FP8 input transpose for backward wgrad
                     inputmat, inputmat_t = fp8_cast_transpose_fused(
                         inputmat,
@@ -412,6 +418,8 @@ class _Linear(torch.autograd.Function):
             ) = TransformerEngineBaseModule.grad_output_preprocess(
                 ctx, grad_output, ctx.parallel_mode == "row"
             )
+            if supports_fp8_transposes():
+                grad_output_t = None
 
             # Column Parallel Linear
             # Overlap input AG with dgrad
@@ -453,8 +461,14 @@ class _Linear(torch.autograd.Function):
                             None,
                             ctx.activation_dtype,
                         )
+                    if supports_fp8_transposes():
+                        dgrad_weight_input = weight_fp8._data
+                        dgrad_layout = "NN"
+                    else:
+                        dgrad_weight_input = weight_fp8.transpose_2d()
+                        dgrad_layout = "TN"
                     dgrad, _ = fp8_gemm(
-                        weight_fp8.transpose_2d(),
+                        dgrad_weight_input,
                         weight_fp8._scale_inv,
                         0,
                         weight_fp8._fp8_dtype,
@@ -464,6 +478,7 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_backward,
                         output_dtype,
                         get_workspace(),
+                        layout=dgrad_layout,
                         use_split_accumulator=_2X_ACC_DGRAD,
                         ub_algo=ub_algo if ctx.ub_overlap_ag else None,
                         ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
@@ -510,33 +525,44 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     # WGRAD
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        if ctx.ub_overlap_ag:
-                            if isinstance(grad_output_c, Float8Tensor):
-                                grad_output_t = grad_output_c.transpose_2d()
-                            else:
-                                grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                        if inputmat_t_total is None:
-                            if isinstance(inputmat_total, Float8Tensor):
-                                inputmat_t_total = inputmat_total.transpose_2d()
-                            else:
-                                inputmat_t_total = tex.fp8_transpose(
-                                    inputmat_total, fp8_dtype_backward
-                                )
+                        if not supports_fp8_transposes():
+                            if ctx.ub_overlap_ag:
+                                if isinstance(grad_output_c, Float8Tensor):
+                                    grad_output_t = grad_output_c.transpose_2d()
+                                else:
+                                    grad_output_t = tex.fp8_transpose(
+                                        grad_output_c, fp8_dtype_backward
+                                    )
+                            if inputmat_t_total is None:
+                                if isinstance(inputmat_total, Float8Tensor):
+                                    inputmat_t_total = inputmat_total.transpose_2d()
+                                else:
+                                    inputmat_t_total = tex.fp8_transpose(
+                                        inputmat_total, fp8_dtype_backward
+                                    )
+                            wgrad_layout = "TN"
+                            wgrad_input = inputmat_t_total
+                            wgrad_grad_input = grad_output_t
+                        else:
+                            wgrad_layout = "NT"
+                            wgrad_input = inputmat_total
+                            wgrad_grad_input = grad_output_c
                         wgrad, _ = fp8_gemm(
                             (
-                                inputmat_t_total._data
-                                if isinstance(inputmat_t_total, Float8Tensor)
-                                else inputmat_t_total
+                                wgrad_input._data
+                                if isinstance(wgrad_input, Float8Tensor)
+                                else wgrad_input
                             ),
                             inputmat_scale_inv,
                             0,
                             fp8_dtype_forward,
-                            grad_output_t,
+                            wgrad_grad_input,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
                             tex.FP8BwdTensors.GRAD_OUTPUT1,
                             fp8_dtype_backward,
                             ctx.activation_dtype,
                             get_workspace(),
+                            layout=wgrad_layout,
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,

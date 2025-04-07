@@ -35,6 +35,7 @@
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/swizzle.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cstring>
@@ -45,6 +46,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 
 namespace transformer_engine {
@@ -84,6 +86,8 @@ enum FP8BwdTensors {
 };
 
 }  // namespace transformer_engine
+
+std::vector<size_t> getTensorShape(at::Tensor t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -138,11 +142,10 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const std::vector<size_t>& shape,
                                                               const transformer_engine::DType type);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
-                                                              const std::vector<size_t>& shape,
-                                                              const transformer_engine::DType type,
-                                                              void* amax_ptr, void* scale_ptr,
-                                                              void* scale_inv_ptr);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape = {1},
+    NVTEScalingMode scaling_mode = {-1, -1, 1});
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
@@ -150,9 +153,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor, at::Tensor amax,
-                                                              const at::Tensor scale,
-                                                              at::Tensor scale_inv);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
+    NVTEScalingMode scaling_mode = {-1, -1, 1});
 
 size_t product(const std::vector<size_t>& shape);
 

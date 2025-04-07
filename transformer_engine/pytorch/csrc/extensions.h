@@ -43,6 +43,7 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q
                                                size_t head_dim_qk, size_t head_dim_v,
                                                int64_t window_size_left, int64_t window_size_right);
 
+void mha_fill(const at::Tensor &self, const at::Tensor &start_index);
 std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     size_t max_seqlen, bool is_training, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -139,31 +140,34 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
  **************************************************************************************************/
 
 void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
-             bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-             transformer_engine::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
+             std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+             at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+             std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
              transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
              transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad,
              at::Tensor workspace, size_t workspaceSize, bool accumulate,
              bool use_split_accumulator, int math_sm_count);
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
-                    bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-                    transformer_engine::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
-                    transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-                    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad,
-                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                    std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                    at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
+                    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
+                    at::Tensor bias, transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                    bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter);
 
 void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int A_offset,
-                     transformer_engine::DType A_type, bool transa, std::vector<at::Tensor> B,
-                     at::Tensor B_scale_inverse, int B_offset, transformer_engine::DType B_type,
-                     bool transb, std::vector<at::Tensor> D, int D_offset, at::Tensor D_scale,
-                     transformer_engine::DType D_type, at::Tensor D_amax,
-                     std::vector<at::Tensor> bias, transformer_engine::DType bias_type,
-                     std::vector<at::Tensor> pre_gelu_out, bool grad,
-                     std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
-                     bool use_split_accumulator, int math_sm_count);
+                     transformer_engine::DType A_type, std::vector<int64_t> A_scaling_mode,
+                     bool transa, std::vector<at::Tensor> B, at::Tensor B_scale_inverse,
+                     int B_offset, transformer_engine::DType B_type,
+                     std::vector<int64_t> B_scaling_mode, bool transb, std::vector<at::Tensor> D,
+                     int D_offset, at::Tensor D_scale, transformer_engine::DType D_type,
+                     at::Tensor D_amax, std::vector<at::Tensor> bias,
+                     transformer_engine::DType bias_type, std::vector<at::Tensor> pre_gelu_out,
+                     bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize,
+                     bool accumulate, bool use_split_accumulator, int math_sm_count);
 
 void te_grouped_gemm_single_output(
     std::vector<at::Tensor> A, std::vector<at::Tensor> A_scale_inverse, int A_offset,
@@ -356,13 +360,98 @@ at::Tensor cast_to_fp8(const at::Tensor &input, const at::Tensor &scale, at::Ten
                        const int scale_inv_offset = 0);
 
 void cast_to_fp8_noalloc(const at::Tensor &input, const at::Tensor &scale, at::Tensor output,
-                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype,
-                         const int scale_offset = 0, const int amax_offset = 0,
-                         const int scale_inv_offset = 0);
+                         at::Tensor amax, at::Tensor scale_inv, at::Tensor noop,
+                         transformer_engine::DType otype, const int scale_offset = 0,
+                         const int amax_offset = 0, const int scale_inv_offset = 0);
 
 at::Tensor cast_from_fp8(const at::Tensor &input, const at::Tensor &scale_inv,
                          transformer_engine::DType itype, transformer_engine::DType otype,
                          const int scale_inv_offset = 0);
+
+/***************************************************************************************************
+ * Cast fusions
+ **************************************************************************************************/
+
+std::vector<at::Tensor> fp8_cast_dbias(const at::Tensor &input, const at::Tensor &scale,
+                                       at::Tensor amax, at::Tensor scale_inv,
+                                       transformer_engine::DType otype,
+                                       std::vector<int64_t> scaling_mode, const int scale_offset,
+                                       const int amax_offset, const int scale_inv_offset);
+
+std::vector<at::Tensor> fp8_cast_dbias_dgelu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsilu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_drelu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dqgelu(at::Tensor grad_output, at::Tensor act_input,
+                                              at::Tensor scale, at::Tensor amax,
+                                              at::Tensor scale_inv, transformer_engine::DType otype,
+                                              std::vector<int64_t> scaling_mode,
+                                              int scale_offset = 0, int amax_offset = 0,
+                                              int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsrelu(at::Tensor grad_output, at::Tensor act_input,
+                                              at::Tensor scale, at::Tensor amax,
+                                              at::Tensor scale_inv, transformer_engine::DType otype,
+                                              std::vector<int64_t> scaling_mode,
+                                              int scale_offset = 0, int amax_offset = 0,
+                                              int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_x2(const at::Tensor &input, const at::Tensor &scale,
+                                          at::Tensor amax, at::Tensor scale_inv,
+                                          transformer_engine::DType otype, const int scale_offset,
+                                          const int amax_offset, const int scale_inv_offset);
+
+std::vector<at::Tensor> fp8_cast_dbias_dgelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsilu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_drelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dqgelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                 at::Tensor scale, at::Tensor amax,
+                                                 at::Tensor scale_inv,
+                                                 transformer_engine::DType otype,
+                                                 int scale_offset = 0, int amax_offset = 0,
+                                                 int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsrelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                 at::Tensor scale, at::Tensor amax,
+                                                 at::Tensor scale_inv,
+                                                 transformer_engine::DType otype,
+                                                 int scale_offset = 0, int amax_offset = 0,
+                                                 int scale_inv_offset = 0);
 
 /***************************************************************************************************
  * Softmax
@@ -503,5 +592,12 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
+
+/***************************************************************************************************
+ * swizzle
+ **************************************************************************************************/
+
+at::Tensor swizzle_scaling_factors(at::Tensor input, at::Tensor scale_inv,
+                                   std::vector<int64_t> scaling_mode);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

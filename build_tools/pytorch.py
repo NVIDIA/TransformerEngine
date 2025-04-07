@@ -79,11 +79,12 @@ def setup_pytorch_extension(
                 os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
             )
         )
-
         if "80" in cuda_architectures:
             nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
         if "90" in cuda_architectures:
             nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+        if "100" in cuda_architectures:
+            nvcc_flags.extend(["-gencode", "arch=compute_100,code=sm_100"])
 
     # Libraries
     library_dirs = []

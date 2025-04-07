@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.21)
 
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -63,6 +63,7 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
+     layer_norm/norms.cpp
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
      layer_norm/ln_fwd_cuda_kernel.cu
@@ -76,6 +77,7 @@ list(APPEND transformer_engine_SOURCES
      util/cuda_runtime.cpp
      util/rtc.cpp
      util/system.cpp
+     swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
