@@ -737,6 +737,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ):
                         # Async gather in BF16 does not asynchronously
                         # call quantizer after gather.
+                        ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
                         ln_out_total = ctx.input_quantizer(ln_out_total)
 
                 # Make sure GEMM inputs have required data

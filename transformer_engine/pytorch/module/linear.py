@@ -623,6 +623,7 @@ class _Linear(torch.autograd.Function):
                     ):
                         # Async gather in BF16 does not asynchronously
                         # call quantizer after gather.
+                        ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
                         inputmat_total = ctx.input_quantizer(inputmat_total)
 
                 # Make sure GEMM inputs have required data
