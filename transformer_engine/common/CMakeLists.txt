@@ -58,6 +58,8 @@ list(APPEND transformer_engine_SOURCES
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.cu
      activation/gelu.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
@@ -96,6 +98,8 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
@@ -112,6 +116,13 @@ if (NVTE_UB_WITH_MPI)
     target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
     target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+endif()
+
+option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+if (NVTE_ENABLE_NVSHMEM)
+    add_subdirectory(nvshmem_api)
+    target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+    target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend

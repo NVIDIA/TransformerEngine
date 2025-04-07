@@ -40,7 +40,11 @@ class ScalingModeMetadataImpl(ABC):
 
     @abstractmethod
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
+        flatten_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors.
 
@@ -48,7 +52,7 @@ class ScalingModeMetadataImpl(ABC):
             data_shape: The shape of the tensor being quantized
             is_colwise: Whether the scaling is column-wise
             is_padded: Whether to return padded shape
-
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
         Returns:
             The shape for scale tensors
         """
@@ -69,7 +73,11 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return jnp.float32
 
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
+        flatten_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors in delayed scaling.
 
@@ -77,6 +85,7 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
             data_shape: The shape of the tensor being scaled
             is_colwise: Whether the scaling is column-wise
             is_padded: Whether to return padded shape
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
 
         Returns:
             The shape for scale tensors - (1,)
@@ -113,8 +122,35 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         """
         return jnp.float8_e8m0fnu
 
+    def _apply_scale_shape_correction(self, data_shape, n_scale_blocks, scale_block_dim):
+        """Remove excess padding from the scale shape and return the shape with respect to the original data shape."""
+        if len(data_shape) > 1:
+            # handle last dim
+            assert data_shape[-1] % scale_block_dim == 0
+            last = data_shape[-1] // scale_block_dim
+            scale_shape = (last,)
+            assert n_scale_blocks % last == 0
+            n_scale_blocks //= last
+            # handle middle dim, exclude first and last
+            for mid in reversed(data_shape[1:-1]):
+                scale_shape = (mid,) + scale_shape
+                assert n_scale_blocks % mid == 0
+                n_scale_blocks //= mid
+            scale_shape = (n_scale_blocks,) + scale_shape
+        else:
+            scale_shape = (n_scale_blocks,)
+
+        assert len(scale_shape) == len(
+            data_shape
+        ), f"scale_shape {scale_shape}, data_shape {data_shape}"
+        return scale_shape
+
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
+        flatten_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors in block scaling.
 
@@ -122,6 +158,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             data_shape: The shape of the tensor being quantized
             is_colwise: Whether the scaling is column-wise
             is_padded: Whether to return padded shape
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
 
         Returns:
             The shape for scale tensors
@@ -135,35 +172,48 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             block_x, block_y = self._block_dims
             alignment_x, alignment_y = block_alignment
 
-        seq_axis = len(data_shape) - 2
-
+        if flatten_axis < 0:
+            flatten_axis = len(data_shape) + flatten_axis
         assert (
-            data_shape[seq_axis] % block_x == 0
-        ), f"Input data of shape {data_shape} should be padded by {block_x} in axes={seq_axis}"
+            0 < flatten_axis < len(data_shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
+
+        assert data_shape[flatten_axis - 1] % block_x == 0, (
+            f"Data shape {data_shape} should be divisible by block_x {block_x} in axis"
+            f" {flatten_axis - 1}"
+        )
         assert (
             data_shape[-1] % block_y == 0
-        ), f"Input data of shape {data_shape} should be padded by {block_y} in axis -1"
+        ), f"Data shape {data_shape} should be divisible by block_y {block_y} in axis -1"
 
-        # NOTE: this overpads if dim > 2 and dims before seq_axis are greater than 1
-        n_block_seq = data_shape[seq_axis] // block_x
-        n_block_y = data_shape[-1] // block_y
+        flattened_first_dim = reduce(operator.mul, data_shape[:flatten_axis], 1)
+        flattened_last_dim = reduce(operator.mul, data_shape[flatten_axis:], 1)
 
-        n_flat_first_dim = reduce(operator.mul, data_shape[:seq_axis], 1) * n_block_seq
+        assert flattened_first_dim % block_x == 0, (
+            f"Flattened first dim - mutiplication of axes={tuple(range(0, flatten_axis))} of shape"
+            f" {data_shape} - should be divisible by block_x {block_x}"
+        )
+        assert flattened_last_dim % block_y == 0, (
+            "Flattened last dim - mutiplication of"
+            f" axes={tuple(range(flatten_axis, len(data_shape)))} of shape {data_shape} - should be"
+            f" divisible by block_y {block_y}"
+        )
 
-        # Padding
-        n_flat_first_dim = ((n_flat_first_dim + alignment_x - 1) // alignment_x) * alignment_x
-        n_block_y = ((n_block_y + alignment_y - 1) // alignment_y) * alignment_y
+        n_block_x = int(flattened_first_dim / block_x)
+        n_block_y = int(flattened_last_dim / block_y)
 
-        out_shape = ()
-        for i in range(seq_axis):
-            d = data_shape[i]
-            out_shape += (d,)
-            assert n_flat_first_dim % d == 0
-            n_flat_first_dim //= d
+        # padding
+        n_block_x = int(((n_block_x + alignment_x - 1) // alignment_x) * alignment_x)
+        n_block_y = int(((n_block_y + alignment_y - 1) // alignment_y) * alignment_y)
 
-        out_shape += (n_flat_first_dim, n_block_y)
+        first_dim_scale_shape = self._apply_scale_shape_correction(
+            data_shape[:flatten_axis], n_block_x, block_x
+        )
+        last_dim_scale_shape = self._apply_scale_shape_correction(
+            data_shape[flatten_axis:], n_block_y, block_y
+        )
 
-        return out_shape
+        return (*first_dim_scale_shape, *last_dim_scale_shape)
 
 
 # (Phuong: Map the NVTEScalingMode value to the ScalingMode
@@ -183,8 +233,8 @@ class ScalingMode(Enum):
 
     NVTE_DELAYED_TENSOR_SCALING = 0
     NVTE_MXFP8_1D_SCALING = 1
-    NVTE_INVALID_SCALING = 2
-    NVTE_NO_SCALING = 3
+    NVTE_INVALID_SCALING = 4
+    NVTE_NO_SCALING = 5
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -208,34 +258,40 @@ class ScalingMode(Enum):
         """
         return self._get_impl().get_scale_dtype()
 
-    def get_scale_shape_2x(self, data_shape, is_padded=True) -> Tuple[Tuple[int]]:
+    def get_scale_shape_2x(self, data_shape, is_padded=True, flatten_axis=-1) -> Tuple[Tuple[int]]:
         """Get shapes for both row-wise and column-wise scaling.
 
         Args:
             data_shape: Shape of the data tensor
             is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
 
         Returns:
             Tuple of (rowwise_scale_shape, colwise_scale_shape)
         """
         rowwise_scale_shape = self.get_scale_shape(
-            data_shape, is_colwise=False, is_padded=is_padded
+            data_shape, is_colwise=False, is_padded=is_padded, flatten_axis=flatten_axis
         )
-        colwise_scale_shape = self.get_scale_shape(data_shape, is_colwise=True, is_padded=is_padded)
+        colwise_scale_shape = self.get_scale_shape(
+            data_shape, is_colwise=True, is_padded=is_padded, flatten_axis=flatten_axis
+        )
         return (rowwise_scale_shape, colwise_scale_shape)
 
-    def get_scale_shape(self, data_shape, is_colwise, is_padded=True) -> Tuple[int]:
+    def get_scale_shape(
+        self, data_shape, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
         Args:
             data_shape: Shape of the data tensor
             is_colwise: Whether to use column-wise scaling
             is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
 
         Returns:
             The shape for scale tensors
         """
-        return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded)
+        return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
 
     def __eq__(self, other):
         """Compare this scaling mode with another.

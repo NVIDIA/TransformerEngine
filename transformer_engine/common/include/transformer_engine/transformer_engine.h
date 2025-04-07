@@ -80,8 +80,14 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  NVTE_INVALID_SCALING = 2,
-  NVTE_NO_SCALING = 3
+  /*! Tensor is split into NxN quantization tiles or 1xN quantization tiles,
+    which each yield a scale. The block_scaling_dim property of the quantizer
+    selects the granularity.
+   */
+  NVTE_BLOCK_SCALING_1D = 2,
+  NVTE_BLOCK_SCALING_2D = 3,
+  NVTE_INVALID_SCALING = 4,
+  NVTE_NO_SCALING = 5
 };
 
 /*! \brief TE Tensor type
