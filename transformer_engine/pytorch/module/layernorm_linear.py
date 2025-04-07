@@ -1341,14 +1341,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
             quantizers = (
-                self._get_quantizers(fp8_output)
+                self._get_quantizers(fp8_output, fp8_grad)
                 if not debug
-                else self._get_debug_quantizers(fp8_output)
+                else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
             if debug:
                 if not any_feature_enabled(quantizers):
                     # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers(fp8_output)
+                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
                     debug = False
 
                 if isinstance(weight_tensor, QuantizedTensor):
@@ -1361,7 +1361,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
-            ) = self._get_quantizers(fp8_output, fp8_grad)
+            ) = quantizers
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
@@ -1456,8 +1456,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_output_quantizer,
         )
 
-    def _get_debug_quantizers(self, fp8_output):
-        original_quantizers = self._get_quantizers(fp8_output)
+    def _get_debug_quantizers(self, fp8_output, fp8_grad):
+        original_quantizers = self._get_quantizers(fp8_output, fp8_grad)
         assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
