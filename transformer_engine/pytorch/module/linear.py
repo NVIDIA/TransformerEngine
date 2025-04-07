@@ -1290,5 +1290,5 @@ class Linear(TransformerEngineBaseModule):
                 for bias_name in self.bias_names:
                     bias_param = getattr(self, bias_name)
                     if bias_param.grad is None:
-                        bias_param.grad = grad_bias_.to(bias_param.dtype)    
+                        bias_param.grad = grad_bias_.to(bias_param.dtype)
             del grad_bias_

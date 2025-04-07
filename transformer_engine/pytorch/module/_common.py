@@ -225,16 +225,20 @@ class WeightGradStore:
     This class enables split backward propagation for better memory efficiency.
     """
 
-    def __init__(self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True, ub_bulk_wgrad=False):
+    def __init__(
+        self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True, ub_bulk_wgrad=False
+    ):
         """
         Initialize the WeightGradStore.
-        
+
         Args:
             split_bw (bool): Whether to enable split backward propagation
         """
         if split_bw:
             self.context = queue.Queue()
-            assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enabling split_bw"
+            assert (
+                fuse_wgrad_accumulation == True
+            ), "fuse_wgrad_accumulation is not supported when enabling split_bw"
             assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
             self.enabled = split_bw
         else:
@@ -244,7 +248,7 @@ class WeightGradStore:
     def split_bw(self):
         """
         Get the current split backward propagation status.
-        
+
         Returns:
             bool: True if split backward is enabled, False otherwise
         """
@@ -261,7 +265,7 @@ class WeightGradStore:
     def put(self, tensor_list, func):
         """
         Store tensors and computation function for later execution.
-        
+
         Args:
             tensor_list (list): List of tensors needed for computation
             func (callable): Function to be executed with the tensors

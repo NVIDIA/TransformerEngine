@@ -1487,4 +1487,3 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     if bias_param.grad is None:
                         bias_param.grad = grad_bias_.to(bias_param.dtype)
             del grad_bias_
-
