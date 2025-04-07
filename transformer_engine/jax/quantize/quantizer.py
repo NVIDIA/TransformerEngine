@@ -172,7 +172,7 @@ class DelayedScaleQuantizer(Quantizer):
         amax_history: History of maximum absolute values
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+    scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
@@ -375,7 +375,7 @@ class BlockScaleQuantizer(Quantizer):
         q_layout: Quantization axis (default: ROWWISE_COLWISE)
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
+    scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING.value
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     def get_data_layout(self) -> str:
@@ -556,8 +556,9 @@ class QuantizerFactory:
             A single quantizer or tuple of quantizers
         """
         # (Phuong): add this assert back when NVTE_NO_SCALING is fully implememted
-        # assert scaling_mode != ScalingMode.NVTE_INVALID_SCALING
-        if scaling_mode in (ScalingMode.NVTE_NO_SCALING, ScalingMode.NVTE_INVALID_SCALING):
+        assert isinstance(scaling_mode, ScalingMode), "Invalid scaling_mode type"
+        # import pdb; pdb.set_trace()
+        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
             quantizers = [None] * n_quantizers
         else:
             quantizers = []

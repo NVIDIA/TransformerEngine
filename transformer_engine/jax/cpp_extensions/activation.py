@@ -162,7 +162,7 @@ class ActLuPrimitive(BasePrimitive):
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
         out = ffi.ffi_lowering(ActLuPrimitive.name)(
-            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode, is_2x=is_2x
+            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode.value, is_2x=is_2x
         )
         return out
 
@@ -545,7 +545,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             dz,
             x,
             scale,
-            scaling_mode=scaling_mode,
+            scaling_mode=scaling_mode.value,
             is_2x=is_2x,
             is_dbias=is_dbias,
             act_enum=int(act_enum),
@@ -928,7 +928,7 @@ def act_lu(
             out_dtype=x.dtype,
             act_enum=act_type_id,
             act_len=act_len,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            scaling_mode=ScalingMode.NVTE_NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
             scale_shapes=((), ()),
@@ -1042,7 +1042,7 @@ def quantize_dact_dbias(
             # outputs float32 for dbias accumulation
             out_dtype=(jnp.float32 if is_dbias else x.dtype),
             # default value for no scaling, TE/common ignore this value when scale is unset
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            scaling_mode=ScalingMode.NVTE_NO_SCALING.value,
             is_2x=False,  # unused
             scale_dtype=jnp.float32,  # unused
             scale_shapes=((), ()),  # unused

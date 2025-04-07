@@ -114,6 +114,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 gi_hidden_size,
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(out_dtype),
+                scaling_mode,
+                QuantizeLayout(q_layout)    # For now until we have auto-decoding for QuantizeLayout enum
             )
             wkspace_shape = wkspace_info[0]
             wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])
@@ -176,7 +178,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             ctx,
             x,
             scale,
-            scaling_mode=scaling_mode,
+            scaling_mode=scaling_mode.value,
             q_layout=q_layout,
             flatten_axis=flatten_axis,
             is_dbias=is_dbias,

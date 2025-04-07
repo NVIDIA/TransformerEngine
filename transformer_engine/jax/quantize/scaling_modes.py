@@ -16,6 +16,8 @@ from typing import Tuple, Dict
 from functools import reduce
 import operator
 
+from transformer_engine_jax import JAXX_Scaling_Mode
+
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -227,14 +229,12 @@ class ScalingMode(Enum):
     This class defines the available scaling modes for tensor quantization:
     - NVTE_DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
     - NVTE_MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
-    - NVTE_INVALID_SCALING: Invalid scaling mode
     - NVTE_NO_SCALING: No scaling applied
     """
 
-    NVTE_DELAYED_TENSOR_SCALING = 0
-    NVTE_MXFP8_1D_SCALING = 1
-    NVTE_INVALID_SCALING = 100
-    NVTE_NO_SCALING = 1000
+    NVTE_NO_SCALING = JAXX_Scaling_Mode.NO_SCALING
+    NVTE_DELAYED_TENSOR_SCALING = JAXX_Scaling_Mode.DELAYED_TENSOR_SCALING
+    NVTE_MXFP8_1D_SCALING = JAXX_Scaling_Mode.MXFP8_1D_SCALING
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -304,7 +304,7 @@ class ScalingMode(Enum):
         """
         if not isinstance(other, ScalingMode):
             return False
-        return self.value == other.value
+        return self.value == other.value or self == other.value or self.value == other
 
     def tree_flatten(self):
         """Flatten this scaling mode for JAX tree operations.
