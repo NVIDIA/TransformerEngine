@@ -329,9 +329,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensor):
-                    weightmat.update_usage(columnwise_usage=True)
+            if isinstance(weightmat, QuantizedTensor):
+                weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 if fp8 and weightmat is not None:
