@@ -21,7 +21,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
   auto none = py::none();
 
   // create TE tensors from input
-  for (int i = 0; i < input_list.size(); i++) {
+  for (size_t i = 0; i < input_list.size(); i++) {
     auto input_tensor = makeTransformerEngineTensor(input_list[i], none);
     const NVTEShape input_shape = input_tensor.shape();
 
