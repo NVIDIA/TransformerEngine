@@ -1491,4 +1491,3 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
             del grad_bias_
             del wgrad
-
