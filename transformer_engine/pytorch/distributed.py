@@ -19,7 +19,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import safely_set_viewless_tensor_data
+from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -860,23 +860,29 @@ def _all_gather_fp8(
     process_group: dist_group_type,
     *,
     async_op: bool = False,
-    quantizer: Optional[Float8Quantizer] = None,
+    quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
 ) -> tuple[Float8TensorBase, Optional[torch.distributed.Work]]:
     """All-gather FP8 tensor along first dimension."""
     world_size = get_distributed_world_size(process_group)
+
+    # Check that quantizer is valid
+    if quantizer is not None and not isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+    ):
+        raise ValueError(f"Got non-FP8 quantizer ({quantizer.__class__.__name__})")
 
     # Output tensor dims
     if out_shape is None:
         out_shape = list(inp.size())
         out_shape[0] *= world_size
 
-    # Quantize input tensor if needed
+    # Cast input tensor to FP8 if needed
+    # Note: We cannot directly all-gather the transposed FP8 tensor,
+    # so temporarily modify quantizer to avoid creating FP8 transpose.
     if not isinstance(inp, Float8TensorBase):
-        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
-        # we cannot directly gather the transposed fp8 tensor
-        # so we need to disable columnwise usage for the quantizer
-        # and then set it back to the original value after quantizing
+        if quantizer is None:
+            raise ValueError("Input tensor is not FP8 and no quantizer was provided")
         init_rowwise_usage = quantizer.rowwise_usage
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(rowwise=True, columnwise=False)
@@ -888,7 +894,7 @@ def _all_gather_fp8(
 
     # Construct output tensor
     out: Float8TensorBase
-    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+    if quantizer is not None:
         dtype = torch.float32
         device = "cuda"
         if isinstance(inp, Float8Tensor):
@@ -906,9 +912,8 @@ def _all_gather_fp8(
         out._transpose_invalid = True
     else:
         raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
-    # For delayed scaling, scale_inv is from history, so we can pass it from inp to out
-    # For current scaling, scale_inv is from doing amax reduction in C++ code, so each rank should have same scale_inv,
-    #                      so we can just pass it from inp to out
+
+    # Assume scaling factors are identical across ranks
     out._scale_inv = inp._scale_inv
 
     # Perform communication
@@ -920,12 +925,13 @@ def _all_gather_fp8(
     )
 
     # Make sure FP8 transpose is populated if needed
-    if out._transpose is not None:
+    needs_transpose = (
+        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+    )
+    if needs_transpose:
         if handle is not None:
             handle.wait()
             handle = None
-        if not isinstance(out, Float8Tensor):
-            raise RuntimeError("FP8TensorBase does not support FP8 transpose yet")
         out._create_transpose()
 
     return out, handle

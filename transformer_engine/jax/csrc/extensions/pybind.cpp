@@ -144,11 +144,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
       .export_values();
 
-  pybind11::enum_<transformer_engine::jax::QuantizeAxis>(m, "QuantizeAxis",
-                                                         pybind11::module_local())
-      .value("ROWWISE", transformer_engine::jax::QuantizeAxis::ROWWISE)
-      .value("COLWISE", transformer_engine::jax::QuantizeAxis::COLWISE)
-      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeAxis::ROWWISE_COLWISE)
+  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
+                                                           pybind11::module_local())
+      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
+      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
+      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
       .export_values();
 }
 

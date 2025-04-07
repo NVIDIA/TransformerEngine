@@ -26,12 +26,12 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_quantize_dbias, _jax_dbias, quantize_dbias
+from .quantization import _jax_dbias, _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
-    QuantizeAxis,
+    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
 )
@@ -110,41 +110,31 @@ class ActLuPrimitive(BasePrimitive):
         """
         te_act_lu_p abstract
         """
-        del act_enum, act_len, scale_shapes
+        del act_enum, scale_shapes
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
-
-        out_shape = (
-            *x_aval.shape[:-2],
-            1,
-            x_aval.shape[-1],
+        assert x_aval.shape[-2] == act_len, (
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
+            f" {x_aval.shape} and act_len {act_len}"
         )
+
+        out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
+
         updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out_shape[:-2] + (out_shape[-1],), is_padded=not is_outer)
-
-        if len(rowwise_scale_inv_shape) > 1:
-            rowwise_scale_inv_shape = (
-                rowwise_scale_inv_shape[:-1] + (1,) + rowwise_scale_inv_shape[-1:]
-            )
-        if len(colwise_scale_inv_shape) > 1:
-            colwise_scale_inv_shape = (
-                colwise_scale_inv_shape[:-1] + (1,) + colwise_scale_inv_shape[-1:]
-            )
-
+        ).get_scale_shape_2x(out_shape, is_padded=not is_outer, flatten_axis=-1)
+        if not is_2x:
+            out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
         scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
-
-        colwise_out_aval = jax.core.ShapedArray(shape=(1,), dtype=out_dtype)
-        colwise_scale_inv_aval = jax.core.ShapedArray(shape=(1,), dtype=scale_dtype)
-        if is_2x:
-            colwise_out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
-            colwise_scale_inv_aval = jax.core.ShapedArray(
-                shape=colwise_scale_inv_shape, dtype=scale_dtype
-            )
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
 
         return out_aval, colwise_out_aval, scale_inv_aval, colwise_scale_inv_aval, updated_amax_aval
 
@@ -211,15 +201,8 @@ class ActLuPrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out.shape[:-2] + (out.shape[-1],), is_padded=False)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            rowwise_scale_inv_shape = (
-                rowwise_scale_inv_shape[:-1] + (1,) + rowwise_scale_inv_shape[-1:]
-            )
-            if is_2x:
-                colwise_scale_inv_shape = (
-                    colwise_scale_inv_shape[:-1] + (1,) + colwise_scale_inv_shape[-1:]
-                )
+        ).get_scale_shape_2x(out.shape, is_padded=False, flatten_axis=-1)
+        # Slice out padding for MXFP8, noop for DelayedScaling
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
         )
@@ -227,6 +210,7 @@ class ActLuPrimitive(BasePrimitive):
             colwise_scale_inv = jax.lax.slice(
                 colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
             )
+
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
@@ -292,11 +276,14 @@ class ActLuPrimitive(BasePrimitive):
             is_outer,
         )  # Unused.
         x_spec = get_padded_spec(arg_infos[0])
-        out_spec = (*x_spec[:-2], None, x_spec[-2])
+        scale_spec = get_padded_spec(arg_infos[1])
+
+        out_spec = (*x_spec[:-2], x_spec[-1])
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
+
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(out_spec)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
         else:
@@ -304,18 +291,24 @@ class ActLuPrimitive(BasePrimitive):
         colwise_out_sharding = NamedSharding(
             mesh, PartitionSpec(*colwise_out_spec), desc="ActLuPrimitive.colwise_out"
         )
-        scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[1])), desc="ActLuPrimitive.scale_inv"
-        )
-        amax_sharding = scale_inv_sharding.duplicate_with_new_description("ActLuPrimitive.amax")
 
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "ActLuPrimitive.colwise_scale_inv"
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
         )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+        )
+
         return (
             out_sharding,
             colwise_out_sharding,
@@ -340,14 +333,14 @@ class ActLuPrimitive(BasePrimitive):
     ):
         del result_infos, is_outer  # Unused.
         x_spec = get_padded_spec(arg_infos[0])
-        out_spec = (*x_spec[:-1], x_spec[-1])
-        if act_len == 2 and x_spec[-1] is None:
-            # Ensure last axis is partitioned and not the gating axis
-            out_spec = (*x_spec[:-2], None, x_spec[-2])
+        scale_spec = get_padded_spec(arg_infos[1])
+
+        out_spec = (*x_spec[:-2], x_spec[-1])
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
+
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(out_spec)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
         else:
@@ -355,21 +348,25 @@ class ActLuPrimitive(BasePrimitive):
         colwise_out_sharding = NamedSharding(
             mesh, PartitionSpec(*colwise_out_spec), desc="ActLuPrimitive.colwise_out"
         )
-        scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[1])), desc="ActLuPrimitive.scale_inv"
-        )
-        amax_sharding = scale_inv_sharding.duplicate_with_new_description("ActLuPrimitive.amax")
 
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "ActLuPrimitive.colwise_scale_inv"
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
         )
-        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
-        arg_shardings[0] = NamedSharding(mesh, PartitionSpec(*out_spec))
-        arg_shardings = tuple(arg_shardings)
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+        )
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
@@ -413,6 +410,7 @@ class ActLuPrimitive(BasePrimitive):
 register_primitive(ActLuPrimitive)
 
 
+# TODO(Jeremy): replace is_2x with q_layout
 class DActLuDBiasQuantizePrimitive(BasePrimitive):
     """
     DActLu DBias Cast Transpose Primitive
@@ -445,42 +443,41 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p abstract
         """
         del act_enum, scale_shapes
-        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert x_aval.dtype == dtype
+        dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_dtype
+        assert x_aval.shape[-2] == act_len, (
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
+            f" {x_aval.shape} and act_len {act_len}"
+        )
         assert scale_aval.dtype == jnp.float32
         ir_hidden_size = dz_aval.shape[-1]
-        gi_hidden_size = x_aval.shape[-1]
+        gi_hidden_size = act_len * x_aval.shape[-1]
         assert act_len * ir_hidden_size == gi_hidden_size
         out_shape = x_aval.shape
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
+
         updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer)
-
-        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
-
-        colwise_out_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
-        colwise_scale_inv_aval = jax.core.ShapedArray(shape=(1,), dtype=scale_dtype)
-
-        dbias_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
-        wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
-            # Don't transpose output for MXFP8
-            if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-                t_shape = out_shape
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
-                t_shape = multidim_transpose(out_shape)
-            colwise_out_aval = x_aval.update(shape=t_shape, dtype=out_dtype)
-            colwise_scale_inv_aval = jax.core.ShapedArray(
-                shape=colwise_scale_inv_shape, dtype=scale_dtype
-            )
+                colwise_out_shape = out_shape
+        else:
+            colwise_out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
 
         if is_dbias:
-            dbias_shape = gi_hidden_size
-            dbias_aval = x_aval.update(shape=dbias_shape, dtype=dtype)
+            dbias_shape = (act_len, ir_hidden_size)
             (wkspace_info,) = transformer_engine_jax.get_dact_dbias_quantize_workspace_sizes(
                 x_aval.size // gi_hidden_size,
                 gi_hidden_size,
@@ -489,9 +486,14 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
                 scaling_mode,
                 is_2x,
             )
-            wkspace_aval = x_aval.update(
-                shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-            )
+            wkspace_shape = wkspace_info[0]
+            wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])
+        else:
+            dbias_shape = (1,)
+            wkspace_shape = (1,)
+            wkspace_dtype = jnp.float32
+        dbias_aval = jax.core.ShapedArray(shape=dbias_shape, dtype=dz_dtype)
+        wkspace_aval = jax.core.ShapedArray(shape=wkspace_shape, dtype=wkspace_dtype)
 
         return (
             out_aval,
@@ -587,23 +589,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x.shape, is_padded=False)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv = jax.lax.slice(
-                scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
+        ).get_scale_shape_2x(x.shape, is_padded=False, flatten_axis=-2)
+        # Slice out padding for MXFP8, noop for DelayedScaling
+        scale_inv = jax.lax.slice(
+            scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
+        )
+        if is_2x:
+            colwise_scale_inv = jax.lax.slice(
+                colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
             )
-            if is_2x:
-                colwise_scale_inv = jax.lax.slice(
-                    colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
-                )
-        return (
-            out,
-            colwise_out,
-            scale_inv,
-            colwise_scale_inv,
-            updated_amax,
-            dbias,
-        )  # Exclude wkspace
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
 
     @staticmethod
     def batcher(
@@ -670,15 +665,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del out_dtype, result_infos, act_enum
-        del scale_dtype, scale_shapes, is_dbias, act_len, is_outer
+        del scale_dtype, scale_shapes, act_len, is_outer
         x_spec = get_padded_spec(arg_infos[1])
+        scale_spec = get_padded_spec(arg_infos[2])
 
         out_sharding = NamedSharding(
             mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
         )
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_x_spec = multidim_transpose(x_spec)
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
         else:
@@ -687,23 +683,32 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
         )
 
-        dbias_shaprding = NamedSharding(
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DActLuDBiasQuantizePrimitive.dbias",
         )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(None), desc="DActLuDBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
         )
         amax_sharding = NamedSharding(
-            mesh, PartitionSpec(None), desc="DActLuDBiasQuantizePrimitive.amax"
+            mesh, PartitionSpec(*amax_spec), desc="DActLuDBiasQuantizePrimitive.amax"
         )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "DActLuDBiasQuantizePrimitive.colwise_scale_inv"
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*colwise_scale_inv_spec),
+            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv",
         )
         return (
             out_sharding,
@@ -711,7 +716,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scale_inv_sharding,
             colwise_scale_inv_sharding,
             amax_sharding,
-            dbias_shaprding,
+            dbias_sharding,
         )
 
     @staticmethod
@@ -731,10 +736,15 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
     ):
         del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[1])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec), desc="out")
+        scale_spec = get_padded_spec(arg_infos[2])
+
+        out_sharding = NamedSharding(
+            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+        )
+
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_x_spec = multidim_transpose(x_spec)
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
         else:
@@ -743,38 +753,39 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
         )
 
-        dbias_shaprding = NamedSharding(
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DActLuDBiasQuantizePrimitive.dbias",
         )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(None), desc="DActLuDBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
         )
-        amax_sharding = NamedSharding(
-            mesh, PartitionSpec(None), desc="DActLuDBiasQuantizePrimitive.amax"
-        )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "DActLuDBiasQuantizePrimitive.colwise_scale_inv"
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
         )
 
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        arg_shardings = (
-            arg_shardings[1],
-            arg_shardings[1],
-            *arg_shardings[2:],
-        )  # dz and x are the same
+
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
             scale_inv_sharding,
             colwise_scale_inv_sharding,
             amax_sharding,
-            dbias_shaprding,
+            dbias_sharding,
         )
 
         def sharded_impl(dz, x, scale):
@@ -816,14 +827,21 @@ def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, S
     """
     JAX native activation implementation
     """
-    x = jnp.split(inputs, len(activation_type), axis=-1)
+    act_len = len(activation_type)
+    assert inputs.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {inputs.shape} and act_len {act_len}"
+    )
+
+    x = jnp.split(inputs, act_len, axis=-2)
     acts = []
     for idx, act_fn in enumerate(activation_type):
         x_i = _convert_to_activation_function(act_fn)(x[idx])
         acts.append(x_i)
     x = reduce(operator.mul, acts)
+    x = jnp.squeeze(x, axis=-2)
     if quantizer:
-        return quantizer.quantize(x)
+        return quantizer.quantize(x, flatten_axis=-1)
     return x
 
 
@@ -837,6 +855,12 @@ def _jax_quantize_dact_dbias(
     """
     JAX implementation of dact_lu and dbias with optional quantization
     """
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
+
     _, vjp_func = jax.vjp(
         partial(_jax_act_lu, activation_type=activation_type), x.astype(jnp.float32)
     )
@@ -844,10 +868,10 @@ def _jax_quantize_dact_dbias(
 
     dbias = None
     if is_dbias:
-        dbias = _jax_dbias(dx).astype(x.dtype)
+        dbias = _jax_dbias(dx, dtype=x.dtype, flatten_axis=-2)
 
     if quantizer is not None:
-        dx = quantizer.quantize(dx, dq_dtype=x.dtype)
+        dx = quantizer.quantize(dx, dq_dtype=x.dtype, flatten_axis=-2)
     else:
         dx = dx.astype(x.dtype)
 
@@ -863,6 +887,7 @@ def act_lu(
 
     Args:
         x: Input tensor to be processed.
+            Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
 
@@ -873,12 +898,17 @@ def act_lu(
             A ScaledTensor containing the quantized activated input.
     """
     act_type_id = ActivationEnum[activation_type].value
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
 
     if not ActLuPrimitive.enabled():
         return _jax_act_lu(x, activation_type, quantizer)
 
     # TE/common does not support colwise-only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_act_lu(x, activation_type, quantizer)
 
     # TE/common does not support 2x quantization for DelayedScaling yet
@@ -889,16 +919,15 @@ def act_lu(
         return war_output
 
     scale = jnp.empty((1,), jnp.float32)
-    output_shape = (*x.shape[:-1], x.shape[-1] // len(activation_type))
+    output_shape = (*x.shape[:-2], x.shape[-1])
 
     if quantizer is None:
-        x = x.reshape((-1, len(activation_type), x.shape[-1] // len(activation_type)))
         out, _, _, _, _ = ActLuPrimitive.outer_primitive.bind(
             x,
             scale,
             out_dtype=x.dtype,
             act_enum=act_type_id,
-            act_len=len(activation_type),
+            act_len=act_len,
             scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
@@ -911,7 +940,6 @@ def act_lu(
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
-    x = x.reshape((*x.shape[:-1], len(activation_type), x.shape[-1] // len(activation_type)))
     (
         rowwise_casted_output,
         colwise_casted_output,
@@ -923,24 +951,14 @@ def act_lu(
         scale,
         out_dtype=quantizer.q_dtype,
         act_enum=act_type_id,
-        act_len=len(activation_type),
+        act_len=act_len,
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(output_shape),
+        # output does not have act axis
+        scale_shapes=quantizer.get_scale_shapes(output_shape, flatten_axis=-1),
         is_outer=True,
     )
-
-    rowwise_casted_output = rowwise_casted_output.reshape(output_shape)
-    if len(rowwise_scale_inv.shape) > 1:
-        rowwise_scale_inv = jnp.squeeze(rowwise_scale_inv, axis=-2)  # Remove act axis
-    if quantizer.q_axis in (QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE):
-        colwise_output_shape = output_shape
-        if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
-            colwise_output_shape = multidim_transpose(output_shape)
-        colwise_casted_output = colwise_casted_output.reshape(colwise_output_shape)
-        if len(colwise_scale_inv.shape) > 1:
-            colwise_scale_inv = jnp.squeeze(colwise_scale_inv, axis=-2)  # Remove act axis
 
     quantizer.update(updated_amax)
 
@@ -951,8 +969,8 @@ def act_lu(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
     )
 
 
@@ -968,7 +986,7 @@ def quantize_dact_dbias(
     Args:
         dz: Gradient of the output with respect to the activation output.
         x: Input tensor that was processed by the forward pass.
-            Shape: (..., ACT_DIM * K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
+            Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function used in the forward pass. Defaults to ("gelu",).
         is_dbias: If True, compute bias gradient. Defaults to True.
         quantizer: Optional quantizer for FP8 quantization of the output.
@@ -979,21 +997,25 @@ def quantize_dact_dbias(
         - The gradient of the activation with respect to the bias.
     """
 
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
+
     if not DActLuDBiasQuantizePrimitive.enabled():
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support colwise-only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
-        out, _ = quantize_dact_dbias(
-            dz=dz, x=x, activation_type=activation_type, is_dbias=False, quantizer=None
-        )
-        return quantize_dbias(out, is_dbias=True, quantizer=quantizer)
+        out = dact_lu(dz, x, activation_type, quantizer=None)
+        return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
 
-    is_gated = len(activation_type) == 2
+    is_gated = act_len == 2
     # TE/common does not support DelayedScaling2x for gated-act yet
     if is_gated:
         war_output = try_apply_delayed_scaling_2x_war(
@@ -1003,6 +1025,7 @@ def quantize_dact_dbias(
             activation_type=activation_type,
             is_dbias=is_dbias,
             quantizer=quantizer,
+            flatten_axis=-2,
         )
         if war_output is not None:
             return war_output
@@ -1025,12 +1048,12 @@ def quantize_dact_dbias(
             scale_shapes=((), ()),  # unused
             is_dbias=False,
             act_enum=act_type_id,
-            act_len=len(activation_type),
+            act_len=act_len,
             is_outer=True,
         )
         dbias = None
         if is_dbias:
-            dbias = _jax_dbias(output).astype(x.dtype)
+            dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
         return output.astype(x.dtype), dbias
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1041,16 +1064,9 @@ def quantize_dact_dbias(
         dgated = dact_lu(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type
         )
-        # TODO(Jeremy): Debug - TE's quantize_dbias produced nans in this case for distributed layernorm_mlp tests
-        if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            out, dbias = _jax_quantize_dbias(dgated, quantizer=quantizer, dq_dtype=x.dtype)
-        else:
-            out, dbias = quantize_dbias(
-                dgated,
-                quantizer=quantizer,
-                is_dbias=True,
-                dq_dtype=x.dtype,
-            )
+        out, dbias = _quantize_dbias_impl(
+            dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+        )
         return out, dbias
 
     out_shape = x.shape
@@ -1070,10 +1086,11 @@ def quantize_dact_dbias(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(out_shape),
+        # output has act axis
+        scale_shapes=quantizer.get_scale_shapes(out_shape, flatten_axis=-2),
         is_dbias=is_dbias,
         act_enum=act_type_id,
-        act_len=len(activation_type),
+        act_len=act_len,
         is_outer=True,
     )
 
@@ -1090,8 +1107,9 @@ def quantize_dact_dbias(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
+        flatten_axis=-2,  # as output has act axis
     )
 
     return out, dbias
