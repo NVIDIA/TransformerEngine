@@ -1005,7 +1005,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
 
-        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation, ub_bulk_wgrad)
+        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1476,10 +1476,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_LayerNormLinear_wgrad"):
-            _, grad_bias_, _, _ = self.wgrad_store.pop()
+            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            if not self.fuse_wgrad_accumulation:
+                unfused_weights = [getattr(self, name) for name in self.weight_names]
+                weight_tensor = noop_cat(unfused_weights)
+                if weight_tensor.grad is None:
+                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
-                for bias_name in self.bias_names:
-                    bias_param = getattr(self, bias_name)
-                    if bias_param.grad is None:
-                        bias_param.grad = grad_bias_.to(bias_param.dtype)
+                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+                if bias_tensor.grad is None:
+                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
             del grad_bias_
+            del wgrad

@@ -1193,7 +1193,7 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulation):
     config = model_configs[model]
 
@@ -1424,8 +1424,10 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
-def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation):
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_layernorm_linear_accuracy_split_bw(
+    dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
+):
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1621,7 +1623,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("split_bw", all_boolean)
 def test_grouped_linear_accuracy(
