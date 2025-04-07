@@ -506,9 +506,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 return
 
-        num_fp8_tensors = self.fp8_meta["num_gemms"] * self._num_fp8_tensors_per_gemm[
-            "fwd" if fwd else "bwd"
-        ]
+        num_fp8_tensors = (
+            self.fp8_meta["num_gemms"] * self._num_fp8_tensors_per_gemm["fwd" if fwd else "bwd"]
+        )
 
         # Initialize recipe state and quantizers
         recipe_state = RecipeState.create(
