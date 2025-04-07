@@ -84,7 +84,12 @@ def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor
     assert len(shape) == 2
     global _dummy_wgrads
     if (shape[0], shape[1], dtype) not in _dummy_wgrads:
-        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(shape, dtype=dtype, device="cuda", requires_grad=False,)
+        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
     if zero:
         _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
     return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
