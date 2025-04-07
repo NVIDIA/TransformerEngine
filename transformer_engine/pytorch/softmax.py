@@ -9,7 +9,6 @@ import torch
 from torch import nn
 import transformer_engine_torch as tex
 
-
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
 

@@ -373,7 +373,7 @@ class UserbuffersForwardLinear(FusedOperation):
             kwargs = {
                 "out": y,
                 "bias": b,
-                "use_bias": (b is not None),
+                "use_bias": b is not None,
                 "use_split_accumulator": False,
                 "ub_algo": ub_algo,
                 "ub": ub_comm,
@@ -409,7 +409,7 @@ class UserbuffersForwardLinear(FusedOperation):
             kwargs = {
                 "out": y,
                 "bias": b,
-                "use_bias": (b is not None),
+                "use_bias": b is not None,
                 "ub_algo": ub_algo,
                 "ub": ub_comm,
             }

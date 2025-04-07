@@ -47,7 +47,6 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
-
 __all__ = ["GroupedLinear"]
 
 

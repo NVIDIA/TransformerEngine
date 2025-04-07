@@ -34,7 +34,6 @@ from transformer_engine.pytorch.constants import (
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 
-
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 
 

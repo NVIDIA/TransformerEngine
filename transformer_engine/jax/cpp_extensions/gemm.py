@@ -20,7 +20,6 @@ from ..quantize import (
     noop_quantizer_set,
 )
 
-
 __all__ = ["gemm", "grouped_gemm"]
 
 

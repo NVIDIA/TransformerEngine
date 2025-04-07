@@ -81,7 +81,6 @@ from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentio
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
 
-
 # Setup Attention Logging
 attn_log.setup_logging()
 

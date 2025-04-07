@@ -12,7 +12,6 @@ import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
-
 __all__ = [
     "moe_permute",
     "moe_unpermute",

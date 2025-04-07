@@ -19,7 +19,6 @@ import operator
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
-
 __all__ = ["ScalingMode"]
 
 

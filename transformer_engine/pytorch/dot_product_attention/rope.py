@@ -11,7 +11,6 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
-
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb"]
 
 

@@ -20,7 +20,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine_torch as tex
 
-
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)

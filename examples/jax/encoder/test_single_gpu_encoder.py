@@ -21,7 +21,6 @@ import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
-
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
 INPUT_KEY = "input_rng"

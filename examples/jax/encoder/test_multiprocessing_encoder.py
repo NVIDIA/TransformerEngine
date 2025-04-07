@@ -31,7 +31,6 @@ import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
-
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"
