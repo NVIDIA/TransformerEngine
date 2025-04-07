@@ -232,10 +232,14 @@ class WeightGradStore:
         Args:
             split_bw (bool): Whether to enable split backward propagation
         """
-        self.context = queue.Queue()
-        assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enabling split_bw"
-        assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
-        self.enabled = split_bw
+        if split_bw:
+            self.context = queue.Queue()
+            assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enabling split_bw"
+            assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
+            self.enabled = split_bw
+        else:
+            self.context = None
+            self.enabled = False
 
     def split_bw(self):
         """
@@ -262,6 +266,7 @@ class WeightGradStore:
             tensor_list (list): List of tensors needed for computation
             func (callable): Function to be executed with the tensors
         """
+        assert self.enabled == True, "split_bw is not enabled"
         self.context.put([tensor_list, func])
         return
 
@@ -270,6 +275,7 @@ class WeightGradStore:
         Execute the stored computation with the stored tensors.
         Raises an exception if the queue is empty.
         """
+        assert self.enabled == True, "split_bw is not enabled"
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
             return func(*tensor_list)
@@ -282,5 +288,6 @@ class WeightGradStore:
         Assert that the queue is empty.
         Used for debugging and ensuring proper cleanup.
         """
+        assert self.enabled == True, "split_bw is not enabled"
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"

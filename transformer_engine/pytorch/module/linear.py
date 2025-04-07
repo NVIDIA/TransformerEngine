@@ -1276,10 +1276,6 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-<<<<<<< HEAD
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].amax_reduction_size = self.tp_size
 
     def wgrad_comp(self):
         """
@@ -1296,5 +1292,3 @@ class Linear(TransformerEngineBaseModule):
                     if bias_param.grad is None:
                         bias_param.grad = grad_bias_.to(bias_param.dtype)    
             del grad_bias_
-=======
->>>>>>> main
