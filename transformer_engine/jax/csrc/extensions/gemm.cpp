@@ -209,6 +209,194 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode"),
                               FFI_CudaGraph_Traits);
 
+
+Error_Type GroupedGemmNewFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
+                             Variadic_Result_Type output_list, int64_t num_gemms,
+                             int64_t scaling_mode, int64_t has_bias, int64_t workspace_size) {
+  // Notes on matrix layouts and transpose:
+  // Jax uses row-major data_layout, on entering this function, each input matrix pair:
+  //   A: row-major with size [m, k],
+  //   B: row-major with size [n, k], needs transpose,
+  // on exiting this function, JAX expect:
+  //   C: row-major with size [m, n].
+  // cuBLAS uses column-major data_layout, in this view, each input matrix pair:
+  //   A: column-major with size [k, m], needs transpose,
+  //   B: column-major with size [k, n].
+  // If we call cuBLAS GEMM for A * B, the output will be:
+  //   C: column-major with size [m, n] --> row-major with size [n, m].
+  // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
+
+  bool trans_lhs = true;
+  bool trans_rhs = false;
+  auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+  bool grad = false;
+  bool accumulate = false;
+  bool use_split_accumulator = false;
+
+  // These lists are to keep the TensorWrapper objects alive
+  std::vector<TensorWrapper> lhs_wrapper_list;
+  std::vector<TensorWrapper> rhs_wrapper_list;
+  std::vector<TensorWrapper> bias_wrapper_list;
+  std::vector<TensorWrapper> pre_gelu_wrapper_list;
+  std::vector<TensorWrapper> out_wrapper_list;
+  std::vector<TensorWrapper> workspace_wrapper_list;
+
+  // These lists are the actual NVTETensor (void *) lists for multi-stream GEMM
+  std::vector<NVTETensor> lhs_list;
+  std::vector<NVTETensor> rhs_list;
+  std::vector<NVTETensor> bias_list;
+  std::vector<NVTETensor> pre_gelu_list;
+  std::vector<NVTETensor> out_list;
+  std::vector<NVTETensor> workspace_list;
+
+  //printf("[DEBUG] num_gemms, scaling_mode, has_bias, workspace_size: %ld %ld %ld %ld\n",
+  //       num_gemms, scaling_mode, has_bias, workspace_size);
+  //fflush(stdout);
+
+  int lhs_list_offset      = 0;
+  int rhs_list_offset      = num_gemms;
+  int lhs_sinv_list_offset = 2 * num_gemms;
+  int rhs_sinv_list_offset = 3 * num_gemms;
+  int bias_list_offset     = 4 * num_gemms;
+  int out_list_offset      = 0;
+  for (int i = 0; i < num_gemms; i++) {
+    auto lhs_i_get      = input_list.get<Buffer_Type>(lhs_list_offset + i);
+    auto rhs_i_get      = input_list.get<Buffer_Type>(rhs_list_offset + i);
+    auto lhs_sinv_i_get = input_list.get<Buffer_Type>(lhs_sinv_list_offset + i);
+    auto rhs_sinv_i_get = input_list.get<Buffer_Type>(rhs_sinv_list_offset + i);
+    auto out_i_get      = output_list.get<Buffer_Type>(out_list_offset + i);
+    Buffer_Type lhs_i      = lhs_i_get.value();
+    Buffer_Type rhs_i      = rhs_i_get.value();
+    Buffer_Type lhs_sinv_i = lhs_sinv_i_get.value();
+    Buffer_Type rhs_sinv_i = rhs_sinv_i_get.value();
+    Result_Type out_i      = out_i_get.value();
+
+    DType lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_i.element_type());
+    DType rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_i.element_type());
+    DType out_dtype = convert_ffi_datatype_to_te_dtype(out_i->element_type());
+
+    void *lhs_ptr      = lhs_i.untyped_data();
+    void *rhs_ptr      = rhs_i.untyped_data();
+    void *lhs_sinv_ptr = lhs_sinv_i.untyped_data();
+    void *rhs_sinv_ptr = rhs_sinv_i.untyped_data();
+    void *out_ptr      = out_i->untyped_data();
+
+    // Placeholder for bias since it can be empty
+    DType bias_dtype = DType::kFloat32;
+    void *bias_ptr   = nullptr;
+
+    auto lhs_shape_ = lhs_i.dimensions();
+    auto rhs_shape_ = rhs_i.dimensions();
+
+    size_t m = lhs_shape_[0];
+    size_t n = rhs_shape_[0];
+    size_t k = lhs_shape_[1];
+
+    auto lhs_shape = std::vector<size_t>{m, k};
+    auto rhs_shape = std::vector<size_t>{n, k};
+    auto out_shape = std::vector<size_t>{n, m};
+    auto lhs_sinv_shape = std::vector<size_t>{1, 1};
+    auto rhs_sinv_shape = std::vector<size_t>{1, 1};
+
+    if (scaling_mode == NVTE_NO_SCALING || scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, nullptr, nullptr,
+                                  reinterpret_cast<float *>(lhs_sinv_ptr));
+      auto rhs_i_ = TensorWrapper(rhs_ptr, rhs_shape, rhs_dtype, nullptr, nullptr,
+                                  reinterpret_cast<float *>(rhs_sinv_ptr));
+      lhs_wrapper_list.push_back(std::move(lhs_i_));
+      rhs_wrapper_list.push_back(std::move(rhs_i_));
+    } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
+                 MXFP8_BLOCK_SIZE, k);
+      size_t sinv_k = k / MXFP8_BLOCK_SIZE;
+      lhs_sinv_shape[0] = m;
+      lhs_sinv_shape[1] = sinv_k;
+      rhs_sinv_shape[0] = n;
+      rhs_sinv_shape[1] = sinv_k;
+
+      // Note: the scale_inv array should have been swizzled in Python before lowering
+      TensorWrapper lhs_i_(NVTE_MXFP8_1D_SCALING);
+      TensorWrapper rhs_i_(NVTE_MXFP8_1D_SCALING);
+      lhs_i_.set_rowwise_data(lhs_ptr, lhs_dtype, lhs_shape);
+      rhs_i_.set_rowwise_data(rhs_ptr, rhs_dtype, rhs_shape);
+      lhs_i_.set_rowwise_scale_inv(lhs_sinv_ptr, DType::kFloat8E8M0, lhs_sinv_shape);
+      rhs_i_.set_rowwise_scale_inv(rhs_sinv_ptr, DType::kFloat8E8M0, rhs_sinv_shape);
+
+      lhs_wrapper_list.push_back(std::move(lhs_i_));
+      rhs_wrapper_list.push_back(std::move(rhs_i_));
+    } else {
+      NVTE_ERROR("Unsupported scaling mode: ", scaling_mode);
+    }
+
+    /*
+    printf("[DEBUG] i: %d, lhs_dtype, rhs_dtype, out_dtype = %d, %d, %d\n", i, lhs_dtype, rhs_dtype, out_dtype);
+    printf("[DEBUG] lhs_shape: %d %d, ptr = %p\n", lhs_shape_[0], lhs_shape_[1], lhs_ptr);
+    printf("[DEBUG] rhs_shape: %d %d, ptr = %p\n", rhs_shape_[0], rhs_shape_[1], rhs_ptr);
+    printf("[DEBUG] out_shape: %d %d, ptr = %p\n", out_i->dimensions()[0], out_i->dimensions()[1], out_ptr);
+    printf("[DEBUG] lhs_sinv_shape: %d %d, ptr = %p\n", lhs_sinv_shape[0], lhs_sinv_shape[1], lhs_sinv_ptr);
+    printf("[DEBUG] rhs_sinv_shape: %d %d, ptr = %p\n", rhs_sinv_shape[0], rhs_sinv_shape[1], rhs_sinv_ptr);
+    fflush(stdout);
+    */
+
+    auto out_i_ = TensorWrapper(out_ptr, out_shape, out_dtype);
+    void *pre_gelu_ptr = nullptr;
+    auto bias_shape = std::vector<size_t>{0};
+    auto pre_gelu_shape = std::vector<size_t>{0};
+    if (has_bias)
+    {
+      auto bias_i_get = input_list.get<Buffer_Type>(bias_list_offset + i);
+      Buffer_Type bias_i = bias_i_get.value();
+      bias_ptr = bias_i.untyped_data();
+      bias_dtype = convert_ffi_datatype_to_te_dtype(bias_i.element_type());
+      bias_shape[0] = n;
+    }
+    auto bias_i = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
+    auto pre_gelu_i = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, out_dtype);
+
+    out_wrapper_list.push_back(std::move(out_i_));
+    bias_wrapper_list.push_back(std::move(bias_i));
+    pre_gelu_wrapper_list.push_back(std::move(pre_gelu_i));
+
+    lhs_list.push_back(lhs_wrapper_list.back().data());
+    rhs_list.push_back(rhs_wrapper_list.back().data());
+    bias_list.push_back(bias_wrapper_list.back().data());
+    pre_gelu_list.push_back(pre_gelu_wrapper_list.back().data());
+    out_list.push_back(out_wrapper_list.back().data());
+  }
+
+  auto workspace_get = output_list.get<Buffer_Type>(num_gemms);
+  Result_Type workspace = workspace_get.value();
+  uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
+  auto workspace_shape = std::vector<size_t>{workspace_size};
+  for (int i = 0; i < num_streams; i++) {
+    auto workspace_i =
+        TensorWrapper(static_cast<void *>(workspace_ptr), workspace_shape, DType::kByte);
+    workspace_wrapper_list.push_back(std::move(workspace_i));
+    workspace_list.push_back(workspace_wrapper_list.back().data());
+    workspace_ptr += workspace_size;
+  }
+  //printf("[DEBUG] workspace packing done\n");
+  //fflush(stdout);
+
+  nvte_multi_stream_cublas_gemm(rhs_list.data(), lhs_list.data(), out_list.data(), bias_list.data(),
+                                pre_gelu_list.data(), num_gemms, trans_lhs, trans_rhs, grad,
+                                workspace_list.data(), accumulate, use_split_accumulator,
+                                num_math_sm, stream);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmNewHandler, GroupedGemmNewFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .RemainingArgs()         // input list
+                                  .RemainingRets()         // output list
+                                  .Attr<int64_t>("num_gemms")
+                                  .Attr<int64_t>("scaling_mode")
+                                  .Attr<int64_t>("has_bias")
+                                  .Attr<int64_t>("workspace_size"),
+                              FFI_CudaGraph_Traits);
+
 Error_Type GroupedAddFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
                          Variadic_Result_Type output_list, int64_t num_pairs) {
   for (size_t i = 0; i < static_cast<size_t>(num_pairs); i++) {
