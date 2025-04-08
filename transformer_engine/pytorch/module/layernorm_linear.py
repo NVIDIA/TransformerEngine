@@ -159,6 +159,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     " current scaling"
                 )
 
+        # FP8 allgather not implemented for Float8_Blockwise_Tensor
+        force_bf16_all_gather = with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
         # Configure quantizer for norm output
         if fp8:
             if input_quantizer is None:
@@ -174,11 +176,12 @@ class _LayerNormLinear(torch.autograd.Function):
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         # Avoid quantized norm kernel if norm output will be returned
+        force_bf16_blockwise_gather = (fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer))
         with_quantized_norm = (
             fp8
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not isinstance(input_quantizer, Float8BlockQuantizer)
+            and not force_bf16_blockwise_gather
         )
 
         # Apply normalization
@@ -206,8 +209,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_total = None
         ub_obj_fprop = None
         if with_input_all_gather:
-            # TODO(kwyss): Support FP8 allgather for FP8 block quantization.
-            force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
@@ -219,7 +220,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 if fp8:
-                    if not (with_quantized_norm or force_high_precision_gather):
+                    if not with_quantized_norm and not force_bf16_blockwise_gather:
                         ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:
@@ -334,6 +335,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
+
+                    # For force_bf16_blockwise_gather, we should
+                    # be saving the unquantized ln_out to ctx.
+                    assert not force_bf16_blockwise_gather
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if isinstance(weightmat, QuantizedTensor):
