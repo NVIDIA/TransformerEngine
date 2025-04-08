@@ -21,7 +21,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm", "grouped_add"]
+__all__ = ["gemm", "grouped_gemm"]
 
 
 num_cublas_streams = 4
@@ -41,104 +41,6 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9)
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        lhs_contig_aval,
-        lhs_scale_contig_aval,
-        rhs_contig_aval,
-        rhs_scale_contig_aval,
-        bias_contig_aval,
-        dim_list_aval,
-        *,
-        num_gemms,
-        scaling_mode,
-        out_dtype,
-        out_flat_size,
-    ):
-        del lhs_contig_aval, lhs_scale_contig_aval
-        del rhs_contig_aval, rhs_scale_contig_aval
-        del bias_contig_aval, dim_list_aval
-        del num_gemms, scaling_mode
-        out_flat_aval = jax.core.ShapedArray(shape=(out_flat_size,), dtype=out_dtype)
-        wkspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
-        wkspace_aval = jax.core.ShapedArray(shape=(wkspace_size,), dtype=jnp.uint8)
-        return (out_flat_aval, wkspace_aval)
-
-    @staticmethod
-    def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
-        return out_aval
-
-    @staticmethod
-    def lowering(
-        ctx,
-        lhs_contig,
-        lhs_scale_inv_contig,
-        rhs_contig,
-        rhs_scale_inv_contig,
-        bias_contig,
-        dim_list,
-        *,
-        num_gemms,
-        scaling_mode,
-        out_dtype,
-        out_flat_size,
-    ) -> jnp.ndarray:
-        del out_dtype, out_flat_size
-        return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
-            ctx,
-            lhs_contig,
-            lhs_scale_inv_contig,
-            rhs_contig,
-            rhs_scale_inv_contig,
-            bias_contig,
-            dim_list,
-            num_gemms=num_gemms,
-            scaling_mode=scaling_mode.value,
-        )
-
-    @staticmethod
-    def impl(
-        lhs_contig,
-        lhs_scale_inv_contig,
-        rhs_contig,
-        rhs_scale_inv_contig,
-        bias_contig,
-        dim_list,
-        num_gemms,
-        scaling_mode,
-        out_dtype,
-        out_flat_size,
-    ) -> jnp.ndarray:
-        assert GroupedGemmPrimitive.inner_primitive is not None
-        out = GroupedGemmPrimitive.inner_primitive.bind(
-            lhs_contig,
-            lhs_scale_inv_contig,
-            rhs_contig,
-            rhs_scale_inv_contig,
-            bias_contig,
-            dim_list,
-            num_gemms=num_gemms,
-            scaling_mode=scaling_mode,
-            out_dtype=out_dtype,
-            out_flat_size=out_flat_size,
-        )
-        return out[0]  # out is [out_flat, wkspace], only return out_flat
-
-
-register_primitive(GroupedGemmPrimitive)
-
-class GroupedGemmPrimitiveNew(BasePrimitive):
-    """
-    Primitive for grouped GEMM
-    """
-
-    name = "te_grouped_gemm_new_ffi"
-    multiple_results = True
     impl_static_args = ()
     inner_primitive = None
     outer_primitive = None
@@ -149,21 +51,24 @@ class GroupedGemmPrimitiveNew(BasePrimitive):
         A_list = args[0 : num_gemms]
         B_list = args[num_gemms : 2 * num_gemms]
         # A and B have shapes [1, m, k] and [1, n, k]
-        out_list_aval = tuple(jax.core.ShapedArray((A.shape[1], B.shape[1]), dtype=out_dtype) for A, B in zip(A_list, B_list))
+        out_list_aval = tuple(
+            jax.core.ShapedArray((A.shape[1], B.shape[1]), dtype=out_dtype) 
+            for A, B in zip(A_list, B_list)
+        )
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
         return (*out_list_aval, workspace_aval)
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        (out_aval, _) = GroupedGemmPrimitiveNew.abstract(*args, **kwargs)
+        (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
         return out_aval
 
     @staticmethod
     def lowering(ctx, *args, num_gemms, scaling_mode, out_dtype, has_bias):
         del out_dtype
         workspace_size = get_cublas_workspace_size_bytes()
-        return jax.ffi.ffi_lowering(GroupedGemmPrimitiveNew.name)(
+        return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
             ctx,
             *args,
             num_gemms=num_gemms,
@@ -174,8 +79,8 @@ class GroupedGemmPrimitiveNew(BasePrimitive):
 
     @staticmethod
     def impl(*args, num_gemms, scaling_mode, out_dtype, has_bias):
-        assert GroupedGemmPrimitiveNew.inner_primitive is not None
-        out = GroupedGemmPrimitiveNew.inner_primitive.bind(
+        assert GroupedGemmPrimitive.inner_primitive is not None
+        out = GroupedGemmPrimitive.inner_primitive.bind(
             *args,
             num_gemms=num_gemms,
             scaling_mode=scaling_mode.value,
@@ -185,7 +90,7 @@ class GroupedGemmPrimitiveNew(BasePrimitive):
         return out[:-1]  # out is [out_list, wkspace], only return out_list
 
 
-register_primitive(GroupedGemmPrimitiveNew)
+register_primitive(GroupedGemmPrimitive)
 
 def _shape_normalization(x, dimension_numbers, already_transposed: bool = False):
     orig_order = list(range(x.ndim))
@@ -423,165 +328,15 @@ def swizzled_scale(scales):
     return scales
 
 
-def grouped_gemm_old(
-    lhs_list: List[Union[jnp.ndarray, ScaledTensor]],
-    rhs_list: List[Union[jnp.ndarray, ScaledTensor]],
-    contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
-    bias_list: List[jnp.ndarray] = None,
-) -> List[jnp.ndarray]:
-    """Grouped GEMM for multiple pairs of tensors."""
-    assert (
-        len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
-    ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
-
-    # Flatten inputs and save their shapes
-    num_gemms = len(lhs_list)
-    out_flat_size = 0
-    dims = []
-    lhs_contig_ = []
-    rhs_contig_ = []
-    lhs_scale_inv_contig_ = []
-    rhs_scale_inv_contig_ = []
-    bias_contig_ = []
-    out_offsets = []
-    remain_shape_list = []
-    num_gemms = len(lhs_list)
-    for i in range(num_gemms):
-        lhs = lhs_list[i]
-        rhs = rhs_list[i]
-        contracting_dims = contracting_dims_list[i]
-        dim_nums = (contracting_dims, ((), ()))
-        if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
-            scaling_mode = lhs.scaling_mode
-            lhs_shape = lhs.data.shape
-            rhs_shape = rhs.data.shape
-            out_dtype = lhs.dq_dtype
-            # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal data_layout
-            if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
-                assert not (
-                    lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
-                ), "FP8 GEMM does not support E5M2 * E5M2"
-                ((lhs_contract_dim,), (rhs_contract_dim,)) = contracting_dims
-                if lhs.data_layout == "T":
-                    lhs_contract_dim = (lhs_contract_dim - 1) % lhs.data.ndim
-                if rhs.data_layout == "T":
-                    rhs_contract_dim = (rhs_contract_dim - 1) % rhs.data.ndim
-                dim_nums = ((lhs_contract_dim,), (rhs_contract_dim,)), ((), ())
-        else:
-            # For jnp.ndarray, only consider contracting_dims, data_layout is always NN
-            scaling_mode = ScalingMode.NO_SCALING
-            lhs_shape = lhs.shape
-            rhs_shape = rhs.shape
-            out_dtype = lhs.dtype
-
-        (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
-        lhs_dn = (lhs_contract, lhs_batch)
-        rhs_dn = (rhs_contract, rhs_batch)
-
-        lhs_remain_shape = _calculate_remaining_shape(lhs_shape, lhs_contract)
-        rhs_remain_shape = _calculate_remaining_shape(rhs_shape, rhs_contract)
-
-        if scaling_mode == ScalingMode.NO_SCALING:
-            lhs_3d = _shape_normalization(lhs, lhs_dn)
-            rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
-            lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
-            rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
-        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            lhs_3d = _shape_normalization(lhs.data, lhs_dn)
-            rhs_3d = _shape_normalization(rhs.data, rhs_dn)
-            lhs_scale_inv = _shape_normalization(lhs.scale_inv, lhs_dn)
-            rhs_scale_inv = _shape_normalization(rhs.scale_inv, rhs_dn)
-            lhs_scale_inv = swizzled_scale(lhs_scale_inv.squeeze())
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv.squeeze())
-        else:
-            raise NotImplementedError("Unsupported ScalingMode: {scaling_mode}")
-
-        # Note: if _shape_normalization() is updated to support non-TN, need to update here
-        # already_transposed doesn't matter for the output shape
-        # x.shape = [B, D1, D2]
-        # contracting_dims = (2, )    --> output.shape = [1, B * D1, D2]
-        # contracting_dims = (0, 1, ) --> output.shape = [1, D2, B * D1]
-        # x.shape = [D1, D2]
-        # contracting_dims = (1, )    --> output.shape = [1, D1, D2]
-        # contracting_dims = (0, )    --> output.shape = [1, D2, D1]
-        bm = lhs_remain_shape[0]
-        bn = rhs_remain_shape[0]
-        kl = lhs_3d.shape[-1]
-        kr = rhs_3d.shape[-1]
-        remain_shape_list.append(((bm,), (bn,)))
-        assert kl == kr, f"lhs_3d.shape[-1] ({kl}) != rhs_3d.shape[-1] ({kr})"
-        k = kl
-
-        if (bm % 16 != 0) or (bn % 16 != 0) or (k % 16 != 0):
-            print(f"grouped_gemm input pair {i} has invalid problem shape for lowering: ")
-            print(
-                f"m = {bm}, n = {bn}, k = {k}; cuBLAS requires the problem shapes being multiples"
-                " of 16"
-            )
-            assert bm % 16 == 0 and bn % 16 == 0 and k % 16 == 0
-
-        dims.append((bm, bn, k))
-        lhs_contig_.append(lhs_3d.reshape(-1))
-        rhs_contig_.append(rhs_3d.reshape(-1))
-        if scaling_mode == ScalingMode.NO_SCALING:
-            lhs_scale_inv_contig_.append(jnp.ones(1, dtype=jnp.float32))
-            rhs_scale_inv_contig_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
-            lhs_scale_inv_contig_.append(lhs.scale_inv.reshape(-1))
-            rhs_scale_inv_contig_.append(rhs.scale_inv.reshape(-1))
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            lhs_scale_inv_contig_.append(lhs_scale_inv.reshape(-1))
-            rhs_scale_inv_contig_.append(rhs_scale_inv.reshape(-1))
-        if bias_list is not None:
-            bias_contig_.append(bias_list[i].reshape(-1))
-        out_flat_size += bm * bn
-        out_offsets.append(out_flat_size)
-
-    lhs_contig = jnp.concatenate(lhs_contig_)
-    rhs_contig = jnp.concatenate(rhs_contig_)
-    lhs_scale_inv_contig = jnp.concatenate(lhs_scale_inv_contig_)
-    rhs_scale_inv_contig = jnp.concatenate(rhs_scale_inv_contig_)
-    bias_contig = jnp.empty(0) if bias_list is None else jnp.concatenate(bias_contig_)
-    dim_list = jnp.array(dims, dtype=jnp.int32)
-
-    # TE/common does not support NVTE_NO_SCALING yet
-    # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
-    if scaling_mode == ScalingMode.NO_SCALING:
-        scaling_mode = ScalingMode.DELAYED_TENSOR_SCALING
-
-    # Perform batched GEMM on flattened inputs
-    out_contig = GroupedGemmPrimitive.outer_primitive.bind(
-        lhs_contig,
-        lhs_scale_inv_contig,
-        rhs_contig,
-        rhs_scale_inv_contig,
-        bias_contig,
-        dim_list,
-        num_gemms=num_gemms,
-        scaling_mode=scaling_mode.value,
-        out_dtype=out_dtype,
-        out_flat_size=out_flat_size,
-    )
-
-    # Split the output back into tensors
-    out_offsets = jnp.array(out_offsets)
-    out_flat_list = jnp.split(out_contig, out_offsets[:-1])
-    out_tensors = []
-    for out_flat, (lhs_remain_shape, rhs_remain_shape) in zip(out_flat_list, remain_shape_list):
-        out_tensors.append(out_flat.reshape(*lhs_remain_shape, *rhs_remain_shape))
-
-    return out_tensors
-
-def _get_shape_normalization_contracting_dim_size(x, dimension_numbers):
+def get_shape_normalization_contracting_dim_size(x, dimension_numbers):
     orig_order = list(range(x.ndim))
     contracting_dims, batch_dims = dimension_numbers
     contracting_order = [d for d in orig_order if d in contracting_dims]
     cols_shape = [x.shape[d] for d in contracting_order]
     return reduce(operator.mul, cols_shape, 1)
 
-import nvtx
-def grouped_gemm_new(
+
+def grouped_gemm(
     lhs_list: List[Union[jnp.ndarray, ScaledTensor]],
     rhs_list: List[Union[jnp.ndarray, ScaledTensor]],
     contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
@@ -592,9 +347,6 @@ def grouped_gemm_new(
         len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
     ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
 
-    rng_gg = nvtx.start_range("grouped_gemm_new", color="blue")
-
-    rng_shape_check = nvtx.start_range("shape_check", color="yellow")
     num_gemms = len(lhs_list)
     lhs_dn_list = []
     rhs_dn_list = []
@@ -646,8 +398,8 @@ def grouped_gemm_new(
         bn = rhs_remain_shape[0]
         _lhs_data = lhs if scaling_mode == ScalingMode.NVTE_NO_SCALING else lhs.data
         _rhs_data = rhs if scaling_mode == ScalingMode.NVTE_NO_SCALING else rhs.data
-        kl = _get_shape_normalization_contracting_dim_size(_lhs_data, lhs_dn)
-        kr = _get_shape_normalization_contracting_dim_size(_rhs_data, rhs_dn)
+        kl = get_shape_normalization_contracting_dim_size(_lhs_data, lhs_dn)
+        kr = get_shape_normalization_contracting_dim_size(_rhs_data, rhs_dn)
         assert kl == kr, f"After shape normalization, contracting dim size mismatch: {kl} != {kr}"
         if (bm % 16 != 0) or (bn % 16 != 0) or (kl % 16 != 0):
             print(f"grouped_gemm input pair {i} has invalid problem shape for lowering: ")
@@ -656,9 +408,7 @@ def grouped_gemm_new(
                 " of 16"
             )
             assert bm % 16 == 0 and bn % 16 == 0 and kl % 16 == 0
-    nvtx.end_range(rng_shape_check)
 
-    rng_make_tuple = nvtx.start_range("make_tuple", color="purple")
     # Note: do not .squeeze() for the output of _shape_normalization, it will trigger a D2D memcpy
     if scaling_mode == ScalingMode.NVTE_NO_SCALING:
         lhs_list_ = tuple(
@@ -702,15 +452,13 @@ def grouped_gemm_new(
     else:
         raise NotImplementedError("Unsupported ScalingMode: {scaling_mode}")
     bias_list_ = [] if bias_list is None else tuple(bias_list)
-    nvtx.end_range(rng_make_tuple)
 
     # TE/common does not support NVTE_NO_SCALING yet
     # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
     if scaling_mode == ScalingMode.NVTE_NO_SCALING:
         scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
 
-    rng_prim = nvtx.start_range("grouped_gemm_new_ffi", color="green")
-    out_list = GroupedGemmPrimitiveNew.outer_primitive.bind(
+    out_list = GroupedGemmPrimitive.outer_primitive.bind(
         *lhs_list_,
         *rhs_list_,
         *lhs_sinv_list_,
@@ -721,57 +469,5 @@ def grouped_gemm_new(
         out_dtype=out_dtype,
         has_bias=1 if bias_list is not None else 0,
     )
-    nvtx.end_range(rng_prim)
-
-    nvtx.end_range(rng_gg)
 
     return out_list
-
-def grouped_gemm(
-    lhs_list: List[Union[jnp.ndarray, ScaledTensor]],
-    rhs_list: List[Union[jnp.ndarray, ScaledTensor]],
-    contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
-    bias_list: List[jnp.ndarray] = None,
-) -> List[jnp.ndarray]:
-    grouped_gemm_ = grouped_gemm_new
-    #grouped_gemm_ = grouped_gemm_old
-    #print(f"Using {grouped_gemm_.__name__} for grouped_gemm")
-    return grouped_gemm_(lhs_list, rhs_list, contracting_dims_list, bias_list)
-
-class GroupedAddPrimitive(BasePrimitive):
-    multiple_results = True
-    impl_static_args = ()
-    inner_primitive = None
-    outer_primitive = None
-    name = "te_grouped_add_ffi"
-
-    @staticmethod
-    def abstract(*args, out_dtype):
-        num_pairs = len(args) // 2
-        A_list = args[:num_pairs]
-        workspace_aval = jax.core.ShapedArray(shape=(1024,), dtype=jnp.uint8)
-        out_aval = tuple(jax.core.ShapedArray(A.shape, dtype=out_dtype) for A in A_list)
-        return (*out_aval, workspace_aval)
-
-    @staticmethod
-    def outer_abstract(*args, **kwargs):
-        return GroupedAddPrimitive.abstract(*args, **kwargs)
-
-    @staticmethod
-    def lowering(ctx, *args, out_dtype):
-        del out_dtype
-        num_pairs = len(args) // 2
-        return jax.ffi.ffi_lowering(GroupedAddPrimitive.name)(
-            ctx, *args, num_pairs=num_pairs
-        )
-
-    @staticmethod
-    def impl(*args, out_dtype):
-        assert GroupedAddPrimitive.inner_primitive is not None
-        out = GroupedAddPrimitive.inner_primitive.bind(*args, out_dtype=out_dtype)
-        return out[:-1]
-
-register_primitive(GroupedAddPrimitive)
-
-def grouped_add(A_list, B_list, out_dtype):
-    return GroupedAddPrimitive.outer_primitive.bind(*A_list, *B_list, out_dtype=out_dtype)
