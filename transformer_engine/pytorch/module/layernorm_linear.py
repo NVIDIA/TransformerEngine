@@ -140,11 +140,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
-        # Avoid quantized norm kernel if norm output will be returned
-        with_quantized_norm = (
-            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
-        )
-
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
@@ -178,43 +173,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 columnwise_usage = False
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
-        # Configure quantizer for normalization output
-        with_quantized_norm = fp8 and not return_layernorm_output
-        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
-        # so we need to set with_quantized_norm to False
-        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
-        if isinstance(input_quantizer, Float8BlockQuantizer):
-            # Quantizer has not been fused with norm yet.
-            with_quantized_norm = False
-        if with_quantized_norm:
-            if with_input_all_gather:
-                if isinstance(input_quantizer, MXFP8Quantizer):
-                    with_quantized_norm = False
-
-        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-        if (
+        # Avoid quantized norm kernel if norm output will be returned
+        with_quantized_norm = (
             fp8
-            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
-            and ub_bulk_dgrad
-        ):
-            input_quantizer.set_usage(rowwise=True, columnwise=False)
-
-        ub_obj_fprop = None
-        ln_out = None
-        # For DelayScaling, output of normalization will be in fp8.
-        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
-        if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            ub_obj_fprop = get_ub(ub_name + "_fprop")
-            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
-        elif with_quantized_norm:
-            if with_input_all_gather:
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
-            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
-        else:
-            ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
-            )
+            and not return_layernorm_output
+            and not return_layernorm_output_gathered
+            and not isinstance(input_quantizer, Float8BlockQuantizer)
+        )
 
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
