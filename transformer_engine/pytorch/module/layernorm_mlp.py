@@ -225,6 +225,11 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
 
+        # TODO(kwyss): Support FP8 allgather of Float8Block quantization.
+        force_hp_fc1_input_gather = (
+            fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
+        )
+
         # Configure quantizer for norm output
         if fp8:
             if fc1_input_quantizer is None:
@@ -260,20 +265,19 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_out_total = None
         ub_obj_lnout = None
         if sequence_parallel:
-            # TODO(kwyss): Support FP8 allgather of Float8Block quantization.
-            force_high_precision_gather = isinstance(fc1_input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8:
-                    ln_out = fc1_input_quantizer(ln_out)
+                    if not force_hp_fc1_input_gather:
+                        ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
                 if fp8:
-                    if not (with_quantized_norm or force_high_precision_gather):
+                    if not with_quantized_norm and not force_hp_fc1_input_gather:
                         ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
@@ -289,7 +293,10 @@ class _LayerNormMLP(torch.autograd.Function):
                         quantizer=(fc1_input_quantizer if fp8 else None),
                     )
         else:
-            if fp8 and not with_quantized_norm:
+            # NOTE: force_hp_fc1_input_gather is redundant with else, but
+            # here for clarity. We should not quantize ln_out if bwd needs
+            # to gather in hp.
+            if fp8 and not with_quantized_norm and not force_hp_fc1_input_gather:
                 ln_out = fc1_input_quantizer(ln_out)
             ln_out_total = ln_out
 
@@ -475,6 +482,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not return_layernorm_output:
                     clear_tensor_data(ln_out)
                 ln_out = None
+            elif force_hp_fc1_input_gather:
+                assert not isinstance(ln_out, QuantizedTensor)
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
@@ -503,6 +512,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.force_hp_fc1_input_gather = force_hp_fc1_input_gather
             ctx.grad_fc1_output_quantizer = grad_fc1_output_quantizer
             ctx.grad_fc2_output_quantizer = grad_fc2_output_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -710,11 +720,12 @@ class _LayerNormMLP(torch.autograd.Function):
                     else:
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)
+                gather_quantizer = None if ctx.force_hp_fc1_input_gather else quantizer
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,
                     async_op=True,
-                    quantizer=quantizer,
+                    quantizer=gather_quantizer,
                 )
             else:
                 ln_out_total = ln_out
@@ -933,13 +944,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
-                    if ctx.fc1_input_quantizer is not None and not isinstance(
-                        ln_out_total, QuantizedTensor
-                    ):
-                        # Async gather in BF16 does not asynchronously
-                        # call quantizer after gather.
-                        ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        ln_out_total = ctx.fc1_input_quantizer(ln_out_total)
+                if ctx.fc1_input_quantizer is not None and not isinstance(
+                    ln_out_total, QuantizedTensor
+                ):
+                    # Async gather in BF16 does not asynchronously
+                    # call quantizer after gather.
+                    ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    ln_out_total = ctx.fc1_input_quantizer(ln_out_total)
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):

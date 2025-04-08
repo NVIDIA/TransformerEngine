@@ -953,11 +953,15 @@ def _all_gather_fp8_blockwise(
     all gather is done asynchronously, but quantization is deferred until
     after the gather, this returns the full precision tensor.
 
-    NOTE: It would be preferable to always honor the quantizer and quantize
-    the result, and this may be possible via calling `get_future()` on the
+    NOTE: The implementation is not sophisticated enough to honor async_op=True
+    and also apply the quantizer if quantizer=None. In such a case, it falls
+    back to a synchronous gather and invokes the quantizer.
+    A more sophisticated approach may be possible via calling `get_future()` on the
     asynchronous handler, calling `make_empty()` on the quantizer, and chaining
     a callback with `then()` to perform `update_quantized`. This invites
     complications and also requires pre-allocating the quantized tensor.
+    Or other callbacks are possible if the type can be relaxed from torch.distributed.Work
+    to a duck typed done check.
     """
 
     # Input tensor attributes
@@ -1000,13 +1004,9 @@ def _all_gather_fp8_blockwise(
             device=device,
             memory_format=torch.contiguous_format,
         )
-        handle = torch.distributed.all_gather_into_tensor(
-            out, inp, group=process_group, async_op=async_op
-        )
-        # NOTE: if async, out will not be quantized.
-        if handle is None:
-            out = quantizer(out)
-        return out, handle
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
+        out = quantizer(out)
+        return out, None
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
@@ -1155,10 +1155,6 @@ def gather_along_first_dim(
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """
     All-gather tensors and concatenate along first dimension.
-
-    NOTE: Caller should be aware that there are asynchronous cases
-    where quantizer is not None, but the output will not be quantized.
-    This affects Float8BlockQuantizer.
     """
 
     # Return immediately if no communication is required

@@ -174,6 +174,7 @@ class _LayerNormLinear(torch.autograd.Function):
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         # Avoid quantized norm kernel if norm output will be returned
+        # or if a gather of ln_out must be in high precision.
         force_hp_blockwise_ln_out_gather = (
             fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
         )
@@ -707,13 +708,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
-                    if ctx.input_quantizer is not None and not isinstance(
-                        ln_out_total, QuantizedTensor
-                    ):
-                        # Async gather may have been done in BF16
-                        # call quantizer after gather.
-                        ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        ln_out_total = ctx.input_quantizer(ln_out_total)
+                if ctx.input_quantizer is not None and not isinstance(
+                    ln_out_total, QuantizedTensor
+                ):
+                    # Async gather may have been done in BF16
+                    # call quantizer after gather.
+                    ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    ln_out_total = ctx.input_quantizer(ln_out_total)
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):
