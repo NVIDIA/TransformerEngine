@@ -46,6 +46,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _multi_stream_cublas_workspace = []
+_dummy_wgrads = {}
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
@@ -79,6 +80,22 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
     return _multi_stream_cublas_workspace
+
+
+def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape."""
+    assert len(shape) == 2
+    global _dummy_wgrads
+    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
+        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
+    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
 
 
 def initialize_ub(
