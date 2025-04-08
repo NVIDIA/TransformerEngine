@@ -113,8 +113,8 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
  *  \param[in]      quant_config     Quantization configuration.
  *  \param[in]      stream           CUDA stream used for the operation.
  */
-void nvte_quantize_v2(const NVTETensor input, NVTETensor output, const NVTEQuantizationConfig quant_config,
-                        cudaStream_t stream);
+void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
+                      const NVTEQuantizationConfig quant_config, cudaStream_t stream);
 
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,

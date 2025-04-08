@@ -726,10 +726,10 @@ class QuantizationConfigWrapper {
                                            &amax_epsilon, sizeof(float));
   }
 
-    /*! \brief Set noop tensor pointer */
+  /*! \brief Set noop tensor pointer */
   void set_noop_tensor(NVTETensor noop_tensor) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor,
-                                           &noop_tensor, sizeof(NVTETensor));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
+                                           sizeof(NVTETensor));
   }
 
  private:

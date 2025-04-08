@@ -172,14 +172,13 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
       // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
       out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
-    }
-    else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
-      auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
+    } else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+      auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
       quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
       quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
     }
     nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,
-                       at::cuda::getCurrentCUDAStream());
+                     at::cuda::getCurrentCUDAStream());
   }
 
   return {out, py::cast(mu), py::cast(rsigma)};
@@ -320,14 +319,13 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
       // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
       out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
-    }
-    else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
-      auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
+    } else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+      auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
       quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
       quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
     }
     nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,
-                       at::cuda::getCurrentCUDAStream());
+                     at::cuda::getCurrentCUDAStream());
   }
 
   return {out, py::none(), py::cast(rsigma)};

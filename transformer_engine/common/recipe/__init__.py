@@ -348,8 +348,8 @@ class Float8BlockScaling(Recipe):
             When `fp8_mha = True, fp8_dpa = True`, it becomes
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
 
-    Notes:  By default, fp8_quant_fwd_inp, fp8_quant_fwd_weight, fp8_quant_bwd_grad are set to power of 2 scales. 
-            To Enable FP32 scales, set env variable NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it. 
+    Notes:  By default, fp8_quant_fwd_inp, fp8_quant_fwd_weight, fp8_quant_bwd_grad are set to power of 2 scales.
+            To Enable FP32 scales, set env variable NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it.
             export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
     """
 

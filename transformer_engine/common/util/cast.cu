@@ -35,8 +35,8 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(input, grad, output,
-                                                                     dbias, workspace, nullptr, stream);
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(input, grad, output, dbias,
+                                                                     workspace, nullptr, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -51,8 +51,8 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
   nvte_quantize_v2(input, output, reinterpret_cast<NVTEQuantizationConfig>(&quant_config), stream);
 }
 
-void nvte_quantize_v2(const NVTETensor input, NVTETensor output, const NVTEQuantizationConfig quant_config,
-                        cudaStream_t stream) {
+void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
+                      const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_v2);
   using namespace transformer_engine;
 
@@ -63,8 +63,8 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output, const NVTEQuant
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(input, grad, output,
-                                                                     dbias, workspace, quant_config, stream);
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
+      input, grad, output, dbias, workspace, quant_config, stream);
 }
 
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,

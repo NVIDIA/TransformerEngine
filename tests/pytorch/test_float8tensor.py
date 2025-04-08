@@ -135,15 +135,15 @@ class TestFloat8Tensor:
         x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
         if noop_flag is not None:
             # if noop, then when we input a different tensor, output should still be x_fp8_orig
-            x_ref_noop_test = 2 * x_ref.cuda() 
+            x_ref_noop_test = 2 * x_ref.cuda()
             x_fp8_orig = x_fp8.clone()
             x_fp8.quantize_(x_ref_noop_test, noop_flag=noop_flag)
             if noop_flag.item() == 1.0:
                 torch.testing.assert_close(x_fp8, x_fp8_orig, atol=0, rtol=0)
             else:
                 torch.testing.assert_close(x_fp8, x_ref_noop_test, **_tols[fp8_dtype])
-            return 
-        
+            return
+
         x_fp8 = x_fp8.dequantize().cpu()
 
         # Check results
@@ -173,10 +173,8 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("noop", [True, False])
-    def test_quantize_dequantize_noop(self,
-        fp8_dtype: tex.DType,
-        dtype: torch.dtype,
-        noop: bool
+    def test_quantize_dequantize_noop(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, noop: bool
     ) -> None:
         noop_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
         if noop:
