@@ -223,23 +223,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
       thread_amax = 0.0f;
       float in_compute_colwise[BUFF_DIM_Y];
-      IType2 in_colwise_IType[BUFF_DIM_Y / 2];
+      IType in_colwise_IType[BUFF_DIM_Y];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; i += 2) {
-          const int shmem_offset_colwise_elt1 = shmem_offset_base_colwise + i * BUFF_DIM_X;
-          const int shmem_offset_colwise_elt2 = shmem_offset_base_colwise + (i + 1) * BUFF_DIM_X;
-          in_colwise_IType[i / 2].x = in_sh[shmem_offset_colwise_elt1];
-          in_colwise_IType[i / 2].y = in_sh[shmem_offset_colwise_elt2];
-          ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_colwise_IType[i / 2]);
+        IType thread_amax_f16 = static_cast<IType>(0.0f);
+        #pragma unroll
+        for (int i = 0; i < BUFF_DIM_Y; ++i) {
+          const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
         }
-        thread_amax =
-            static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+        thread_amax = static_cast<float>(thread_amax_f16);
       } else {
-#pragma unroll
+        #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
 
@@ -285,24 +282,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const float block_scale_inverse = exp2f_rcp(biased_exponent);
       const float2 block_scale_inverse_2x = make_float2(block_scale_inverse, block_scale_inverse);
 
-// 3. Scale elements
-#pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; i += 2) {
-        IType2 in;
-        OType2 out_pair;
-
+      // 3. Scale elements
+      #pragma unroll
+      for (int i = 0; i < SCALE_DIM_Y; ++i) {
+        float in;
         if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-          in = in_colwise_IType[i / 2];
+          in = static_cast<float>(in_colwise_IType[i]);
         } else {
-          in.x = in_compute_colwise[i];
-          in.y = in_compute_colwise[i + 1];
+          in = in_compute_colwise[i];
         }
-        ptx::mul_cvt_2x<OType2, IType2>(out_pair, in, block_scale_inverse_2x);
+        const float scaled_out = in * block_scale_inverse;
 
-        const int shmem_offset_elt_1 = shmem_offset_base_colwise + i * BUFF_DIM_X;
-        const int shmem_offset_elt_2 = shmem_offset_base_colwise + (i + 1) * BUFF_DIM_X;
-        out_colwise_sh[shmem_offset_elt_1] = out_pair.x;
-        out_colwise_sh[shmem_offset_elt_2] = out_pair.y;
+        const int shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
+        out_colwise_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
       }
     }
 
