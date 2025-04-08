@@ -7,15 +7,11 @@ import subprocess
 
 import pytest
 import torch
-from transformer_engine.pytorch.attention import (
-    _flash_attn_2_plus,
-    _flash_attn_2_3_plus,
-)
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
-
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils
 from test_fused_attn import ModelConfig
 
 model_configs_flash_attn = {
@@ -54,7 +50,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
     return args
 
 
-@pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())

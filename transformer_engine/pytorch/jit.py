@@ -4,6 +4,7 @@
 
 """NVFuser functions and JIT utilities"""
 import os
+from functools import wraps
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -12,20 +13,34 @@ from .utils import is_torch_min_version, gpu_autocast_ctx
 
 # pylint: disable=unnecessary-lambda-assignment
 
+
+def lazy_compile(func):
+    """Lazy compile a function with torch.compile
+
+    This decorator defers the compilation of a function until the first call, speeding up the
+    overall module's import time if these functions are not used.
+    """
+    compiled_func = None
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal compiled_func
+        if compiled_func is None:
+            compiled_func = torch.compile(func)
+        return compiled_func(*args, **kwargs)
+
+    return wrapper
+
+
 jit_fuser = lambda func: func
 if is_torch_min_version("2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    jit_fuser = torch.compile
+    jit_fuser = lazy_compile
 
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
 if is_torch_min_version("2.2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    dropout_fuser = torch.compile
-
-
-# Decorator to disable Torch Dynamo
-# See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+    dropout_fuser = lazy_compile
 
 
 def set_jit_fusion_options() -> None:

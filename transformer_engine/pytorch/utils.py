@@ -398,6 +398,19 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
     torch.cuda.nvtx.range_pop()
 
 
+def canonicalize_process_group(
+    group: Optional[torch.distributed.ProcessGroup],
+) -> torch.distributed.ProcessGroup:
+    """Convert to PyTorch process group
+
+    If `None`, returns default process group.
+
+    """
+    if group is None:
+        return torch.distributed.distributed_c10d._get_default_group()
+    return group
+
+
 def torch_get_autocast_gpu_dtype() -> torch.dtype:
     """Get PyTorch autocast GPU dtype."""
     if is_torch_min_version("2.4.0a0"):

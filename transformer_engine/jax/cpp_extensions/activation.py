@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
-from typing import Tuple, Sequence, Union, Callable
+from typing import Sequence, Union, Callable, Optional, Tuple
 import operator
 from functools import reduce, partial
 from packaging import version
@@ -10,31 +10,38 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-from jax.interpreters.mlir import ir
-from jax.sharding import PartitionSpec, NamedSharding
+from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Activation_Type
 
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
-    check_valid_batch_dims,
     jax_dtype_to_te_dtype,
-    jax_dtype_to_ir_dtype,
+    te_dtype_to_jax_dtype,
     get_padded_spec,
-    is_ffi_enabled,
+    check_valid_batch_dims,
+    multidim_transpose,
+    try_apply_delayed_scaling_2x_war,
+    should_apply_1x_fused_dbias_war_for_arch_l_100,
+    NamedSharding,
 )
-from .quantization import _jax_cast_fp8
-from ..sharding import all_reduce_max_along_all_axes_except_PP
+from .quantization import _jax_dbias, _quantize_dbias_impl
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..quantize import ScaledTensor, ScaledTensorFactory
+from ..quantize import (
+    Quantizer,
+    QuantizeLayout,
+    DelayedScaleQuantizer,
+    ScalingMode,
+)
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
 else:
     from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
-
-__all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
+__all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 
 
 ActivationEnum = {
@@ -66,448 +73,1071 @@ def _convert_to_activation_function(fn_or_string):
     raise ValueError(f"Unsupported {fn_or_string} to an activation function")
 
 
-def _jax_act_lu(inputs, activation_type):
+class ActLuPrimitive(BasePrimitive):
+    """
+    ActLu Primitive
+    """
+
+    name = "te_act_lu_ffi"
+    multiple_results = True
+    impl_static_args = (
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, scale_shapes, is_outer
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        x_aval,
+        scale_aval,
+        *,
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+    ):
+        """
+        te_act_lu_p abstract
+        """
+        del act_enum, scale_shapes
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert x_aval.shape[-2] == act_len, (
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
+            f" {x_aval.shape} and act_len {act_len}"
+        )
+
+        out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
+        out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
+
+        updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(out_shape, is_padded=not is_outer, flatten_axis=-1)
+        if not is_2x:
+            out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
+
+        return out_aval, colwise_out_aval, scale_inv_aval, colwise_scale_inv_aval, updated_amax_aval
+
+    @staticmethod
+    def lowering(
+        ctx,
+        x,
+        scale,
+        *,
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+    ):
+        """
+        te_gated_act_lu_p lowering rules
+        """
+        del out_dtype, scale_dtype, scale_shapes, act_len, is_outer
+        x_aval, scale_aval = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert scale_aval is None or scale_aval.dtype == jnp.float32
+
+        out = ffi.ffi_lowering(ActLuPrimitive.name)(
+            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode, is_2x=is_2x
+        )
+        return out
+
+    @staticmethod
+    def impl(
+        x,
+        scale,
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+    ):
+        """
+        to describe implementation
+        """
+        del is_outer
+        assert ActLuPrimitive.inner_primitive is not None
+
+        out, colwise_out, scale_inv, colwise_scale_inv, updated_amax = (
+            ActLuPrimitive.inner_primitive.bind(
+                x,
+                scale,
+                out_dtype=out_dtype,
+                act_enum=act_enum,
+                act_len=act_len,
+                scaling_mode=scaling_mode,
+                is_2x=is_2x,
+                scale_dtype=scale_dtype,
+                scale_shapes=scale_shapes,
+                is_outer=False,
+            )
+        )
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(out.shape, is_padded=False, flatten_axis=-1)
+        # Slice out padding for MXFP8, noop for DelayedScaling
+        scale_inv = jax.lax.slice(
+            scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
+        )
+        if is_2x:
+            colwise_scale_inv = jax.lax.slice(
+                colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
+            )
+
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+    ):
+        """
+        to describe batch rules for vmap
+        """
+        del act_len, is_outer
+        check_valid_batch_dims(batch_dims)
+        assert ActLuPrimitive.outer_primitive is not None
+        x, scale = batched_args
+        x_bdim, scale_bdim = batch_dims
+        amax_bdim = scale_bdim
+
+        out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim
+        return (
+            ActLuPrimitive.outer_primitive.bind(
+                x,
+                scale,
+                out_dtype=out_dtype,
+                act_enum=act_enum,
+                scaling_mode=scaling_mode,
+                is_2x=is_2x,
+                scale_dtype=scale_dtype,
+                scale_shapes=scale_shapes,
+            ),
+            out_bdims,
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del (
+            out_dtype,
+            result_infos,
+            act_enum,
+            scale_dtype,
+            scale_shapes,
+            act_len,
+            is_outer,
+        )  # Unused.
+        x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
+
+        out_spec = (*x_spec[:-2], x_spec[-1])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
+
+        if is_2x:
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
+            else:
+                colwise_out_spec = out_spec
+        else:
+            colwise_out_spec = (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_out_spec), desc="ActLuPrimitive.colwise_out"
+        )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+        )
+
+        return (
+            out_sharding,
+            colwise_out_sharding,
+            scale_inv_sharding,
+            colwise_scale_inv_sharding,
+            amax_sharding,
+        )
+
+    @staticmethod
+    def partition(
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del result_infos, is_outer  # Unused.
+        x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
+
+        out_spec = (*x_spec[:-2], x_spec[-1])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
+
+        if is_2x:
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
+            else:
+                colwise_out_spec = out_spec
+        else:
+            colwise_out_spec = (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_out_spec), desc="ActLuPrimitive.colwise_out"
+        )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+        )
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        out_shardings = (
+            out_sharding,
+            colwise_out_sharding,
+            scale_inv_sharding,
+            colwise_scale_inv_sharding,
+            amax_sharding,
+        )
+
+        def sharded_impl(x, scale):
+            local_x, local_colwise_x, local_scale_inv, local_colwise_scale_inv, local_amax = (
+                ActLuPrimitive.impl(
+                    x,
+                    scale,
+                    out_dtype=out_dtype,
+                    act_enum=act_enum,
+                    act_len=act_len,
+                    scaling_mode=scaling_mode,
+                    is_2x=is_2x,
+                    scale_dtype=scale_dtype,
+                    scale_shapes=scale_shapes,
+                    is_outer=True,
+                )
+            )
+
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+            else:
+                global_updated_amax = local_amax
+
+            return (
+                local_x,
+                local_colwise_x,
+                local_scale_inv,
+                local_colwise_scale_inv,
+                global_updated_amax,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(ActLuPrimitive)
+
+
+# TODO(Jeremy): replace is_2x with q_layout
+class DActLuDBiasQuantizePrimitive(BasePrimitive):
+    """
+    DActLu DBias Cast Transpose Primitive
+    """
+
+    name = "te_dact_dbias_quantize_ffi"
+    multiple_results = True
+    # out_dtype, scaling_mode, is_2x, scale_dtype, scale_shapes, is_dbias, act_enum, act_len, is_outer
+    impl_static_args = (3, 4, 5, 6, 7, 8, 9, 10, 11)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        dz_aval,
+        x_aval,
+        scale_aval,
+        *,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+    ):
+        """
+        te_dact_dbias_quantize_p abstract
+        """
+        del act_enum, scale_shapes
+        dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_dtype
+        assert x_aval.shape[-2] == act_len, (
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
+            f" {x_aval.shape} and act_len {act_len}"
+        )
+        assert scale_aval.dtype == jnp.float32
+        ir_hidden_size = dz_aval.shape[-1]
+        gi_hidden_size = act_len * x_aval.shape[-1]
+        assert act_len * ir_hidden_size == gi_hidden_size
+        out_shape = x_aval.shape
+        out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
+
+        updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
+        if is_2x:
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
+            else:
+                colwise_out_shape = out_shape
+        else:
+            colwise_out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
+
+        if is_dbias:
+            dbias_shape = (act_len, ir_hidden_size)
+            (wkspace_info,) = transformer_engine_jax.get_dact_dbias_quantize_workspace_sizes(
+                x_aval.size // gi_hidden_size,
+                gi_hidden_size,
+                jax_dtype_to_te_dtype(x_aval.dtype),
+                jax_dtype_to_te_dtype(out_dtype),
+                scaling_mode,
+                is_2x,
+            )
+            wkspace_shape = wkspace_info[0]
+            wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])
+        else:
+            dbias_shape = (1,)
+            wkspace_shape = (1,)
+            wkspace_dtype = jnp.float32
+        dbias_aval = jax.core.ShapedArray(shape=dbias_shape, dtype=dz_dtype)
+        wkspace_aval = jax.core.ShapedArray(shape=wkspace_shape, dtype=wkspace_dtype)
+
+        return (
+            out_aval,
+            colwise_out_aval,
+            scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+            dbias_aval,
+            wkspace_aval,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        te_dact_dbias_quantize_p outer abstract
+        """
+        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+            DActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
+        )
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
+
+    @staticmethod
+    def lowering(
+        ctx,
+        dz,
+        x,
+        scale,
+        *,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+    ):
+        """
+        te_dact_dbias_quantize_p lowering rules
+        """
+        del out_dtype, scale_dtype, scale_shapes, act_len, is_outer
+        dz_aval, x_aval, scale_aval = ctx.avals_in
+        assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_aval.dtype
+        assert scale_aval.dtype == jnp.float32
+        return ffi.ffi_lowering(DActLuDBiasQuantizePrimitive.name)(
+            ctx,
+            dz,
+            x,
+            scale,
+            scaling_mode=scaling_mode,
+            is_2x=is_2x,
+            is_dbias=is_dbias,
+            act_enum=int(act_enum),
+        )
+
+    @staticmethod
+    def impl(
+        dz,
+        x,
+        scale,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+    ):
+        """
+        te_dact_dbias_quantize_p impl
+        """
+        del is_outer
+        assert DActLuDBiasQuantizePrimitive.inner_primitive is not None
+        (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
+            DActLuDBiasQuantizePrimitive.inner_primitive.bind(
+                dz,
+                x,
+                scale,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                is_2x=is_2x,
+                scale_dtype=scale_dtype,
+                scale_shapes=scale_shapes,
+                is_dbias=is_dbias,
+                act_enum=act_enum,
+                act_len=act_len,
+                is_outer=False,
+            )
+        )
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(x.shape, is_padded=False, flatten_axis=-2)
+        # Slice out padding for MXFP8, noop for DelayedScaling
+        scale_inv = jax.lax.slice(
+            scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
+        )
+        if is_2x:
+            colwise_scale_inv = jax.lax.slice(
+                colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
+            )
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
+
+    @staticmethod
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+    ):
+        """
+        to describe batch rules for vmap
+        """
+        del is_outer
+        check_valid_batch_dims(batch_dims)
+        assert DActLuDBiasQuantizePrimitive.outer_primitive is not None
+        dz, x, scale = batched_args
+        _, x_bdim, scale_bdim = batch_dims
+
+        out_bdims = (
+            x_bdim,  # rowwise output
+            scale_bdim,  # rowwise scale_inv
+            x_bdim,  # colwise output
+            scale_bdim,  # colwise scale_inv
+            scale_bdim,  # amax
+            x_bdim,  # dbias
+        )
+        return (
+            DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+                dz,
+                x,
+                scale,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                is_2x=is_2x,
+                scale_dtype=scale_dtype,
+                scale_shapes=scale_shapes,
+                is_dbias=is_dbias,
+                act_enum=act_enum,
+                act_len=act_len,
+            ),
+            out_bdims,
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del out_dtype, result_infos, act_enum
+        del scale_dtype, scale_shapes, act_len, is_outer
+        x_spec = get_padded_spec(arg_infos[1])
+        scale_spec = get_padded_spec(arg_infos[2])
+
+        out_sharding = NamedSharding(
+            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+        )
+        if is_2x:
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
+            else:
+                colwise_x_spec = x_spec
+        else:
+            colwise_x_spec = (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+        )
+
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*dbias_spec),
+            desc="DActLuDBiasQuantizePrimitive.dbias",
+        )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(
+            mesh, PartitionSpec(*amax_spec), desc="DActLuDBiasQuantizePrimitive.amax"
+        )
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*colwise_scale_inv_spec),
+            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv",
+        )
+        return (
+            out_sharding,
+            colwise_out_sharding,
+            scale_inv_sharding,
+            colwise_scale_inv_sharding,
+            amax_sharding,
+            dbias_sharding,
+        )
+
+    @staticmethod
+    def partition(
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        del result_infos, is_outer
+        x_spec = get_padded_spec(arg_infos[1])
+        scale_spec = get_padded_spec(arg_infos[2])
+
+        out_sharding = NamedSharding(
+            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+        )
+
+        if is_2x:
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
+            else:
+                colwise_x_spec = x_spec
+        else:
+            colwise_x_spec = (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+        )
+
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(*dbias_spec),
+            desc="DActLuDBiasQuantizePrimitive.dbias",
+        )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if is_2x:
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+        )
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
+        out_shardings = (
+            out_sharding,
+            colwise_out_sharding,
+            scale_inv_sharding,
+            colwise_scale_inv_sharding,
+            amax_sharding,
+            dbias_sharding,
+        )
+
+        def sharded_impl(dz, x, scale):
+            (out, colwise_out, scale_inv, colwise_scale_inv, local_amax, local_dbias) = (
+                DActLuDBiasQuantizePrimitive.impl(
+                    dz,
+                    x,
+                    scale,
+                    out_dtype=out_dtype,
+                    scaling_mode=scaling_mode,
+                    is_2x=is_2x,
+                    scale_dtype=scale_dtype,
+                    scale_shapes=scale_shapes,
+                    is_dbias=is_dbias,
+                    act_enum=act_enum,
+                    act_len=act_len,
+                    is_outer=True,
+                )
+            )
+            if is_dbias:
+                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+            else:
+                global_dbias = local_dbias
+
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+            else:
+                global_updated_amax = local_amax
+
+            return out, colwise_out, scale_inv, colwise_scale_inv, global_updated_amax, global_dbias
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+
+register_primitive(DActLuDBiasQuantizePrimitive)
+
+
+def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
     """
     JAX native activation implementation
     """
-    x = jnp.split(inputs, len(activation_type), axis=-2)
+    act_len = len(activation_type)
+    assert inputs.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {inputs.shape} and act_len {act_len}"
+    )
+
+    x = jnp.split(inputs, act_len, axis=-2)
     acts = []
     for idx, act_fn in enumerate(activation_type):
         x_i = _convert_to_activation_function(act_fn)(x[idx])
         acts.append(x_i)
     x = reduce(operator.mul, acts)
     x = jnp.squeeze(x, axis=-2)
+    if quantizer:
+        return quantizer.quantize(x, flatten_axis=-1)
     return x
 
 
-class ActLuPrimitive(BasePrimitive):
+def _jax_quantize_dact_dbias(
+    dz: jnp.ndarray,
+    x: jnp.ndarray,
+    activation_type: Sequence[Union[str, Callable]],
+    is_dbias: bool = True,
+    quantizer: Optional[Quantizer] = None,
+):
     """
-    Activation Forward Primitive
+    JAX implementation of dact_lu and dbias with optional quantization
     """
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
 
-    name = "te_act_lu"
-    multiple_results = False
-    inner_primitive = None
-    outer_primitive = None
-    impl_static_args = (1,)
+    _, vjp_func = jax.vjp(
+        partial(_jax_act_lu, activation_type=activation_type), x.astype(jnp.float32)
+    )
+    (dx,) = vjp_func(dz.astype(jnp.float32))
 
-    @staticmethod
-    def abstract(x_aval, *, act_enum):  # pylint: disable=unused-argument
-        """
-        act_lu abstract
-        """
-        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+    dbias = None
+    if is_dbias:
+        dbias = _jax_dbias(dx, dtype=x.dtype, flatten_axis=-2)
 
-        x_shape = x_aval.shape
-        assert x_shape[-2] == 2 or x_shape[-2] == 1
-        hidden_size = x_shape[-1]
-        batch_shapes = x_shape[:-2]
-        out_aval = x_aval
-        out_shape = (batch_shapes) + (hidden_size,)
-        out_aval = out_aval.update(shape=out_shape, dtype=dtype)
+    if quantizer is not None:
+        dx = quantizer.quantize(dx, dq_dtype=x.dtype, flatten_axis=-2)
+    else:
+        dx = dx.astype(x.dtype)
 
-        return out_aval
-
-    @staticmethod
-    def lowering(ctx, x, *, act_enum):
-        """
-        act_lu lowering rules
-        """
-        (x_aval,) = ctx.avals_in
-        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        if is_ffi_enabled():
-            name = "te_act_lu_ffi"
-            out = ffi.ffi_lowering(name)(ctx, x, act_enum=act_enum)
-        else:
-            ir_x_type = ir.RankedTensorType(x.type)
-            ir_x_shape = ir_x_type.shape
-            out_shape = ir_x_shape[:-2] + [ir_x_shape[-1]]
-
-            out_types = [
-                ir.RankedTensorType.get(out_shape, ir_x_type.element_type),
-            ]
-            operands = [x]
-            operand_shapes = [ir_x_shape]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            hidden_size = ir_x_shape[-1]
-            batch_size = reduce(operator.mul, ir_x_shape[:-2])
-            in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-            opaque = transformer_engine_jax.pack_common_descriptor(
-                (batch_size, hidden_size), in_dtype, in_dtype, act_enum
-            )
-
-            out = custom_caller(ActLuPrimitive.name, args, opaque, False)
-
-        return out
-
-    @staticmethod
-    def impl(x, act_enum):
-        assert ActLuPrimitive.inner_primitive is not None
-        out = ActLuPrimitive.inner_primitive.bind(x, act_enum=act_enum)
-        return out
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, act_enum):
-        """
-        act_lu batcher
-        """
-        check_valid_batch_dims(batch_dims)
-        assert ActLuPrimitive.outer_primitive is not None
-        (inputs,) = batched_args
-        (inputs_bdim,) = batch_dims
-
-        out_bdims = inputs_bdim
-        return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_enum), out_bdims
-
-    @staticmethod
-    def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
-        """
-        act_lu infer_sharding_from_operands
-        """
-        del result_infos, act_enum  # Unused.
-        x_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        return out_sharding
-
-    @staticmethod
-    def partition(act_enum, mesh, arg_infos, result_infos):
-        """
-        act_lu partitioning
-        """
-        del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-
-        def sharded_impl(x):
-            return ActLuPrimitive.impl(x, act_enum=act_enum)
-
-        return mesh, sharded_impl, out_sharding, arg_shardings
+    return dx, dbias
 
 
-register_primitive(ActLuPrimitive)
+def act_lu(
+    x: jnp.ndarray,
+    activation_type: Sequence[Union[str, Callable]],
+    quantizer: Optional[Quantizer] = None,
+) -> Union[jnp.ndarray, ScaledTensor]:
+    """Activation with optional quantization.
 
+    Args:
+        x: Input tensor to be processed.
+            Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
+        activation_type: Type of activation function to apply.
+        quantizer: Optional quantizer for FP8 quantization of the output.
 
-def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]) -> jnp.ndarray:
+    Returns:
+        If quantizer is None:
+            The activated input tensor with the same dtype as input.
+        If quantizer is provided:
+            A ScaledTensor containing the quantized activated input.
     """
-    act_lu wrapper
-    Return act_lu(inputs)
-    Input shape: (N, 1, H) for non-gated activations
-                 (N, 2, H) for gated activations
-    """
-    if not ActLuPrimitive.enabled():
-        return _jax_act_lu(inputs, activation_type)
-
     act_type_id = ActivationEnum[activation_type].value
-    return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
 
+    if not ActLuPrimitive.enabled():
+        return _jax_act_lu(x, activation_type, quantizer)
 
-class DActLuPrimitive(BasePrimitive):
-    """
-    Dgated ActLu Primitive
-    """
+    # TE/common does not support colwise-only quantization yet
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
+        return _jax_act_lu(x, activation_type, quantizer)
 
-    name = "te_dact_lu"
-    multiple_results = False
-    inner_primitive = None
-    outer_primitive = None
-    impl_static_args = (2,)
+    # TE/common does not support 2x quantization for DelayedScaling yet
+    war_output = try_apply_delayed_scaling_2x_war(
+        f=act_lu, x=x, activation_type=activation_type, quantizer=quantizer
+    )
+    if war_output is not None:
+        return war_output
 
-    @staticmethod
-    def abstract(dz_aval, x_aval, *, act_enum):  # pylint: disable=unused-argument
-        """
-        dact_lu abstract
-        """
-        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert x_aval.dtype == dtype
-        for axis in range(len(dz_aval.shape) - 1):
-            assert dz_aval.shape[axis] == x_aval.shape[axis]
-        assert x_aval.shape[-2] == 2 or x_aval.shape[-2] == 1
+    scale = jnp.empty((1,), jnp.float32)
+    output_shape = (*x.shape[:-2], x.shape[-1])
 
-        i_hidden_size = dz_aval.shape[-1]
-        g_hidden_size = x_aval.shape[-1]
-        assert i_hidden_size == g_hidden_size
-        out_aval = x_aval
-
-        return out_aval
-
-    @staticmethod
-    def lowering(ctx, dz, x, *, act_enum):
-        """
-        dact_lu lowering rules
-        """
-        in_aval, gi_aval = ctx.avals_in
-        assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert gi_aval.dtype == in_aval.dtype
-        if is_ffi_enabled():
-            name = "te_dact_lu_ffi"
-            out = ffi.ffi_lowering(name)(ctx, dz, x, act_enum=act_enum)
-        else:
-            ir_in_type = ir.RankedTensorType(dz.type)
-            ir_in_shape = ir_in_type.shape
-            gi_type = ir.RankedTensorType(x.type)
-            gi_shape = gi_type.shape
-            #        assert ir_in_shape == gi_shape
-            for axis in range(len(ir_in_shape) - 1):
-                assert ir_in_shape[axis] == gi_shape[axis]
-
-            ir_batch_size = reduce(operator.mul, ir_in_shape[:-1])
-            i_hidden_size = ir_in_shape[-1]
-            g_hidden_size = gi_shape[-1]
-            assert i_hidden_size == g_hidden_size
-            out_dtype = ir_in_type.element_type
-            out_shape = gi_shape
-
-            out_types = [
-                ir.RankedTensorType.get(out_shape, out_dtype),
-            ]
-            operands = [dz, x]
-            operand_shapes = [ir_in_shape, gi_shape]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
-            opaque = transformer_engine_jax.pack_common_descriptor(
-                (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
-            )
-
-            out = custom_caller(DActLuPrimitive.name, args, opaque, False)
-
+    if quantizer is None:
+        out, _, _, _, _ = ActLuPrimitive.outer_primitive.bind(
+            x,
+            scale,
+            out_dtype=x.dtype,
+            act_enum=act_type_id,
+            act_len=act_len,
+            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            is_2x=False,
+            scale_dtype=jnp.float32,
+            scale_shapes=((), ()),
+            is_outer=True,
+        )
+        out = out.reshape(output_shape)
         return out
 
-    @staticmethod
-    def impl(dz, x, act_enum):
-        """
-        dact_lu implementation
-        """
-        assert DActLuPrimitive.inner_primitive is not None
-        dx = DActLuPrimitive.inner_primitive.bind(dz, x, act_enum=act_enum)
-        return dx
+    if isinstance(quantizer, DelayedScaleQuantizer):
+        scale = quantizer.scale
 
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, act_enum):
-        """
-        dact_lu batcher
-        """
-        check_valid_batch_dims(batch_dims)
-        assert DActLuPrimitive.outer_primitive is not None
-        dz, x = batched_args
-        _, x_bdim = batch_dims
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+    ) = ActLuPrimitive.outer_primitive.bind(
+        x,
+        scale,
+        out_dtype=quantizer.q_dtype,
+        act_enum=act_type_id,
+        act_len=act_len,
+        scaling_mode=quantizer.scaling_mode.value,
+        is_2x=quantizer.is_2x2x(),
+        scale_dtype=quantizer.get_scale_dtype(),
+        # output does not have act axis
+        scale_shapes=quantizer.get_scale_shapes(output_shape, flatten_axis=-1),
+        is_outer=True,
+    )
 
-        out_bdims = x_bdim
-        return DActLuPrimitive.outer_primitive.bind(dz, x, act_enum=act_enum), out_bdims
+    quantizer.update(updated_amax)
 
-    @staticmethod
-    def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
-        """
-        dact_lu infer_sharding_from_operands
-        """
-        del result_infos, act_enum  # Unused.
-        act_lu_out_spec = get_padded_spec(arg_infos[1])
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*act_lu_out_spec))
-        return dx_sharding
-
-    @staticmethod
-    def partition(act_enum, mesh, arg_infos, result_infos):
-        """
-        dact_lu partition
-        """
-        del result_infos
-        dx_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = dx_sharding
-
-        def sharded_impl(dz, x):
-            return DActLuPrimitive.impl(dz, x, act_enum=act_enum)
-
-        return mesh, sharded_impl, out_shardings, arg_shardings
+    return ScaledTensorFactory.create(
+        data=rowwise_casted_output,
+        scale_inv=rowwise_scale_inv,
+        colwise_data=colwise_casted_output,
+        colwise_scale_inv=colwise_scale_inv,
+        scaling_mode=quantizer.scaling_mode,
+        dq_dtype=x.dtype,
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
+    )
 
 
-register_primitive(DActLuPrimitive)
+def quantize_dact_dbias(
+    dz: jnp.ndarray,
+    x: jnp.ndarray,
+    activation_type: Sequence[Union[str, Callable]] = ("gelu",),
+    is_dbias: bool = True,
+    quantizer: Optional[Quantizer] = None,
+) -> Tuple[ScaledTensor, jnp.ndarray]:
+    """Compute gradients of activation and bias with optional quantization.
+
+    Args:
+        dz: Gradient of the output with respect to the activation output.
+        x: Input tensor that was processed by the forward pass.
+            Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
+        activation_type: Type of activation function used in the forward pass. Defaults to ("gelu",).
+        is_dbias: If True, compute bias gradient. Defaults to True.
+        quantizer: Optional quantizer for FP8 quantization of the output.
+
+    Returns:
+        Tuple[ScaledTensor, jnp.ndarray]: A tuple containing:
+        - The gradient of the activation with respect to the input.
+        - The gradient of the activation with respect to the bias.
+    """
+
+    act_len = len(activation_type)
+    assert x.shape[-2] == act_len, (
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
+        f" {x.shape} and act_len {act_len}"
+    )
+
+    if not DActLuDBiasQuantizePrimitive.enabled():
+        return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
+
+    # TE/common does not support colwise-only quantization yet
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
+        return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
+
+    # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
+    if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
+        out = dact_lu(dz, x, activation_type, quantizer=None)
+        return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
+
+    is_gated = act_len == 2
+    # TE/common does not support DelayedScaling2x for gated-act yet
+    if is_gated:
+        war_output = try_apply_delayed_scaling_2x_war(
+            f=quantize_dact_dbias,
+            dz=dz,
+            x=x,
+            activation_type=activation_type,
+            is_dbias=is_dbias,
+            quantizer=quantizer,
+            flatten_axis=-2,
+        )
+        if war_output is not None:
+            return war_output
+
+    scale = jnp.empty((), jnp.float32)
+
+    act_type_id = ActivationEnum[activation_type]
+
+    if quantizer is None:
+        output, _, _, _, _, _ = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+            dz,
+            x,
+            scale,
+            # outputs float32 for dbias accumulation
+            out_dtype=(jnp.float32 if is_dbias else x.dtype),
+            # default value for no scaling, TE/common ignore this value when scale is unset
+            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            is_2x=False,  # unused
+            scale_dtype=jnp.float32,  # unused
+            scale_shapes=((), ()),  # unused
+            is_dbias=False,
+            act_enum=act_type_id,
+            act_len=act_len,
+            is_outer=True,
+        )
+        dbias = None
+        if is_dbias:
+            dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
+        return output.astype(x.dtype), dbias
+
+    if isinstance(quantizer, DelayedScaleQuantizer):
+        scale = quantizer.scale
+
+    # TE/common dact_dbias_quantize does not support gated act yet
+    if is_dbias and is_gated:
+        dgated = dact_lu(
+            dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type
+        )
+        out, dbias = _quantize_dbias_impl(
+            dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+        )
+        return out, dbias
+
+    out_shape = x.shape
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+        dbias,
+    ) = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+        dz,
+        x,
+        scale,
+        out_dtype=quantizer.q_dtype,
+        scaling_mode=quantizer.scaling_mode.value,
+        is_2x=quantizer.is_2x2x(),
+        scale_dtype=quantizer.get_scale_dtype(),
+        # output has act axis
+        scale_shapes=quantizer.get_scale_shapes(out_shape, flatten_axis=-2),
+        is_dbias=is_dbias,
+        act_enum=act_type_id,
+        act_len=act_len,
+        is_outer=True,
+    )
+
+    # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
+    if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+        colwise_scale_inv = rowwise_scale_inv
+
+    quantizer.update(updated_amax)
+
+    out = ScaledTensorFactory.create(
+        data=rowwise_casted_output,
+        scale_inv=rowwise_scale_inv,
+        colwise_data=colwise_casted_output,
+        colwise_scale_inv=colwise_scale_inv,
+        scaling_mode=quantizer.scaling_mode,
+        dq_dtype=x.dtype,
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
+        flatten_axis=-2,  # as output has act axis
+    )
+
+    return out, dbias
 
 
 def dact_lu(
-    inputs: jnp.ndarray, act_lu_inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]]
-) -> jnp.ndarray:
-    """
-    dact_lu fusion wrapper
-    Return dgated_act_lu(inputs)
-    """
-    if not DActLuPrimitive.enabled():
-        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
-        return vjp_func(inputs)[0]
-
-    act_type_id = ActivationEnum[activation_type].value
-    return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
-
-
-class ActLuFp8Primitive(BasePrimitive):
-    """
-    ActLu FP8 Primitive
-    """
-
-    name = "te_act_lu_fp8"
-    multiple_results = True
-    impl_static_args = (4, 5)  # out_dtype, act_enum
-    inner_primitive = None
-    outer_primitive = None
-
-    @staticmethod
-    def abstract(
-        x_aval, amax_aval, scale_aval, scale_inv_aval, *, out_dtype, act_enum
-    ):  # pylint: disable=unused-argument
-        """
-        te_act_lu_p abstract
-        """
-        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
-        # Currently only support casting to E4M3 only in C side.
-        assert out_dtype == jnp.float8_e4m3fn
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert amax_aval.dtype == jnp.float32
-        assert scale_aval.dtype == jnp.float32
-        assert scale_inv_aval.dtype == jnp.float32
-
-        assert x_aval.shape[-2] == 1 or x_aval.shape[-2] == 2
-        hidden_size = x_aval.shape[-1]
-        batch_shape = x_aval.shape[:-2]
-        out_shape = (batch_shape) + (hidden_size,)
-        out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
-        updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-
-        return out_aval, updated_amax_aval
-
-    @staticmethod
-    def lowering(ctx, x, amax, scale, scale_inv, *, out_dtype, act_enum):
-        """
-        te_gated_act_lu_p lowering rules
-        """
-        x_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
-        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert amax_aval.dtype == jnp.float32
-        assert scale_aval.dtype == jnp.float32
-        assert scale_inv_aval.dtype == jnp.float32
-        if is_ffi_enabled():
-            name = "te_act_lu_fp8_ffi"
-            out = ffi.ffi_lowering(name, operand_output_aliases={1: 1})(
-                ctx, x, amax, scale, scale_inv, act_enum=act_enum
-            )
-        else:
-            ir_x_type = ir.RankedTensorType(x.type)
-            ir_x_shape = ir_x_type.shape
-            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-            ir_amax_type = ir.RankedTensorType(amax.type)
-            ir_amax_dtype = ir_amax_type.element_type
-            ir_amax_shape = ir_amax_type.shape
-            ir_scale_shape = ir_amax_shape
-            ir_scale_inv_shape = ir_amax_shape
-
-            hidden_size = ir_x_shape[-1]
-            batch_shape = ir_x_shape[:-2]
-            batch_size = reduce(operator.mul, batch_shape)
-            out_shape = batch_shape + [hidden_size]
-            out_types = [
-                ir.RankedTensorType.get(out_shape, ir_out_dtype),
-                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-            ]
-            operands = [x, amax, scale, scale_inv]
-            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            opaque = transformer_engine_jax.pack_common_descriptor(
-                (batch_size, hidden_size),
-                jax_dtype_to_te_dtype(x_aval.dtype),
-                jax_dtype_to_te_dtype(out_dtype),
-                act_enum,
-            )
-
-            out = custom_caller(
-                ActLuFp8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
-            )
-
-        return out
-
-    @staticmethod
-    def impl(x, amax, scale, scale_inv, out_dtype, act_enum):
-        """
-        to describe implementation
-        """
-        assert ActLuFp8Primitive.inner_primitive is not None
-        out, updated_amax = ActLuFp8Primitive.inner_primitive.bind(
-            x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-        )
-        return out, updated_amax
-
-    @staticmethod
-    def batcher(batched_args, batch_dims, *, out_dtype, act_enum):
-        """
-        to describe batch rules for vmap
-        """
-        check_valid_batch_dims(batch_dims)
-        assert ActLuFp8Primitive.outer_primitive is not None
-        x, amax, scale, scale_inv = batched_args
-        x_bdim, amax_bdim, _, _ = batch_dims
-
-        out_bdims = x_bdim, amax_bdim
-        return (
-            ActLuFp8Primitive.outer_primitive.bind(
-                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-            ),
-            out_bdims,
-        )
-
-    @staticmethod
-    def infer_sharding_from_operands(out_dtype, act_enum, mesh, arg_infos, result_infos):
-        del out_dtype, result_infos, act_enum
-        x_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        return (out_sharding, amax_sharding)
-
-    @staticmethod
-    def partition(out_dtype, act_enum, mesh, arg_infos, result_infos):
-        del result_infos
-        x_spec = get_padded_spec(arg_infos[0])
-        out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*get_padded_spec(arg_infos[1])))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (out_sharding, amax_sharding)
-
-        def sharded_impl(x, amax, scale, scale_inv):
-            local_x, local_amax = ActLuFp8Primitive.impl(
-                x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
-            )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
-
-            return local_x, global_updated_amax
-
-        return mesh, sharded_impl, out_shardings, arg_shardings
-
-
-register_primitive(ActLuFp8Primitive)
-
-
-def act_lu_fp8(
+    dz: jnp.ndarray,
     x: jnp.ndarray,
-    amax: jnp.ndarray,
-    scale: jnp.ndarray,
-    scale_inv: jnp.ndarray,
-    out_dtype: jnp.dtype,
     activation_type: Sequence[Union[str, Callable]],
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    quantizer: Optional[Quantizer] = None,
+) -> Union[jnp.ndarray, ScaledTensor]:
     """
-    act wrapper
-    Return FP8(act_lu(x))
-    Input shape: (N, 1, H) for non-gated activations
-                 (N, 2, H) for gated activations
-    """
-    if not ActLuFp8Primitive.enabled():
-        act_lu_output = _jax_act_lu(x, activation_type)
-        casted_output, updated_amax = _jax_cast_fp8(act_lu_output, scale, amax, out_dtype)
-        return casted_output, updated_amax
+    Backward pass for activation with optional quantization.
 
-    act_type_id = ActivationEnum[activation_type].value
-    return ActLuFp8Primitive.outer_primitive.bind(
-        x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
+    Args:
+        dz: Gradient tensor from upstream.
+        x: Input tensor that was used in forward pass.
+        activation_type: Type of activation function that was applied.
+        quantizer: Optional quantizer for FP8 quantization of the output gradient.
+
+    Returns:
+        The gradient of the activation with respect to the input.
+    """
+    output, _ = quantize_dact_dbias(
+        dz=dz,
+        x=x,
+        activation_type=activation_type,
+        is_dbias=False,
+        quantizer=quantizer,
     )
+    return output

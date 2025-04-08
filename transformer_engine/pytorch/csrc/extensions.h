@@ -51,8 +51,9 @@ std::vector<py::object> fused_attn_fwd(
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
     const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<py::object> fused_attn_bwd(
@@ -68,6 +69,13 @@ std::vector<py::object> fused_attn_bwd(
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
+void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
+                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
+                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
+                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM
@@ -244,6 +252,8 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
  * FP8 recipe
  **************************************************************************************************/
 
+void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
+
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
@@ -255,16 +265,14 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const bool transpose_output_memory);
+                              const NVTE_QKV_Format qkv_format, const bool interleaved,
+                              const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                              const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const bool transpose_output_memory);
-
-at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs, const int cp_size, const int cp_rank);
-
-at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs, const int cp_size, const int cp_rank);
+                               const NVTE_QKV_Format qkv_format, const bool interleaved,
+                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                               const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous
@@ -351,6 +359,10 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
 
+void multi_tensor_compute_scale_and_scale_inv_cuda(
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    float max_fp8, bool force_pow_2_scales, float epsilon);
+
 /***************************************************************************************************
  * padding
  **************************************************************************************************/
@@ -358,6 +370,23 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
+
+/***************************************************************************************************
+ * NVSHMEM APIs
+ **************************************************************************************************/
+
+namespace nvshmem_api {
+void init_nvshmem_backend(c10d::ProcessGroup *process_group);
+
+torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+
+void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
+                                    torch::Tensor signal);
+
+void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
+
+void nvshmem_finalize();
+}  // namespace nvshmem_api
 
 /***************************************************************************************************
  * swizzle
