@@ -132,7 +132,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.lda = is_A_transposed? k : m;
+    ret.lda = is_A_transposed ? k : m;
   } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
     // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
