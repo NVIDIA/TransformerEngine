@@ -18,8 +18,8 @@ namespace jax {
 constexpr static size_t MXFP8_BLOCK_SIZE = 32;
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
-                             Variadic_Result_Type output_list, int64_t num_gemms,
-                             int64_t scaling_mode, int64_t has_bias, int64_t workspace_size) {
+                          Variadic_Result_Type output_list, int64_t num_gemms,
+                          int64_t scaling_mode, int64_t has_bias, int64_t workspace_size) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
