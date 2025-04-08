@@ -90,7 +90,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_NO_SCALING || scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       auto lhs_i = TensorWrapper(static_cast<void *>(lhs_ptr), lhs_shape, lhs_dtype, nullptr,
                                  nullptr, reinterpret_cast<float *>(lhs_sinv_ptr));
       auto rhs_i = TensorWrapper(static_cast<void *>(rhs_ptr), rhs_shape, rhs_dtype, nullptr,

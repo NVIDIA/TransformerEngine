@@ -49,6 +49,7 @@ class CuBLASScaleMunger:
             s_t = _pad_inner_to_align(unmunged.scale_t, transpose=tile_shape[0] == 1)
         return QuantizeResult(unmunged.data, s, unmunged.data_t, s_t)
 
+    @classmethod
     def demunge_scale_shape_from_backend(
         cls,
         qtensor_shape: Tuple[int, int],
