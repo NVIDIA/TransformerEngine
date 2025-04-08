@@ -357,7 +357,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
-            
+
             if ctx.wgrad_store.split_bw():
                 wgrad_list = [None] * ctx.num_gemms
 

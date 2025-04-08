@@ -636,8 +636,11 @@ class _Linear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                general_gemm_wgrad = functools.partial(general_gemm,
-                    out_dtype=main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype,
+                general_gemm_wgrad = functools.partial(
+                    general_gemm,
+                    out_dtype=(
+                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                    ),
                     workspace=get_workspace(),
                     layout="NT",
                     grad=True,
@@ -648,7 +651,7 @@ class _Linear(torch.autograd.Function):
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,
                     extra_output=rs_out,
-                    bulk_overlap=ctx.ub_bulk_wgrad,                    
+                    bulk_overlap=ctx.ub_bulk_wgrad,
                 )
 
                 if ctx.wgrad_store.split_bw():
@@ -669,7 +672,7 @@ class _Linear(torch.autograd.Function):
                     if ub_obj_wgrad.is_fp8_ubuf():
                         dgrad = rs_out
                     else:
-                        dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)                    
+                        dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias or ctx.wgrad_store.split_bw():
