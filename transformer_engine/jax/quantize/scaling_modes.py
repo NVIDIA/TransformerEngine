@@ -304,7 +304,7 @@ class ScalingMode(Enum):
         """
         if not isinstance(other, ScalingMode):
             return False
-        return self.value == other.value or self == other.value or self.value == other
+        return self.value == other.value
 
     def tree_flatten(self):
         """Flatten this scaling mode for JAX tree operations.

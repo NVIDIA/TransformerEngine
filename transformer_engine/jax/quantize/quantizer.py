@@ -172,7 +172,7 @@ class DelayedScaleQuantizer(Quantizer):
         amax_history: History of maximum absolute values
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value
+    scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
@@ -375,7 +375,7 @@ class BlockScaleQuantizer(Quantizer):
         q_layout: Quantization axis (default: ROWWISE_COLWISE)
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING.value
+    scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     def get_data_layout(self) -> str:
