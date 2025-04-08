@@ -942,7 +942,7 @@ def _all_gather_fp8_blockwise(
     inp: torch.Tensor,
     process_group: dist_group_type,
     *,
-    async_op: bool = False,
+    async_op: bool = False, # pylint: disable=unused-argument
     quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:

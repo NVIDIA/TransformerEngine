@@ -220,7 +220,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 continue
 
             if recipe.float8_block_scaling():
-                raise NotImplementedError("Fusible operations do not support FP8 block scaling recipe")
+                raise NotImplementedError(
+                    "Fusible operations do not support FP8 block scaling recipe"
+                )
 
             # Construct quantization recipe state
             recipe_state = RecipeState.create(
