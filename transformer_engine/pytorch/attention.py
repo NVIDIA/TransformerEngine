@@ -618,7 +618,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
@@ -1361,16 +1361,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
-                if use_fused_attention:
-                    # [b, np, sq, 1] -> [b, np, sq] or
-                    # [t, np, 1] -> [t, np]
-                    softmax_lse_per_step[i - 1].squeeze_(-1)
-                    if softmax_lse_in_packed_format:
-                        softmax_lse_per_step[i - 1] = (
-                            softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
-                        )
-
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                    if use_fused_attention:
+                        # [b, np, sq, 1] -> [b, np, sq] or
+                        # [t, np, 1] -> [t, np]
+                        softmax_lse_per_step[i - 1].squeeze_(-1)
+                        if softmax_lse_in_packed_format:
+                            softmax_lse_per_step[i - 1] = (
+                                softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
+                            )
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
@@ -1567,7 +1566,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
             restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
@@ -5141,6 +5140,16 @@ class FusedAttention(torch.nn.Module):
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
+        # cuDNN can work with 0-length sequences in the batch for both bshd/sbhd and thd formats
+        # however, for bshd/sbhd, q/k/v tensors need to have the same batch size as indicated by
+        # cu_seqlens, whereas thd does not have this requirement
+        # e.g. if q_format = bshd, and q.shape = [3, 1, 16, 64], we should have k.shape[0] =
+        # v.shape[0] = q.shape[0], and cu_seqlens_q.shape = cu_seqlens_kv.shape = [4]
+        if q_format in ["bshd", "sbhd"] or kv_format in ["bshd", "sbhd"]:
+            batch_size = query_layer.shape[0] if q_format == "bshd" else query_layer.shape[1]
+            cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+            cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
+
         page_table = None
         if inference_params is None:
             if qkv_format in ["sbhd", "bshd"]:
@@ -6231,7 +6240,11 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
-                raise ValueError("No dot product attention support for the provided inputs!")
+                raise ValueError(
+                    "No dot product attention backend is available for the provided inputs. Please"
+                    " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
+                    " disabling all backends."
+                )
 
             # run attention
             if use_flash_attention:

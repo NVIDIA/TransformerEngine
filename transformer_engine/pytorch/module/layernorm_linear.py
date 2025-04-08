@@ -19,6 +19,7 @@ from .base import (
     get_workspace,
     get_ub,
     TransformerEngineBaseModule,
+    get_dummy_wgrad,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
@@ -55,7 +56,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
@@ -139,6 +140,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
+        # Avoid quantized norm kernel if norm output will be returned
+        with_quantized_norm = (
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
+        )
+
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
@@ -148,6 +154,7 @@ class _LayerNormLinear(torch.autograd.Function):
         backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
+        # Check if Userbuffers is supported
         if fp8:
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
                 FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
@@ -157,104 +164,74 @@ class _LayerNormLinear(torch.autograd.Function):
                     " current scaling"
                 )
 
+        # Configure quantizer for norm output
+        if fp8:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-
-        # Configure quantizer for normalization output
-        with_quantized_norm = fp8 and not return_layernorm_output
-        if with_quantized_norm:
-            if with_input_all_gather:
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
-                if isinstance(input_quantizer, MXFP8Quantizer):
-                    with_quantized_norm = False
-            else:
-                input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=backward_needs_input,
-                )
-
-        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-        if (
-            fp8
-            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
-            and ub_bulk_dgrad
-        ):
-            input_quantizer.set_usage(rowwise=True, columnwise=False)
-
-        ub_obj_fprop = None
-        ln_out = None
-        # For DelayScaling, output of normalization will be in fp8.
-        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
-        if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            ub_obj_fprop = get_ub(ub_name + "_fprop")
-            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
-        elif with_quantized_norm:
-            if with_input_all_gather:
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
-            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
-        else:
-            ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
-            )
+            columnwise_usage = backward_needs_input
+            if (
+                columnwise_usage
+                and with_input_all_gather
+                and not isinstance(input_quantizer, MXFP8Quantizer)
+            ):
+                columnwise_usage = False
+            input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            ln_out,
+            None,  # ln_out
             ln_weight,
             ln_bias,
             eps,
             input_quantizer if with_quantized_norm else None,
-            inp.dtype,
+            inputmat.dtype,
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        ln_out_return = ln_out if return_layernorm_output else None
+        ln_out_return = None
+        if return_layernorm_output or return_layernorm_output_gathered:
+            ln_out_return = ln_out
         nvtx_range_pop(f"{nvtx_label}.norm")
-
-        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
-        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
-        if ub_overlap_ag_fprop and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            ub_obj_fprop = get_ub(ub_name + "_fprop")
-            ln_out_local = ln_out
-            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
-            input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.gemm_input_cast_comm")
-        if with_input_all_gather and not ub_overlap_ag_fprop:
-            with_quantized_all_gather = fp8
-            if return_layernorm_output and return_layernorm_output_gathered:
-                with_quantized_all_gather = False
-            if fp8:
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
-            # ln_out in this has two possibilities:
-            # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
-            # 2. in high precision, then we need to cast it and then gather in FP8
-            # the output ln_out_total will be in FP8, and it's a full tensor
-            ln_out_total, _ = gather_along_first_dim(
-                ln_out,
-                tp_group,
-                quantizer=(input_quantizer if with_quantized_all_gather else None),
-            )
-            if return_layernorm_output and return_layernorm_output_gathered:
+        ln_out_total = None
+        ub_obj_fprop = None
+        if with_input_all_gather:
+            if return_layernorm_output_gathered:
+                # Perform all-gather in high precision if gathered
+                # norm output will be returned
+                ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
-            if fp8 and not with_quantized_all_gather:
-                ln_out_total = input_quantizer(ln_out_total)
-        else:
-            if ub_overlap_ag_fprop:
-                ln_out_total = ub_obj_fprop.get_buffer(input_quantizer)
+                if fp8:
+                    ln_out = input_quantizer(ln_out)
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    ln_out_total = input_quantizer(ln_out_total)
             else:
                 if fp8:
-                    if not isinstance(ln_out, QuantizedTensor):
-                        input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    if not with_quantized_norm:
                         ln_out = input_quantizer(ln_out)
-                    elif backward_needs_input:
-                        ln_out.update_usage(rowwise_usage=True, columnwise_usage=True)
-                ln_out_total = ln_out
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                if ub_overlap_ag_fprop:
+                    # Copy into Userbuffers buffer
+                    ub_obj_fprop = get_ub(ub_name + "_fprop")
+                    ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True).copy_(ln_out)
+                    ln_out_total = ub_obj_fprop.get_buffer(input_quantizer)
+                else:
+                    # All-gather with NCCL
+                    ln_out_total, _ = gather_along_first_dim(
+                        ln_out,
+                        tp_group,
+                        quantizer=(input_quantizer if fp8 else None),
+                    )
+        else:
+            if fp8 and not with_quantized_norm:
+                ln_out = input_quantizer(ln_out)
+            ln_out_total = ln_out
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
 
         # Cast weight to expected dtype
@@ -353,9 +330,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensor):
-                    weightmat.update_usage(columnwise_usage=True)
+            if isinstance(weightmat, QuantizedTensor):
+                weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 if fp8 and weightmat is not None:
@@ -399,7 +375,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight,
                 bias,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag_fprop else ln_out,  # avoid saving a UB buffer
+                ln_out,
                 mu,
                 rsigma,
             )
@@ -584,12 +560,27 @@ class _LayerNormLinear(torch.autograd.Function):
                     ub_obj_wgrad.set_buffer_params(ctx.grad_input_quantizer)
                     dgrad_bulk = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer)
 
+            # Configure quantizer for grad output tensor
+            # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
+            # requires column-wise usage
             if ctx.grad_output_quantizer is not None:
-                # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                rowwise_usage = True
+                columnwise_usage = True
+                if ctx.ub_overlap_ag and isinstance(
+                    ctx.grad_output_quantizer,
+                    (Float8Quantizer, Float8CurrentScalingQuantizer),
+                ):
+                    # If data is in FP8 and communication is handled
+                    # with Userbuffers, we compute FP8 transposes
+                    # manually
+                    columnwise_usage = False
+                ctx.grad_output_quantizer.set_usage(
+                    rowwise=rowwise_usage,
+                    columnwise=columnwise_usage,
+                )
+
+            # Prepare grad output tensor
+            # Note: Cast to expected dtype and perform tensor-parallel communication
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
@@ -602,15 +593,19 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
-            # Prepare GEMM input
-            # Note: Perform tensor-parallel communication if needed
+            # Launch tensor-parallel communication for LayerNorm out tensor
             ln_out_total = None
             ln_out_total_work = None
             if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                        # If data is in FP8, we compute FP8 transposes manually
+                        quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        # wgrad GEMM requires input with column-wise usage
+                        quantizer.set_usage(rowwise=False, columnwise=True)
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
@@ -679,6 +674,8 @@ class _LayerNormLinear(torch.autograd.Function):
             # Compute grad weight tensor
             wgrad = None
             if ctx.requires_wgrad:
+
+                # Synchronize tensor-parallel communication for input tensor
                 if ctx.ub_bulk_dgrad:
                     ln_out_total = ub_obj_dgrad.get_buffer(ctx.input_quantizer)
                     if ctx.fp8:
@@ -692,18 +689,25 @@ class _LayerNormLinear(torch.autograd.Function):
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.
                             ln_out_total._create_transpose()
+                if ln_out_total_work is not None:
+                    ln_out_total_work.wait()
+                    ln_out_total_work = None
 
-                else:
-                    if ln_out_total_work is not None:
-                        # Synchronize tensor-parallel communication
-                        ln_out_total_work.wait()
-                        ln_out_total_work = None
-
+                # Make sure GEMM inputs have required data
+                if isinstance(ln_out_total, QuantizedTensor):
+                    ln_out_total.update_usage(columnwise_usage=True)
                 if isinstance(grad_output, QuantizedTensor):
-                    # This is a no-op if platform supports non-TN FP8 GEMM or the transpose
-                    # already exists.
-                    grad_output.update_usage(rowwise_usage=True, columnwise_usage=True)
+                    grad_output.update_usage(columnwise_usage=True)
 
+                # Figure out whether to use split accumulator
+                use_split_accumulator = _2X_ACC_WGRAD
+                if ctx.fp8:
+                    recipe = ctx.fp8_recipe
+                    if hasattr(recipe, "fp8_gemm_wgrad"):
+                        use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+
+                # Output buffer for overlapping grad input
+                # reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad and ub_obj_wgrad.is_fp8_ubuf():
                     rs_out = torch.empty(
                         dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
@@ -712,14 +716,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if ctx.fp8:
-                    recipe = ctx.fp8_recipe
-                    if hasattr(recipe, "fp8_gemm_wgrad"):
-                        wgrad_gemm_use_split_accumulator = (
-                            recipe.fp8_gemm_wgrad.use_split_accumulator
-                        )
-
                 wgrad, grad_bias_, *_, rs_out = general_gemm(
                     ln_out_total,
                     grad_output,
@@ -731,7 +727,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ),
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                    use_split_accumulator=use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,
@@ -755,7 +751,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
                     clear_tensor_data(ln_out_total)
 
-            # Synchronize tensor parallel communication
+            # Make sure all tensor-parallel communication is finished
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
@@ -803,18 +799,15 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
-                    wgrad = torch.zeros(
-                        origin_weight.main_grad.shape,
-                        dtype=origin_weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
+                    wgrad = get_dummy_wgrad(
+                        list(origin_weight.main_grad.shape),
+                        origin_weight.dtype,
+                        zero=True,
                     )
                 else:
-                    wgrad = torch.empty(
-                        origin_weight.main_grad.shape,
-                        dtype=origin_weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
+                    wgrad = get_dummy_wgrad(
+                        list(origin_weight.main_grad.shape),
+                        origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -1268,6 +1261,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
+        fp8_grad: Optional[bool] = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
@@ -1300,6 +1294,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
+        if self.ub_overlap_rs_fprop:
+            if get_ub(self.ub_name + "_fprop").is_fp8_ubuf():
+                fp8_output = True
+        if self.ub_overlap_rs_dgrad:
+            if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
+                fp8_grad = True
+
         with self.prepare_forward(
             inp, allow_non_contiguous=False  # removed .contiguous from inside the layer
         ) as inp:
@@ -1313,7 +1314,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 output_quantizer,
                 grad_output_quantizer,
                 grad_input_quantizer,
-            ) = self._get_quantizers(fp8_output)
+            ) = self._get_quantizers(fp8_output, fp8_grad)
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
@@ -1378,7 +1379,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             return out, ln_out
         return out
 
-    def _get_quantizers(self, fp8_output):
+    def _get_quantizers(self, fp8_output, fp8_grad):
         if not self.fp8:
             return [None] * 5
         grad_input_quantizer = None
@@ -1393,6 +1394,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if torch.is_grad_enabled():
             grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
             grad_output_quantizer.internal = True
+            if fp8_grad:
+                grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
 
         return (
             input_quantizer,
@@ -1503,9 +1506,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].amax_reduction_size = self.tp_size
         else:
             # set grad_output_quantizer with amax epsilon and power_2_scale (no amax reduction here)
             self.quantizers["scaling_bwd"][

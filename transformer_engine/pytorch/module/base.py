@@ -43,6 +43,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _multi_stream_cublas_workspace = []
+_dummy_wgrads = {}
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
@@ -76,6 +77,22 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
     return _multi_stream_cublas_workspace
+
+
+def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape."""
+    assert len(shape) == 2
+    global _dummy_wgrads
+    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
+        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
+    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
 
 
 def initialize_ub(
@@ -1000,6 +1017,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         out = None
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+            if quantizer is not None and isinstance(out, MXFP8TensorBase):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    out = None
+                    del self._fp8_workspaces[cache_name]
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    out = None
+                    del self._fp8_workspaces[cache_name]
 
         # Gather cached Fp8 workspace if it's distributed
         # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work

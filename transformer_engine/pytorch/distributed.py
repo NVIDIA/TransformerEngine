@@ -5,6 +5,7 @@
 """Methods needed for distributed training (DP/TP)."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
 import math
@@ -18,7 +19,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import safely_set_viewless_tensor_data
+from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -859,31 +860,41 @@ def _all_gather_fp8(
     process_group: dist_group_type,
     *,
     async_op: bool = False,
-    quantizer: Optional[Float8Quantizer] = None,
+    quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
 ) -> tuple[Float8TensorBase, Optional[torch.distributed.Work]]:
     """All-gather FP8 tensor along first dimension."""
     world_size = get_distributed_world_size(process_group)
+
+    # Check that quantizer is valid
+    if quantizer is not None and not isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+    ):
+        raise ValueError(f"Got non-FP8 quantizer ({quantizer.__class__.__name__})")
 
     # Output tensor dims
     if out_shape is None:
         out_shape = list(inp.size())
         out_shape[0] *= world_size
 
-    # Quantize input tensor if needed
+    # Cast input tensor to FP8 if needed
+    # Note: We cannot directly all-gather the transposed FP8 tensor,
+    # so temporarily modify quantizer to avoid creating FP8 transpose.
     if not isinstance(inp, Float8TensorBase):
-        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
-        # we cannot directly gather the transposed fp8 tensor
-        # so we need to disable columnwise usage for the quantizer
-        # and then set it back to the original value after quantizing
+        if quantizer is None:
+            raise ValueError("Input tensor is not FP8 and no quantizer was provided")
+        init_rowwise_usage = quantizer.rowwise_usage
         init_columnwise_usage = quantizer.columnwise_usage
-        quantizer.set_usage(columnwise=False)
+        quantizer.set_usage(rowwise=True, columnwise=False)
         inp = quantizer(inp)
-        quantizer.set_usage(columnwise=init_columnwise_usage)
+        quantizer.set_usage(
+            rowwise=init_rowwise_usage,
+            columnwise=init_columnwise_usage,
+        )
 
     # Construct output tensor
     out: Float8TensorBase
-    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+    if quantizer is not None:
         dtype = torch.float32
         device = "cuda"
         if isinstance(inp, Float8Tensor):
@@ -901,9 +912,8 @@ def _all_gather_fp8(
         out._transpose_invalid = True
     else:
         raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
-    # For delayed scaling, scale_inv is from history, so we can pass it from inp to out
-    # For current scaling, scale_inv is from doing amax reduction in C++ code, so each rank should have same scale_inv,
-    #                      so we can just pass it from inp to out
+
+    # Assume scaling factors are identical across ranks
     out._scale_inv = inp._scale_inv
 
     # Perform communication
@@ -915,12 +925,13 @@ def _all_gather_fp8(
     )
 
     # Make sure FP8 transpose is populated if needed
-    if out._transpose is not None:
+    needs_transpose = (
+        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+    )
+    if needs_transpose:
         if handle is not None:
             handle.wait()
             handle = None
-        if not isinstance(out, Float8Tensor):
-            raise RuntimeError("FP8TensorBase does not support FP8 transpose yet")
         out._create_transpose()
 
     return out, handle
@@ -936,9 +947,34 @@ def _all_gather_mxfp8(
 ) -> tuple[MXFP8TensorBase, Optional[torch.distributed.Work]]:
     """All-gather MXFP8 tensor along first dimension."""
 
-    # Tensor dims
+    # Input tensor attributes
+    in_shape: Iterable[int]
+    device: torch.device
+    dtype: torch.dtype
+    if isinstance(inp, torch.Tensor):
+        in_shape = inp.size()
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, MXFP8TensorBase):
+        if inp._rowwise_data is not None:
+            in_shape = inp._rowwise_data.device.size()
+            device = inp._rowwise_data.device
+            dtype = inp._rowwise_data.dtype
+        elif inp._columnwise_data is not None:
+            in_shape = inp._columnwise_data.device.size()
+            device = inp._columnwise_data.device
+            dtype = inp._columnwise_data.dtype
+        else:
+            raise ValueError("Got MXFP8 input tensor without any data")
+        dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+
+    # Output tensor shape
     world_size = get_distributed_world_size(process_group)
-    in_shape = list(inp.size())
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
@@ -951,25 +987,19 @@ def _all_gather_mxfp8(
     ):
         out = torch.empty(
             out_shape,
-            dtype=inp.dtype,
-            device=inp.device,
+            dtype=dtype,
+            device=device,
             memory_format=torch.contiguous_format,
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
         return out, None
 
-    inp_dtype = inp.dtype
-    inp_device = inp.device
-
     # Cast input tensor to MXFP8 with required data
     if not isinstance(inp, MXFP8TensorBase):
         inp = quantizer(inp)
-    elif (
-        inp.rowwise_data is None
-        and quantizer.rowwise_usage
-        or inp.columnwise_data is None
-        and quantizer.columnwise_usage
+    elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
+        quantizer.columnwise_usage and inp._columnwise_data is None
     ):
         warnings.warn(
             "Input and quantizer do not have matching usages. "
@@ -978,65 +1008,64 @@ def _all_gather_mxfp8(
         inp = quantizer(inp.dequantize())
 
     # Construct MXFP8 output tensor
-    out = quantizer.make_empty(out_shape, dtype=inp_dtype, device=inp_device)
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
-    # Async op handle
-    handle = None
+    # Coalesce NCCL collectives
+    with torch.distributed._coalescing_manager(
+        group=process_group,
+        device=device,
+        async_ops=async_op,
+    ) as coalescing_manager:
 
-    # Gather MXFP8 data for row-wise usage
-    if quantizer.rowwise_usage:
+        # Gather MXFP8 data for row-wise usage
+        if quantizer.rowwise_usage:
 
-        # Remove padding from MXFP8 scale-inverses
-        in_scale_inv = inp._rowwise_scale_inv
-        out_scale_inv = out._rowwise_scale_inv
-        flattened_in_shape0 = math.prod(in_shape[:-1])
-        if in_scale_inv.size(0) != flattened_in_shape0:
-            in_scale_inv = in_scale_inv[:flattened_in_shape0]
-            out_scale_inv[flattened_in_shape0 * world_size :].zero_()
-            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._rowwise_scale_inv
+            out_scale_inv = out._rowwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1])
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
-        # Launch all-gathers
-        if handle is not None:
-            handle.wait()
-        torch.distributed.all_gather_into_tensor(
-            out_scale_inv,
-            in_scale_inv,
-            group=process_group,
-        )
-        handle = torch.distributed.all_gather_into_tensor(
-            out._rowwise_data,
-            inp._rowwise_data,
-            group=process_group,
-            async_op=async_op,
-        )
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_data,
+                inp._rowwise_data,
+                group=process_group,
+            )
 
-    # Gather MXFP8 data for column-wise usage
-    if quantizer.columnwise_usage:
+        # Gather MXFP8 data for column-wise usage
+        if quantizer.columnwise_usage:
 
-        # Remove padding from MXFP8 scale-inverses
-        in_scale_inv = inp._columnwise_scale_inv
-        out_scale_inv = out._columnwise_scale_inv
-        flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
-        if in_scale_inv.size(0) != flattened_in_shape0:
-            in_scale_inv = in_scale_inv[:flattened_in_shape0]
-            out_scale_inv[flattened_in_shape0 * world_size :].zero_()
-            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._columnwise_scale_inv
+            out_scale_inv = out._columnwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
-        # Launch all-gathers
-        if handle is not None:
-            handle.wait()
-        torch.distributed.all_gather_into_tensor(
-            out_scale_inv,
-            in_scale_inv,
-            group=process_group,
-        )
-        handle = torch.distributed.all_gather_into_tensor(
-            out._columnwise_data,
-            inp._columnwise_data,
-            group=process_group,
-            async_op=async_op,
-        )
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._columnwise_data,
+                inp._columnwise_data,
+                group=process_group,
+            )
 
+    handle = coalescing_manager if async_op else None
     return out, handle
 
 
