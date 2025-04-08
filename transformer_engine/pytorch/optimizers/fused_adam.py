@@ -79,12 +79,12 @@ class FusedAdam(torch.optim.Optimizer):
             will create a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
         exp_avg_dtype (torch.dtype, optional): The dtype of exp_avg. It can be
-            one of [torch.float32, torch.float16, torch.uint8], where torch.uint8
+            one of [torch.float32, torch.float16, torch.bfloat16, torch.uint8], where torch.uint8
             represents FP8. If it's not torch.float32, the optimizer will create
             a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
         exp_avg_sq_dtype (torch.dtype, optional): The dtype of exp_avg_sq. It
-            can be one of [torch.float32, torch.float16, torch.uint8], where
+            can be one of [torch.float32, torch.float16, torch.bfloat16, torch.uint8], where
             torch.uint8 represents FP8. If it's not torch.float32, the optimizer
             will create a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
@@ -133,10 +133,10 @@ class FusedAdam(torch.optim.Optimizer):
         # Add constraints to dtypes of states.
         if master_weights and master_weight_dtype not in [torch.float32, torch.float16]:
             raise RuntimeError("FusedAdam only supports fp32/fp16 master weights.")
-        if exp_avg_dtype not in [torch.float32, torch.float16, torch.uint8]:
-            raise RuntimeError("FusedAdam only supports fp32/fp16/fp8 exp_avg.")
-        if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.uint8]:
-            raise RuntimeError("FusedAdam only supports fp32/fp16/fp8 exp_avg_sq.")
+        if exp_avg_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
+            raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg.")
+        if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.bfloat16, torch.uint8]:
+            raise RuntimeError("FusedAdam only supports fp32/fp16/bf16/fp8 exp_avg_sq.")
 
         # Currently, capturable mode only supports fp32 master weights and optimizer states.
         # The reason is, if the master weights or optimizer states are not in fp32 dtype,
@@ -268,6 +268,9 @@ class FusedAdam(torch.optim.Optimizer):
             )
         else:
             assert scaled_state.dtype == dtype
+        if dtype == torch.bfloat16:
+            scaled_state.copy_(unscaled_state.to(dtype))
+            return
 
         max_range = self.dtype_to_range_map[dtype]
         if max_range.device != scaled_state.device:
@@ -297,7 +300,7 @@ class FusedAdam(torch.optim.Optimizer):
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
-        if dtype == torch.uint8:
+        if dtype == torch.uint8 or dtype == torch.bfloat16:
             unscaled = state[state_name].float()
         elif dtype == torch.float16:
             assert state[state_name].dtype == torch.float16
