@@ -74,8 +74,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
   } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
     auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
-    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+    my_quantizer_bw->set_quantization_config(&quant_config);
   }
   nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
                    at::cuda::getCurrentCUDAStream());

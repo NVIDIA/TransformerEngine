@@ -278,6 +278,11 @@ void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const 
                               columnwise_data.shape);
 }
 
+void Float8BlockQuantizer::set_quantization_config(QuantizationConfigWrapper* quant_config) const {
+  quant_config->set_force_pow_2_scales(this->force_pow_2_scales);
+  quant_config->set_amax_epsilon(this->amax_epsilon);
+}
+
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
   using namespace pybind11::literals;

@@ -286,7 +286,11 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigForcePow2Scales = 0,
   /*! Small value to add to amax for numerical stability */
   kNVTEQuantizationConfigAmaxEpsilon = 1,
-  /*! Noop tensor, with noop tensor element value = 1, quantization kernel will early exit */
+  /*! Noop tensor (containing a scalar).
+   If the scalar element value = 1, quantization kernel will early exit.
+   This is a tensor in order that the flag can be on GPU and conditional
+   early exit is compatible with a static CUDA graph.
+  */
   kNVTEQuantizationConfigNoopTensor = 2,
   kNVTEQuantizationConfigNumAttributes
 };

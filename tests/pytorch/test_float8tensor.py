@@ -176,7 +176,7 @@ class TestFloat8Tensor:
     def test_quantize_dequantize_noop(
         self, fp8_dtype: tex.DType, dtype: torch.dtype, noop: bool
     ) -> None:
-        noop_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+        noop_tensor = torch.zeros(1, dtype=torch.float32, device="cuda")
         if noop:
             noop_tensor = torch.ones(1, dtype=torch.float32, device="cuda")
         self._test_quantize_dequantize(fp8_dtype=fp8_dtype, dtype=dtype, noop_flag=noop_tensor)
