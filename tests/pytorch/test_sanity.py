@@ -395,6 +395,31 @@ def _test_sanity_common(
     loss.backward()
     torch.cuda.synchronize()
 
+    # now try eval with weight caching
+    block.eval()
+
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp, is_first_microbatch=True)
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp, is_first_microbatch=False)
+    torch.cuda.synchronize()
+
+    # now try regular execution again with weight caching
+    block.train()
+
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp, is_first_microbatch=True)
+    if isinstance(te_out, tuple):
+        te_out = te_out[0]
+    loss = te_out.sum()
+    loss.backward()
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        te_out = block(te_inp, is_first_microbatch=False)
+    if isinstance(te_out, tuple):
+        te_out = te_out[0]
+    loss = te_out.sum()
+    loss.backward()
+    torch.cuda.synchronize()
 
 def _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad):
     if skip_dgrad and skip_wgrad:

@@ -98,6 +98,7 @@ class Quantizer {
 
   virtual std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const = 0;
 
   virtual ~Quantizer() = default;
@@ -121,6 +122,7 @@ class NoneQuantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -139,6 +141,7 @@ class Float8Quantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -161,6 +164,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -193,6 +197,7 @@ class Float8BlockQuantizer : public Quantizer {
   // and optionally columnwise usage.
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -208,6 +213,7 @@ class MXFP8Quantizer : public Quantizer {
 
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
+      const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 

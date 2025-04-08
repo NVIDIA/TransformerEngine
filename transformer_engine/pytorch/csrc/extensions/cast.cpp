@@ -27,15 +27,8 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     fake_tensor_type = at::kFloat;
   }
 
-  TensorWrapper te_output;
-  py::object out;
-  if (output.is_none()) {
-    DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
-    std::tie(te_output, out) = my_quantizer->create_tensor(input_shape, fake_te_type);
-  } else {
-    out = output;
-    te_output = makeTransformerEngineTensor(output, quantizer);
-  }
+  DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
+  auto [te_output, out] = my_quantizer->create_tensor(input_shape, fake_te_type, output);
 
   TensorWrapper te_noop;
   if (noop.has_value()) {
@@ -101,7 +94,7 @@ py::object dequantize(const py::handle& input, transformer_engine::DType otype) 
 
   const auto& shape = convertShape(input_tensor.shape());
 
-  auto [out_tensor, out] = q.create_tensor(shape, otype);
+  auto [out_tensor, out] = q.create_tensor(shape, otype, none);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
@@ -123,7 +116,8 @@ std::vector<py::object> dbias_dact(const at::Tensor& grad_output, const at::Tens
   auto act_input_tensor = makeTransformerEngineTensor(act_input);
 
   const auto& shape = convertShape(grad_tensor.shape());
-  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype());
+  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype(),
+                                                         py::none());
 
   auto dbias_tensor = makeTransformerEngineTensor(grad_bias);
 
