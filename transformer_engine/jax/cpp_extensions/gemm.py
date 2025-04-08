@@ -678,6 +678,11 @@ def grouped_gemm_new(
         if bias_list is not None:
             bias_list_.append(bias_list[i])
 
+    # TE/common does not support NVTE_NO_SCALING yet
+    # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
+    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+
     out_list = GroupedGemmPrimitiveNew.outer_primitive.bind(
         *lhs_list_,
         *rhs_list_,
@@ -698,7 +703,10 @@ def grouped_gemm(
     contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
     bias_list: List[jnp.ndarray] = None,
 ) -> List[jnp.ndarray]:
-    return grouped_gemm_new(lhs_list, rhs_list, contracting_dims_list, bias_list)
+    grouped_gemm_ = grouped_gemm_new
+    #grouped_gemm_ = grouped_gemm_old
+    #print(f"Using {grouped_gemm_.__name__} for grouped_gemm")
+    return grouped_gemm_(lhs_list, rhs_list, contracting_dims_list, bias_list)
 
 class GroupedAddPrimitive(BasePrimitive):
     multiple_results = True

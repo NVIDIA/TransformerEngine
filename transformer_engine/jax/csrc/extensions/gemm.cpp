@@ -298,7 +298,7 @@ Error_Type GroupedGemmNewFFI(cudaStream_t stream, Variadic_Buffer_Type input_lis
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_NO_SCALING || scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, nullptr, nullptr,
                                   reinterpret_cast<float *>(lhs_sinv_ptr));
       auto rhs_i_ = TensorWrapper(rhs_ptr, rhs_shape, rhs_dtype, nullptr, nullptr,
