@@ -55,7 +55,9 @@ fp8_recipes = [
     recipe.DelayedScaling(),
     recipe.MXFP8BlockScaling(),
     recipe.Float8CurrentScaling(),
-    recipe.Float8BlockScaling(),
+    # TODO: Support Float8BlockScaling with CUDA graph.
+    # One known issue is make_quantizers/num_quantizers, but
+    # sequential also should have changes.
 ]
 
 # Supported data types

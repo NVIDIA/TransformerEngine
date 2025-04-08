@@ -255,16 +255,10 @@ class BasicLinear(BasicOperation):
         )
 
     def num_quantizers(self, mode: str) -> int:
-        # Adhere to consistent conventions of the non-fused
-        # module code, where fwd quantized tensors are (x, w, output)
-        # and bwd quantized tensors are (ygrad, dgrad)
-        #
-        # Fused code need not use the output or dgrad quantizers.
-        # Since fp8_output flag is not available.
         if mode == "forward":
-            return 3
-        if mode == "backward":
             return 2
+        if mode == "backward":
+            return 1
         return 0
 
     def reset_parameters(self) -> None:

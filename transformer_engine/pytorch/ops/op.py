@@ -219,6 +219,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             if num_quantizers == 0:
                 continue
 
+            if recipe.float8_block_scaling():
+                raise NotImplementedError("CUDA graph support for float8_block_scaling pending.")
             # Construct quantization recipe state
             recipe_state = RecipeState.create(
                 recipe,
