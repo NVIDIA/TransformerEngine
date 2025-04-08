@@ -5,6 +5,7 @@
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
 import warnings
+import os
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
 from pydantic.dataclasses import dataclass
@@ -314,11 +315,11 @@ class Float8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
-    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=True, amax_epsilon=0.0}
                     used for quantization of input tensor x
-    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=True, amax_epsilon=0.0}
                     used for quantization of weight tensor w
-    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=True, amax_epsilon=0.0}
                     used for quantization of gradient tensor dY
     x_block_scaling_dim: Choice to use 1x128 (1 dimensional) or 128x128 (2 dimensional)
                     qblock scaling for x.
@@ -346,12 +347,18 @@ class Float8BlockScaling(Recipe):
             `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
             When `fp8_mha = True, fp8_dpa = True`, it becomes
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
+
+    Notes:  By default, fp8_quant_fwd_inp, fp8_quant_fwd_weight, fp8_quant_bwd_grad are set to power of 2 scales. 
+            To Enable FP32 scales, set env variable NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it. 
+            export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
     """
 
+    use_e8_scales: bool = not (os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1")
+
     fp8_format: Format = Format.E4M3
-    fp8_quant_fwd_inp = QParams(power_2_scale=True, amax_epsilon=0.0)
-    fp8_quant_fwd_weight = QParams(power_2_scale=True, amax_epsilon=0.0)
-    fp8_quant_bwd_grad = QParams(power_2_scale=True, amax_epsilon=0.0)
+    fp8_quant_fwd_inp = QParams(power_2_scale=use_e8_scales, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=use_e8_scales, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=use_e8_scales, amax_epsilon=0.0)
     x_block_scaling_dim: int = 1
     w_block_scaling_dim: int = 2
     grad_block_scaling_dim: int = 1

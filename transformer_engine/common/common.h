@@ -233,10 +233,12 @@ struct Tensor {
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
+  NVTETensor noop_tensor = nullptr;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(bool),  // force_pow_2_scales
-      sizeof(float)  // amax_epsilon
+      sizeof(float),  // amax_epsilon
+      sizeof(NVTETensor)  // noop_tensor
   };
 };
 

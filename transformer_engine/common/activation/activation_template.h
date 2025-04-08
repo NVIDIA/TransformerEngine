@@ -32,8 +32,8 @@ void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, nullptr, output, dbias,
-                                                        workspace, stream);
+  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias,
+                                                        workspace, nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
@@ -46,8 +46,8 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, nullptr, output, dbias,
-                                                        workspace, stream);
+  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias,
+                                                        workspace, nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*ActOP)(ComputeType, const Param &)>

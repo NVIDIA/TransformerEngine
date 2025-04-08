@@ -89,7 +89,7 @@ extern "C" {
  */
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
-/*! \brief Casts input tensor to FP8/MXFP8, providing the option to immediately exit the kernel
+/*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output
  *         tensor. See file level comments.
@@ -100,6 +100,20 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
  *  \param[in]      stream           CUDA stream used for the operation.
  */
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
+                        cudaStream_t stream);
+
+/*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
+ *         based on the value of the 'noop' tensor.
+ *         The type of quantized tensor in the output depends on the scaling mode of the output
+ *         tensor.
+ *
+ *  \param[in]      input            Input tensor to be cast.
+ *  \param[in,out]  output           Output quantized tensor.
+ *  \param[out]     noop             Noop tensor.
+ *  \param[in]      quant_config     Quantization configuration.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_quantize_v2(const NVTETensor input, NVTETensor output, const NVTEQuantizationConfig quant_config,
                         cudaStream_t stream);
 
 /*! \brief Casts input tensor to MXFP8. Additionally, reduces the input along columns.

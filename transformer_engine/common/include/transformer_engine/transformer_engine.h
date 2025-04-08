@@ -286,6 +286,8 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigForcePow2Scales = 0,
   /*! Small value to add to amax for numerical stability */
   kNVTEQuantizationConfigAmaxEpsilon = 1,
+  /*! Noop tensor, with noop tensor element value = 1, quantization kernel will early exit */
+  kNVTEQuantizationConfigNoopTensor = 2,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -722,6 +724,12 @@ class QuantizationConfigWrapper {
   void set_amax_epsilon(float amax_epsilon) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
                                            &amax_epsilon, sizeof(float));
+  }
+
+    /*! \brief Set noop tensor pointer */
+  void set_noop_tensor(NVTETensor noop_tensor) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor,
+                                           &noop_tensor, sizeof(NVTETensor));
   }
 
  private:

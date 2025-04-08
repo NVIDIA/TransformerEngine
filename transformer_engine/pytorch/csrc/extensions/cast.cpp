@@ -46,6 +46,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 
   if (te_output.numel() == 0) return out;
 
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_noop_tensor(te_noop.data());
+
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
@@ -61,14 +64,20 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
       allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
       process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
     }
-    QuantizationConfigWrapper quant_config;
+    // this config is used for cs scaling factor computation 
+    // because compute scale is cannot be fused with quantize kernel
+    // so in nvte_quantize_v2 with current scaling, the quant config is not used again
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
     nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
+  }else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+    auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
+    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
+    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
   }
-  nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),
+  nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());
 
   return out;

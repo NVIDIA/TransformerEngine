@@ -1215,8 +1215,9 @@ namespace detail {
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETensor noop,
-                     NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+void quantize_helper(const NVTETensor input, const NVTETensor grad,
+                     NVTETensor output, NVTETensor dbias, NVTETensor workspace, 
+                     const NVTEQuantizationConfig quant_config_,
                      cudaStream_t stream) {
   const Tensor *input_tensor;
   const Tensor *activation_input_tensor;
@@ -1232,7 +1233,13 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
   auto output_tensor = reinterpret_cast<Tensor *>(output);
   auto dbias_tensor = reinterpret_cast<Tensor *>(dbias);
   auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
+
+  const QuantizationConfig * quant_config = reinterpret_cast<const QuantizationConfig *>(quant_config_);
+
+  // extract noop tensor from quant_config if it's not null
+  const NVTETensor noop = quant_config ? quant_config->noop_tensor : nullptr;
   const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
+
 
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -1263,11 +1270,12 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
-      constexpr bool force_pow_2_scales = true;
+      bool force_pow_2_scales = quant_config ? quant_config->force_pow_2_scales : false;
+      float epsilon = quant_config ? quant_config->amax_epsilon : 0.0f;
       quantize_transpose_square_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data,
-          /*epsilon=*/0.0,
+          epsilon,
           /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
       break;
     }
@@ -1275,7 +1283,8 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
-      constexpr bool force_pow_2_scales = true;
+      bool force_pow_2_scales = quant_config ? quant_config->force_pow_2_scales : false;
+      float epsilon = quant_config ? quant_config->amax_epsilon : 0.0f;
       FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
                                                      ? FP8BlockwiseRowwiseOption::ROWWISE
                                                      : FP8BlockwiseRowwiseOption::NONE;
@@ -1285,7 +1294,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data,
-          /*epsilon=*/0.0, rowwise_option, columnwise_option, force_pow_2_scales, stream);
+          epsilon, rowwise_option, columnwise_option, force_pow_2_scales, stream);
       break;
     }
     default:
