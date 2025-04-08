@@ -48,11 +48,11 @@ class GroupedGemmPrimitive(BasePrimitive):
     @staticmethod
     def abstract(*args, num_gemms, scaling_mode, out_dtype, has_bias):
         del scaling_mode, has_bias
-        A_list = args[0 : num_gemms]
+        A_list = args[0:num_gemms]
         B_list = args[num_gemms : 2 * num_gemms]
         # A and B have shapes [1, m, k] and [1, n, k]
         out_list_aval = tuple(
-            jax.core.ShapedArray((A.shape[1], B.shape[1]), dtype=out_dtype) 
+            jax.core.ShapedArray((A.shape[1], B.shape[1]), dtype=out_dtype)
             for A, B in zip(A_list, B_list)
         )
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
@@ -74,7 +74,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             num_gemms=num_gemms,
             scaling_mode=int(scaling_mode),
             has_bias=has_bias,
-            workspace_size=workspace_size
+            workspace_size=workspace_size,
         )
 
     @staticmethod
@@ -91,6 +91,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
 
 register_primitive(GroupedGemmPrimitive)
+
 
 def _shape_normalization(x, dimension_numbers, already_transposed: bool = False):
     orig_order = list(range(x.ndim))
@@ -412,12 +413,10 @@ def grouped_gemm(
     # Note: do not .squeeze() for the output of _shape_normalization, it will trigger a D2D memcpy
     if scaling_mode == ScalingMode.NVTE_NO_SCALING:
         lhs_list_ = tuple(
-            _shape_normalization(lhs, lhs_dn)
-            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+            _shape_normalization(lhs, lhs_dn) for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
         )
         rhs_list_ = tuple(
-            _shape_normalization(rhs, rhs_dn)
-            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+            _shape_normalization(rhs, rhs_dn) for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
         )
         lhs_sinv_list_ = tuple(jnp.ones(1, dtype=jnp.float32) for _ in range(num_gemms))
         rhs_sinv_list_ = tuple(jnp.ones(1, dtype=jnp.float32) for _ in range(num_gemms))
@@ -434,12 +433,10 @@ def grouped_gemm(
         rhs_sinv_list_ = tuple(rhs.scale_inv for rhs in rhs_list)
     elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
         lhs_list_ = tuple(
-            _shape_normalization(lhs.data, lhs_dn)
-            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+            _shape_normalization(lhs.data, lhs_dn) for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
         )
         rhs_list_ = tuple(
-            _shape_normalization(rhs.data, rhs_dn)
-            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+            _shape_normalization(rhs.data, rhs_dn) for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
         )
         lhs_sinv_list_ = tuple(
             swizzled_scale(_shape_normalization(lhs.scale_inv, lhs_dn))

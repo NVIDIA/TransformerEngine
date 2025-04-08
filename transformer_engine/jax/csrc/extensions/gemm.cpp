@@ -18,8 +18,8 @@ namespace jax {
 constexpr static size_t MXFP8_BLOCK_SIZE = 32;
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
-                          Variadic_Result_Type output_list, int64_t num_gemms,
-                          int64_t scaling_mode, int64_t has_bias, int64_t workspace_size) {
+                          Variadic_Result_Type output_list, int64_t num_gemms, int64_t scaling_mode,
+                          int64_t has_bias, int64_t workspace_size) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
@@ -56,32 +56,32 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
   std::vector<NVTETensor> out_list;
   std::vector<NVTETensor> workspace_list;
 
-  int lhs_list_offset      = 0;
-  int rhs_list_offset      = num_gemms;
+  int lhs_list_offset = 0;
+  int rhs_list_offset = num_gemms;
   int lhs_sinv_list_offset = 2 * num_gemms;
   int rhs_sinv_list_offset = 3 * num_gemms;
-  int bias_list_offset     = 4 * num_gemms;
-  int out_list_offset      = 0;
+  int bias_list_offset = 4 * num_gemms;
+  int out_list_offset = 0;
   for (int i = 0; i < num_gemms; i++) {
-    Buffer_Type lhs_i      = input_list.get<Buffer_Type>(lhs_list_offset + i).value();
-    Buffer_Type rhs_i      = input_list.get<Buffer_Type>(rhs_list_offset + i).value();
+    Buffer_Type lhs_i = input_list.get<Buffer_Type>(lhs_list_offset + i).value();
+    Buffer_Type rhs_i = input_list.get<Buffer_Type>(rhs_list_offset + i).value();
     Buffer_Type lhs_sinv_i = input_list.get<Buffer_Type>(lhs_sinv_list_offset + i).value();
     Buffer_Type rhs_sinv_i = input_list.get<Buffer_Type>(rhs_sinv_list_offset + i).value();
-    Result_Type out_i      = output_list.get<Buffer_Type>(out_list_offset + i).value();
+    Result_Type out_i = output_list.get<Buffer_Type>(out_list_offset + i).value();
 
     DType lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_i.element_type());
     DType rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_i.element_type());
     DType out_dtype = convert_ffi_datatype_to_te_dtype(out_i->element_type());
 
-    void *lhs_ptr      = lhs_i.untyped_data();
-    void *rhs_ptr      = rhs_i.untyped_data();
+    void *lhs_ptr = lhs_i.untyped_data();
+    void *rhs_ptr = rhs_i.untyped_data();
     void *lhs_sinv_ptr = lhs_sinv_i.untyped_data();
     void *rhs_sinv_ptr = rhs_sinv_i.untyped_data();
-    void *out_ptr      = out_i->untyped_data();
+    void *out_ptr = out_i->untyped_data();
 
     // Placeholder for bias since it can be empty
     DType bias_dtype = DType::kFloat32;
-    void *bias_ptr   = nullptr;
+    void *bias_ptr = nullptr;
 
     auto lhs_shape_ = lhs_i.dimensions();
     auto rhs_shape_ = rhs_i.dimensions();
@@ -131,8 +131,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
     void *pre_gelu_ptr = nullptr;
     auto bias_shape = std::vector<size_t>{0};
     auto pre_gelu_shape = std::vector<size_t>{0};
-    if (has_bias)
-    {
+    if (has_bias) {
       auto bias_i_get = input_list.get<Buffer_Type>(bias_list_offset + i);
       Buffer_Type bias_i = bias_i_get.value();
       bias_ptr = bias_i.untyped_data();

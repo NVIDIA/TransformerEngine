@@ -22,7 +22,7 @@ for i in range(len(shape_list)):
     B_list.append(B_i)
     ref_C_list.append(ref_C_i)
 
-#pdb.set_trace()
+# pdb.set_trace()
 C_list = tex.grouped_add(A_list, B_list, out_dtype)
 for i in range(len(shape_list)):
     assert_allclose(C_list[i], ref_C_list[i])
