@@ -260,16 +260,11 @@ Error_Type GroupedGemmNewFFI(cudaStream_t stream, Variadic_Buffer_Type input_lis
   int bias_list_offset     = 4 * num_gemms;
   int out_list_offset      = 0;
   for (int i = 0; i < num_gemms; i++) {
-    auto lhs_i_get      = input_list.get<Buffer_Type>(lhs_list_offset + i);
-    auto rhs_i_get      = input_list.get<Buffer_Type>(rhs_list_offset + i);
-    auto lhs_sinv_i_get = input_list.get<Buffer_Type>(lhs_sinv_list_offset + i);
-    auto rhs_sinv_i_get = input_list.get<Buffer_Type>(rhs_sinv_list_offset + i);
-    auto out_i_get      = output_list.get<Buffer_Type>(out_list_offset + i);
-    Buffer_Type lhs_i      = lhs_i_get.value();
-    Buffer_Type rhs_i      = rhs_i_get.value();
-    Buffer_Type lhs_sinv_i = lhs_sinv_i_get.value();
-    Buffer_Type rhs_sinv_i = rhs_sinv_i_get.value();
-    Result_Type out_i      = out_i_get.value();
+    Buffer_Type lhs_i      = input_list.get<Buffer_Type>(lhs_list_offset + i).value();
+    Buffer_Type rhs_i      = input_list.get<Buffer_Type>(rhs_list_offset + i).value();
+    Buffer_Type lhs_sinv_i = input_list.get<Buffer_Type>(lhs_sinv_list_offset + i).value();
+    Buffer_Type rhs_sinv_i = input_list.get<Buffer_Type>(rhs_sinv_list_offset + i).value();
+    Result_Type out_i      = output_list.get<Buffer_Type>(out_list_offset + i).value();
 
     DType lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_i.element_type());
     DType rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_i.element_type());
@@ -288,9 +283,10 @@ Error_Type GroupedGemmNewFFI(cudaStream_t stream, Variadic_Buffer_Type input_lis
     auto lhs_shape_ = lhs_i.dimensions();
     auto rhs_shape_ = rhs_i.dimensions();
 
-    size_t m = lhs_shape_[0];
-    size_t n = rhs_shape_[0];
-    size_t k = lhs_shape_[1];
+    // lhs and rhs has shape [1, m, k] and [1, n, k]
+    size_t m = lhs_shape_[1];
+    size_t n = rhs_shape_[1];
+    size_t k = lhs_shape_[2];
 
     auto lhs_shape = std::vector<size_t>{m, k};
     auto rhs_shape = std::vector<size_t>{n, k};
@@ -330,9 +326,9 @@ Error_Type GroupedGemmNewFFI(cudaStream_t stream, Variadic_Buffer_Type input_lis
 
     /*
     printf("[DEBUG] i: %d, lhs_dtype, rhs_dtype, out_dtype = %d, %d, %d\n", i, lhs_dtype, rhs_dtype, out_dtype);
-    printf("[DEBUG] lhs_shape: %d %d, ptr = %p\n", lhs_shape_[0], lhs_shape_[1], lhs_ptr);
-    printf("[DEBUG] rhs_shape: %d %d, ptr = %p\n", rhs_shape_[0], rhs_shape_[1], rhs_ptr);
-    printf("[DEBUG] out_shape: %d %d, ptr = %p\n", out_i->dimensions()[0], out_i->dimensions()[1], out_ptr);
+    printf("[DEBUG] lhs_shape: %d %d, ptr = %p\n", lhs_shape_[1], lhs_shape_[2], lhs_ptr);
+    printf("[DEBUG] rhs_shape: %d %d, ptr = %p\n", rhs_shape_[1], rhs_shape_[2], rhs_ptr);
+    printf("[DEBUG] out_shape: %d %d, ptr = %p\n", out_i->dimensions()[1], out_i->dimensions()[2], out_ptr);
     printf("[DEBUG] lhs_sinv_shape: %d %d, ptr = %p\n", lhs_sinv_shape[0], lhs_sinv_shape[1], lhs_sinv_ptr);
     printf("[DEBUG] rhs_sinv_shape: %d %d, ptr = %p\n", rhs_sinv_shape[0], rhs_sinv_shape[1], rhs_sinv_ptr);
     fflush(stdout);

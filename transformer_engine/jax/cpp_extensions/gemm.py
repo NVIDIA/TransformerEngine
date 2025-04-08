@@ -148,7 +148,8 @@ class GroupedGemmPrimitiveNew(BasePrimitive):
         del scaling_mode, has_bias
         A_list = args[0 : num_gemms]
         B_list = args[num_gemms : 2 * num_gemms]
-        out_list_aval = tuple(jax.core.ShapedArray((A.shape[0], B.shape[0]), dtype=out_dtype) for A, B in zip(A_list, B_list))
+        # A and B have shapes [1, m, k] and [1, n, k]
+        out_list_aval = tuple(jax.core.ShapedArray((A.shape[1], B.shape[1]), dtype=out_dtype) for A, B in zip(A_list, B_list))
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
         return (*out_list_aval, workspace_aval)
@@ -572,7 +573,14 @@ def grouped_gemm_old(
 
     return out_tensors
 
+def _get_shape_normalization_contracting_dim_size(x, dimension_numbers):
+    orig_order = list(range(x.ndim))
+    contracting_dims, batch_dims = dimension_numbers
+    contracting_order = [d for d in orig_order if d in contracting_dims]
+    cols_shape = [x.shape[d] for d in contracting_order]
+    return reduce(operator.mul, cols_shape, 1)
 
+import nvtx
 def grouped_gemm_new(
     lhs_list: List[Union[jnp.ndarray, ScaledTensor]],
     rhs_list: List[Union[jnp.ndarray, ScaledTensor]],
@@ -584,13 +592,12 @@ def grouped_gemm_new(
         len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
     ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
 
+    rng_gg = nvtx.start_range("grouped_gemm_new", color="blue")
+
+    rng_shape_check = nvtx.start_range("shape_check", color="yellow")
     num_gemms = len(lhs_list)
-    lhs_list_ = []
-    rhs_list_ = []
-    lhs_sinv_list_ = []
-    rhs_sinv_list_ = []
-    bias_list_ = []
-    num_gemms = len(lhs_list)
+    lhs_dn_list = []
+    rhs_dn_list = []
     for i in range(num_gemms):
         lhs = lhs_list[i]
         rhs = rhs_list[i]
@@ -622,28 +629,13 @@ def grouped_gemm_new(
         (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
         lhs_dn = (lhs_contract, lhs_batch)
         rhs_dn = (rhs_contract, rhs_batch)
+        lhs_dn_list.append(lhs_dn)
+        rhs_dn_list.append(rhs_dn)
 
         lhs_remain_shape = _calculate_remaining_shape(lhs_shape, lhs_contract)
         rhs_remain_shape = _calculate_remaining_shape(rhs_shape, rhs_contract)
 
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
-            lhs_3d = _shape_normalization(lhs, lhs_dn)
-            rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
-            lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
-            rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            lhs_3d = _shape_normalization(lhs.data, lhs_dn)
-            rhs_3d = _shape_normalization(rhs.data, rhs_dn)
-            lhs_scale_inv = _shape_normalization(lhs.scale_inv, lhs_dn)
-            rhs_scale_inv = _shape_normalization(rhs.scale_inv, rhs_dn)
-            lhs_scale_inv = swizzled_scale(lhs_scale_inv.squeeze())
-            rhs_scale_inv = swizzled_scale(rhs_scale_inv.squeeze())
-        else:
-            raise NotImplementedError("Unsupported ScalingMode: {scaling_mode}")
-
-        # Note: if _shape_normalization() is updated to support non-TN, need to update here
-        # already_transposed doesn't matter for the output shape
+        # Note: already_transposed doesn't matter for the output shape
         # x.shape = [B, D1, D2]
         # contracting_dims = (2, )    --> output.shape = [1, B * D1, D2]
         # contracting_dims = (0, 1, ) --> output.shape = [1, D2, B * D1]
@@ -652,37 +644,72 @@ def grouped_gemm_new(
         # contracting_dims = (0, )    --> output.shape = [1, D2, D1]
         bm = lhs_remain_shape[0]
         bn = rhs_remain_shape[0]
-        kl = lhs_3d.shape[-1]
-        kr = rhs_3d.shape[-1]
-        assert kl == kr, f"lhs_3d.shape[-1] ({kl}) != rhs_3d.shape[-1] ({kr})"
-        k = kl
-        if (bm % 16 != 0) or (bn % 16 != 0) or (k % 16 != 0):
+        _lhs_data = lhs if scaling_mode == ScalingMode.NVTE_NO_SCALING else lhs.data
+        _rhs_data = rhs if scaling_mode == ScalingMode.NVTE_NO_SCALING else rhs.data
+        kl = _get_shape_normalization_contracting_dim_size(_lhs_data, lhs_dn)
+        kr = _get_shape_normalization_contracting_dim_size(_rhs_data, rhs_dn)
+        assert kl == kr, f"After shape normalization, contracting dim size mismatch: {kl} != {kr}"
+        if (bm % 16 != 0) or (bn % 16 != 0) or (kl % 16 != 0):
             print(f"grouped_gemm input pair {i} has invalid problem shape for lowering: ")
             print(
-                f"m = {bm}, n = {bn}, k = {k}; cuBLAS requires the problem shapes being multiples"
+                f"m = {bm}, n = {bn}, k = {kl}; cuBLAS requires the problem shapes being multiples"
                 " of 16"
             )
-            assert bm % 16 == 0 and bn % 16 == 0 and k % 16 == 0
+            assert bm % 16 == 0 and bn % 16 == 0 and kl % 16 == 0
+    nvtx.end_range(rng_shape_check)
 
-        lhs_list_.append(jnp.squeeze(lhs_3d, axis=0))
-        rhs_list_.append(jnp.squeeze(rhs_3d, axis=0))
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
-            lhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
-            rhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
-            lhs_sinv_list_.append(lhs.scale_inv)
-            rhs_sinv_list_.append(rhs.scale_inv)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            lhs_sinv_list_.append(lhs_scale_inv)
-            rhs_sinv_list_.append(rhs_scale_inv)
-        if bias_list is not None:
-            bias_list_.append(bias_list[i])
+    rng_make_tuple = nvtx.start_range("make_tuple", color="purple")
+    # Note: do not .squeeze() for the output of _shape_normalization, it will trigger a D2D memcpy
+    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        lhs_list_ = tuple(
+            _shape_normalization(lhs, lhs_dn)
+            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+        )
+        rhs_list_ = tuple(
+            _shape_normalization(rhs, rhs_dn)
+            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+        )
+        lhs_sinv_list_ = tuple(jnp.ones(1, dtype=jnp.float32) for _ in range(num_gemms))
+        rhs_sinv_list_ = tuple(jnp.ones(1, dtype=jnp.float32) for _ in range(num_gemms))
+    elif scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        lhs_list_ = tuple(
+            _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
+            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+        )
+        rhs_list_ = tuple(
+            _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
+            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+        )
+        lhs_sinv_list_ = tuple(lhs.scale_inv for lhs in lhs_list)
+        rhs_sinv_list_ = tuple(rhs.scale_inv for rhs in rhs_list)
+    elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        lhs_list_ = tuple(
+            _shape_normalization(lhs.data, lhs_dn)
+            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+        )
+        rhs_list_ = tuple(
+            _shape_normalization(rhs.data, rhs_dn)
+            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+        )
+        lhs_sinv_list_ = tuple(
+            swizzled_scale(_shape_normalization(lhs.scale_inv, lhs_dn))
+            for lhs, lhs_dn in zip(lhs_list, lhs_dn_list)
+        )
+        rhs_sinv_list_ = tuple(
+            swizzled_scale(_shape_normalization(rhs.scale_inv, rhs_dn))
+            for rhs, rhs_dn in zip(rhs_list, rhs_dn_list)
+        )
+    else:
+        raise NotImplementedError("Unsupported ScalingMode: {scaling_mode}")
+    bias_list_ = [] if bias_list is None else tuple(bias_list)
+    nvtx.end_range(rng_make_tuple)
 
     # TE/common does not support NVTE_NO_SCALING yet
     # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
     if scaling_mode == ScalingMode.NVTE_NO_SCALING:
         scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
 
+    rng_prim = nvtx.start_range("grouped_gemm_new_ffi", color="green")
     out_list = GroupedGemmPrimitiveNew.outer_primitive.bind(
         *lhs_list_,
         *rhs_list_,
@@ -694,6 +721,9 @@ def grouped_gemm_new(
         out_dtype=out_dtype,
         has_bias=1 if bias_list is not None else 0,
     )
+    nvtx.end_range(rng_prim)
+
+    nvtx.end_range(rng_gg)
 
     return out_list
 
