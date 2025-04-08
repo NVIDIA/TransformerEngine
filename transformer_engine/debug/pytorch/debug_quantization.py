@@ -299,6 +299,8 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
+            if columnwise_gemm_tensor.dtype != dtype:
+                raise ValueError("Dtype does not match the output of the modify_tensor call")
         if self.rowwise_tensor_plan == API_CALL_MODIFY:
             rowwise_gemm_tensor = debug_api.transformer_engine.modify_tensor(
                 layer_name=self.layer_name,
@@ -309,6 +311,8 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
+            if rowwise_gemm_tensor.dtype != dtype:
+                raise ValueError("Dtype does not match the output of the modify_tensor call")
 
         # 3. If some tensors still are not defined we use high precision tensor.
         if self.rowwise_tensor_plan == HIGH_PRECISION:
