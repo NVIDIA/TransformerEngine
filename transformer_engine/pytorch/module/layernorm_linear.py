@@ -159,8 +159,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     " current scaling"
                 )
 
-        # FP8 allgather not implemented for Float8_Blockwise_Tensor
-        force_bf16_all_gather = with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
         # Configure quantizer for norm output
         if fp8:
             if input_quantizer is None:
@@ -176,12 +174,14 @@ class _LayerNormLinear(torch.autograd.Function):
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         # Avoid quantized norm kernel if norm output will be returned
-        force_bf16_blockwise_gather = (fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer))
+        force_hp_blockwise_ln_out_gather = (
+            fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
+        )
         with_quantized_norm = (
             fp8
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not force_bf16_blockwise_gather
+            and not force_hp_blockwise_ln_out_gather
         )
 
         # Apply normalization
@@ -220,7 +220,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 if fp8:
-                    if not with_quantized_norm and not force_bf16_blockwise_gather:
+                    if not with_quantized_norm and not force_hp_blockwise_ln_out_gather:
                         ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:
@@ -326,6 +326,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
+            ctx.force_hp_blockwise_ln_out_gather = force_hp_blockwise_ln_out_gather
 
             # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
@@ -336,9 +337,9 @@ class _LayerNormLinear(torch.autograd.Function):
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
 
-                    # For force_bf16_blockwise_gather, we should
+                    # For force_hp_blockwise_ln_out_gather, we should
                     # be saving the unquantized ln_out to ctx.
-                    assert not force_bf16_blockwise_gather
+                    assert not force_hp_blockwise_ln_out_gather
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if isinstance(weightmat, QuantizedTensor):
@@ -618,11 +619,14 @@ class _LayerNormLinear(torch.autograd.Function):
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
+                # async_op is not compatible with high precision gather since
+                # gather_along_first_dim does not offer callback chaining.
+                gather_quantizer = None if ctx.force_hp_blockwise_ln_out_gather else quantizer
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,
                     async_op=True,
-                    quantizer=quantizer,
+                    quantizer=gather_quantizer,
                 )
                 nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_input")
             else:
@@ -706,7 +710,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     if ctx.input_quantizer is not None and not isinstance(
                         ln_out_total, QuantizedTensor
                     ):
-                        # Async gather in BF16 does not asynchronously
+                        # Async gather may have been done in BF16
                         # call quantizer after gather.
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
                         ln_out_total = ctx.input_quantizer(ln_out_total)
