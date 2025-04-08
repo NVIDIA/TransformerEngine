@@ -1604,7 +1604,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_quantizer,
             output_quantizer,
             *_,
-        ) = self._get_quantizers()
+        ) = self._get_quantizers(False)
         inp_dtype = inp.dtype
 
         fc1_weight = self.fc1_weight

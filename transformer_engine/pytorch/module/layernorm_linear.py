@@ -1441,7 +1441,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             weight_quantizer,
             output_quantizer,
             *_,
-        ) = self._get_quantizers(fp8_output)
+        ) = self._get_quantizers(fp8_output, fp8_grad=False)
         inp_dtype = inp.dtype
 
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()

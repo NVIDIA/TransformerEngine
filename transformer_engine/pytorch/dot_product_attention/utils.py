@@ -1599,11 +1599,16 @@ def get_qkv_layout(
 
     def run_iteratively(q, k, v):
         # check data pointers
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
-        data_ptr = k.untyped_storage().data_ptr()
-        check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
+        if is_in_onnx_export_mode():
+            check_ptrs_qkv = False
+            check_ptrs_qk = False
+            check_ptrs_kv = False
+        else:
+            data_ptr = q.untyped_storage().data_ptr()
+            check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+            check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
+            data_ptr = k.untyped_storage().data_ptr()
+            check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
 
         # check tensor shapes
         shape = q.shape
