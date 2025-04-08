@@ -328,6 +328,7 @@ def swizzled_scale(scales):
     scales = jnp.transpose(scales, (0, 3, 2, 1, 4))
     return scales
 
+
 def grouped_gemm(
     lhs_list: List[Union[jnp.ndarray, ScaledTensor]],
     rhs_list: List[Union[jnp.ndarray, ScaledTensor]],
