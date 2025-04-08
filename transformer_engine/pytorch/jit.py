@@ -43,6 +43,11 @@ if is_torch_min_version("2.2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1
     dropout_fuser = lazy_compile
 
 
+# Decorator to disable Torch Dynamo
+# See: https://github.com/NVIDIA/TransformerEngine/issues/308
+no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+
+
 def set_jit_fusion_options() -> None:
     """Set PyTorch JIT layer fusion options."""
     # flags required to enable jit fusion kernels
