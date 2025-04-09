@@ -584,6 +584,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
 
 bool is_supported_by_CC_100();
 
+bool is_supported_nontn_fp8_gemm();
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

@@ -6,6 +6,7 @@
 
 #include <pybind.h>
 
+#include "common/common.h"
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
@@ -103,7 +104,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !non_tn_fp8_gemm_supported();
+  bool create_transpose = columnwise_usage && !is_supported_nontn_fp8_gemm();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }
@@ -214,7 +215,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !non_tn_fp8_gemm_supported();
+  bool create_transpose = columnwise_usage && !is_supported_nontn_fp8_gemm();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }

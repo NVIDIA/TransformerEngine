@@ -134,4 +134,14 @@ bool is_supported_by_CC_100() {
   return deviceComputeCapability >= 100;
 }
 
+bool is_supported_nontn_fp8_gemm(){
+  int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
+
+  // Note: this is temporary restriction and should be lifted in the future. 
+  // (remove the note once it's done.)
+  return (deviceComputeCapability >= 100 && deviceComputeCapability < 120) || 
+          deviceComputeCapability >= 130;
+}
+
+
 }  // namespace transformer_engine

@@ -92,9 +92,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;
 
-  // Device compute capability
-  const int arch = cuda::sm_arch();
-
   // Transpose mode with column-major ordering
   bool is_A_transposed = transA == CUBLAS_OP_T;
   bool is_B_transposed = transB == CUBLAS_OP_T;
@@ -107,7 +104,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
-    if (arch < 100 && !is_A_transposed) {
+    if (!is_supported_nontn_fp8_gemm() && !is_A_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
         ret.A = A.columnwise_data.dptr;
@@ -166,7 +163,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = B.data.dtype;
     ret.B_scale_inv = B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
-    if (arch < 100 && is_B_transposed) {
+    if (!is_supported_nontn_fp8_gemm() && is_B_transposed) {
       // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
       if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {
         ret.B = B.columnwise_data.dptr;
