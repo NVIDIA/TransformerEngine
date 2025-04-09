@@ -90,13 +90,14 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
+    auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+    auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+    lhs_i.set_rowwise_data(static_cast<void*>(lhs_ptr), lhs_dtype, lhs_shape);
+    rhs_i.set_rowwise_data(static_cast<void*>(rhs_ptr), rhs_dtype, rhs_shape);
+
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
-      auto lhs_i = TensorWrapper(static_cast<void *>(lhs_ptr), lhs_shape, lhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(lhs_sinv_ptr));
-      auto rhs_i = TensorWrapper(static_cast<void *>(rhs_ptr), rhs_shape, rhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(rhs_sinv_ptr));
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
+      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat32, std::vector<size_t>{1});
+      rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat32, std::vector<size_t>{1});
     } else if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
                  MXFP8_BLOCK_SIZE, k);
@@ -107,20 +108,15 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
       rhs_sinv_shape[1] = sinv_k;
 
       // Note: the scale_inv array should have been swizzled in Python before lowering
-      TensorWrapper lhs_i(get_nvte_scaling_mode(scaling_mode));
-      TensorWrapper rhs_i(get_nvte_scaling_mode(scaling_mode));
-      lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
-      rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
       lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat8E8M0,
                                   lhs_sinv_shape);
       rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat8E8M0,
                                   rhs_sinv_shape);
-
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
     } else {
       NVTE_ERROR("Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
+    lhs_wrapper_list.push_back(std::move(lhs_i));
+    rhs_wrapper_list.push_back(std::move(rhs_i));
 
     auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
     lhs_ptr += m * k * lhs_dtype_bytes;
