@@ -47,7 +47,6 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
-
 __all__ = ["GroupedLinear"]
 
 
@@ -177,6 +176,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_shape_1 = weights[0].shape[1]
 
+            # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
                 for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensor):
@@ -254,7 +254,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.use_bias:
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
                     # for Float8BlockQuantizer.
-                    if ctx.fp8_recipe.fp8blockwise():
+                    if ctx.fp8_recipe.float8_block_scaling():
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
                             grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
