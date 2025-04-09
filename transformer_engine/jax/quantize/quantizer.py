@@ -51,6 +51,7 @@ class Quantizer(ABC):
     q_dtype: jnp.dtype
     scaling_mode: ScalingMode
     q_layout: QuantizeLayout
+    data_layout: str
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -59,7 +60,7 @@ class Quantizer(ABC):
             Tuple of (children, aux_data) for tree operations
         """
         children = ()
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
         return (children, aux_data)
 
     @classmethod
@@ -87,13 +88,22 @@ class Quantizer(ABC):
         """
         return self.q_layout == QuantizeLayout.ROWWISE_COLWISE
 
-    @abstractmethod
     def get_data_layout(self) -> str:
-        """Get the data data_layout.
+        """Get the data data_layout string.
 
         Returns:
             Data data_layout in string format
+
+        Raises:
+            ValueError: If quantization axis is invalid
         """
+        if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
+            return self.data_layout
+        if self.q_layout == QuantizeLayout.ROWWISE:
+            return self.data_layout[0]
+        if self.q_layout == QuantizeLayout.COLWISE:
+            return self.data_layout[1]
+        raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
     @abstractmethod
     def _quantize_func(self, x, is_colwise=False, dq_dtype=None, flatten_axis=-1) -> ScaledTensor1x:
@@ -109,7 +119,8 @@ class Quantizer(ABC):
             A ScaledTensor1x containing the quantized data
         """
 
-    def quantize(self, x, is_rowwise=False, is_colwise=False, dq_dtype=None, flatten_axis=-1):
+    def quantize(self, x, is_rowwise=False, is_colwise=False, dq_dtype=None, flatten_axis=-1)
+    ->ScaledTensor:
         """Quantize a tensor using the internal _quantize_func().
 
         Args:
@@ -174,6 +185,7 @@ class DelayedScaleQuantizer(Quantizer):
 
     scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+    data_layout: str = "NT"
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
     amax_history: jnp.ndarray = field(
@@ -187,26 +199,8 @@ class DelayedScaleQuantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.scale, self.amax_history)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
         return (children, aux_data)
-
-    def get_data_layout(self) -> str:
-        """Get the data data_layout string.
-
-        Returns:
-            Data data_layout in string format
-
-        Raises:
-            ValueError: If quantization axis is invalid
-        """
-        data_layout = "NT"
-        if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
-            return data_layout
-        if self.q_layout == QuantizeLayout.ROWWISE:
-            return data_layout[0]
-        if self.q_layout == QuantizeLayout.COLWISE:
-            return data_layout[1]
-        raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
     def _quantize_func(
         self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, flatten_axis=-1
@@ -226,11 +220,6 @@ class DelayedScaleQuantizer(Quantizer):
         compute_dtype = self.scale.dtype
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
         scaled_x = x.astype(compute_dtype) * self.scale
-
-        # quantize() in the old dot.py do this way, leave this code block here for future debugging
-        # compute_dtype = x.dtype
-        # dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
-        # scaled_x = x * self.scale.astype(compute_dtype)
 
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
         scale_inv = 1.0 / self.scale
@@ -288,6 +277,7 @@ class DelayedScaleQuantizer(Quantizer):
                 data_layout="T",
                 flatten_axis=flatten_axis,
             )
+
         if is_colwise and is_rowwise:
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
         if is_colwise:
@@ -377,16 +367,7 @@ class BlockScaleQuantizer(Quantizer):
 
     scaling_mode: ScalingMode = ScalingMode.MXFP8_1D_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
-
-    def get_data_layout(self) -> str:
-        """Get the data data_layout string.
-
-        Returns:
-            Data data_layout in string format
-        """
-        if self.is_2x2x():
-            return "NN"
-        return "N"
+    data_layout: str = "NN"
 
     def _quantize_func(self, x, is_colwise=False, dq_dtype=None, flatten_axis=-1) -> ScaledTensor1x:
         """Quantize function helper for block scaling FP8.
@@ -653,3 +634,110 @@ class QuantizerFactory:
 
 
 noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING)
+
+
+@register_pytree_node_class
+@dataclass
+class GroupedQuantizer(Quantizer):
+    """Base class for quantizers.
+
+    This abstract class defines the interface for tensor quantization, providing
+    methods for quantization and scale management.
+
+    Attributes:
+        q_dtype: The data type for quantized values
+        scaling_mode: The scaling mode to use for quantization
+        q_layout: The quantization axis (row-wise, column-wise, or both)
+
+    """
+    num_groups: int
+    q_dtype: jnp.dtype
+    scaling_mode: ScalingMode
+    q_layout: QuantizeLayout
+    data_layout: str = None
+    quantizers: List[Quantizer] = None
+
+    def tree_flatten(self):
+        """Flatten the quantizer for JAX tree operations.
+
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = (self.quantizers)
+        aux_data = (self.num_groups, self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
+        return (aux_data, children)
+
+    def __post_init__(self):
+        if not self._internal_quantizers:
+            self._internal_quantizer = QuantizerFactory.create(
+                    self.num_groups, self.scaling_mode, self.q_dtype, self.q_layout
+                    )
+        self.data_layout = self.quantizers[0].data_layout
+
+    def _create_grouped_tensor_from_tensor_list(tensor_list, group_sizes):
+        grouped_data = []
+        grouped_scale_inv = []
+
+        for tensor in tensor_list:
+            grouped_data.append(tensor_list.data)
+            grouped_scale_inv.append(tensor_list.scale_inv.flatten())
+
+        data_layout = tensor_list[0].data_layout
+
+        concat_axis = 0 if data_layout == 'N' else -1
+        grouped_data = jnp.concatenate(grouped_data, axis=concat_axis)
+        grouped_scale_inv = jnp.concatenate(grouped_scale_inv, axis=concat_axis)
+
+        return ScaledTensorFactory.create_1x(grouped_data, grouped_scale_inv, group_size, self.scaling_mode,
+                                         dq_dtype, is_colwise = is_colwise, data_layout=data_layout,
+                                         flatten_axis=flatten_axis)
+
+    def _quantize_func(self, *args, **kwargs):
+        pass
+
+    def quantize(self, x, group_sizes, is_rowwise: bool = None, is_colwise: bool = None,
+                 dq_dtype=None, flatten_axis=-1):
+        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        if flatten_axis < 0:
+            flatten_axis += x.ndim
+        assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
+
+        is_rowwise = (
+            is_rowwise
+            if is_rowwise is not None
+            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
+        )
+        is_colwise = (
+            is_colwise
+            if is_colwise is not None
+            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
+        )
+        assert is_rowwise or is_colwise, "No quantization layout is specified"
+
+        assert flatten_axis == 1, f"GroupedQuantizer only support flatten_axis == 1, got {flatten_axis}"
+
+        assert group_sizes.sum == x.shape[flatten_axis - 1], f"Unable to split x. x.shape[{flatten_axis - 1}] = {x.shape[flatten_axis -1]} while sum(group_size) = {group_size.sum}"
+
+        x = jnp.split(x, group_sizes, axis=flatten_axis - 1)
+        tensor_list = []
+        for i in range(len(group_sizes)):
+            tensor = self.quantizers[i](x[i], is_rowwise, is_colwise, dq_dtype, flatten_axis)
+            tensor_list.append[tensor]
+
+        rowwise_grouped_tensor = colwise_grouped_tensor = None
+        if is_rowwise:
+            rowwise_tensor_list = [tensor.get_rowwise_tensor() for tensor in tensor_list]
+            grouped_rowwise_tensor = _create_grouped_tensor_from_tensor_list(rowwise_tensor_list,
+                                                                             group_sizes)
+        if is_colwise:
+            colwise_tensor_list = [tensor.get_colwise_tensor() for tensor in tensor_list]
+            grouped_colwise_tensor = _create_grouped_tensor_from_tensor_list(colwise_tensor_list, group_sizes)
+
+        if is_colwise and is_rowwise:
+            return GroupedScaledTensor2x(grouped_rowwise_tensor, grouped_colwise_tensor)
+        if is_colwise:
+            return grouped_colwise_tensor
+        return grouped_rowwise_tensor
+
+    def get_scale_shapes(self, data_shape, group_sizes, is_padded=True, flatten_axis=-1):
+        return self.scaling_mode.get_grouped_scale_shape_2x(data_shape, group_sizes, is_padded, flatten_axis)
