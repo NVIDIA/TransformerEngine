@@ -86,8 +86,7 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
-  NVTE_INVALID_SCALING = 4,
-  NVTE_NO_SCALING = 5
+  NVTE_INVALID_SCALING = 100
 };
 
 /*! \brief TE Tensor type
