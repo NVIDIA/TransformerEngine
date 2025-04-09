@@ -182,6 +182,8 @@ def _get_scaling_mode(fp8_recipe: recipe.Recipe) -> ScalingMode:
         return ScalingMode.DELAYED_TENSOR_SCALING
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         return ScalingMode.MXFP8_1D_SCALING
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        return ScalingMode.CURRENT_TENSOR_SCALING
     raise ValueError("Invalid fp8_recipe!")
 
 
@@ -309,6 +311,30 @@ class DelayedScalingQuantizeConfig:
         QuantizeConfig.finalize()
 
 
+class CurrentScalingQuantizeConfig:
+    """Configuration class for current scaling FP8 recipe.
+
+    This class provides specific initialization and finalization for current scaling
+    FP8 quantization mode.
+    """
+
+    @staticmethod
+    def initialize(fp8_recipe: recipe.Recipe) -> None:
+        """Initialize current scaling FP8 configuration.
+
+        Args:
+            fp8_recipe: The FP8 recipe to use for initialization
+        """
+        cls = QuantizeConfig
+        cls.initialize(fp8_recipe)
+        cls.AMAX_HISTORY_LEN = 0
+
+    @staticmethod
+    def finalize() -> None:
+        """Reset the current scaling configuration."""
+        QuantizeConfig.finalize()
+
+
 class BlockScalingQuantizeConfig:
     """Configuration class for block scaling FP8 recipe.
 
@@ -385,6 +411,8 @@ def fp8_autocast(
     Config = DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         Config = BlockScalingQuantizeConfig
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        Config = CurrentScalingQuantizeConfig
 
     try:
         with global_shard_guard(mesh_resource):
