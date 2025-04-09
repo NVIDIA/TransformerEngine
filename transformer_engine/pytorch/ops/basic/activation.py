@@ -13,6 +13,7 @@ import torch
 import transformer_engine_torch as tex
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
+from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ...utils import clear_tensor_data, devices_match
 from ..op import BasicOperation, OperationContext
 from .._common import reshape
@@ -37,7 +38,18 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
        the first half of the input tensor, while PyTorch applies it to
        the second half.
 
+    Parameters
+    ----------
+    cache_quantized_input: bool, default = False
+        Quantize input tensor when caching for use in the backward
+        pass. This will typically reduce memory usage but require
+        extra compute and increase numerical error.
+
     """
+
+    def __init__(self, *, cache_quantized_input: bool = False):
+        super().__init__()
+        self.cache_quantized_input: bool = cache_quantized_input
 
     @abc.abstractmethod
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
@@ -100,9 +112,15 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         if y.dim() != x.dim():
             y = y.reshape(list(x.shape[:-1]) + [-1])
 
+        # Quantize input to FP8 before caching if needed
+        if self.cache_quantized_input:
+            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
+            x = quantizer(x)
+
         # Save state for backward pass
         ctx.save_for_backward(x.detach())
         ctx.fp8_enabled = fp8_enabled
+        ctx.dtype = dtype
         ctx.prev_op = prev_op
 
         return y
@@ -116,10 +134,18 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Saved tensors from forward pass
         (x,) = ctx.saved_tensors
 
+        # Check input tensor
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize(dtype=ctx.dtype)
+        elif x.dtype != ctx.dtype:
+            x = x.to(dtype=ctx.dtype)
+        if not x.is_contiguous():
+            x = x.contiguous()
+
         # Check grad output tensor
         dy = grad_output
         if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize()
+            dy = dy.dequantize(dtype=ctx.dtype)
         if not devices_match(dy.device, x.device) or dy.dtype != x.dtype:
             dy = dy.to(device=x.device, dtype=x.dtype)
         if not dy.is_contiguous():

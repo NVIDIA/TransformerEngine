@@ -1394,6 +1394,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
+    @pytest.mark.parametrize("cache_quantized_input", (False, True))
     def test_activation(
         self,
         *,
@@ -1402,6 +1403,7 @@ class TestBasicOps:
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
+        cache_quantized_input: bool,
     ) -> None:
         """Activation functions"""
 
@@ -1463,7 +1465,7 @@ class TestBasicOps:
         )[activation]
         forward = te_ops.Sequential(
             te_ops.Quantize(forward=False, backward=quantized_compute),
-            make_op(),
+            make_op(cache_quantized_input=cache_quantized_input),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
@@ -1472,9 +1474,9 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute:
+        if quantized_compute or cache_quantized_input:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
-        if activation == "relu":
+        if activation == "relu" and not cache_quantized_input:
             tols = {"atol": 0, "rtol": 0}
 
         # Check results
