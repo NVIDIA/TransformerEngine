@@ -23,7 +23,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
                            uint8_t *rhs_sinv_ptr, const DType &rhs_sinv_dtype, uint8_t *bias_ptr,
                            const DType &bias_dtype, uint8_t *out_ptr, const DType &out_dtype,
                            uint8_t *workspace_ptr, const size_t workspace_size, size_t num_gemms,
-                           int32_t *dim_list_ptr, const JAXX_Scaling_Mode &scaling_mode,
+                           int32_t *dim_list_ptr, const JAXX_Scaling_Mode scaling_mode,
                            cudaStream_t stream) {
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
