@@ -172,7 +172,9 @@ class TestDistributedSelfAttn:
             pytest.param(AttnBiasType.PRE_SCALE_BIAS, BiasShape._1HSS, id="PRE_SCALE_BIAS-1HSS"),
         ],
     )
-    def test_self_attn_shardy(self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type, bias_shape):
+    def test_self_attn_shardy(
+        self, device_count, mesh_shape, mesh_axes, mesh_resource, attn_bias_type, bias_shape
+    ):
         data_shape = (32, 512, 12, 64)
         self.impl_test_self_attn(
             device_count,
@@ -258,7 +260,9 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_LAYOUTS_MASKS = [
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
     pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="HD_KVPACKED-NO_MASK"),
     pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"),
-    pytest.param(QKVLayout.THD_THD_THD, AttnMaskType.PADDING_CAUSAL_MASK, id="THD_SEPARATE-PADDING_CAUSAL"),
+    pytest.param(
+        QKVLayout.THD_THD_THD, AttnMaskType.PADDING_CAUSAL_MASK, id="THD_SEPARATE-PADDING_CAUSAL"
+    ),
 ]
 
 DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
@@ -266,6 +270,7 @@ DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES = [
     pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
     pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
 ]
+
 
 class TestDistributedContextParallelSelfAttn:
 
@@ -498,7 +503,7 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.RING,
             use_shardy=False,
-            use_scan_ring=use_scan
+            use_scan_ring=use_scan,
         )
 
     @pytest.mark.parametrize(
@@ -535,7 +540,7 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced=True,
             cp_strategy=CPStrategy.RING,
             use_shardy=False,
-            use_scan_ring=True
+            use_scan_ring=True,
         )
 
 

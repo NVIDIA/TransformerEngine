@@ -29,10 +29,10 @@ __all__ = ["QuantizeShardyRules", "ScalingMode"]
 @dataclass
 class QuantizeShardyRules:
     """Information necessary to shard scale tensors with Shardy.
-    
+
     Attributes:
         input_spec: Specification for the input axes
-        rowwise_rule: Sharding rule for the row-wise scale tensor, depends on 
+        rowwise_rule: Sharding rule for the row-wise scale tensor, depends on
           the axes in `input_spec`
         colwise_rule: Likewise for the column-wise scale tensor.
         factor_sizes: For block scaling, contains the block size factor, which is
@@ -82,7 +82,7 @@ class ScalingModeMetadataImpl(ABC):
     @abstractmethod
     def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
-        
+
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
@@ -129,7 +129,7 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
     def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
-        
+
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
@@ -264,7 +264,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
     def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
-        
+
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
@@ -367,7 +367,7 @@ class ScalingMode(Enum):
 
     def get_shardy_sharding_rules(self, input_rank, unique_var) -> Tuple[Tuple[str]]:
         """Sharding rules for the input and (row, col)wise scale tensors.
-        
+
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix

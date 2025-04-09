@@ -168,7 +168,7 @@ class TestDistributedSoftmax:
             dtype,
             bad_sharding,
             broadcast_batch_mask,
-            use_shardy=False
+            use_shardy=False,
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
@@ -196,5 +196,5 @@ class TestDistributedSoftmax:
             dtype=DTYPES[0],
             bad_sharding=bad_sharding,
             broadcast_batch_mask=broadcast_batch_mask,
-            use_shardy=True
+            use_shardy=True,
         )
