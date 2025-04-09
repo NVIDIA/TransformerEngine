@@ -92,12 +92,14 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
 
     auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
     auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-    lhs_i.set_rowwise_data(static_cast<void*>(lhs_ptr), lhs_dtype, lhs_shape);
-    rhs_i.set_rowwise_data(static_cast<void*>(rhs_ptr), rhs_dtype, rhs_shape);
+    lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
+    rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
 
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
-      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat32, std::vector<size_t>{1});
-      rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat32, std::vector<size_t>{1});
+      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat32,
+                                  std::vector<size_t>{1});
+      rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat32,
+                                  std::vector<size_t>{1});
     } else if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
                  MXFP8_BLOCK_SIZE, k);
