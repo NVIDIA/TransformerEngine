@@ -98,7 +98,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias_contig,
             dim_list,
             num_gemms=num_gemms,
-            scaling_mode=int(scaling_mode),
+            scaling_mode=scaling_mode.value,
         )
 
     @staticmethod
@@ -123,7 +123,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias_contig,
             dim_list,
             num_gemms=num_gemms,
-            scaling_mode=scaling_mode.value,
+            scaling_mode=scaling_mode,
             out_dtype=out_dtype,
             out_flat_size=out_flat_size,
         )
@@ -505,7 +505,7 @@ def grouped_gemm(
         bias_contig,
         dim_list,
         num_gemms=num_gemms,
-        scaling_mode=scaling_mode,
+        scaling_mode=scaling_mode.value,
         out_dtype=out_dtype,
         out_flat_size=out_flat_size,
     )
