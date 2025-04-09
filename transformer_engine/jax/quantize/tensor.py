@@ -242,7 +242,6 @@ class ScaledTensor1x(ScaledTensor):
         else:
             scale_inv = self.scale_inv
 
-        # TODO(Phuong): constaint padded scale_inv?
         return ScaledTensor1x(
             data=data,
             scale_inv=scale_inv,

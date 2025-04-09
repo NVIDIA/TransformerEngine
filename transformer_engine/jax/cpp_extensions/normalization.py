@@ -373,7 +373,7 @@ class NormFwdPrimitive(BasePrimitive):
                 "and hurt performance."
             )
 
-        out_sharding = NamedSharding(mesh, PartitionSpec(out_spec), desc="NormFwdPrimitive.out")
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.out")
         colwise_out_spec = out_spec if is_2x else (None,)
         colwise_out_sharding = NamedSharding(
             mesh, PartitionSpec(*colwise_out_spec), desc="NormFwdPrimitive.colwise_out"
@@ -381,14 +381,14 @@ class NormFwdPrimitive(BasePrimitive):
         rsigma_sharding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:-1]), desc="NormFwdPrimitive.rsigma"
         )
-        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.RMSNorm else (None,)
+        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
         mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
 
         scale_inv_spec = amax_spec = (None,)
         if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            scale_inv_spec = colwise_out_spec
+            scale_inv_spec = out_spec
 
         scale_inv_sharding = NamedSharding(
             mesh, PartitionSpec(*scale_inv_spec), desc="NormFwdPrimitive.scale_inv"
@@ -444,7 +444,7 @@ class NormFwdPrimitive(BasePrimitive):
                 "Enforcing no sharding of parameters hidden dim! "
             )
 
-        out_sharding = NamedSharding(mesh, PartitionSpec(out_spec), desc="NormFwdPrimitive.out")
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.out")
         colwise_out_spec = out_spec if is_2x else (None,)
         colwise_out_sharding = NamedSharding(
             mesh, PartitionSpec(*colwise_out_spec), desc="NormFwdPrimitive.colwise_out"
@@ -452,14 +452,14 @@ class NormFwdPrimitive(BasePrimitive):
         rsigma_sharding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:-1]), desc="NormFwdPrimitive.rsigma"
         )
-        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.RMSNorm else (None,)
+        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
         mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
 
         scale_inv_spec = amax_spec = (None,)
         if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            scale_inv_spec = colwise_out_spec
+            scale_inv_spec = out_spec
 
         scale_inv_sharding = NamedSharding(
             mesh, PartitionSpec(*scale_inv_spec), desc="NormFwdPrimitive.scale_inv"
