@@ -542,7 +542,7 @@ class _ViewFunc(torch.autograd.Function):
             ctx.shape = tensor.shape
         if shape is None:
             return tensor
-        
+
         # Canonicalize shape
         if not isinstance(shape, Iterable):
             shape = [shape]
@@ -563,10 +563,10 @@ class _ViewFunc(torch.autograd.Function):
 
         if list(shape) == list(tensor.shape):
             return tensor
-    
+
         if tensor._is_2D_scaled:
             raise NotImplementedError("View of 2D scaled tensor is not implemented")
-        
+
         # Construct new tensor if shape is provided
         new_rowwise_data = None
         new_columnwise_data = None
@@ -618,6 +618,7 @@ class _ViewFunc(torch.autograd.Function):
             return dgrad, None
         return grad.view(ctx.shape), None
 
+
 class _ReshapeFunc(torch.autograd.Function):
     """Reshape function
 
@@ -651,7 +652,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-       
+
         if shape[-1] != ctx.shape[-1]:
             raise RuntimeError(
                 "Float8BlockwiseQTensor does not support reshaping inner dimension "
@@ -659,10 +660,10 @@ class _ReshapeFunc(torch.autograd.Function):
             )
         if list(shape) == list(tensor.shape):
             return tensor
-        
+
         if tensor._is_2D_scaled:
             raise NotImplementedError("Reshape of 2D scaled tensor is not implemented")
-        
+
         # Construct new tensor if shape is provided
         new_rowwise_data = None
         new_columnwise_data = None
