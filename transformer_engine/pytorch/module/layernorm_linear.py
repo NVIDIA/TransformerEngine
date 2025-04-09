@@ -59,7 +59,12 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param, CPU_MODEL_INIT_ENABLED, copy_to_cuda_if_needed
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    set_offloading_param,
+    CPU_MODEL_INIT_ENABLED,
+    copy_to_cuda_if_needed,
+)
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -1065,7 +1070,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.parameter_device = parameter_device
 
         self.eps = eps
-        layer_norm_weight = torch.empty(self.in_features, device=parameter_device, dtype=params_dtype)
+        layer_norm_weight = torch.empty(
+            self.in_features, device=parameter_device, dtype=params_dtype
+        )
         if CPU_MODEL_INIT_ENABLED:
             layer_norm_weight = layer_norm_weight.pin_memory()
         layer_norm_weight = torch.nn.Parameter(layer_norm_weight)

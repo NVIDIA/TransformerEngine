@@ -532,6 +532,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             torch.cuda.current_stream().wait_stream(self.h2d_stream)
             self.offloaded_group_count = 0
 
+
 class WeightOnCPUHandler:
     def __init__(self, num_layers):
         self.fwd_finished_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)]
@@ -556,11 +557,14 @@ class WeightOnCPUHandler:
         if self.current_group < self.num_layers - 1:
             self.bwd_finished_events[self.current_group + 1].wait(torch.cuda.current_stream())
 
+
 CPU_MODEL_INIT_ENABLED = False
 H2D_WEIGHT_STREAM = torch.cuda.Stream()
 
+
 def is_in_cpu_model_init():
     return CPU_MODEL_INIT_ENABLED
+
 
 @contextmanager
 def cpu_model_init(enabled: bool = True):
@@ -630,12 +634,11 @@ def get_cpu_offload_context(
     def tensor_need_offloading_checker_activations(tensor):
         return hasattr(tensor, "activation_offloading")
 
-
     if offload_activations:
         tensor_need_offloading_checker = tensor_need_offloading_checker_activations
     else:
         tensor_need_offloading_checker = lambda _: False
-    
+
     if not offload_activations and not offload_weights:
         raise ValueError(
             "CPU Offloading is enabled while it is not "

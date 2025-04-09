@@ -25,7 +25,9 @@ def _get_input():
     return torch.empty((128, SIZE, SIZE)).cuda()
 
 
-def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload, weight_offload=False, activation_offload=True):
+def _measure_memory_between_forward_and_backward(
+    model_cls, fp8, cpu_offload, weight_offload=False, activation_offload=True
+):
 
     with te.cpu_model_init(enabled=weight_offload):
         input_layer = model_cls(SIZE, SIZE)
@@ -91,9 +93,13 @@ def test_cpu_offload(fp8, model_key) -> None:
 def test_cpu_weight_offload(fp8, model_key) -> None:
     model_cls = models[model_key]
 
-    without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False, weight_offload=False, activation_offload=False)
+    without_offloading = _measure_memory_between_forward_and_backward(
+        model_cls, fp8, False, weight_offload=False, activation_offload=False
+    )
 
-    with_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, True, weight_offload=True, activation_offload=False)
+    with_offloading = _measure_memory_between_forward_and_backward(
+        model_cls, fp8, True, weight_offload=True, activation_offload=False
+    )
 
     print(f"without_offloading: {without_offloading}, with_offloading: {with_offloading}")
 

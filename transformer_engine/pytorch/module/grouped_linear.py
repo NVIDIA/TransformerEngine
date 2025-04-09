@@ -87,8 +87,6 @@ class _GroupedLinear(torch.autograd.Function):
         biases = weights_and_biases[num_gemms:]
         device = inp.device
 
-
-
         # TODO Support MXFP8  # pylint: disable=fixme
         if fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8():
             raise NotImplementedError("GroupedLinear does not yet support MXFP8")
@@ -492,7 +490,6 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
-
         parameter_device = "cpu" if CPU_MODEL_INIT_ENABLED else device
         self.device = device
         self.parameter_device = parameter_device
@@ -508,7 +505,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             if CPU_MODEL_INIT_ENABLED:
                 weight_tensor = weight_tensor.pin_memory()
-            
+
             self.register_parameter(
                 f"weight{i}",
                 torch.nn.Parameter(
