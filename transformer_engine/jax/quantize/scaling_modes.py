@@ -272,11 +272,21 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        input_spec = [f"x{i}" for i in range(input_rank)]
-        input_spec[-2] = CompoundFactor(unique_var, "block_size")
+        bx = unique_var
+        by = f"{unique_var}_"
 
-        rowwise = input_spec[:-1] + [f"{unique_var}_"]
-        colwise = input_spec[:-2] + [unique_var, f"{unique_var}__"]
+        input_spec = [f"x{i}" for i in range(input_rank - 2)] + [
+            CompoundFactor(bx, "block_size"),
+            CompoundFactor(by, "block_size"),
+        ]
+
+        # The rowwise and colwise scale tensors should be sharded the same way as the input.
+        # However, we need to adjust the dimensions where the block scaling factor applies.
+        rowwise = input_spec.copy()
+        rowwise[-1] = by
+
+        colwise = input_spec.copy()
+        colwise[-2] = bx
 
         return QuantizeShardyRules(
             tuple(input_spec), tuple(rowwise), tuple(colwise), {"block_size": 32}

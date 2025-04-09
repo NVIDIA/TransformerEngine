@@ -552,10 +552,7 @@ class NormFwdPrimitive(BasePrimitive):
         x_axes = scale_rules.input_spec
 
         out = x_axes[:-1] + ("k",)
-        if is_2x and norm_type != NVTE_Norm_Type.RMSNorm:
-            colwise_out = out
-        else:
-            colwise_out = ("…4",)
+        colwise_out = out if is_2x else ("…4",)
         rsigma = x_axes[:-1]
         mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
         amax = ("…6",)
