@@ -40,7 +40,7 @@ class TEDebugState:
             cls.debug_enabled = debug_api.DEBUG_MANAGER is not None
 
     @classmethod
-    def reset(cls):
+    def _reset(cls):
         """Resets layer count and stats buffers."""
         from ..features.utils.stats_buffer import STATS_BUFFERS
 
