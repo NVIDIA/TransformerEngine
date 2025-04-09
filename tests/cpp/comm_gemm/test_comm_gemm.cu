@@ -58,7 +58,20 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     NVTE_CHECK_CUDA(cudaMemsetAsync(dptr, 0, m * n * sizeof(T), stream));
 
     transformer_engine::Tensor ret;
-    ret.data = {dptr, {m, n}, dtype};
+    ret.data = {dptr, {n, m}, dtype};
+    return ret;
+  }
+
+  template <typename T>
+  std::vector<T> CopySubMatrix(const std::vector<T>& data, size_t mstart, size_t nstart, size_t mb,
+                               size_t nb, size_t ld) {
+    std::vector<T> ret(mb * nb);
+    size_t dst = 0;
+    for (size_t j = nstart; j < nstart + nb; ++j) {
+      for (size_t i = mstart; i < mstart + mb; ++i) {
+        ret[dst++] = data[j * ld + i];
+      }
+    }
     return ret;
   }
 
@@ -67,20 +80,14 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
                                                       size_t nstart, size_t mb, size_t nb,
                                                       size_t ld, transformer_engine::DType dtype,
                                                       cudaStream_t stream) {
-    std::vector<T> values(mb * nb);
-    size_t dst = 0;
-    for (size_t i = mstart; i < mstart + mb; ++i) {
-      for (size_t j = nstart; j < nstart + nb; ++j) {
-        values[dst++] = data[i * ld + j];
-      }
-    }
+    auto values = CopySubMatrix(data, mstart, nstart, mb, nb, ld);
     void* dptr{};
     NVTE_CHECK_CUDA(cudaMallocAsync(&dptr, values.size() * sizeof values[0], stream));
     NVTE_CHECK_CUDA(cudaMemcpyAsync(dptr, values.data(), values.size() * sizeof values[0],
                                     cudaMemcpyDefault, stream));
 
     transformer_engine::Tensor ret;
-    ret.data = {dptr, {mb, nb}, dtype};
+    ret.data = {dptr, {nb, mb}, dtype};
     return ret;
   }
 
@@ -97,13 +104,13 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     std::vector<T> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(), [&rng, &dist] { return dist(rng); });
 
-    auto ga = MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, m, dtype, stream);
-    auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, n, dtype, stream);
+    auto ga = MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype, stream);
+    auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
     auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
 
-    auto a = MakeDeviceTensorFromData<T>(adata, 0, m / nranks_ * rank_, k, m / nranks_, m, dtype,
+    auto a = MakeDeviceTensorFromData<T>(adata, 0, m / nranks_ * rank_, k, m / nranks_, k, dtype,
                                          stream);
-    auto b = MakeDeviceTensorFromData<T>(bdata, 0, n / nranks_ * rank_, k, n / nranks_, n, dtype,
+    auto b = MakeDeviceTensorFromData<T>(bdata, 0, n / nranks_ * rank_, k, n / nranks_, k, dtype,
                                          stream);
     auto d = MakeDeviceTensor<T>(m / nranks_, n, dtype, stream);
 
@@ -123,13 +130,15 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     std::vector<T> out(m * n / nranks_);
     NVTE_CHECK_CUDA(cudaMemcpyAsync(out.data(), d.data.dptr, out.size() * sizeof out[0],
                                     cudaMemcpyDefault, stream));
-    std::vector<T> out_golden(m * n / nranks_);
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(
-        out_golden.data(), static_cast<const T*>(gd.data.dptr) + n * k / nranks_ * rank_,
-        out_golden.size() * sizeof out_golden[0], cudaMemcpyDefault, stream));
+    std::vector<T> out_golden_global(m * n);
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(out_golden_global.data(), gd.data.dptr,
+                                    out_golden_global.size() * sizeof out_golden_global[0],
+                                    cudaMemcpyDefault, stream));
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 
+    auto out_golden = CopySubMatrix(out_golden_global, m / nranks_ * rank_, 0, m / nranks_, n, m);
+    NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
       std::ostringstream ss;
       ss << rank_ << ": " << i << ": " << static_cast<float>(out[i]) << " "
