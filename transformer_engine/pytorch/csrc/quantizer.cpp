@@ -169,7 +169,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     output.attr("_fp8_dtype") = this->dtype;
     output.attr("_transpose") = py_columnwise_data;
     output.attr("_quantizer") = this->quantizer;
-    output.attr("_transpose_invalid") = !py_columnwise_data.is_none();
+    output.attr("_transpose_invalid") = py_columnwise_data.is_none();
     ret = output;
   }
   TensorWrapper tensor(this->get_scaling_mode());
@@ -240,6 +240,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   std::vector<int64_t> rowwise_torch_shape;
   std::vector<int64_t> columnwise_torch_shape;
   std::vector<int64_t> scale_inv_torch_shape = {1};  // Shape of 1 element for scale_inv
+  rowwise_torch_shape.reserve(shape.size());
+  columnwise_torch_shape.reserve(shape.size());
 
   if (!shape.empty()) {
     columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape.back()));
@@ -253,36 +255,56 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   at::TensorOptions opts;
   opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
   at::Tensor data;
+  at::Tensor columnwise_data;
+  py::object py_data{py::none()};
+  py::object py_columnwise_data{py::none()};
+  bool create_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
+  if (!output.is_none()) {
+    NVTE_CHECK(detail::IsFloat8Tensor(output.ptr()),
+               "Wrong Tensor type provided for reuse. ",
+               "Expected Float8Tensor or Float8TensorBase, but got ",
+               py::repr(output).cast<std::string>());
+    py_data = output.attr("_data");
+    py_columnwise_data = output.attr("_transpose");
+  }
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
       data = std::move(*rowwise_data);
     } else {
-      data = at::empty(rowwise_torch_shape, opts);
+      data = create_torch_tensor(rowwise_torch_shape, opts, py_data);
     }
   }
-  const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
-  at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
+  py_data = rowwise_usage ? py::cast(data) : py::none();
   if (create_transpose) {
-    columnwise_data = at::empty(columnwise_torch_shape, opts);
+    columnwise_data = create_torch_tensor(columnwise_torch_shape, opts, py_columnwise_data);
   }
-  const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
+  py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
 
   // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
   at::Tensor scale_inv = at::reciprocal(scale);
 
   py::object ret;
-  if (internal) {
-    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
-    ret = Float8TensorClass("data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
-                            "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
-                            "quantizer"_a = this->quantizer);
+  if (output.is_none()) {
+    if (internal) {
+      py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
+      ret = Float8TensorClass("data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
+                              "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
+                              "quantizer"_a = this->quantizer);
+    } else {
+      py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
+      ret = Float8TensorClass("shape"_a = rowwise_torch_shape, "dtype"_a = GetATenDType(dtype),
+                              "data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
+                              "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
+                              "quantizer"_a = this->quantizer);
+    }
   } else {
-    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
-    ret = Float8TensorClass("shape"_a = rowwise_torch_shape, "dtype"_a = GetATenDType(dtype),
-                            "data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
-                            "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
-                            "quantizer"_a = this->quantizer);
+    output.attr("_data") = py_data;
+    output.attr("_scale_inv") = scale_inv;
+    output.attr("_fp8_dtype") = this->dtype;
+    output.attr("_transpose") = py_columnwise_data;
+    output.attr("_quantizer") = this->quantizer;
+    output.attr("_transpose_invalid") = py_columnwise_data.is_none();
+    ret = output;
   }
   TensorWrapper tensor(this->get_scaling_mode());
   if (rowwise_usage) {
