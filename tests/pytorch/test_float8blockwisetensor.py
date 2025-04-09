@@ -111,6 +111,10 @@ class TestFloat8BlockwiseTensor:
 
         # Initialize random data
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        if x_ref.numel() == 1:
+            # Reduce the chance that with trigger the trivial pass
+            # logic when all elements of x are close to zero.
+            x_ref.view(1)[0] = 42.1415
         x_ref_cuda = x_ref.to("cuda")
 
         # Cast to FP8 and back

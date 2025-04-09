@@ -301,7 +301,8 @@ class Float8BlockScaling(Recipe):
 
     In this strategy, tensors are scaled in blockwise fashion. Values within
     each block share a common scaling factor. The block dimensionality
-    can be configured. The scaling factors are float32.
+    can be configured. The scaling factors are float32 containers. They
+    will by default be constrained to powers of 2.
 
     Since the scaling happens in a particular direction (either rowwise
     or columnwise), the quantized tensor and its transpose are not numerically
@@ -309,6 +310,11 @@ class Float8BlockScaling(Recipe):
     and its transpose (e.g. to calculate both forward and backward pass),
     during the quantization both versions are computed from the high precision
     input to avoid double quantization errors.
+
+    NOTE: To relax the default constraint that scales be powers of 2, set env variable
+    NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it for the recipe defaults.
+    export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
+    Or initialize the Recipe with non-default QParams in code for increased control.
 
     Parameters
     ----------
@@ -333,10 +339,6 @@ class Float8BlockScaling(Recipe):
                     use for calculating dgrad in backward pass
     fp8_gemm_wgrad: MMParams, default MMParams.use_split_accumulator=True
                     use for calculating dgrad in backward pass
-    Notes:  By default, fp8_quant_fwd_inp, fp8_quant_fwd_weight, fp8_quant_bwd_grad are set to power of 2 scales.
-            To Enable FP32 scales, set env variable NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it.
-            export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
-            Or initialize the Recipe with non-default QParams in code.
     """
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
