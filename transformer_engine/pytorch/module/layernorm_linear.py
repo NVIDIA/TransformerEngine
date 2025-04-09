@@ -59,7 +59,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param, CPU_MODEL_INIT_ENABLED, copy_to_cuda_if_needed
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -125,6 +125,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
+
+        weight, bias = copy_to_cuda_if_needed(weight, bias)
+
         assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
@@ -1057,10 +1060,17 @@ class LayerNormLinear(TransformerEngineBaseModule):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
+        parameter_device = "cpu" if CPU_MODEL_INIT_ENABLED else device
+        self.device = device
+        self.parameter_device = parameter_device
+
         self.eps = eps
-        layer_norm_weight = torch.nn.Parameter(
-            torch.empty(self.in_features, device=device, dtype=params_dtype)
-        )
+        layer_norm_weight = torch.empty(self.in_features, device=parameter_device, dtype=params_dtype)
+        if CPU_MODEL_INIT_ENABLED:
+            layer_norm_weight = layer_norm_weight.pin_memory()
+        layer_norm_weight = torch.nn.Parameter(layer_norm_weight)
+        if CPU_MODEL_INIT_ENABLED:
+            layer_norm_weight = layer_norm_weight.pin_memory()
         self.register_parameter(
             "layer_norm_weight",
             layer_norm_weight,
@@ -1068,8 +1078,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         )
         if self.normalization != "RMSNorm":
             layer_norm_bias = torch.nn.Parameter(
-                torch.empty(self.in_features, device=device, dtype=params_dtype)
+                torch.empty(self.in_features, device=parameter_device, dtype=params_dtype)
             )
+            if CPU_MODEL_INIT_ENABLED:
+                layer_norm_bias = layer_norm_bias.pin_memory()
             self.register_parameter(
                 "layer_norm_bias", layer_norm_bias, init_fn=init_method_constant(0.0)
             )
@@ -1079,20 +1091,27 @@ class LayerNormLinear(TransformerEngineBaseModule):
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
+        parameter_device = "cpu" if CPU_MODEL_INIT_ENABLED else device
+        self.device = device
+        self.parameter_device = parameter_device
+
         # Contiguous buffers for params
         weight_tensor = torch.empty(
             self.out_features,
             self.in_features,
-            device=device,
+            device=parameter_device,
             dtype=params_dtype,
         )
         bias_tensor = None
         if self.use_bias:
             bias_tensor = torch.empty(
                 self.out_features,
-                device=device,
+                device=parameter_device,
                 dtype=params_dtype,
             )
+        if CPU_MODEL_INIT_ENABLED:
+            weight_tensor = weight_tensor.pin_memory()
+            bias_tensor = bias_tensor.pin_memory()
 
         # Configure parameter splits
         self.weight_names = []

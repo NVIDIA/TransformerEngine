@@ -4,7 +4,7 @@
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
 from __future__ import annotations
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from typing import Any, Dict, Optional
 
 import torch
@@ -532,6 +532,63 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             torch.cuda.current_stream().wait_stream(self.h2d_stream)
             self.offloaded_group_count = 0
 
+class WeightOnCPUHandler:
+    def __init__(self, num_layers):
+        self.fwd_finished_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)]
+        self.bwd_finished_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_layers)]
+        self.current_group = 0
+        self.num_layers = num_layers
+
+    def on_group_commit_forward(self):
+        # record the event
+        self.fwd_finished_events[self.current_group].record(torch.cuda.current_stream())
+
+        # stream h2d should wait on finish of layer n - 1
+        if self.current_group > 0:
+            self.fwd_finished_events[self.current_group - 1].wait(torch.cuda.current_stream())
+        self.current_group += 1
+
+    def on_group_commit_backward(self):
+        self.current_group -= 1
+        # record the event
+        self.bwd_finished_events[self.current_group].record(torch.cuda.current_stream())
+        # stream h2d should wait on finish of layer n + 1
+        if self.current_group < self.num_layers - 1:
+            self.bwd_finished_events[self.current_group + 1].wait(torch.cuda.current_stream())
+
+CPU_MODEL_INIT_ENABLED = False
+H2D_WEIGHT_STREAM = torch.cuda.Stream()
+
+def is_in_cpu_model_init():
+    return CPU_MODEL_INIT_ENABLED
+
+@contextmanager
+def cpu_model_init(enabled: bool = True):
+    """Context manager to enable/disable CPU model initialization."""
+    global CPU_MODEL_INIT_ENABLED
+    _previous_cpu_model_init_enabled = CPU_MODEL_INIT_ENABLED
+    CPU_MODEL_INIT_ENABLED = enabled
+    try:
+        yield
+    finally:
+        CPU_MODEL_INIT_ENABLED = _previous_cpu_model_init_enabled
+
+
+def copy_to_cuda_if_needed(*tensors):
+    # check if we are in weight offloading decorator
+    if all(str(tensor.device) != "cpu" for tensor in tensors):
+        return tensors
+    new_tensors = []
+
+    with torch.cuda.stream(H2D_WEIGHT_STREAM):
+        for tensor in tensors:
+            if str(tensor.device) == "cpu":
+                tensor = tensor.to("cuda", non_blocking=True)
+                new_tensors.append(tensor)
+    # main stream wait for the copy to finish
+    torch.cuda.current_stream().wait_stream(H2D_WEIGHT_STREAM)
+    return new_tensors
+
 
 def get_cpu_offload_context(
     enabled: bool = False,
@@ -573,20 +630,13 @@ def get_cpu_offload_context(
     def tensor_need_offloading_checker_activations(tensor):
         return hasattr(tensor, "activation_offloading")
 
-    # This includes the Gradient Accumulation Buffer
-    def tensor_need_offloading_checker_weights(tensor):
-        return hasattr(tensor, "weight_offloading")
 
-    def tensor_need_offloading_checker_all(tensor):
-        return hasattr(tensor, "activation_offloading") or hasattr(tensor, "weight_offloading")
-
-    if offload_activations and offload_weights:
-        tensor_need_offloading_checker = tensor_need_offloading_checker_all
-    elif offload_activations:
+    if offload_activations:
         tensor_need_offloading_checker = tensor_need_offloading_checker_activations
-    elif offload_weights:
-        tensor_need_offloading_checker = tensor_need_offloading_checker_weights
     else:
+        tensor_need_offloading_checker = lambda _: False
+    
+    if not offload_activations and not offload_weights:
         raise ValueError(
             "CPU Offloading is enabled while it is not "
             "mentioned what to offload (weights/activations)"
@@ -598,7 +648,11 @@ def get_cpu_offload_context(
         tensor_need_offloading_checker=tensor_need_offloading_checker,
     )
 
+    weight_on_cpu_handler = WeightOnCPUHandler(model_layers)
+
     def group_prefetch_offload_commit_async(tensor):
+        if offload_weights:
+            tensor = group_prefetch_offload_commit(tensor, weight_on_cpu_handler)
         return group_prefetch_offload_commit(tensor, cpu_offload_handler)
 
     if enabled:

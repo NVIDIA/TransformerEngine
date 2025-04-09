@@ -61,7 +61,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param, is_in_cpu_model_init, copy_to_cuda_if_needed
 
 __all__ = ["Linear"]
 
@@ -117,6 +117,8 @@ class _Linear(torch.autograd.Function):
         out_features, in_features = weight.shape
         inp_shape = inp.shape
         assert inp_shape[-1] == in_features, "GEMM not possible"
+
+        weight, bias = copy_to_cuda_if_needed(weight, bias)
 
         tp_world_size = get_distributed_world_size(tp_group)
         backward_needs_input = is_grad_enabled and weight.requires_grad
@@ -402,6 +404,9 @@ class _Linear(torch.autograd.Function):
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
+
+            weight, bias = copy_to_cuda_if_needed(weight, bias)
+
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
@@ -920,20 +925,27 @@ class Linear(TransformerEngineBaseModule):
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
+        parameter_device = "cpu" if is_in_cpu_model_init() else device
+        self.device = device
+        self.parameter_device = parameter_device
+
         # Contiguous buffers for params
         weight_tensor = torch.empty(
             self.out_features,
             self.in_features,
-            device=device,
+            device=parameter_device,
             dtype=params_dtype,
         )
         bias_tensor = None
         if self.use_bias:
             bias_tensor = torch.empty(
                 self.out_features,
-                device=device,
+                device=parameter_device,
                 dtype=params_dtype,
             )
+        if is_in_cpu_model_init():
+            weight_tensor = weight_tensor.pin_memory()
+            bias_tensor = bias_tensor.pin_memory()
 
         # Configure parameter splits
         self.weight_names = []
@@ -1020,7 +1032,7 @@ class Linear(TransformerEngineBaseModule):
                 )
         else:
             for name in self.bias_names:
-                bias = torch.Tensor().to(dtype=params_dtype, device=device)
+                bias = torch.Tensor().to(dtype=params_dtype, device=parameter_device)
                 setattr(self, name, bias)
 
         if with_fp8_params:

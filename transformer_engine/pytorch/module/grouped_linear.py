@@ -38,7 +38,7 @@ from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.float8_tensor import Float8Tensor
-from ..cpu_offload import is_cpu_offload_enabled
+from ..cpu_offload import is_cpu_offload_enabled, copy_to_cuda_if_needed, CPU_MODEL_INIT_ENABLED
 
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
@@ -81,9 +81,13 @@ class _GroupedLinear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         num_gemms = len(m_splits)
+        weights_and_biases = copy_to_cuda_if_needed(weights_and_biases)
+
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
         device = inp.device
+
+
 
         # TODO Support MXFP8  # pylint: disable=fixme
         if fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8():
@@ -488,17 +492,27 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
 
+
+        parameter_device = "cpu" if CPU_MODEL_INIT_ENABLED else device
+        self.device = device
+        self.parameter_device = parameter_device
+
         for i in range(self.num_gemms):
             # Construct weight parameter
+            weight_tensor = torch.empty(
+                self.out_features,
+                self.in_features,
+                device=parameter_device,
+                dtype=params_dtype,
+            )
+
+            if CPU_MODEL_INIT_ENABLED:
+                weight_tensor = weight_tensor.pin_memory()
+            
             self.register_parameter(
                 f"weight{i}",
                 torch.nn.Parameter(
-                    torch.empty(
-                        self.out_features,
-                        self.in_features,
-                        device=device,
-                        dtype=params_dtype,
-                    ),
+                    weight_tensor,
                 ),
                 init_fn=init_method,
                 get_rng_state_tracker=get_rng_state_tracker,
@@ -507,19 +521,26 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             # Construct bias parameters if needed
             if self.use_bias:
+                bias_tensor = torch.empty(
+                    self.out_features,
+                    device=parameter_device,
+                    dtype=params_dtype,
+                )
+
+                if CPU_MODEL_INIT_ENABLED:
+                    bias_tensor = bias_tensor.pin_memory()
+
                 self.register_parameter(
                     f"bias{i}",
                     torch.nn.Parameter(
-                        torch.empty(
-                            self.out_features,
-                            device=device,
-                            dtype=params_dtype,
-                        ),
+                        bias_tensor,
                     ),
                     init_fn=init_method_constant(0.0),
                 )
             else:
-                bias = torch.Tensor().to(dtype=params_dtype, device=device)
+                bias = torch.Tensor().to(dtype=params_dtype, device=parameter_device)
+                if CPU_MODEL_INIT_ENABLED:
+                    bias = bias.pin_memory()
                 setattr(self, f"bias{i}", bias)
 
         if self.primary_weights_in_fp8:

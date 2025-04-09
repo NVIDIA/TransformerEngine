@@ -25,11 +25,12 @@ def _get_input():
     return torch.empty((128, SIZE, SIZE)).cuda()
 
 
-def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
+def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload, weight_offload=False, activation_offload=True):
 
-    input_layer = model_cls(SIZE, SIZE)
-    hidden_layer = model_cls(SIZE, SIZE)
-    output_layer = model_cls(SIZE, SIZE)
+    with te.cpu_model_init(enabled=weight_offload):
+        input_layer = model_cls(SIZE, SIZE)
+        hidden_layer = model_cls(SIZE, SIZE)
+        output_layer = model_cls(SIZE, SIZE)
 
     input = _get_input()
     if cpu_offload:
@@ -37,8 +38,8 @@ def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
             enabled=True,
             num_layers=2,
             model_layers=3,
-            offload_activations=True,
-            offload_weights=False,
+            offload_activations=activation_offload,
+            offload_weights=weight_offload,
         )
     else:
         offload_context = nullcontext()
@@ -81,5 +82,19 @@ def test_cpu_offload(fp8, model_key) -> None:
     without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False)
 
     with_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, True)
+
+    assert with_offloading < without_offloading
+
+
+@pytest.mark.parametrize("fp8", [True, False])
+@pytest.mark.parametrize("model_key", models.keys())
+def test_cpu_weight_offload(fp8, model_key) -> None:
+    model_cls = models[model_key]
+
+    without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False, weight_offload=False, activation_offload=False)
+
+    with_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, True, weight_offload=True, activation_offload=False)
+
+    print(f"without_offloading: {without_offloading}, with_offloading: {with_offloading}")
 
     assert with_offloading < without_offloading
