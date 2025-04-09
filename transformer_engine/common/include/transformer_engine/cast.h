@@ -102,10 +102,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
                         cudaStream_t stream);
 
-/*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
- *         by configuring a noop in quant_config.
- *         The type of quantized tensor in the output depends on the scaling mode of the output
- *         tensor.
+/*! \brief Casts input tensor to quantized output tensor, with advanced quantization options.
  *
  *  \param[in]      input            Input tensor to be cast.
  *  \param[in,out]  output           Output quantized tensor.

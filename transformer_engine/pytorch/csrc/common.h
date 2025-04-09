@@ -168,13 +168,13 @@ class Float8BlockQuantizer : public Quantizer {
   // Which float8 type is used for q data.
   DType dtype;
 
- private:
   // Options about how to quantize the tensor
   // Quantization scales are rounded down to powers of 2.
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
 
+ private:
   int block_scaling_dim = 2;
 
  public:
@@ -187,9 +187,6 @@ class Float8BlockQuantizer : public Quantizer {
 
   // Gets rowwise and columnwise_data from tensor and sets them on wrapper
   void set_quantization_params(TensorWrapper* tensor) const override;
-
-  // Set options for quantization on QuantizationConfigWrapper.
-  void set_quantization_config(QuantizationConfigWrapper* quant_config) const;
 
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise

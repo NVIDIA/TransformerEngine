@@ -134,7 +134,7 @@ class _Linear(torch.autograd.Function):
         # TODO(kwyss): Support FP8 allgather for FP8 block quantization.
         force_hp_input_gather = (
             fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
-        )
+        )  # Perform TP communication in high precision.
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
@@ -156,8 +156,10 @@ class _Linear(torch.autograd.Function):
                 else:
                     if not isinstance(inputmat, QuantizedTensor):
                         columnwise_usage = backward_needs_input and isinstance(
-                            input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)
+                            input_quantizer, MXFP8Quantizer
                         )
+                        # force_hp_input_gather should enforce this
+                        assert not isinstance(input_quantizer, Float8BlockQuantizer)
                         input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
                         inputmat = input_quantizer(inputmat)
                         own_quantized_input = True

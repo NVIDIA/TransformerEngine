@@ -225,10 +225,10 @@ class _LayerNormMLP(torch.autograd.Function):
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
 
-        # TODO(kwyss): Support FP8 allgather of Float8Block quantization.
+        # TODO(kwyss): Support FP8 allgather of Float8BlockQuantizer recipe
         force_hp_fc1_input_gather = (
             fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
-        )
+        )  # Perform TP communication in high precision.
 
         # Configure quantizer for norm output
         if fp8:

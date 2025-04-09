@@ -333,21 +333,6 @@ class Float8BlockScaling(Recipe):
                     use for calculating dgrad in backward pass
     fp8_gemm_wgrad: MMParams, default MMParams.use_split_accumulator=True
                     use for calculating dgrad in backward pass
-    fp8_dpa: bool, default = `False`
-             Whether to enable FP8 dot product attention (DPA). When the model is placed in an
-             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
-             inputs from higher precision to FP8, performs attention in FP8, and casts tensors
-             back to higher precision as outputs. FP8 DPA currently is only supported in the
-             `FusedAttention` backend.
-    fp8_mha: bool, default = `False`
-            Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
-            operations mentioned above at the DPA boundaries. Currently only standard MHA modules
-            i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
-            `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
-            `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
-            When `fp8_mha = True, fp8_dpa = True`, it becomes
-            `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
-
     Notes:  By default, fp8_quant_fwd_inp, fp8_quant_fwd_weight, fp8_quant_bwd_grad are set to power of 2 scales.
             To Enable FP32 scales, set env variable NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 to override it.
             export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1

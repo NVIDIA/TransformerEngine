@@ -174,7 +174,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
     } else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
       auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
-      my_quantizer_bw->set_quantization_config(&quant_config);
+      quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
+      quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
     }
     nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());
@@ -320,7 +321,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
     } else if (IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
       auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
-      my_quantizer_bw->set_quantization_config(&quant_config);
+      quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
+      quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
     }
     nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());

@@ -942,26 +942,17 @@ def _all_gather_fp8_blockwise(
     inp: torch.Tensor,
     process_group: dist_group_type,
     *,
-    async_op: bool = False, # pylint: disable=unused-argument
+    async_op: bool = False,  # pylint: disable=unused-argument
     quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """
     All-gather FP8 tensor along first dimension for blockwise quantization.
 
-    Usually returns a Float8BlockwiseQTensorBase. In the case that the
-    all gather is done asynchronously, but quantization is deferred until
-    after the gather, this returns the full precision tensor.
+    Returns: quantizer(gather(inp))
 
-    NOTE: The implementation is not sophisticated enough to honor async_op=True
-    and also apply the quantizer if quantizer=None. In such a case, it falls
-    back to a synchronous gather and invokes the quantizer.
-    A more sophisticated approach may be possible via calling `get_future()` on the
-    asynchronous handler, calling `make_empty()` on the quantizer, and chaining
-    a callback with `then()` to perform `update_quantized`. This invites
-    complications and also requires pre-allocating the quantized tensor.
-    Or other callbacks are possible if the type can be relaxed from torch.distributed.Work
-    to a duck typed done check.
+    NOTE: The implementation is not sophisticated enough to honor async_op=True.
+    In some cases it falls back to synchronous gather and invokes the quantizer.
     """
 
     # Input tensor attributes

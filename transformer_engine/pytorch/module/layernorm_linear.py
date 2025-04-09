@@ -168,7 +168,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 columnwise_usage
                 and with_input_all_gather
                 and not isinstance(input_quantizer, MXFP8Quantizer)
-                and not isinstance(input_quantizer, Float8BlockQuantizer)
             ):
                 columnwise_usage = False
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -177,7 +176,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # or if a gather of ln_out must be in high precision.
         force_hp_blockwise_ln_out_gather = (
             fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
-        )
+        )  # Perform TP communication in high precision.
         with_quantized_norm = (
             fp8
             and not return_layernorm_output
