@@ -16,10 +16,10 @@ from typing import Tuple, Dict
 from functools import reduce
 import operator
 
-from transformer_engine_jax import JAXX_Scaling_Mode
-
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
+
+from transformer_engine_jax import JAXX_Scaling_Mode
 
 
 __all__ = ["ScalingMode"]
