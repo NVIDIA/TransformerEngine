@@ -95,22 +95,22 @@ void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, i
   const auto b1 = b->flat_last_dim();
 
   if (transa)
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, a1, a0, 0, 0, a1,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, a0, a1, 0, 0, a0,
                                                        get_cuda_dtype(a->dtype()),
                                                        ctx->grid_row_major.get(), ctx->a_desc.get()));
   else
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, a0, a1, 0, 0, a0,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, a1, a0, 0, 0, a1,
                                                        get_cuda_dtype(a->dtype()),
                                                        ctx->grid_row_major.get(), ctx->a_desc.get()));
   if (transb)
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, b1, b0, 0, 0, b1,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, b0, b1, 0, 0, b0,
                                                        get_cuda_dtype(b->dtype()),
                                                        ctx->grid_row_major.get(), ctx->b_desc.get()));
   else
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, b0, b1, 0, 0, b0,
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, b1, b0, 0, 0, b1,
                                                        get_cuda_dtype(b->dtype()),
                                                        ctx->grid_row_major.get(), ctx->b_desc.get()));
-  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, a0, b1, 0, 0, a0,
+  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, a1, b0, 0, 0, a1,
                                                    get_cuda_dtype(d->dtype()),
                                                    ctx->grid_col_major.get(), ctx->d_desc.get()));
 
