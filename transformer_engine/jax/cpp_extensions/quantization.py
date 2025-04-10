@@ -496,7 +496,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         out = x_axes
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes

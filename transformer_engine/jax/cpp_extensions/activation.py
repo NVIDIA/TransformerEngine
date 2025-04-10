@@ -429,7 +429,7 @@ class ActLuPrimitive(BasePrimitive):
         )
         x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
         out = (*x_axes[:-2], x_axes[-1])
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv = scale_rules.rowwise_rule[:-1] + (scale_rules.rowwise_rule[-1],)
             colwise_scale_inv = scale_rules.colwise_rule[:-1] + (scale_rules.colwise_rule[-1],)
         else:
@@ -437,7 +437,7 @@ class ActLuPrimitive(BasePrimitive):
             colwise_scale_inv = scale_rules.colwise_rule
 
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(
                     multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-1)
                 )
@@ -894,7 +894,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         x_axes = scale_rules.input_spec
         out = x_axes
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
             else:
                 colwise_out = tuple(x_axes)
