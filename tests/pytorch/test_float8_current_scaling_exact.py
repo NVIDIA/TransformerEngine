@@ -82,7 +82,7 @@ class TestFP8RecipeLinearBase:
 
     @staticmethod
     def _get_mean_abs_relative_error(a, b):
-        error = torch.where(b == 0, 0.0, torch.abs((a - b) / b))
+        error = torch.where(b == 0, torch.ne(a, b), torch.abs((a - b) / b))
         return torch.mean(error)
 
     @staticmethod

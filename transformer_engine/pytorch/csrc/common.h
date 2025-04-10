@@ -168,13 +168,12 @@ class Float8BlockQuantizer : public Quantizer {
   // Which float8 type is used for q data.
   DType dtype;
 
+ private:
   // Options about how to quantize the tensor
   // Quantization scales are rounded down to powers of 2.
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
-
- private:
   int block_scaling_dim = 2;
 
  public:
