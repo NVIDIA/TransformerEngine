@@ -95,7 +95,8 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
     rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
 
-    if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+    if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+        scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING) {
       lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat32,
                                   std::vector<size_t>{1});
       rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat32,
