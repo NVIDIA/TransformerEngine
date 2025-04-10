@@ -674,23 +674,23 @@ class GroupedQuantizer(Quantizer):
                     )
         self.data_layout = self.quantizers[0].data_layout
 
-    def _create_grouped_tensor_from_tensor_list(tensor_list, group_sizes):
+    def _create_grouped_tensor_from_tensor_list(tensor_list, group_sizes, other_sizes):
         grouped_data = []
         grouped_scale_inv = []
 
         for tensor in tensor_list:
-            grouped_data.append(tensor_list.data)
+            grouped_data.append(tensor_list.data.flatten_axis)
             grouped_scale_inv.append(tensor_list.scale_inv.flatten())
 
-        data_layout = tensor_list[0].data_layout
+        grouped_data = jnp.concatenate(grouped_data)
+        grouped_scale_inv = jnp.concatenate(grouped_scale_inv)
 
-        concat_axis = 0 if data_layout == 'N' else -1
-        grouped_data = jnp.concatenate(grouped_data, axis=concat_axis)
-        grouped_scale_inv = jnp.concatenate(grouped_scale_inv, axis=concat_axis)
-
-        return ScaledTensorFactory.create_1x(grouped_data, grouped_scale_inv, group_size, self.scaling_mode,
-                                         dq_dtype, is_colwise = is_colwise, data_layout=data_layout,
-                                         flatten_axis=flatten_axis)
+        return ScaledTensorFactory.create_1x(grouped_data, grouped_scale_inv,
+                                             self.scaling_mode, dq_dtype, is_colwise,
+                                             self.data_layout, flatten_axis
+                                             group_size=group_size,
+                                             other_sizes=other_sizes,
+                                             )
 
     def _quantize_func(self, *args, **kwargs):
         pass
@@ -718,6 +718,8 @@ class GroupedQuantizer(Quantizer):
 
         assert group_sizes.sum == x.shape[flatten_axis - 1], f"Unable to split x. x.shape[{flatten_axis - 1}] = {x.shape[flatten_axis -1]} while sum(group_size) = {group_size.sum}"
 
+        other_sizes = x.shape[flatten_axis:]
+
         x = jnp.split(x, group_sizes, axis=flatten_axis - 1)
         tensor_list = []
         for i in range(len(group_sizes)):
@@ -727,14 +729,17 @@ class GroupedQuantizer(Quantizer):
         rowwise_grouped_tensor = colwise_grouped_tensor = None
         if is_rowwise:
             rowwise_tensor_list = [tensor.get_rowwise_tensor() for tensor in tensor_list]
-            grouped_rowwise_tensor = _create_grouped_tensor_from_tensor_list(rowwise_tensor_list,
-                                                                             group_sizes)
+            grouped_rowwise_tensor = _create_grouped_tensor_from_tensor_list(
+                    rowwise_tensor_list, group_sizes, other_sizes
+                    )
         if is_colwise:
             colwise_tensor_list = [tensor.get_colwise_tensor() for tensor in tensor_list]
-            grouped_colwise_tensor = _create_grouped_tensor_from_tensor_list(colwise_tensor_list, group_sizes)
+            grouped_colwise_tensor = _create_grouped_tensor_from_tensor_list(
+                    colwise_tensor_list, group_sizes, other_sizes
+                    )
 
         if is_colwise and is_rowwise:
-            return GroupedScaledTensor2x(grouped_rowwise_tensor, grouped_colwise_tensor)
+            return ScaledTensor2x(grouped_rowwise_tensor, grouped_colwise_tensor)
         if is_colwise:
             return grouped_colwise_tensor
         return grouped_rowwise_tensor
