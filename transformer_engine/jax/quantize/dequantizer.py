@@ -9,7 +9,6 @@ using various scaling modes, including delayed scaling and block scaling.
 """
 import math
 from dataclasses import dataclass
-from typing import Callable, Tuple
 from abc import ABC, abstractmethod
 
 import jax
@@ -34,40 +33,45 @@ class Dequantizer(ABC):
         pass
 
     # TODO (Phuong): use grouped_dequantize with group_size = 1 replacing dequantize
+    @staticmethod
     def grouped_dequantize(grouped_scaled_tensor):
         data = grouped_scaled_tensor.data
         scale_inv = grouped_scaled_tensor.scale_inv
-        group_size = grouped_scaled_tensor.group_size
+        group_sizes = grouped_scaled_tensor.group_sizes
+        other_sizes = grouped_scaled_tensor.other_sizes
         flatten_axis = grouped_scaled_tensor.flatten_axis
         scaling_mode = grouped_scaled_tensor.scaling_mode
 
-        flatten_axis = len(data.shape) + flatten_axis if flatten_axis < 0 else flatten_axis
-        assert (
-            0 < flatten_axis < len(data.shape)
-        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data.shape}"
+        data_ndim = 1 + len(other_sizes)
+
+        flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
 
         output = []
-        data = jnp.split(data, group_size, axis=0)
+        matrix_sizes = group_sizes * math.prod(other_sizes)
+        data = jnp.split(data, matrix_sizes)
 
         scale_inv_ptr = 0
-        for data_i in data:
+        for i, data_i in enumerate(data):
+            data_shape_i = (group_sizes[i], *other_sizes)
+            assert math.prod(data_shape_i) == data_i.size, (
+                f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
+                f" {data_i.size}"
+            )
             scale_shape_i = scaling_mode.get_scale_shape(
-                data_i.shape,
+                data_shape_i,
                 grouped_scaled_tensor.is_colwise,
                 is_padded=True,
                 flatten_axis=flatten_axis,
             )
             scale_shape_i_size = math.prod(scale_shape_i)
-            scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size].reshape(
-                scale_shape_i
-            )
-            out_i = self._dequantize_func(
-                data_i,
-                scale_inv_i,
+            scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
+            out_i = Dequantizer._dequantize_func(
+                data_i.reshape(data_shape_i),
+                scale_inv_i.reshape(scale_shape_i),
                 grouped_scaled_tensor.dq_dtype,
-                grouped_scaled_tensor.scaling_mode,
-                grouped_scaled_tensor.is_colwise,
-                grouped_scaled_tensor.flatten_axis,
+                scaling_mode=grouped_scaled_tensor.scaling_mode,
+                is_colwise=grouped_scaled_tensor.is_colwise,
+                flatten_axis=grouped_scaled_tensor.flatten_axis,
             )
             output.append(out_i)
             scale_inv_ptr += scale_shape_i_size

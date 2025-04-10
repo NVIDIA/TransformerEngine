@@ -421,7 +421,7 @@ class ScalingMode(Enum):
         )
         return (rowwise_scale_shape, colwise_scale_shape)
 
-    def get_grouped_scale_shape(
+    def get_grouped_scale_shape_from_original_data_shape(
         self, data_shape, group_sizes, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
@@ -440,7 +440,32 @@ class ScalingMode(Enum):
         for i in range(group_sizes.size):
             data_shape_i = (group_sizes[i], *data_shape[1:])
             scale_shape_i = self._get_impl().get_scale_shape(
-                data_shape, is_colwise, is_padded, flatten_axis
+                data_shape_i, is_colwise, is_padded, flatten_axis
+            )
+            grouped_scale_size += math.prod(scale_shape_i)
+        return (grouped_scale_size,)
+
+    def get_grouped_scale_shape_from_flattened_data_shape(
+        self, data_shape, group_sizes, other_sizes, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for scale tensors in this mode.
+
+        Args:
+            data_shape: Shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+        assert len(data_shape) == 1, f"Expect 1D flattened data_shape, got {data_shape}"
+        assert jnp.sum(group_sizes) * math.prod(other_sizes) == data_shape[0]
+        grouped_scale_size = 0
+        for i in range(group_sizes.size):
+            data_shape_i = (group_sizes[i], *other_sizes)
+            scale_shape_i = self._get_impl().get_scale_shape(
+                data_shape_i, is_colwise, is_padded, flatten_axis
             )
             grouped_scale_size += math.prod(scale_shape_i)
         return (grouped_scale_size,)
