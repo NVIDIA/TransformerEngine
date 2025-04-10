@@ -16,6 +16,8 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
+from ...utils import non_tn_fp8_gemm_supported
+
 
 class _FromFloat8Func(torch.autograd.Function):
     """Cast from FP8 to other dtype"""
@@ -142,3 +144,40 @@ class Float8TensorBase:
             data = data.contiguous()
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
         self._transpose_invalid = False
+
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
+        # Figure out what data is available and what is required
+        has_data = self._data is not None
+        has_data_transpose = self._transpose is not None and not self._transpose_invalid
+        needs_data = has_data
+        needs_data_transpose = has_data_transpose
+        if non_tn_fp8_gemm_supported():
+            if rowwise_usage is not None and rowwise_usage:
+                needs_data = True
+            if columnwise_usage is not None and columnwise_usage:
+                needs_data = True
+            needs_data_transpose = False
+        else:
+            if rowwise_usage is not None:
+                needs_data = rowwise_usage
+            if columnwise_usage is not None:
+                needs_data_transpose = columnwise_usage
+
+        # Generate data that is required
+        if needs_data and not has_data:
+            raise RuntimeError("Cannot generate FP8 data, even from FP8 data transpose")
+        if needs_data_transpose and not has_data_transpose:
+            if not has_data:
+                raise RuntimeError("FP8 data is required to generate FP8 data transpose")
+            self._create_transpose()
+
+        # Delete data that is not required
+        if not needs_data:
+            self._data = None
+        if not needs_data_transpose:
+            self._transpose = None
+            self._transpose_invalid = True
