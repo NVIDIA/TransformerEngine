@@ -85,6 +85,11 @@ struct CommGemmCtx {
 
 namespace {
 
+int64_t block_size(CommGemmCtx* ctx, int64_t global_size) {
+    // Use non-cyclic layout to maximize opportunity for comm overlap.
+    return (global_size + ctx->nranks - 1) / ctx->nranks;
+}
+
 void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, int64_t n, int64_t k,
                    const Tensor* a, const Tensor* b, const Tensor* d, const Tensor* bias,
                    const Tensor* pre_act_out, bool transa, bool transb, bool grad, bool accumulate,
@@ -93,26 +98,35 @@ void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, i
   const auto a1 = a->flat_last_dim();
   const auto b0 = b->flat_first_dim();
   const auto b1 = b->flat_last_dim();
+  const auto d0 = d->flat_first_dim();
+  const auto d1 = d->flat_last_dim();
 
-  if (transa)
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, a0, a1, 0, 0, a0,
-                                                       get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), ctx->a_desc.get()));
-  else
+  if (transa) {
+    NVTE_CHECK(a1 == k);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, k, block_size(ctx, m), 0, 0, k,
+                                                     get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->a_desc.get()));
+  } else {
+    NVTE_CHECK(false);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, a1, a0, 0, 0, a1,
-                                                       get_cuda_dtype(a->dtype()),
-                                                       ctx->grid_row_major.get(), ctx->a_desc.get()));
-  if (transb)
+                                                     get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->a_desc.get()));
+  }
+  if (transb) {
+    NVTE_CHECK(false);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, b0, b1, 0, 0, b0,
-                                                       get_cuda_dtype(b->dtype()),
-                                                       ctx->grid_row_major.get(), ctx->b_desc.get()));
-  else
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, b1, b0, 0, 0, b1,
-                                                       get_cuda_dtype(b->dtype()),
-                                                       ctx->grid_row_major.get(), ctx->b_desc.get()));
-  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, a1, b0, 0, 0, a1,
-                                                   get_cuda_dtype(d->dtype()),
-                                                   ctx->grid_col_major.get(), ctx->d_desc.get()));
+                                                     get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->b_desc.get()));
+  } else {
+    NVTE_CHECK(b1 == k);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, k, block_size(ctx, n), 0, 0, k,
+                                                     get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->b_desc.get()));
+  }
+  NVTE_CHECK(d0 == n);
+  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
+      m, n, block_size(ctx, m), block_size(ctx, n), 0, 0, block_size(ctx, m),
+      get_cuda_dtype(d->dtype()), ctx->grid_col_major.get(), ctx->d_desc.get()));
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -255,4 +269,8 @@ void nvte_comm_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVT
   auto tpre_act_out = static_cast<const Tensor*>(pre_act_out);
   cublasmp_gemm(ctx, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P, m, n, k, ta, tb, td, tbias, tpre_act_out,
                 transa, transb, grad, accumulate, comm_sm_count, main_stream);
+}
+
+int64_t nvte_comm_gemm_numroc(CommGemmCtx* ctx, int64_t global_size) {
+  return cublasMpNumroc(global_size, block_size(ctx, global_size), ctx->rank, 0, ctx->nranks);
 }
