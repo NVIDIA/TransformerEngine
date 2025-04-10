@@ -271,6 +271,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     flatten_axis: int = -1
 
     def __post_init__(self):
+        assert scale_inv.ndim == 1, "Unsupported scale_inv shape"
         flatten_axis = (
                 len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
                 )

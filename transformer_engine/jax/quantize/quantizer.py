@@ -134,8 +134,8 @@ class Quantizer(ABC):
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         if (is_rowwise and is_colwise) or self.is_2x2x():
-            rowwise_tensor, _ = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
-            colwise_tensor, _ = self._quantize_func(
+            rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
+            colwise_tensor = self._quantize_func(
                 x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis
             )
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
