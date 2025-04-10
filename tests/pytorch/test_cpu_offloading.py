@@ -10,7 +10,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
-# Check if FP8 supported
+# Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 SIZE = 512
@@ -18,14 +18,14 @@ NUM_HEADS = 8
 NUM_LAYERS = 5
 EPSILON = 0.1
 
-# Flash attention saves some internal tensor for the backward,
+# Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
 assert os.getenv("NVTE_FLASH_ATTN") == "0"
 
 # Offloading is supported for attention only for fused and flash attention backends,
-# so use of bfloat16 is required.
+# so the use of bfloat16 is required.
 #
-# For transformer layer activation offloading with dropout is not supported,
+# For the TransformerLayer, activation offloading with dropout is not supported,
 # so we set hidden_dropout to 0.0.
 model_types = {
     "linear":
@@ -45,6 +45,7 @@ model_types = {
 def _get_input():
     return torch.empty((128, SIZE, SIZE), dtype=torch.bfloat16).cuda()
 
+
 def _get_fp8_weight_cache_size(models, fp8):
     """
     Calculate the total FP8 weight cache size (in MB) for a list of models.
@@ -58,9 +59,9 @@ def _get_fp8_weight_cache_size(models, fp8):
             if "weight" in name:
                 params_bytes += param.numel()
 
-    # one byte for columnwise and one byte for rowwise,
+    # One byte for columnwise and one byte for rowwise,
     # hence multiply by 2 and convert to MB
-    return 2 * params_bytes // 1024**2
+    return (2 * params_bytes) // (1024**2)
 
 
 def _measure_memory_between_forward_and_backward(models, fp8, cpu_offload):
@@ -82,10 +83,11 @@ def _measure_memory_between_forward_and_backward(models, fp8, cpu_offload):
             tensor = model(tensor, is_first_microbatch=True)
         tensor = sync_function(tensor)
 
-    max_mem_used = torch.cuda.memory_allocated() / 1024**2
+    max_mem_used = torch.cuda.memory_allocated() / (1024**2)
     torch.cuda.synchronize()
 
     return max_mem_used
+
 
 @pytest.mark.parametrize("fp8", [True, False])
 @pytest.mark.parametrize("model_key", model_types.keys())
@@ -93,9 +95,10 @@ def test_cpu_offload(fp8, model_key) -> None:
     """
     We run three configurations:
     (1) No offloading: All activations remain on the GPU between forward and backward passes.
-    (2) No offloading (one layer): Only the first layer's activations remain on the GPU between forward and backward passes.
-    (3) With offloading (all layers): Only the last layer's activations remain on the GPU between forward and backward passes,
-        while all other layers are offloaded to the CPU.
+    (2) No offloading (one layer): Only the first layer's activations remain on the GPU between
+        forward and backward passes.
+    (3) With offloading (all layers): Only the last layer's activations remain on the GPU
+        between forward and backward passes, while all other layers are offloaded to the CPU.
 
     We expect the memory consumption of configurations (2) and (3) to be similar, with
     the difference being the size of the FP8 cache that is not offloaded to the CPU.
@@ -119,4 +122,3 @@ def test_cpu_offload(fp8, model_key) -> None:
     # which is not offloaded to the CPU.
     memory_consumption_diff = abs(with_offloading - without_offloading_one_layer)
     assert memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8) + EPSILON
-
