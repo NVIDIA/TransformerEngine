@@ -303,10 +303,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
     ):
         del (out_dtype, result_infos, scale_dtype, scale_shapes, is_outer)  # Unused.
 
-        assert (
-            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
-        ), "Current tensor scaling is not yet supported for multi-GPU partitioning."
-
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -315,7 +311,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING.value, ScalingMode.CURRENT_TENSOR_SCALING.value):
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -380,10 +376,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
     ):
         del result_infos, is_outer
 
-        assert (
-            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
-        ), "Current tensor scaling is not yet supported for multi-GPU partitioning."
-
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -392,7 +384,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING.value, ScalingMode.CURRENT_TENSOR_SCALING.value):
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -472,6 +464,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
             else:
                 global_dbias = local_dbias
+
+            # jax.debug.print('Local scale inv: {}', local_scale_inv)
 
             return (
                 local_x,
@@ -652,6 +646,8 @@ def _quantize_dbias_impl(
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)
+
+    jax.debug.print('Global scale inv: {}', rowwise_scale_inv)
 
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
