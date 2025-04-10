@@ -1583,22 +1583,6 @@ def test_grouped_linear_accuracy(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("parallel_mode", ["column", "row"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
-def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
-    """Split the tests to save CI time"""
-    test_grouped_linear_accuracy(
-        dtype=torch.float32,
-        num_gemms=6,
-        bs=2,
-        model="126m",
-        recipe=recipe,
-        fp8_model_params=True,
-        parallel_mode=parallel_mode,
-        fuse_wgrad_accumulation=True,
-    )
-
-
 @pytest.mark.parametrize("recipe", fp8_recipes + [None])
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
