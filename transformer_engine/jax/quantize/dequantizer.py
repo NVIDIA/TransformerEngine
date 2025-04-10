@@ -84,8 +84,8 @@ class Dequantizer:
         )
 
     funcs = {
-        ScalingMode.NVTE_DELAYED_TENSOR_SCALING: _dq_func_tensor_scaling,
-        ScalingMode.NVTE_MXFP8_1D_SCALING: _dq_func_block_scaling,
+        ScalingMode.DELAYED_TENSOR_SCALING: _dq_func_tensor_scaling,
+        ScalingMode.MXFP8_1D_SCALING: _dq_func_block_scaling,
     }
 
     @staticmethod
