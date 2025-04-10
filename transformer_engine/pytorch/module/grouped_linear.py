@@ -277,7 +277,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
                 for weight, quantizer in zip(weights, ctx.weight_quantizers):
-                    if quantizer is not None:
+                    if quantizer is not None and isinstance(weight, QuantizedTensor):
                         weight.update_usage(
                             rowwise_usage=quantizer.rowwise_usage,
                             columnwise_usage=quantizer.columnwise_usage,

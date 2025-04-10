@@ -751,7 +751,7 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # FC2 DGRAD; Unconditional
-            if ctx.fc2_weight_quantizer is not None:
+            if ctx.fc2_weight_quantizer is not None and isinstance(ctx.fc2_weight, QuantizedTensor):
                 ctx.fc2_weight.update_usage(
                     rowwise_usage=ctx.fc2_weight_quantizer.rowwise_usage,
                     columnwise_usage=ctx.fc2_weight_quantizer.columnwise_usage,
@@ -902,7 +902,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc1_dgrad_bulk = ub_obj_fc1_wgrad.get_buffer(None)
 
             # FC1 DGRAD: Unconditional
-            if ctx.fc1_weight_quantizer is not None:
+            if ctx.fc1_weight_quantizer is not None and isinstance(ctx.fc1_weight_quantizer, QuantizedTensor):
                 ctx.fc1_weight.update_usage(
                     rowwise_usage=ctx.fc1_weight_quantizer.rowwise_usage,
                     columnwise_usage=ctx.fc1_weight_quantizer.columnwise_usage,

@@ -575,7 +575,7 @@ class _Linear(torch.autograd.Function):
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
 
-                if ctx.weight_quantizer is not None:
+                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensor):
                     weight_fp8.update_usage(
                         rowwise_usage=ctx.weight_quantizer.rowwise_usage,
                         columnwise_usage=ctx.weight_quantizer.columnwise_usage,

@@ -652,7 +652,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
-            if ctx.weight_quantizer is not None:
+            if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensor):
                 weight.update_usage(
                     rowwise_usage=ctx.weight_quantizer.rowwise_usage,
                     columnwise_usage=ctx.weight_quantizer.columnwise_usage,
