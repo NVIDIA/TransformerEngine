@@ -39,10 +39,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
   size_t expected_output_size = num_gemms + 1;
   size_t actual_input_size = input_list.size();
   size_t actual_output_size = output_list.size();
-  NVTE_CHECK(actual_input_size == expected_input_size,
-             "Expected %zu input tensors, got %zu", expected_input_size, actual_input_size);
-  NVTE_CHECK(actual_output_size == expected_output_size,
-             "Expected %zu output tensors, got %zu", expected_output_size, actual_output_size);
+  NVTE_CHECK(actual_input_size == expected_input_size, "Expected %zu input tensors, got %zu",
+             expected_input_size, actual_input_size);
+  NVTE_CHECK(actual_output_size == expected_output_size, "Expected %zu output tensors, got %zu",
+             expected_output_size, actual_output_size);
 
   bool trans_lhs = true;
   bool trans_rhs = false;
@@ -108,7 +108,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING || 
+    if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
         scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       float *amax_dptr = nullptr;
       float *scale_dptr = nullptr;
@@ -126,7 +126,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
         lhs_sinv_shape[i] = lhs_sinv_shape_[i];
         rhs_sinv_shape[i] = rhs_sinv_shape_[i];
       }
-  
+
       TensorWrapper lhs_i_(NVTE_MXFP8_1D_SCALING);
       TensorWrapper rhs_i_(NVTE_MXFP8_1D_SCALING);
       lhs_i_.set_rowwise_data(lhs_ptr, lhs_dtype, lhs_shape);

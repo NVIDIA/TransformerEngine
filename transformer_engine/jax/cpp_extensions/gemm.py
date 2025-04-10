@@ -59,7 +59,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             scaling_mode: Scaling mode for the GEMM operations.
             out_dtype: Data type of the output tensors.
             has_bias: Boolean indicating if bias tensors are provided.
-        
+
         Returns:
            A tuple of ShapedArray objects of size num_gemms+1:
                ret[0 : num_gemms]: GEMM output tensors,
@@ -67,9 +67,9 @@ class GroupedGemmPrimitive(BasePrimitive):
         """
         del scaling_mode
         expected_num_args = 5 * num_gemms if has_bias else 4 * num_gemms
-        assert len(args) == expected_num_args, (
-            f"Expected {expected_num_args} input arguments, but got {len(args)}"
-        )
+        assert (
+            len(args) == expected_num_args
+        ), f"Expected {expected_num_args} input arguments, but got {len(args)}"
         A_list = args[0:num_gemms]
         B_list = args[num_gemms : 2 * num_gemms]
         # A and B have shapes [1, m, k] and [1, n, k]
