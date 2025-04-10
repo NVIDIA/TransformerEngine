@@ -80,12 +80,13 @@ class ScalingModeMetadataImpl(ABC):
         """
 
     @abstractmethod
-    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization.
 
         Returns:
             The Shardy rules for the scaling mode
@@ -127,16 +128,18 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del data_shape, is_colwise
         return (1,)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
             input_rank: The rank of the input tensor (for which we produce the scale tensor)
             unique_var: An otherwise unused Shardy variable name prefix
+            flatten_axis: Axis along which data can be flattened to 2D for quantization.
 
         Returns:
             The Shardy rules for the scaling mode
         """
+        del flatten_axis
         input_spec = tuple(f"x{i}" for i in range(input_rank))
         return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
 
@@ -262,7 +265,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
@@ -272,29 +275,31 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        bx = unique_var
-        by = f"{unique_var}_"
+        input_spec = [f"x{i}" for i in range(input_rank)]
 
         # We have to use two different factors in the two CompoundFactors because of Shardy
         # verifier requirements, even though they are the same.
-        input_spec = [f"x{i}" for i in range(input_rank - 2)] + [
-            CompoundFactor(bx, "block_size_x"),
-            CompoundFactor(by, "block_size_y"),
-        ]
+        rowwise_var = unique_var
+        colwise_var = f"{unique_var}_"
+        input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
+        input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
 
         # The rowwise and colwise scale tensors should be sharded the same way as the input.
         # However, we need to adjust the dimensions where the block scaling factor applies.
         rowwise = input_spec.copy()
-        rowwise[-1] = by
+        rowwise[-1] = rowwise_var
 
         colwise = input_spec.copy()
-        colwise[-2] = bx
+        colwise[flatten_axis - 1] = colwise_var
+
+        # This implementation needs to be updated for different block dims.
+        assert self._block_dims == (1, 32)
 
         return QuantizeShardyRules(
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {"block_size_x": 32, "block_size_y": 32},
+            {"block_size_rowwise": 32, "block_size_colwise": 32},
         )
 
 
@@ -370,7 +375,7 @@ class ScalingMode(Enum):
         """
         return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var) -> Tuple[Tuple[str]]:
+    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis=-1) -> Tuple[Tuple[str]]:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
@@ -380,7 +385,7 @@ class ScalingMode(Enum):
         Returns:
             The Shardy rules for the scaling mode
         """
-        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var)
+        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
 
     def __eq__(self, other):
         """Compare this scaling mode with another.

@@ -425,21 +425,17 @@ class ActLuPrimitive(BasePrimitive):
 
         x_rank = len(value_types[0].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var="i"
+            x_rank - 1, unique_var="i", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
         out = (*x_axes[:-2], x_axes[-1])
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            scale_inv = scale_rules.rowwise_rule[:-1] + (scale_rules.rowwise_rule[-1],)
-            colwise_scale_inv = scale_rules.colwise_rule[:-1] + (scale_rules.colwise_rule[-1],)
-        else:
-            scale_inv = scale_rules.rowwise_rule
-            colwise_scale_inv = scale_rules.colwise_rule
+        scale_inv = scale_rules.rowwise_rule
+        colwise_scale_inv = scale_rules.colwise_rule
 
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(
-                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-1)
+                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-2)
                 )
             else:
                 colwise_out = out
@@ -890,7 +886,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         del out_dtype, scale_dtype, scale_shapes, act_enum, act_len, is_outer, mesh, result_types
 
         x_rank = len(value_types[1].shape)
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank, unique_var="i")
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            x_rank, unique_var="i", flatten_axis=-2
+        )
         x_axes = scale_rules.input_spec
         out = x_axes
         if is_2x:
