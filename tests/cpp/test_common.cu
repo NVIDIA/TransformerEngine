@@ -216,8 +216,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode,
-               const QuantizationOptions* q_opts) {
+               const NVTEScalingMode &scaling_mode) {
   name_ = name;
   const size_t seed = create_seed_from_tensor_name(name);
   gen_.seed(seed);
@@ -327,10 +326,6 @@ Tensor::Tensor(const std::string& name,
         auto scale_dtype = colwise_scale_meta.type;
         tensor_.set_columnwise_scale_inv(columnwise_scale_inv, scale_dtype, columnwise_scale_shape);
       }
-    }
-    if (q_opts != nullptr) {
-      NVTE_CHECK(q_opts->force_pow_2_scales, "Pow2 scales is required for current implementation.");
-      NVTE_CHECK(q_opts->amax_epsilon == 0.0, "Amax epsilon must be zero for current implementation.");
     }
   }
 }

@@ -23,6 +23,7 @@ from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer, QuantizedTensor
 from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
@@ -483,6 +484,12 @@ class BasicLinear(BasicOperation):
                 "Attempting to generate MXFP8 output tensor, "
                 "but GEMM with MXFP8 output is not supported"
             )
+        if isinstance(output_quantizer, Float8BlockQuantizer):
+            raise RuntimeError(
+                "Attempting to generate Float8BlockQuantized output tensor, "
+                "but GEMM with Float8BlockQuantized output is not supported"
+            )
+
         if output_quantizer is not None:
             output_quantizer.set_usage(rowwise=True, columnwise=False)
 

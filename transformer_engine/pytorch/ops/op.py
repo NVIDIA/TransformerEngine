@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
     fp8_autocast,
@@ -219,6 +220,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             if num_quantizers == 0:
                 continue
 
+            if recipe.float8_block_scaling():
+                raise NotImplementedError(
+                    "Fusible operations do not support FP8 block scaling recipe"
+                )
+
             # Construct quantization recipe state
             recipe_state = RecipeState.create(
                 recipe,
@@ -260,8 +266,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 continue
             recipe_state = self._fp8_metas[mode][fp8_meta_key]
             need_to_reset_recipe_state = (
-                recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState)
-            ) or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
+                (recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState))
+                or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
+                or (
+                    recipe.float8_block_scaling()
+                    and not isinstance(recipe_state, Float8BlockScalingRecipeState)
+                )
+            )
             if need_to_reset_recipe_state:
                 self._reset_quantization_recipe_state(recipe=recipe)
                 return
