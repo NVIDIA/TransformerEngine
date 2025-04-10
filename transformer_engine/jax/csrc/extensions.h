@@ -119,6 +119,18 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 // CuBLAS helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
+// GEMM
+
+Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+                   Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
+                   Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
+                   Result_Type out_amax_updated, Result_Type out_scale_updated,
+                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type workspace,
+                   bool lhs_trans, bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
+                   bool accumulate, bool use_split_accumulator);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 

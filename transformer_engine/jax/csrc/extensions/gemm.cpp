@@ -210,5 +210,113 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<int64_t>("scaling_mode"),
                               FFI_CudaGraph_Traits);
 
+void GemmImpl(cudaStream_t stream, void *lhs, const std::vector<size_t> &lhs_shape,
+              float *lhs_scale_inv, bool lhs_trans, void *rhs, const std::vector<size_t> &rhs_shape,
+              float *rhs_scale_inv, bool rhs_trans, DType operand_dtype, void *bias,
+              DType bias_dtype, void *out, float *out_amax, float *out_scale, DType out_dtype,
+              void *pre_gelu_out, void *workspace, size_t workspace_size, bool fuse_gelu,
+              bool fuse_bias, bool grad, bool accumulate, bool use_split_accumulator) {
+  auto lhs_ = TensorWrapper(lhs, lhs_shape, operand_dtype, nullptr, nullptr, lhs_scale_inv);
+  auto rhs_ = TensorWrapper(rhs, rhs_shape, operand_dtype, nullptr, nullptr, rhs_scale_inv);
+
+  std::vector<size_t> out_shape(2, 0);
+  out_shape[0] = (lhs_trans) ? lhs_shape[1] : lhs_shape[0];
+  out_shape[1] = (rhs_trans) ? rhs_shape[0] : rhs_shape[1];
+  auto out_ = TensorWrapper(out, out_shape, out_dtype, out_amax, out_scale, nullptr);
+
+  void *bias_ptr = (fuse_bias) ? bias : nullptr;
+  std::vector<size_t> bias_shape =
+      (fuse_bias) ? std::vector<size_t>{out_shape[1]} : std::vector<size_t>{0};
+  auto bias_ = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
+
+  void *pre_gelu_ptr = (fuse_gelu) ? pre_gelu_out : nullptr;
+  std::vector<size_t> pre_gelu_shape = (fuse_gelu) ? out_shape : std::vector<size_t>{0};
+  auto pre_gelu_out_ = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, bias_dtype);
+  auto workspace_ = TensorWrapper(workspace, std::vector<size_t>{workspace_size}, DType::kByte);
+
+  // cuBLAS is column-major, so we swap LHS and RHS in the arguments
+  auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+  nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_out_.data(),
+                   (rhs_trans) ? CUBLAS_OP_T : CUBLAS_OP_N, (lhs_trans) ? CUBLAS_OP_T : CUBLAS_OP_N,
+                   grad, workspace_.data(), accumulate, use_split_accumulator, num_math_sm, stream);
+}
+
+Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+                   Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
+                   Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
+                   Result_Type out_amax_updated, Result_Type out_scale_updated,
+                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type workspace,
+                   bool lhs_trans, bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
+                   bool accumulate, bool use_split_accumulator) {
+  // Inputs
+  auto lhs_ptr = lhs.untyped_data();
+  auto lhs_scale_inv_ptr = reinterpret_cast<float *>(lhs_scale_inv.untyped_data());
+  auto rhs_ptr = rhs.untyped_data();
+  auto rhs_scale_inv_ptr = reinterpret_cast<float *>(rhs_scale_inv.untyped_data());
+  auto operand_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
+  auto bias_ptr = bias.untyped_data();
+  auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
+  auto gelu_input_ptr = gelu_input.untyped_data();
+  auto out_amax_ptr = reinterpret_cast<float *>(out_amax.untyped_data());
+  auto out_scale_ptr = reinterpret_cast<float *>(out_scale.untyped_data());
+
+  // Outputs
+  auto out_ptr = out->untyped_data();
+  auto out_amax_updated_ptr = reinterpret_cast<float *>(out_amax_updated->untyped_data());
+  auto out_scale_updated_ptr = reinterpret_cast<float *>(out_scale_updated->untyped_data());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(out->element_type());
+  auto pre_gelu_out_ptr = pre_gelu_out->untyped_data();
+  auto bias_grad_ptr = bias_grad->untyped_data();
+  auto workspace_ptr = workspace->untyped_data();
+  auto workspace_size = workspace->dimensions().back();
+
+  // Operand aliasing
+  NVTE_CHECK(bias_ptr == bias_grad_ptr, "bias not bound to bias_grad in TE/JAX GEMM");
+  NVTE_CHECK(gelu_input_ptr == pre_gelu_out_ptr,
+             "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
+  NVTE_CHECK(out_amax_ptr == out_amax_updated_ptr,
+             "out_amax not bound to out_amax_updated in TE/JAX GEMM");
+  NVTE_CHECK(out_scale_ptr == out_scale_updated_ptr,
+             "out_scale not bound to out_scale_updated in TE/JAX GEMM");
+
+  // GEMM sizing
+  std::vector<size_t> lhs_shape(lhs.dimensions().begin(), lhs.dimensions().end());
+  std::vector<size_t> rhs_shape(rhs.dimensions().begin(), rhs.dimensions().end());
+
+  // Swap A and B argument locations to match what the TE/common kernel expects
+  GemmImpl(stream, lhs_ptr, lhs_shape, lhs_scale_inv_ptr, lhs_trans, rhs_ptr, rhs_shape,
+           rhs_scale_inv_ptr, rhs_trans, operand_dtype, bias_ptr, bias_dtype, out_ptr, out_amax_ptr,
+           out_scale_ptr, out_dtype, pre_gelu_out_ptr, workspace_ptr, workspace_size, fuse_gelu,
+           fuse_bias, grad, accumulate, use_split_accumulator);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // lhs
+                                  .Arg<Buffer_Type>()      // lhs_scale_inv
+                                  .Arg<Buffer_Type>()      // rhs
+                                  .Arg<Buffer_Type>()      // rhs_scale_inv
+                                  .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // gelu_input
+                                  .Arg<Buffer_Type>()      // out_amax
+                                  .Arg<Buffer_Type>()      // out_scale
+                                  .Ret<Buffer_Type>()      // out
+                                  .Ret<Buffer_Type>()      // out_amax_updated
+                                  .Ret<Buffer_Type>()      // out_scale_updated
+                                  .Ret<Buffer_Type>()      // pre_gelu_out
+                                  .Ret<Buffer_Type>()      // bias_grad
+                                  .Ret<Buffer_Type>()      // workspace
+                                  .Attr<bool>("lhs_trans")
+                                  .Attr<bool>("rhs_trans")
+                                  .Attr<bool>("fuse_gelu")
+                                  .Attr<bool>("fuse_bias")
+                                  .Attr<bool>("grad")
+                                  .Attr<bool>("accumulate")
+                                  .Attr<bool>("use_split_accumulator"),
+                              FFI_CudaGraph_Traits);
+
 }  // namespace jax
 }  // namespace transformer_engine

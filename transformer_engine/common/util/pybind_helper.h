@@ -91,30 +91,30 @@
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
       .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
-  py::class_<transformer_engine::CommOverlapCore,                                                  \
+  pybind11::class_<transformer_engine::CommOverlapCore,                                            \
              std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
                                                                    pybind11::module_local())       \
-      .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
-           py::call_guard<py::gil_scoped_release>())                                               \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapCore(); }),             \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapBase,                                                  \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
+  pybind11::class_<transformer_engine::CommOverlapBase,                                            \
              std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
              transformer_engine::CommOverlapCore>(m, "CommOverlapBase", pybind11::module_local())  \
-      .def(py::init([]() { return new transformer_engine::CommOverlapBase(); }),                   \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapP2PBase,                                               \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapBase(); }),             \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
+  pybind11::class_<transformer_engine::CommOverlapP2PBase,                                         \
              std::shared_ptr<transformer_engine::CommOverlapP2PBase>,                              \
              transformer_engine::CommOverlapCore>(m, "CommOverlapP2PBase",                         \
                                                   pybind11::module_local())                        \
-      .def(py::init([]() { return new transformer_engine::CommOverlapP2PBase(); }),                \
-           py::call_guard<py::gil_scoped_release>());                                              \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapP2PBase(); }),          \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
   m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,                \
-        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                      \
+        pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);    \
   m.def(                                                                                           \
       "get_stream_priority_range",                                                                 \
       [](int device_id = -1) {                                                                     \
@@ -122,8 +122,8 @@
         transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);           \
         return std::make_pair(low_pri, high_pri);                                                  \
       },                                                                                           \
-      py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
+      pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);      \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
-        py::call_guard<py::gil_scoped_release>());
+        pybind11::call_guard<pybind11::gil_scoped_release>());
 
 #endif

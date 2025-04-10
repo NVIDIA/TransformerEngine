@@ -31,10 +31,10 @@ import sys
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
+module_name = "transformer_engine_jax"
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
-    module_name = "transformer_engine_jax"
 
     if is_package_installed(module_name):
         assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
@@ -79,7 +79,9 @@ def _load_library():
     spec.loader.exec_module(solib)
 
 
-_load_library()
+if module_name not in sys.modules:
+    _load_library()
+
 from . import flax
 from . import quantize
 
@@ -101,7 +103,6 @@ ShardingResource = deprecate_wrapper(
 )
 
 __all__ = [
-    "fp8_autocast",
     "MeshResource",
     "MajorShardingType",
     "ShardingResource",

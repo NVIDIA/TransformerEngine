@@ -161,6 +161,13 @@ def jax_version_meet_requirement(version: str):
     return jax_version >= jax_version_required
 
 
+def jax_dtype_is_fp8(dtype):
+    """
+    Check if the given jax.numpy.dtype is an FP8 dtype.
+    """
+    return dtypes.canonicalize_dtype(dtype) in [jnp.float8_e4m3fn, jnp.float8_e5m2]
+
+
 def get_xla_flag(flag: str, default=None, cast=str):
     """
     Returns the value of a flag/option in XLA_FLAGS environment variable if present or returns the default value.

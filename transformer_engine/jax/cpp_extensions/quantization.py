@@ -34,6 +34,14 @@ else:
 
 __all__ = ["quantize", "quantize_dbias"]
 
+def _jax_cast_fp8(inputs, scale, amax, out_dtype):
+    """
+    JAX native fp8 casting implementation
+    """
+    casted_output = _jax_quantize(inputs, scale, dq_dtype=out_dtype)
+    updated_amax = jax.lax.max(amax, jnp.max(jnp.abs(inputs)).astype(amax.dtype))
+    return casted_output, updated_amax
+
 
 class DBiasQuantizePrimitive(BasePrimitive):
     """
