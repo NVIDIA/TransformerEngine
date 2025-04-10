@@ -475,7 +475,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
     def shardy_sharding_rule(
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -491,17 +492,20 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
 
         x_axes = scale_rules.input_spec
+        colwise_scale_inv = scale_rules.colwise_rule
+
         out = x_axes
-        if q_axis in (QuantizeAxis.COLWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out = tuple(multidim_transpose(x_axes))
+                colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes
         else:
             colwise_out = ("j",)
+            colwise_scale_inv =  ("k",)
 
-        dbias = (x_axes[-1],) if is_dbias else ("k",)
-        amax = ("l",)
+        dbias = x_axes[flatten_axis:] if is_dbias else ("l",)
+        amax = ("m",)
 
         return SdyShardingRule(
             (x_axes, ("…1",)),
