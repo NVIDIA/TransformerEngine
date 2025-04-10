@@ -25,6 +25,8 @@ void nvte_comm_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVT
                     const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                     bool accumulate, int comm_sm_count, cudaStream_t main_stream);
 
+int64_t nvte_comm_gemm_numroc(CommGemmCtx* ctx, int64_t global_size);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
