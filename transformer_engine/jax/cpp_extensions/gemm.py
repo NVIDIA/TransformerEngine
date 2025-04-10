@@ -98,7 +98,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias_contig,
             dim_list,
             num_gemms=num_gemms,
-            scaling_mode=int(scaling_mode),
+            scaling_mode=scaling_mode.value,
         )
 
     @staticmethod
@@ -123,7 +123,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             bias_contig,
             dim_list,
             num_gemms=num_gemms,
-            scaling_mode=scaling_mode.value,
+            scaling_mode=scaling_mode,
             out_dtype=out_dtype,
             out_flat_size=out_flat_size,
         )
@@ -198,7 +198,7 @@ def _jax_gemm_delayed_scaling_fp8(
 ):
     """FP8 GEMM for XLA pattern match"""
     assert (
-        rhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+        rhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
     ), "rhs does not have delayed tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
@@ -230,7 +230,7 @@ def _jax_gemm_mxfp8_1d(
     JAX GEMM for MXFP8 via scaled_matmul
     """
     assert (
-        rhs.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING
+        rhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING
     ), "rhs does not have MXFP8 1D scaling mode"
     from jax._src.cudnn.scaled_matmul_stablehlo import scaled_matmul_wrapper
 
@@ -291,10 +291,10 @@ def _jax_gemm(
 
     def _jax_gemm_fp8_impl(lhs, rhs):
 
-        if lhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             return _jax_gemm_delayed_scaling_fp8(lhs, rhs, dim_nums)
 
-        if lhs.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             return _jax_gemm_mxfp8_1d(lhs, rhs, dim_nums)
 
         raise NotImplementedError("Unsupported ScalingMode: {lhs.scaling_mode}")
@@ -403,7 +403,7 @@ def grouped_gemm(
             rhs_shape = rhs.data.shape
             out_dtype = lhs.dq_dtype
             # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal data_layout
-            if lhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+            if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
                 assert not (
                     lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
                 ), "FP8 GEMM does not support E5M2 * E5M2"
@@ -415,7 +415,7 @@ def grouped_gemm(
                 dim_nums = ((lhs_contract_dim,), (rhs_contract_dim,)), ((), ())
         else:
             # For jnp.ndarray, only consider contracting_dims, data_layout is always NN
-            scaling_mode = ScalingMode.NVTE_NO_SCALING
+            scaling_mode = ScalingMode.NO_SCALING
             lhs_shape = lhs.shape
             rhs_shape = rhs.shape
             out_dtype = lhs.dtype
@@ -427,13 +427,13 @@ def grouped_gemm(
         lhs_remain_shape = _calculate_remaining_shape(lhs_shape, lhs_contract)
         rhs_remain_shape = _calculate_remaining_shape(rhs_shape, rhs_contract)
 
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        if scaling_mode == ScalingMode.NO_SCALING:
             lhs_3d = _shape_normalization(lhs, lhs_dn)
             rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        elif scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
             rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_3d = _shape_normalization(lhs.data, lhs_dn)
             rhs_3d = _shape_normalization(rhs.data, rhs_dn)
             lhs_scale_inv = _shape_normalization(lhs.scale_inv, lhs_dn)
@@ -470,13 +470,13 @@ def grouped_gemm(
         dims.append((bm, bn, k))
         lhs_contig_.append(lhs_3d.reshape(-1))
         rhs_contig_.append(rhs_3d.reshape(-1))
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        if scaling_mode == ScalingMode.NO_SCALING:
             lhs_scale_inv_contig_.append(jnp.ones(1, dtype=jnp.float32))
             rhs_scale_inv_contig_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             lhs_scale_inv_contig_.append(lhs.scale_inv.reshape(-1))
             rhs_scale_inv_contig_.append(rhs.scale_inv.reshape(-1))
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_scale_inv_contig_.append(lhs_scale_inv.reshape(-1))
             rhs_scale_inv_contig_.append(rhs_scale_inv.reshape(-1))
         if bias_list is not None:
@@ -493,8 +493,8 @@ def grouped_gemm(
 
     # TE/common does not support NVTE_NO_SCALING yet
     # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
-    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
-        scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+    if scaling_mode == ScalingMode.NO_SCALING:
+        scaling_mode = ScalingMode.DELAYED_TENSOR_SCALING
 
     # Perform batched GEMM on flattened inputs
     out_contig = GroupedGemmPrimitive.outer_primitive.bind(
@@ -505,7 +505,7 @@ def grouped_gemm(
         bias_contig,
         dim_list,
         num_gemms=num_gemms,
-        scaling_mode=scaling_mode,
+        scaling_mode=scaling_mode.value,
         out_dtype=out_dtype,
         out_flat_size=out_flat_size,
     )

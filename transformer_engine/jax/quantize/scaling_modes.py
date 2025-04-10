@@ -19,6 +19,8 @@ import operator
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
+from transformer_engine_jax import JAXX_Scaling_Mode
+
 
 __all__ = ["ScalingMode"]
 
@@ -216,25 +218,20 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
 
-# (Phuong: Map the NVTEScalingMode value to the ScalingMode
-
-
 @dataclass(frozen=True)
 @register_pytree_node_class
 class ScalingMode(Enum):
     """Enumeration of tensor scaling modes with their corresponding metadata implementations.
 
     This class defines the available scaling modes for tensor quantization:
-    - NVTE_DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
-    - NVTE_MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
-    - NVTE_INVALID_SCALING: Invalid scaling mode
-    - NVTE_NO_SCALING: No scaling applied
+    - DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
+    - MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
+    - NO_SCALING: No scaling applied
     """
 
-    NVTE_DELAYED_TENSOR_SCALING = 0
-    NVTE_MXFP8_1D_SCALING = 1
-    NVTE_INVALID_SCALING = 100
-    NVTE_NO_SCALING = 1000
+    NO_SCALING = JAXX_Scaling_Mode.NO_SCALING
+    DELAYED_TENSOR_SCALING = JAXX_Scaling_Mode.DELAYED_TENSOR_SCALING
+    MXFP8_1D_SCALING = JAXX_Scaling_Mode.MXFP8_1D_SCALING
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -329,8 +326,8 @@ class ScalingMode(Enum):
 
 
 SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
-    ScalingMode.NVTE_DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
-    ScalingMode.NVTE_MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
+    ScalingMode.DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
-    ScalingMode.NVTE_NO_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
 }
