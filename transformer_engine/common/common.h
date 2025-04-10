@@ -239,6 +239,7 @@ constexpr T DIVUP(const T &x, const T &y) {
 
 template <typename T1, typename T2>
 constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T1 &N, const T2 &M) {
+  static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value, "Integral type required.");
   return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
 }
 
