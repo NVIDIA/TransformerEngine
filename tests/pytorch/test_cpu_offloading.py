@@ -45,18 +45,22 @@ model_types = {
 def _get_input():
     return torch.empty((128, SIZE, SIZE), dtype=torch.bfloat16).cuda()
 
-
 def _get_fp8_weight_cache_size(models, fp8):
+    """
+    Calculate the total FP8 weight cache size (in MB) for a list of models.
+    """
     if not fp8:
         return 0
-    num_of_params = 0
+
+    params_bytes = 0
     for model in models:
         for name, param in model.named_parameters():
             if "weight" in name:
-                num_of_params += param.numel()
+                params_bytes += param.numel()
+
     # one byte for columnwise and one byte for rowwise,
-    # thus multiply by 2
-    return 2 * num_of_params // 1024**2
+    # hence multiply by 2 and convert to MB
+    return 2 * params_bytes // 1024**2
 
 
 def _measure_memory_between_forward_and_backward(models, fp8, cpu_offload):
@@ -83,15 +87,20 @@ def _measure_memory_between_forward_and_backward(models, fp8, cpu_offload):
 
     return max_mem_used
 
-
 @pytest.mark.parametrize("fp8", [True, False])
 @pytest.mark.parametrize("model_key", model_types.keys())
 def test_cpu_offload(fp8, model_key) -> None:
-    # We run three configurations:
-    # - no offloading - all activations should be on GPU between forward and backward
-    # - no offloading - one layer - only the first layer's activations should be on GPU between forward and backward
-    # - with offloading - all layers - only the last layer's activations should be on GPU between forward and backward,
-    #   all other layers should be offloaded to CPU.
+    """
+    We run three configurations:
+    (1) No offloading: All activations remain on the GPU between forward and backward passes.
+    (2) No offloading (one layer): Only the first layer's activations remain on the GPU between forward and backward passes.
+    (3) With offloading (all layers): Only the last layer's activations remain on the GPU between forward and backward passes,
+        while all other layers are offloaded to the CPU.
+
+    We expect the memory consumption of configurations (2) and (3) to be similar, with
+    the difference being the size of the FP8 cache that is not offloaded to the CPU.
+    We also expect this memory consumption to be smaller than in scenario (1).
+    """
 
     model_cls = model_types[model_key]
     models_list = [model_cls() for _ in range(NUM_LAYERS)]
@@ -104,9 +113,10 @@ def test_cpu_offload(fp8, model_key) -> None:
     with_offloading = _measure_memory_between_forward_and_backward(models_list, fp8, True)
 
     assert with_offloading < without_offloading
-    # The only difference between with_offloading memory consumption and
-    # without_offloading_one_layer memory consumption should be
-    # the size of weights after fp8 cast.
 
+    # The only difference between the memory consumption of with_offloading
+    # and without_offloading_one_layer should be the size of the FP8 weights cache,
+    # which is not offloaded to the CPU.
     memory_consumption_diff = abs(with_offloading - without_offloading_one_layer)
-    assert memory_consumption_diff < _get_fp8_weight_cache_size(models_list, fp8) + EPSILON
+    assert memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8) + EPSILON
+
