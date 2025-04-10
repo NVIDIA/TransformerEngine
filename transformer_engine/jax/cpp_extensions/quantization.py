@@ -502,7 +502,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 colwise_out = x_axes
         else:
             colwise_out = ("j",)
-            colwise_scale_inv =  ("k",)
+            colwise_scale_inv = ("k",)
 
         dbias = x_axes[flatten_axis:] if is_dbias else ("l",)
         amax = ("m",)
