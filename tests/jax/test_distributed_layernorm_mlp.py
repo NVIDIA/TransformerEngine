@@ -144,15 +144,7 @@ class TestDistributedLayernormMLP:
             )
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
-    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
-    @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("use_shardy", [True, False])
-    def test_layernorm_mlp_grad(
+    def _test_layernorm_mlp_grad(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy
     ):
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
@@ -258,6 +250,47 @@ class TestDistributedLayernormMLP:
                         atol=atol,
                         err_msg=f"multi_grads[{i}] is not close",
                     )
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    def test_layernorm_mlp_grad(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+    ):
+        self._test_layernorm_mlp_grad(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            fp8_recipe,
+            use_shardy=False,
+        )
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    def test_layernorm_mlp_grad_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype
+    ):
+        # We don't test block scaling with Shardy because at the time of writing,
+        # it is not supported in JAX's scaled_matmul_stablehlo.
+        self._test_layernorm_mlp_grad(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            fp8_recipe=recipe.DelayedScaling(),
+            use_shardy=True,
+        )
 
     def _test_layernorm_mlp(
         self,
