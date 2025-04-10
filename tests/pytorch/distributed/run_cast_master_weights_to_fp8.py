@@ -380,17 +380,11 @@ class MiniFSDP:
         # Step 3: Cast master weights to FP8 or BF16 precision
         if isinstance(self.weights[0], Float8Tensor):
             local_weights = []
-            for model_weight, local_weight in zip(self.weights, self.local_weights):
+            for local_weight in self.local_weights:
                 if local_weight is None:
                     local_weights.append(None)
                     continue
 
-                quantizer = model_weight._get_quantizer()
-                if isinstance(quantizer, Float8CurrentScalingQuantizer):
-                    local_weight = quantizer.create_tensor_from_data(
-                        local_weight.view(-1),
-                        model_weight.dtype,
-                    )
                 local_weights.append(local_weight)
 
             cast_master_weights_to_fp8(
