@@ -110,10 +110,16 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
 
     auto a_cols = nvte_comm_gemm_numroc(ctx_, m);
     auto b_cols = nvte_comm_gemm_numroc(ctx_, n);
-    auto a =
-        MakeDeviceTensorFromData<T>(adata, 0, m / nranks_ * rank_, k, a_cols, k, dtype, stream);
-    auto b =
-        MakeDeviceTensorFromData<T>(bdata, 0, n / nranks_ * rank_, k, b_cols, k, dtype, stream);
+
+    int64_t a_cols_start{};
+    int64_t b_cols_start{};
+    MPI_Scan(&a_cols, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Scan(&b_cols, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    a_cols_start -= a_cols;
+    b_cols_start -= b_cols;
+
+    auto a = MakeDeviceTensorFromData<T>(adata, 0, a_cols_start, k, a_cols, k, dtype, stream);
+    auto b = MakeDeviceTensorFromData<T>(bdata, 0, b_cols_start, k, b_cols, k, dtype, stream);
     auto d = MakeDeviceTensor<T>(a_cols, n, dtype, stream);
 
     transformer_engine::Tensor bias;
@@ -129,7 +135,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     nvte_cublas_gemm(&ga, &gb, &gd, &bias, &pre_act_out, transa, transb, grad, &workspace,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
 
-    std::vector<T> out(m * n / nranks_);
+    std::vector<T> out(a_cols * n);
     NVTE_CHECK_CUDA(cudaMemcpyAsync(out.data(), d.data.dptr, out.size() * sizeof out[0],
                                     cudaMemcpyDefault, stream));
     std::vector<T> out_golden_global(m * n);
@@ -139,7 +145,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 
-    auto out_golden = CopyLocalMatrix(out_golden_global, m / nranks_ * rank_, 0, a_cols, n, m);
+    auto out_golden = CopyLocalMatrix(out_golden_global, a_cols_start, 0, a_cols, n, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
       std::ostringstream ss;
