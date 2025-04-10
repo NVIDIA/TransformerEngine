@@ -337,7 +337,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
     bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
+    bool D_shape_zero = false;
     for (size_t t : size_t_shape) {
+      D_shape_zero = t == 0 || D_shape_zero;
       D_shape.push_back(t);
       if (t == 0) {
         D_numel_is_zero = true;
@@ -346,7 +348,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     auto dtype = GetATenDType(D_type);
     auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
     if (single_output) {
-      if (output_data_ptr == nullptr) {
+      if (output_data_ptr == nullptr || D_shape_zero) {
         out_tensor = at::empty(D_shape, opts);
       } else {
         // We need to check !D_numel_is_zero because if the final input portion has zero elements,
