@@ -2,19 +2,8 @@
 #
 # See LICENSE for license information.
 
-function error_exit() {
-    echo "Error: $1"
-    exit 1
-}
-
-function test_fail() {
-    RET=1
-    FAILED_CASES="$FAILED_CASES $1"
-    echo "Error: sub-test failed: $1"
-}
-
-RET=0
-FAILED_CASES=""
+source $(dirname "$0")/../test_utils.sh
+initialize_test_variables
 
 : ${TE_PATH:=/opt/transformerengine}
 
@@ -26,9 +15,4 @@ python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=/logs/pytest_te
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=/logs/pytest_test_model_parallel_encoder.xml $TE_PATH/examples/jax/encoder/test_model_parallel_encoder.py || test_fail "test_model_parallel_encoder.py"
 . $TE_PATH/examples/jax/encoder/run_test_multiprocessing_encoder.sh || test_fail "run_test_multiprocessing_encoder.sh"
 
-if [ $RET -ne 0 ]; then
-    echo "Error: some sub-tests failed: $FAILED_CASES"
-    exit 1
-fi
-echo "All tests passed"
-exit 0
+check_test_results

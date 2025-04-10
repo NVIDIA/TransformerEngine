@@ -2,19 +2,8 @@
 #
 # See LICENSE for license information.
 
-function error_exit() {
-    echo "Error: $1"
-    exit 1
-}
-
-function test_fail() {
-    RET=1
-    FAILED_CASES="$FAILED_CASES $1"
-    echo "Error: sub-test failed: $1"
-}
-
-RET=0
-FAILED_CASES=""
+source $(dirname "$0")/../test_utils.sh
+initialize_test_variables
 
 : "${TE_PATH:=/opt/transformerengine}"
 
@@ -46,9 +35,4 @@ pip3 install dist/*.whl --no-deps || error_exit "Failed to install dist/*.whl --
 
 python3 $TE_PATH/tests/pytorch/test_sanity_import.py || test_fail "test_sanity_import.py"
 
-if [ "$RET" -ne 0 ]; then
-    echo "Error in the following test cases:$FAILED_CASES"
-    exit 1
-fi
-echo "All tests passed"
-exit 0
+check_test_results

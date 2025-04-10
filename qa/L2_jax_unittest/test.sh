@@ -4,19 +4,8 @@
 
 set -x
 
-function error_exit() {
-    echo "Error: $1"
-    exit 1
-}
-
-function test_fail() {
-    RET=1
-    FAILED_CASES="$FAILED_CASES $1"
-    echo "Error: sub-test failed: $1"
-}
-
-RET=0
-FAILED_CASES=""
+source $(dirname "$0")/../test_utils.sh
+initialize_test_variables
 
 pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
@@ -36,9 +25,4 @@ python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=/logs/pytest_mn
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=/logs/pytest_test_single_gpu_encoder.xml $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py"
 
-if [ $RET -ne 0 ]; then
-    echo "Error: some sub-tests failed: $FAILED_CASES"
-    exit 1
-fi
-echo "All tests passed"
-exit 0
+check_test_results
