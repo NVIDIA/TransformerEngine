@@ -305,4 +305,11 @@ def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_mo
             amax=torch.Tensor(),
             fp8_dtype=model_weight._fp8_dtype,
         )
+        if use_fsdp_shard_model_weights and not isinstance(model_weight_fragment, Float8Tensor):
+            # NOTE: The fsdp shard model weight may be a unit8 tensor instead of
+            # a float8 tensor. We should handle this situation properly.
+            model_weight_fragment = quantizer.create_tensor_from_data(
+                model_weight_fragment.view(-1),
+                model_weight.dtype,
+            )
         quantizer.update_quantized(master_weight, model_weight_fragment)
