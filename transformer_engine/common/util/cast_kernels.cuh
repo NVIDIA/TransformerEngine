@@ -38,10 +38,10 @@ constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
 // Number of 1-byte elements that span 32 banks (4-byte each) of shared memory
-constexpr size_t BANK_WIDTH = (32 * 4) / 1;  // 128
+constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
-constexpr size_t THREADS_PER_BANK = BANK_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
+constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 constexpr __device__ __forceinline__ bool is_cached_act_op() {
