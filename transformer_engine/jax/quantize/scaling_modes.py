@@ -80,7 +80,9 @@ class ScalingModeMetadataImpl(ABC):
         """
 
     @abstractmethod
-    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(
+        self, input_rank, unique_var, flatten_axis
+    ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
@@ -128,7 +130,9 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del data_shape, is_colwise
         return (1,)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(
+        self, input_rank, unique_var, flatten_axis
+    ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
@@ -265,7 +269,9 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis) -> QuantizeShardyRules:
+    def get_shardy_sharding_rules(
+        self, input_rank, unique_var, flatten_axis
+    ) -> QuantizeShardyRules:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
@@ -375,7 +381,9 @@ class ScalingMode(Enum):
         """
         return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
 
-    def get_shardy_sharding_rules(self, input_rank, unique_var, flatten_axis=-1) -> Tuple[Tuple[str]]:
+    def get_shardy_sharding_rules(
+        self, input_rank, unique_var, flatten_axis=-1
+    ) -> Tuple[Tuple[str]]:
         """Sharding rules for the input and (row, col)wise scale tensors.
 
         Args:
