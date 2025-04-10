@@ -113,7 +113,7 @@ class TestFloat8BlockwiseTensor:
         # Note: Make sure values are not all close to zero, or else
         # test may pass trivially.
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-        x_ref.view(1)[0] = 0.75
+        x_ref.view(-1)[0] = 0.75
         x_ref_cuda = x_ref.to("cuda")
 
         # Cast to FP8 and back
