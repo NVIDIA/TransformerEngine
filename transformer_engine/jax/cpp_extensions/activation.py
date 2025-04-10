@@ -162,7 +162,7 @@ class ActLuPrimitive(BasePrimitive):
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
         out = ffi.ffi_lowering(ActLuPrimitive.name)(
-            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode, is_2x=is_2x
+            ctx, x, scale, act_enum=act_enum, scaling_mode=scaling_mode.value, is_2x=is_2x
         )
         return out
 
@@ -282,7 +282,7 @@ class ActLuPrimitive(BasePrimitive):
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
 
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
@@ -293,9 +293,9 @@ class ActLuPrimitive(BasePrimitive):
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = out_spec
 
         if is_2x:
@@ -339,7 +339,7 @@ class ActLuPrimitive(BasePrimitive):
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="ActLuPrimitive.out")
 
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
@@ -350,9 +350,9 @@ class ActLuPrimitive(BasePrimitive):
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = out_spec
 
         if is_2x:
@@ -391,7 +391,7 @@ class ActLuPrimitive(BasePrimitive):
                 )
             )
 
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             else:
                 global_updated_amax = local_amax
@@ -463,7 +463,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
                 colwise_out_shape = out_shape
@@ -545,7 +545,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             dz,
             x,
             scale,
-            scaling_mode=scaling_mode,
+            scaling_mode=scaling_mode.value,
             is_2x=is_2x,
             is_dbias=is_dbias,
             act_enum=int(act_enum),
@@ -673,7 +673,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
         )
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
@@ -691,9 +691,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = x_spec
 
         if is_2x:
@@ -743,7 +743,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         if is_2x:
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
@@ -761,9 +761,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
             scale_inv_spec = amax_spec = scale_spec
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = x_spec
 
         if is_2x:
@@ -810,7 +810,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             else:
                 global_dbias = local_dbias
 
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             else:
                 global_updated_amax = local_amax
@@ -928,7 +928,7 @@ def act_lu(
             out_dtype=x.dtype,
             act_enum=act_type_id,
             act_len=act_len,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
             scale_shapes=((), ()),
@@ -1042,7 +1042,7 @@ def quantize_dact_dbias(
             # outputs float32 for dbias accumulation
             out_dtype=(jnp.float32 if is_dbias else x.dtype),
             # default value for no scaling, TE/common ignore this value when scale is unset
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value,
+            scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,  # unused
             scale_dtype=jnp.float32,  # unused
             scale_shapes=((), ()),  # unused
@@ -1095,7 +1095,7 @@ def quantize_dact_dbias(
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

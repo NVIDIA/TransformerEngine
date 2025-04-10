@@ -19,6 +19,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
     Float8CurrentScaling,
+    Float8BlockScaling,
     Format,
     Recipe,
 )
@@ -49,6 +50,8 @@ def quantization_recipe() -> Recipe:
         return MXFP8BlockScaling()
     if QUANTIZATION == "fp8_cs":
         return Float8CurrentScaling()
+    if QUANTIZATION == "fp8_block_scaling":
+        return Float8BlockScaling()
     return te.fp8.get_default_fp8_recipe()
 
 
@@ -85,7 +88,7 @@ def main(argv=None, namespace=None):
 
     # Quantization scheme
     QUANTIZATION = args.quantization
-    if QUANTIZATION in ("fp8", "mxfp8"):
+    if QUANTIZATION in ("fp8", "mxfp8", "fp8_block_scaling"):
         global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
         SEQ_LEN = 32
         BATCH_SIZE = 32
