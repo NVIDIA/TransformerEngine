@@ -260,7 +260,7 @@ class ScaledTensor1x(ScaledTensor):
 class GroupedScaledTensor1x(ScaledTensor1x):
     """Quantizer for grouped of array"""
 
-    data: jnp.ndarray   # 1d flattened
+    data: jnp.ndarray  # 1d flattened
     scale_inv: jnp.ndarray  # 1d flattened
     group_sizes: jnp.ndarray
     other_sizes: Tuple[int]
@@ -276,9 +276,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         assert self.data.ndim == 1, "Only support flattened data"
 
         data_ndim = 1 + len(self.other_sizes)
-        flatten_axis = (
-                data_ndim + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
-                )
+        flatten_axis = data_ndim + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
         assert (
             0 < flatten_axis < len(data_ndim)
         ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
@@ -434,17 +432,17 @@ class ScaledTensorFactory:
         if group_sizes:
             assert other_sizes, "other_sizes is not given"
             return GroupedScaledTensor1x(
-                    data=data,
-                    scale_inv=scale_inv,
-                    group_sizes=group_sizes,
-                    other_sizes=other_sizes,
-                    scaling_mode=scaling_mode,
-                    dq_dtype=dq_dtype,
-                    _dq_func=dequantizer.grouped_dequantize,
-                    is_colwise=is_colwise,
-                    data_layout=data_layout,
-                    flatten_axis=flatten_axis,
-                    )
+                data=data,
+                scale_inv=scale_inv,
+                group_sizes=group_sizes,
+                other_sizes=other_sizes,
+                scaling_mode=scaling_mode,
+                dq_dtype=dq_dtype,
+                _dq_func=dequantizer.grouped_dequantize,
+                is_colwise=is_colwise,
+                data_layout=data_layout,
+                flatten_axis=flatten_axis,
+            )
 
         return ScaledTensor1x(
             data,

@@ -53,7 +53,10 @@ class Dequantizer(ABC):
         scale_inv_ptr = 0
         for i, data_i in enumerate(data):
             data_shape_i = (group_sizes[i], *other_sizes)
-            assert math.prod(data_shape_i) == data_i.size, f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to {data_i.size}"
+            assert math.prod(data_shape_i) == data_i.size, (
+                f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
+                f" {data_i.size}"
+            )
             scale_shape_i = scaling_mode.get_scale_shape(
                 data_shape_i,
                 grouped_scaled_tensor.is_colwise,
@@ -61,7 +64,7 @@ class Dequantizer(ABC):
                 flatten_axis=flatten_axis,
             )
             scale_shape_i_size = math.prod(scale_shape_i)
-            scale_inv_i = scale_inv[scale_inv_ptr: scale_inv_ptr + scale_shape_i_size]
+            scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
             out_i = Dequantizer._dequantize_func(
                 data_i.reshape(data_shape_i),
                 scale_inv_i.reshape(scale_shape_i),
