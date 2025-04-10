@@ -429,6 +429,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(buf, &config_.amax_epsilon, attr_size);
       break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(buf, &config_.noop_tensor, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -457,6 +460,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(&config_.noop_tensor, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

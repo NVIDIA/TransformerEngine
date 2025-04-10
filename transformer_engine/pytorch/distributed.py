@@ -24,10 +24,11 @@ from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
+from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-
+from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -944,6 +945,74 @@ def _all_gather_fp8(
     return out, handle
 
 
+def _all_gather_fp8_blockwise(
+    inp: torch.Tensor,
+    process_group: dist_group_type,
+    *,
+    async_op: bool = False,  # pylint: disable=unused-argument
+    quantizer: Optional[Quantizer] = None,
+    out_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
+    """
+    All-gather FP8 tensor along first dimension for blockwise quantization.
+
+    Returns: quantizer(gather(inp))
+
+    NOTE: The implementation is not sophisticated enough to honor async_op=True.
+    In some cases it falls back to synchronous gather and invokes the quantizer.
+    """
+
+    # Input tensor attributes
+    device: torch.device
+    dtype: torch.dtype
+    if isinstance(inp, torch.Tensor):
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, Float8BlockwiseQTensorBase):
+        if inp._rowwise_data is not None:
+            device = inp._rowwise_data.device
+        elif inp._columnwise_data is not None:
+            device = inp._columnwise_data.device
+        else:
+            raise ValueError("Got Float8BlockwiseQTensorBase input tensor without any data")
+        dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or Float8BlockwiseQTensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+    world_size = get_distributed_world_size(process_group)
+
+    # Check that quantizer is valid
+    if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
+        raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
+    if not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
+        raise NotImplementedError("Only 1D blockwise quantization is supported for allgather")
+
+    # Output tensor dims
+    if out_shape is None:
+        out_shape = list(inp.size())
+        out_shape[0] *= world_size
+
+    # Doing BF16 gather for now as baseline because it's simpler
+    if not isinstance(inp, Float8BlockwiseQTensorBase) and quantizer is not None:
+        out = torch.empty(
+            out_shape,
+            dtype=dtype,
+            device=device,
+            memory_format=torch.contiguous_format,
+        )
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
+        out = quantizer(out)
+        return out, None
+    # Implementation of fp8 gather needs to account for:
+    # * Getting columnwise data as a transpose of how it is stored for GEMMS.
+    # * Gathering non GEMM swizzled scales.
+    # * Refer to scaffold code when implementing at:
+    # https://github.com/kwyss-nvidia/TransformerEngine/commit/6659ee9dc84fb515d1d47699d8bfd20a72b76477
+    raise NotImplementedError("fp8 blockwise allgather not yet implemented")
+
+
 def _all_gather_mxfp8(
     inp: torch.Tensor,
     process_group: dist_group_type,
@@ -1082,7 +1151,9 @@ def gather_along_first_dim(
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
-    """All-gather tensors and concatenate along first dimension."""
+    """
+    All-gather tensors and concatenate along first dimension.
+    """
 
     # Return immediately if no communication is required
     world_size = get_distributed_world_size(process_group)
@@ -1100,6 +1171,16 @@ def gather_along_first_dim(
         quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
     ):
         return _all_gather_fp8(
+            inp,
+            process_group,
+            async_op=async_op,
+            quantizer=quantizer,
+            out_shape=out_shape,
+        )
+
+    # FP8 block scaling case, block length = 128
+    if isinstance(inp, Float8BlockwiseQTensorBase) or isinstance(quantizer, Float8BlockQuantizer):
+        return _all_gather_fp8_blockwise(
             inp,
             process_group,
             async_op=async_op,
