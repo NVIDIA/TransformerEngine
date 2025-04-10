@@ -228,7 +228,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
         IType thread_amax_f16 = static_cast<IType>(0.0f);
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
           in_colwise_IType[i] = in_sh[shmem_offset_colwise];
@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
         thread_amax = static_cast<float>(thread_amax_f16);
       } else {
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
 
@@ -282,8 +282,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const float block_scale_inverse = exp2f_rcp(biased_exponent);
       const float2 block_scale_inverse_2x = make_float2(block_scale_inverse, block_scale_inverse);
 
-      // 3. Scale elements
-      #pragma unroll
+// 3. Scale elements
+#pragma unroll
       for (int i = 0; i < SCALE_DIM_Y; ++i) {
         float in;
         if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
@@ -428,7 +428,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
           IType2 in;
-          OType2& out_pair = reinterpret_cast<OType2&>(out.data.elt[e]);
+          OType2 &out_pair = reinterpret_cast<OType2 &>(out.data.elt[e]);
           if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
             in = in_IType[w].data.elt[e];
           } else if constexpr (IS_CACHED_ACT_OP) {
