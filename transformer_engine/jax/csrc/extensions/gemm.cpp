@@ -15,11 +15,10 @@
 namespace transformer_engine {
 namespace jax {
 
-constexpr static size_t MXFP8_BLOCK_SIZE = 32;
-
 Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
-                          Variadic_Result_Type output_list, int64_t num_gemms, int64_t scaling_mode,
-                          int64_t has_bias, int64_t workspace_size) {
+                          Variadic_Result_Type output_list, int64_t num_gemms,
+                          JAXX_Scaling_Mode scaling_mode, int64_t has_bias,
+                          int64_t workspace_size) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
@@ -32,6 +31,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
   // If we call cuBLAS GEMM for A * B, the output will be:
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
+
+  if (num_gemms <= 0) {
+    return ffi_with_cuda_error_check();
+  }
+  size_t expected_input_size = has_bias ? 5 * num_gemms : 4 * num_gemms;
+  size_t expected_output_size = num_gemms + 1;
+  size_t actual_input_size = input_list.size();
+  size_t actual_output_size = output_list.size();
+  NVTE_CHECK(actual_input_size == expected_input_size,
+             "Expected %zu input tensors, got %zu", expected_input_size, actual_input_size);
+  NVTE_CHECK(actual_output_size == expected_output_size,
+             "Expected %zu output tensors, got %zu", expected_output_size, actual_output_size);
 
   bool trans_lhs = true;
   bool trans_rhs = false;
@@ -97,23 +108,25 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, nullptr, nullptr,
+    if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING || 
+        scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+      float *amax_dptr = nullptr;
+      float *scale_dptr = nullptr;
+      auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, amax_dptr, scale_dptr,
                                   reinterpret_cast<float *>(lhs_sinv_ptr));
-      auto rhs_i_ = TensorWrapper(rhs_ptr, rhs_shape, rhs_dtype, nullptr, nullptr,
+      auto rhs_i_ = TensorWrapper(rhs_ptr, rhs_shape, rhs_dtype, amax_dptr, scale_dptr,
                                   reinterpret_cast<float *>(rhs_sinv_ptr));
       lhs_wrapper_list.push_back(std::move(lhs_i_));
       rhs_wrapper_list.push_back(std::move(rhs_i_));
-    } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
-                 MXFP8_BLOCK_SIZE, k);
-      size_t sinv_k = k / MXFP8_BLOCK_SIZE;
-      lhs_sinv_shape[0] = m;
-      lhs_sinv_shape[1] = sinv_k;
-      rhs_sinv_shape[0] = n;
-      rhs_sinv_shape[1] = sinv_k;
-
+    } else if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       // Note: the scale_inv array should have been swizzled in Python before lowering
+      auto lhs_sinv_shape_ = lhs_sinv_i.dimensions();
+      auto rhs_sinv_shape_ = rhs_sinv_i.dimensions();
+      for (int i = 0; i < 2; i++) {
+        lhs_sinv_shape[i] = lhs_sinv_shape_[i];
+        rhs_sinv_shape[i] = rhs_sinv_shape_[i];
+      }
+  
       TensorWrapper lhs_i_(NVTE_MXFP8_1D_SCALING);
       TensorWrapper rhs_i_(NVTE_MXFP8_1D_SCALING);
       lhs_i_.set_rowwise_data(lhs_ptr, lhs_dtype, lhs_shape);
@@ -124,7 +137,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
       lhs_wrapper_list.push_back(std::move(lhs_i_));
       rhs_wrapper_list.push_back(std::move(rhs_i_));
     } else {
-      NVTE_ERROR("Unsupported scaling mode: ", scaling_mode);
+      NVTE_ERROR("Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
 
     auto out_i_ = TensorWrapper(out_ptr, out_shape, out_dtype);
@@ -178,7 +191,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .RemainingArgs()         // input list
                                   .RemainingRets()         // output list
                                   .Attr<int64_t>("num_gemms")
-                                  .Attr<int64_t>("scaling_mode")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("has_bias")
                                   .Attr<int64_t>("workspace_size"),
                               FFI_CudaGraph_Traits);

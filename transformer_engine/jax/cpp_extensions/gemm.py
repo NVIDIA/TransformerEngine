@@ -47,7 +47,29 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(*args, num_gemms, scaling_mode, out_dtype, has_bias):
-        del scaling_mode, has_bias
+        """
+        Args:
+            *args: Size num_gemms * 4 or num_gemms * 5 depending on has_bias:
+                args[  0         :   num_gemms] are the lhs tensors,
+                args[  num_gemms : 2*num_gemms] are the rhs tensors,
+                args[2*num_gemms : 3*num_gemms] are the lhs scale_inv tensors,
+                args[3*num_gemms : 4*num_gemms] are the rhs scale_inv tensors,
+                args[4*num_gemms : 5*num_gemms] are the bias tensors if has_bias is True.
+            num_gemms: Number of GEMM operations to perform.
+            scaling_mode: Scaling mode for the GEMM operations.
+            out_dtype: Data type of the output tensors.
+            has_bias: Boolean indicating if bias tensors are provided.
+        
+        Returns:
+           A tuple of ShapedArray objects of size num_gemms+1:
+               ret[0 : num_gemms]: GEMM output tensors,
+               ret[num_gemms]:workspace tensor.
+        """
+        del scaling_mode
+        expected_num_args = 5 * num_gemms if has_bias else 4 * num_gemms
+        assert len(args) == expected_num_args, (
+            f"Expected {expected_num_args} input arguments, but got {len(args)}"
+        )
         A_list = args[0:num_gemms]
         B_list = args[num_gemms : 2 * num_gemms]
         # A and B have shapes [1, m, k] and [1, n, k]
@@ -356,8 +378,8 @@ def grouped_gemm(
             lhs_shape = lhs.data.shape
             rhs_shape = rhs.data.shape
             out_dtype = lhs.dq_dtype
-            # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal data_layout
-            if lhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+            # For ScaledTensors and DELAYED_TENSOR_SCALING, need to handle internal data_layout
+            if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
                 assert not (
                     lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
                 ), "FP8 GEMM does not support E5M2 * E5M2"
@@ -369,7 +391,7 @@ def grouped_gemm(
                 dim_nums = ((lhs_contract_dim,), (rhs_contract_dim,)), ((), ())
         else:
             # For jnp.ndarray, only consider contracting_dims, data_layout is always NN
-            scaling_mode = ScalingMode.NVTE_NO_SCALING
+            scaling_mode = ScalingMode.NO_SCALING
             lhs_shape = lhs.shape
             rhs_shape = rhs.shape
             out_dtype = lhs.dtype
@@ -382,13 +404,13 @@ def grouped_gemm(
         rhs_remain_shape = _calculate_remaining_shape(rhs_shape, rhs_contract)
 
         # Note: do not squeeze() for {lhs, rhs}_3d, it will trigger a D2D memcpy
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        if scaling_mode == ScalingMode.NO_SCALING:
             lhs_3d = _shape_normalization(lhs, lhs_dn)
             rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        elif scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
             rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
-        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_3d = _shape_normalization(lhs.data, lhs_dn)
             rhs_3d = _shape_normalization(rhs.data, rhs_dn)
             lhs_scale_inv = _shape_normalization(lhs.scale_inv, lhs_dn)
@@ -412,31 +434,24 @@ def grouped_gemm(
         kr = rhs_3d.shape[-1]
         assert kl == kr, f"After shape normalization, contracting dim size mismatch: {kl} != {kr}"
         if (bm % 16 != 0) or (bn % 16 != 0) or (kl % 16 != 0):
-            print(f"grouped_gemm input pair {i} has invalid problem shape for lowering: ")
-            print(
-                f"m = {bm}, n = {bn}, k = {kl}; cuBLAS requires the problem shapes being multiples"
-                " of 16"
-            )
-            assert bm % 16 == 0 and bn % 16 == 0 and kl % 16 == 0
+            print("grouped_gemm input pair {i} has invalid problem shape for lowering: ")
+            print(f"m = {bm}, n = {bn}, k = {kl}; ")
+            print("cuBLAS requires the problem shapes being multiples of 16")
+            assert (bm % 16 == 0) and (bn % 16 == 0) and (kl % 16 == 0)
 
         lhs_list_.append(lhs_3d)
         rhs_list_.append(rhs_3d)
-        if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        if scaling_mode == ScalingMode.NO_SCALING:
             lhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
             rhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             lhs_sinv_list_.append(lhs.scale_inv)
             rhs_sinv_list_.append(rhs.scale_inv)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_sinv_list_.append(lhs_scale_inv)
             rhs_sinv_list_.append(rhs_scale_inv)
         if bias_list is not None:
             bias_list_.append(bias_list[i])
-
-    # TE/common does not support NVTE_NO_SCALING yet
-    # It expects NVTE_DELAYED_TENSOR_SCALING as default for FP32, BF16, FP16
-    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
-        scaling_mode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
 
     out_list = GroupedGemmPrimitive.outer_primitive.bind(
         *lhs_list_,
