@@ -28,17 +28,15 @@ assert os.getenv("NVTE_FLASH_ATTN") == "0"
 # For the TransformerLayer, activation offloading with dropout is not supported,
 # so we set hidden_dropout to 0.0.
 model_types = {
-    "linear":
-        lambda: te.Linear(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "layernorm_mlp":
-        lambda: te.LayerNormMLP(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "layernorm_linear":
-        lambda: te.LayerNormLinear(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "multihead_attention":
-        lambda: te.MultiheadAttention(SIZE, NUM_HEADS, params_dtype=torch.bfloat16),
-    "transformer_layer":
-        lambda: te.TransformerLayer(
-            SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0),
+    "linear": lambda: te.Linear(SIZE, SIZE, params_dtype=torch.bfloat16),
+    "layernorm_mlp": lambda: te.LayerNormMLP(SIZE, SIZE, params_dtype=torch.bfloat16),
+    "layernorm_linear": lambda: te.LayerNormLinear(SIZE, SIZE, params_dtype=torch.bfloat16),
+    "multihead_attention": lambda: te.MultiheadAttention(
+        SIZE, NUM_HEADS, params_dtype=torch.bfloat16
+    ),
+    "transformer_layer": lambda: te.TransformerLayer(
+        SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
+    ),
 }
 
 
@@ -112,7 +110,9 @@ def test_cpu_offload(fp8, model_key) -> None:
         pytest.skip(reason_for_no_fp8)
 
     without_offloading = _measure_memory_between_forward_and_backward(models_list, fp8, False)
-    without_offloading_one_layer = _measure_memory_between_forward_and_backward(models_list[:1], fp8, False)
+    without_offloading_one_layer = _measure_memory_between_forward_and_backward(
+        models_list[:1], fp8, False
+    )
     with_offloading = _measure_memory_between_forward_and_backward(models_list, fp8, True)
 
     assert with_offloading < without_offloading
