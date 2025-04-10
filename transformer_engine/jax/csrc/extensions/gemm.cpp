@@ -23,7 +23,7 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
                            uint8_t *rhs_sinv_ptr, const DType &rhs_sinv_dtype, uint8_t *bias_ptr,
                            const DType &bias_dtype, uint8_t *out_ptr, const DType &out_dtype,
                            uint8_t *workspace_ptr, const size_t workspace_size, size_t num_gemms,
-                           int32_t *dim_list_ptr, const int64_t &scaling_mode,
+                           int32_t *dim_list_ptr, const JAXX_Scaling_Mode scaling_mode,
                            cudaStream_t stream) {
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
@@ -90,14 +90,17 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      auto lhs_i = TensorWrapper(static_cast<void *>(lhs_ptr), lhs_shape, lhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(lhs_sinv_ptr));
-      auto rhs_i = TensorWrapper(static_cast<void *>(rhs_ptr), rhs_shape, rhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(rhs_sinv_ptr));
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
-    } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+    auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+    lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
+    rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
+
+    if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat32,
+                                  std::vector<size_t>{1});
+      rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat32,
+                                  std::vector<size_t>{1});
+    } else if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
                  MXFP8_BLOCK_SIZE, k);
       size_t sinv_k = k / MXFP8_BLOCK_SIZE;
@@ -107,20 +110,15 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
       rhs_sinv_shape[1] = sinv_k;
 
       // Note: the scale_inv array should have been swizzled in Python before lowering
-      TensorWrapper lhs_i(NVTE_MXFP8_1D_SCALING);
-      TensorWrapper rhs_i(NVTE_MXFP8_1D_SCALING);
-      lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
-      rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
       lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat8E8M0,
                                   lhs_sinv_shape);
       rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat8E8M0,
                                   rhs_sinv_shape);
-
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
     } else {
-      NVTE_ERROR("Unsupported scaling mode: ", scaling_mode);
+      NVTE_ERROR("Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
+    lhs_wrapper_list.push_back(std::move(lhs_i));
+    rhs_wrapper_list.push_back(std::move(rhs_i));
 
     auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
     lhs_ptr += m * k * lhs_dtype_bytes;
@@ -169,7 +167,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_flatten,
                           Buffer_Type lhs_sinv_flatten, Buffer_Type rhs_flatten,
                           Buffer_Type rhs_sinv_flatten, Buffer_Type bias_flatten,
                           Buffer_Type dim_list, Result_Type out_flatten,
-                          Result_Type workspace_flatten, int64_t num_gemms, int64_t scaling_mode) {
+                          Result_Type workspace_flatten, int64_t num_gemms,
+                          JAXX_Scaling_Mode scaling_mode) {
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_flatten.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_flatten.untyped_data());
@@ -207,7 +206,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Ret<Buffer_Type>()      // out_flatten
                                   .Ret<Buffer_Type>()      // workspace_flatten
                                   .Attr<int64_t>("num_gemms")
-                                  .Attr<int64_t>("scaling_mode"),
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode"),
                               FFI_CudaGraph_Traits);
 
 }  // namespace jax

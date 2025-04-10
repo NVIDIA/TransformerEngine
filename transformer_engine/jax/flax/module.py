@@ -361,7 +361,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             ).value
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-        if QuantizeConfig.SCALING_MODE == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
             x_meta = generate_quantize_meta("x")
             kernel_meta = generate_quantize_meta("kernel")
             grad_meta = generate_quantize_meta("grad")

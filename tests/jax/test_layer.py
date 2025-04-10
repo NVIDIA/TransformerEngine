@@ -39,7 +39,7 @@ def enable_fused_attn():
 
 
 is_fp8_supported, reason = is_fp8_available()
-is_mxfp8_supported, reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 QUANTIZE_RECIPES = []
 """ Find supported scaling modes"""
@@ -313,7 +313,7 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if QuantizeConfig.SCALING_MODE == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+                if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
                     _, updated_quantize_meta = flax.core.pop(
                         updated_state[0], QuantizeConfig.COLLECTION_NAME
                     )
