@@ -275,9 +275,11 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         bx = unique_var
         by = f"{unique_var}_"
 
+        # We have to use two different factors in the two CompoundFactors because of Shardy
+        # verifier requirements, even though they are the same.
         input_spec = [f"x{i}" for i in range(input_rank - 2)] + [
-            CompoundFactor(bx, "block_size"),
-            CompoundFactor(by, "block_size"),
+            CompoundFactor(bx, "block_size_x"),
+            CompoundFactor(by, "block_size_y"),
         ]
 
         # The rowwise and colwise scale tensors should be sharded the same way as the input.
@@ -289,7 +291,10 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         colwise[-2] = bx
 
         return QuantizeShardyRules(
-            tuple(input_spec), tuple(rowwise), tuple(colwise), {"block_size": 32}
+            tuple(input_spec),
+            tuple(rowwise),
+            tuple(colwise),
+            {"block_size_x": 32, "block_size_y": 32},
         )
 
 
