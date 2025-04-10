@@ -258,8 +258,8 @@ class ScaledTensor1x(ScaledTensor):
 @register_pytree_node_class
 @dataclass
 class GroupedScaledTensor1x(ScaledTensor1x):
-    """Quantizer for grouped of array
-"""
+    """Quantizer for grouped of array"""
+
     data: jnp.ndarray
     scale_inv: jnp.ndarray  # 1d flattened
     group_sizes: jnp.ndarray
@@ -273,24 +273,28 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     def __post_init__(self):
         assert scale_inv.ndim == 1, "Unsupported scale_inv shape"
         flatten_axis = (
-                len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
-                )
+            len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
+        )
         assert (
-                0 < flatten_axis < len(self.data.shape)
-                ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
+            0 < flatten_axis < len(self.data.shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
 
         if self.data_layout == "T":
             flatten_axis = self.data.ndim - flatten_axis
         self.flatten_axis = flatten_axis
 
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
-                self.data.shape, self.group_sizes, self.is_colwise, is_padded=True, flatten_axis=flatten_axis
-                )
+            self.data.shape,
+            self.group_sizes,
+            self.is_colwise,
+            is_padded=True,
+            flatten_axis=flatten_axis,
+        )
 
         assert self.scale_inv.shape == expected_scale_shape, (
-                f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-                f" scale_inv, got {self.scale_inv.shape}"
-                )
+            f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
+            f" scale_inv, got {self.scale_inv.shape}"
+        )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
@@ -300,13 +304,13 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         """
         children = (self.data, self.scale_inv, self.group_sizes)
         aux_data = (
-                self.scaling_mode,
-                self.dq_dtype,
-                self._dq_func,
-                self.is_colwise,
-                self.data_layout,
-                self.flatten_axis,
-                )
+            self.scaling_mode,
+            self.dq_dtype,
+            self._dq_func,
+            self.is_colwise,
+            self.data_layout,
+            self.flatten_axis,
+        )
         return (children, aux_data)
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
@@ -421,14 +425,27 @@ class ScaledTensorFactory:
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
         if group_sizes:
             return GroupedScaledTensor1x(
-                    data, scale_inv, group_sizes, scaling_mode, dq_dtype,
-                    dequantizer.grouped_dequantize, is_colwise, data_layout, flatten_axis
-                    )
+                data,
+                scale_inv,
+                group_sizes,
+                scaling_mode,
+                dq_dtype,
+                dequantizer.grouped_dequantize,
+                is_colwise,
+                data_layout,
+                flatten_axis,
+            )
 
         return ScaledTensor1x(
-                    data, scale_inv, scaling_mode, dq_dtype,
-                    dequantizer.dequantize, is_colwise, data_layout, flatten_axis
-                    )
+            data,
+            scale_inv,
+            scaling_mode,
+            dq_dtype,
+            dequantizer.dequantize,
+            is_colwise,
+            data_layout,
+            flatten_axis,
+        )
 
     @staticmethod
     def create_2x(
@@ -459,25 +476,25 @@ class ScaledTensorFactory:
         """
         assert len(data_layout) == 2, f"Expect 2 layouts, got {data_layout}"
         rowwise_tensor = ScaledTensorFactory.create_1x(
-                data,
-                scale_inv,
-                scaling_mode,
-                dq_dtype,
-                is_colwise=False,
-                data_layout=data_layout[0],
-                flatten_axis=flatten_axis,
-                group_sizes=group_sizes
-                )
+            data,
+            scale_inv,
+            scaling_mode,
+            dq_dtype,
+            is_colwise=False,
+            data_layout=data_layout[0],
+            flatten_axis=flatten_axis,
+            group_sizes=group_sizes,
+        )
         colwise_tensor = ScaledTensorFactory.create_1x(
-                colwise_data,
-                colwise_scale_inv,
-                scaling_mode,
-                dq_dtype,
-                is_colwise=True,
-                data_layout=data_layout[1],
-                flatten_axis=flatten_axis,
-                group_sizes=group_sizes
-                )
+            colwise_data,
+            colwise_scale_inv,
+            scaling_mode,
+            dq_dtype,
+            is_colwise=True,
+            data_layout=data_layout[1],
+            flatten_axis=flatten_axis,
+            group_sizes=group_sizes,
+        )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
     @staticmethod
@@ -518,7 +535,7 @@ class ScaledTensorFactory:
                 dq_dtype,
                 data_layout=data_layout,
                 flatten_axis=flatten_axis,
-                group_sizes=group_sizes
+                group_sizes=group_sizes,
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE

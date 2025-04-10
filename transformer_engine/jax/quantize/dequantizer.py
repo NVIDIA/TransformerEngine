@@ -43,8 +43,8 @@ class Dequantizer(ABC):
 
         flatten_axis = len(data.shape) + flatten_axis if flatten_axis < 0 else flatten_axis
         assert (
-                0 < flatten_axis < len(data.shape)
-                ), f"flatten_axis {flatten_axis} is out of bounds for shape {data.shape}"
+            0 < flatten_axis < len(data.shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data.shape}"
 
         output = []
         data = jnp.split(data, group_size, axis=0)
@@ -52,19 +52,23 @@ class Dequantizer(ABC):
         scale_inv_ptr = 0
         for data_i in data:
             scale_shape_i = scaling_mode.get_scale_shape(
-                    data_i.shape, grouped_scaled_tensor.is_colwise,
-                    is_padded=True, flatten_axis=flatten_axis
-                    )
+                data_i.shape,
+                grouped_scaled_tensor.is_colwise,
+                is_padded=True,
+                flatten_axis=flatten_axis,
+            )
             scale_shape_i_size = math.prod(scale_shape_i)
-            scale_inv_i = scale_inv[scale_inv_ptr: scale_inv_ptr + scale_shape_i_size].reshape(scale_shape_i)
+            scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size].reshape(
+                scale_shape_i
+            )
             out_i = self._dequantize_func(
-                    data_i,
-                    scale_inv_i,
-                    grouped_scaled_tensor.dq_dtype,
-                    grouped_scaled_tensor.scaling_mode,
-                    grouped_scaled_tensor.is_colwise,
-                    grouped_scaled_tensor.flatten_axis,
-                    )
+                data_i,
+                scale_inv_i,
+                grouped_scaled_tensor.dq_dtype,
+                grouped_scaled_tensor.scaling_mode,
+                grouped_scaled_tensor.is_colwise,
+                grouped_scaled_tensor.flatten_axis,
+            )
             output.append(out_i)
             scale_inv_ptr += scale_shape_i_size
 
@@ -79,9 +83,13 @@ class TensorScaleDequantizer(Dequantizer):
     quantized using different scaling modes. It supports both delayed scaling
     and block scaling modes.
     """
+
     @staticmethod
     def _dequantize_func(data, scale_inv, dq_dtype):
-        return jnp.asarray(data.astype(jnp.float32) * scale_inv.astype(jnp.float32), dq_dtype,)
+        return jnp.asarray(
+            data.astype(jnp.float32) * scale_inv.astype(jnp.float32),
+            dq_dtype,
+        )
 
     @staticmethod
     def dequantize(scaled_tensor):
@@ -96,9 +104,10 @@ class TensorScaleDequantizer(Dequantizer):
         Returns:
             The dequantized tensor in the specified data type
         """
-        return Dequantizer._dequantize_func(scaled_tensor.data,
-                                            scaled_tensor.scale_inv,
-                                            scaled_tensor.dq_dtype)
+        return Dequantizer._dequantize_func(
+            scaled_tensor.data, scaled_tensor.scale_inv, scaled_tensor.dq_dtype
+        )
+
 
 class BlockScaleDequantizer(Dequantizer):
 
@@ -116,7 +125,9 @@ class BlockScaleDequantizer(Dequantizer):
         scale_shape = scaling_mode.get_scale_shape(
             data_shape, is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
-        scale_inv = jax.lax.slice(scale_inv, [0] * len(scale_shape), scale_shape)  # slice out the padding
+        scale_inv = jax.lax.slice(
+            scale_inv, [0] * len(scale_shape), scale_shape
+        )  # slice out the padding
 
         data = data.reshape(
             *data_shape[: flatten_axis - 1],
@@ -130,9 +141,7 @@ class BlockScaleDequantizer(Dequantizer):
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         scale_inv = jnp.expand_dims(scale_inv, axis=(flatten_axis + 2 - 2, -1))
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
-        return jnp.asarray(data * jnp.power(2, scale_inv - 127), dq_dtype).reshape(
-            data_shape
-        )
+        return jnp.asarray(data * jnp.power(2, scale_inv - 127), dq_dtype).reshape(data_shape)
 
     @staticmethod
     def dequantize(scaled_tensor):
@@ -148,16 +157,16 @@ class BlockScaleDequantizer(Dequantizer):
             The dequantized tensor in the specified data type
         """
         return Dequantizer.__dq_func_block_scaling_impl(
-                scaled_tensor.data,
-                scaled_tensor.scale_inv,
-                scaled_tensor.dq_dtype,
-                scaled_tensor.scaling_mode,
-                scaled_tensor.is_colwise,
-                scaled_tensor.flatten_axis,
-                )
+            scaled_tensor.data,
+            scaled_tensor.scale_inv,
+            scaled_tensor.dq_dtype,
+            scaled_tensor.scaling_mode,
+            scaled_tensor.is_colwise,
+            scaled_tensor.flatten_axis,
+        )
 
 
 ScalingModeToDequantizerMap = {
-        ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
-        ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
-        }
+    ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
+    ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
+}

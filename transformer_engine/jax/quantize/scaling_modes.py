@@ -291,7 +291,9 @@ class ScalingMode(Enum):
         """
         return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
 
-    def get_grouped_scale_shape_2x(self, data_shape, group_sizes, is_padded=True, flatten_axis=-1) -> Tuple[Tuple[int]]:
+    def get_grouped_scale_shape_2x(
+        self, data_shape, group_sizes, is_padded=True, flatten_axis=-1
+    ) -> Tuple[Tuple[int]]:
         """Get shapes for both row-wise and column-wise scaling.
 
         Args:
@@ -303,7 +305,11 @@ class ScalingMode(Enum):
             Tuple of (rowwise_scale_shape, colwise_scale_shape)
         """
         rowwise_scale_shape = self.get_grouped_scale_shape(
-            data_shape, group_sizes, is_colwise=False, is_padded=is_padded, flatten_axis=flatten_axis
+            data_shape,
+            group_sizes,
+            is_colwise=False,
+            is_padded=is_padded,
+            flatten_axis=flatten_axis,
         )
         colwise_scale_shape = self.get_grouped_scale_shape(
             data_shape, group_sizes, is_colwise=True, is_padded=is_padded, flatten_axis=flatten_axis
@@ -328,7 +334,9 @@ class ScalingMode(Enum):
         grouped_scale_size = 0
         for i in range(group_sizes.size):
             data_shape_i = (group_sizes[i], *data_shape[1:])
-            scale_shape_i = self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
+            scale_shape_i = self._get_impl().get_scale_shape(
+                data_shape, is_colwise, is_padded, flatten_axis
+            )
             grouped_scale_size += math.prod(scale_shape_i)
         return (grouped_scale_size,)
 
