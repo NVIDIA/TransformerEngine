@@ -439,7 +439,7 @@ class ActLuPrimitive(BasePrimitive):
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(
-                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis_boundary=-1)
+                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-1)
                 )
             else:
                 colwise_out = out
