@@ -63,12 +63,12 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
   }
 
   template <typename T>
-  std::vector<T> CopySubMatrix(const std::vector<T>& data, size_t mstart, size_t nstart, size_t mb,
-                               size_t nb, size_t ld) {
-    std::vector<T> ret(mb * nb);
+  std::vector<T> CopyLocalMatrix(const std::vector<T>& data, size_t mstart, size_t nstart,
+                                 size_t msize, size_t nsize, size_t ld) {
+    std::vector<T> ret(msize * nsize);
     size_t dst = 0;
-    for (size_t j = nstart; j < nstart + nb; ++j) {
-      for (size_t i = mstart; i < mstart + mb; ++i) {
+    for (size_t j = nstart; j < nstart + nsize; ++j) {
+      for (size_t i = mstart; i < mstart + msize; ++i) {
         ret[dst++] = data[j * ld + i];
       }
     }
@@ -77,17 +77,17 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
 
   template <typename T>
   transformer_engine::Tensor MakeDeviceTensorFromData(const std::vector<T>& data, size_t mstart,
-                                                      size_t nstart, size_t mb, size_t nb,
+                                                      size_t nstart, size_t msize, size_t nsize,
                                                       size_t ld, transformer_engine::DType dtype,
                                                       cudaStream_t stream) {
-    auto values = CopySubMatrix(data, mstart, nstart, mb, nb, ld);
+    auto values = CopyLocalMatrix(data, mstart, nstart, msize, nsize, ld);
     void* dptr{};
     NVTE_CHECK_CUDA(cudaMallocAsync(&dptr, values.size() * sizeof values[0], stream));
     NVTE_CHECK_CUDA(cudaMemcpyAsync(dptr, values.data(), values.size() * sizeof values[0],
                                     cudaMemcpyDefault, stream));
 
     transformer_engine::Tensor ret;
-    ret.data = {dptr, {nb, mb}, dtype};
+    ret.data = {dptr, {nsize, msize}, dtype};
     return ret;
   }
 
@@ -108,11 +108,13 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
     auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
 
-    auto a = MakeDeviceTensorFromData<T>(adata, 0, m / nranks_ * rank_, k, m / nranks_, k, dtype,
-                                         stream);
-    auto b = MakeDeviceTensorFromData<T>(bdata, 0, n / nranks_ * rank_, k, n / nranks_, k, dtype,
-                                         stream);
-    auto d = MakeDeviceTensor<T>(m / nranks_, n, dtype, stream);
+    auto a_cols = nvte_comm_gemm_numroc(ctx_, m);
+    auto b_cols = nvte_comm_gemm_numroc(ctx_, n);
+    auto a =
+        MakeDeviceTensorFromData<T>(adata, 0, m / nranks_ * rank_, k, a_cols, k, dtype, stream);
+    auto b =
+        MakeDeviceTensorFromData<T>(bdata, 0, n / nranks_ * rank_, k, b_cols, k, dtype, stream);
+    auto d = MakeDeviceTensor<T>(a_cols, n, dtype, stream);
 
     transformer_engine::Tensor bias;
     transformer_engine::Tensor pre_act_out;
@@ -137,7 +139,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 
-    auto out_golden = CopySubMatrix(out_golden_global, m / nranks_ * rank_, 0, m / nranks_, n, m);
+    auto out_golden = CopyLocalMatrix(out_golden_global, m / nranks_ * rank_, 0, a_cols, n, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
       std::ostringstream ss;
