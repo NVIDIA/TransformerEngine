@@ -20,6 +20,7 @@ from ..fp8 import (
     Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
+    fp8_autocast,
 )
 from ..tensor import Quantizer
 
@@ -519,7 +520,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def get_extra_state(self) -> torch.Tensor:
         """Serialize extra state
 
-        Contains metadata for FP8 casting.
+        Contains metadata for quantization recipe.
 
         """
 
@@ -551,23 +552,27 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             dst.copy_(src, non_blocking=True)
             return dst
 
-        # Store FP8 state
+        # Store quantizer state if needed
         state = {}
         for mode in ("forward", "backward"):
 
-            # Get state for a given FP8 tensor
-            if self.num_quantizers(mode) == 0:
+            # Skip if op has no quantizer state
+            if self._fp8_metas is None or self._fp8_metas[mode] is None:
                 continue
-            fp8_meta = self.get_fp8_meta(mode)
-            state[mode] = {}
 
-            # Store tensors
-            if "scaling_fwd" in fp8_meta:
-                state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
-                state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
-            if "scaling_bwd" in fp8_meta:
-                state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
-                state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
+            # Quantizer state
+            fp8_meta = self._fp8_metas[mode]
+            state[mode] = {}
+            state[mode]["recipe"] = fp8_meta["recipe"]
+
+            # Copy tensors to CPU and store
+            if state[mode]["recipe"].delayed():
+                if mode == "forward":
+                    state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
+                    state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
+                if mode == "backward":
+                    state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
+                    state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
 
             # Store other picklable items
             extra = {}
@@ -606,37 +611,37 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 dst.data = torch.empty(src.size(), dtype=dst.dtype, device=dst.device)
             dst.copy_(src, non_blocking=True)
 
-        # Load FP8 state
+        # Load quantizer state if needed
         for mode in ("forward", "backward"):
 
-            # Get state for a given FP8 tensor
+            # Skip if checkpoint has no quantizer state
             if mode not in state:
                 continue
-            if self.num_quantizers(mode) == 0:
-                continue
-            fp8_meta = self.get_fp8_meta(mode)
-            if fp8_meta is None:
-                continue
 
-            # Load extra state
+            # Get op's quantizer state, initializing if needed
+            if self._fp8_metas is None or self._fp8_metas[mode] is None:
+                with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
+                    self._reset_quantization_recipe_state()
+            fp8_meta = self._fp8_metas[mode]
+
+            # Load extra items
+            fp8_meta["recipe"] = state[mode]["recipe"]
             fp8_meta.update(state[mode]["extra_fp8_variables"])
-            if "amax_history_fwd" in state[mode]:
-                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_fwd"].size(0)
-            elif "amax_history_bwd" in state[mode]:
-                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_bwd"].size(0)
             if "global_fp8_buffer_pos_fwd_recompute" in fp8_meta:
                 del fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
             # Load tensors
-            fp8_meta = self.get_fp8_meta(mode)
-            if "scaling_fwd" in fp8_meta:
-                fp8_meta_fwd = fp8_meta["scaling_fwd"]
-                copy_tensor(state[mode]["scale_fwd"], fp8_meta_fwd.scale)
-                copy_tensor(state[mode]["amax_history_fwd"], fp8_meta_fwd.amax_history)
-            if "scaling_bwd" in fp8_meta:
-                fp8_meta_bwd = fp8_meta["scaling_bwd"]
-                copy_tensor(state[mode]["scale_bwd"], fp8_meta_bwd.scale)
-                copy_tensor(state[mode]["amax_history_bwd"], fp8_meta_bwd.amax_history)
+            if state[mode]["recipe"].delayed():
+                if mode == "forward":
+                    copy_tensor(state[mode]["scale_fwd"], fp8_meta["scaling_fwd"].scale)
+                    copy_tensor(
+                        state[mode]["amax_history_fwd"], fp8_meta["scaling_fwd"].amax_history
+                    )
+                if mode == "backward":
+                    copy_tensor(state[mode]["scale_bwd"], fp8_meta["scaling_bwd"].scale)
+                    copy_tensor(
+                        state[mode]["amax_history_bwd"], fp8_meta["scaling_bwd"].amax_history
+                    )
 
         # Finish CPU-GPU memory transfers
         torch.cuda.synchronize()
