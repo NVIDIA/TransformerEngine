@@ -112,8 +112,14 @@ struct scale_inv_meta {
   size_t type_size;
 };
 
-NVTEShape convertShape(const std::vector<size_t>& shape) {
-  return {shape.data(), shape.size()};
+NVTEShape convertShape(const std::vector<size_t>& s) {
+  NVTEShape converted;
+  NVTE_CHECK(s.size() <= sizeof(converted.owned_data) / sizeof(converted.owned_data[0]),
+             "Too many dims for NVTEShape: ", s.size());
+  std::copy(s.begin(), s.end(), converted.owned_data);
+  converted.ndim = s.size();
+  converted.data = converted.owned_data;
+  return converted;
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
@@ -240,7 +246,9 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape{nullptr, 0};
+  NVTEShape columnwise_shape;
+  columnwise_shape.data = columnwise_shape.owned_data;
+  columnwise_shape.ndim = 0;
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -257,7 +265,7 @@ Tensor::Tensor(const std::string& name,
   }
 
   if (columnwise) {
-    columnwise_shape.data = columnwise_shape_vec.data();
+    std::copy(columnwise_shape_vec.begin(), columnwise_shape_vec.end(), columnwise_shape.owned_data);
     columnwise_shape.ndim = columnwise_shape_vec.size();
   }
 
