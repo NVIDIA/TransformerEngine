@@ -5,6 +5,7 @@
 set -e
 
 : ${TE_PATH:=/opt/transformerengine}
+: ${XML_LOG_DIR:=/logs}
 
 pip3 install pytest==8.2.1
 
@@ -37,6 +38,6 @@ do
   fi
 
   # Run tests
-  NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=/logs/pytest.xml $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py
+  NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py
 
 done
