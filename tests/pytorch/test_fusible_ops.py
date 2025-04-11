@@ -1415,6 +1415,8 @@ class TestBasicOps:
         # Skip invalid configurations
         quantized_compute = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        if cache_quantized_input:
+            maybe_skip_quantization("fp8", device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
