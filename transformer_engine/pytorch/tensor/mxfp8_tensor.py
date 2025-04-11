@@ -309,7 +309,9 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
         self._rowwise_scale_inv = torch.Tensor() if self._rowwise_scale_inv is not None else None
-        self._columnwise_scale_inv = torch.Tensor() if self._columnwise_scale_inv is not None else None
+        self._columnwise_scale_inv = (
+            torch.Tensor() if self._columnwise_scale_inv is not None else None
+        )
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

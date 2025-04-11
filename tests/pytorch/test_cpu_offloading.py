@@ -69,7 +69,7 @@ def _get_fp8_weight_cache_size(models, fp8_recipe):
     # One byte for columnwise and one byte for rowwise,
     # hence multiply by 2 and convert to MB
     # there is 1 byte of scale per 32 elements in mxFP8
-    factor_for_scale_inv_tensor = (1 + 1/32) if fp8_recipe.mxfp8() else 1
+    factor_for_scale_inv_tensor = (1 + 1 / 32) if fp8_recipe.mxfp8() else 1
     return (2 * params_bytes * factor_for_scale_inv_tensor) / (1024**2)
 
 
@@ -88,7 +88,9 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
         sync_function = lambda x: x
 
     for model in models:
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe), offload_context:
+        with te.fp8_autocast(
+            enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
+        ), offload_context:
             tensor = model(tensor)
         tensor = sync_function(tensor)
 
@@ -123,7 +125,9 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
 
-    without_offloading = _measure_memory_between_forward_and_backward(models_list, fp8_recipe, False)
+    without_offloading = _measure_memory_between_forward_and_backward(
+        models_list, fp8_recipe, False
+    )
     without_offloading_one_layer = _measure_memory_between_forward_and_backward(
         models_list[:1], fp8_recipe, False
     )
@@ -135,4 +139,6 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     # and without_offloading_one_layer should be the size of the FP8 weights cache,
     # which is not offloaded to the CPU.
     memory_consumption_diff = abs(with_offloading - without_offloading_one_layer)
-    assert memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8_recipe) + EPSILON
+    assert (
+        memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8_recipe) + EPSILON
+    )
