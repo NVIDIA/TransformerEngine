@@ -9,6 +9,7 @@ import math
 from typing import Optional, Dict, Any, Tuple
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from ...constants import TE_DType_To_Torch
@@ -32,6 +33,7 @@ class Float8BlockwiseQTensorBase:
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
+    _columnwise_invalid: bool
 
     def __new__(
         cls,
@@ -53,6 +55,7 @@ class Float8BlockwiseQTensorBase:
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._columnwise_invalid = columnwise_data is None or columnwise_scale_inv is None
 
         return instance
 
@@ -231,6 +234,28 @@ class Float8BlockwiseQTensorBase:
             reordered.append(dims[i])
         reordered.append(dims[0])
         return torch.Size(reordered)
+
+    def _create_columnwise(self):
+        """
+        Update columnwise data and columnwise scale inv. Can only be used when using 2D scaling.
+        """
+        assert self._is_2D_scaled, "Cannot create columnwise data when not using 2D scaling."
+
+        rowwise_data = self._rowwise_data
+        if not rowwise_data.is_contiguous():
+            rowwise_data = rowwise_data.contiguous()
+        self._columnwise_data = tex.fp8_transpose(
+            rowwise_data, self._fp8_dtype, out=self._columnwise_data
+        )
+
+        # TODO: what if _columnwise_scale_inv is None?
+        rowwise_scale_inv = self._rowwise_scale_inv
+        columnwise_scale_inv = rowwise_scale_inv.transpose(-2, -1)
+        h = min(self._columnwise_scale_inv.shape[0], columnwise_scale_inv.shape[0])
+        w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
+        self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
+
+        self._columnwise_invalid = False
 
     def __repr__(self):
         if self._rowwise_data is not None:

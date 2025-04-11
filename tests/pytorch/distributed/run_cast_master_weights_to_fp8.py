@@ -16,6 +16,7 @@ import torch.distributed as dist
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
+    Float8BlockScaling,
     Format,
     Recipe,
 )
@@ -26,6 +27,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
 
 def _get_raw_data(quantized_tensor):
@@ -34,6 +36,14 @@ def _get_raw_data(quantized_tensor):
         assert hasattr(quantized_tensor, "_data"), "Float8Tensor does not have _data attribute"
         assert quantized_tensor._data.dtype == torch.uint8, "Float8Tensor _data must be uint8"
         return quantized_tensor._data
+    elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
+        assert hasattr(
+            quantized_tensor, "_rowwise_data"
+        ), "Float8BlockwiseQTensor does not have _rowwise_data attribute"
+        assert (
+            quantized_tensor._rowwise_data.dtype == torch.uint8
+        ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
+        return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
 
@@ -243,10 +253,10 @@ class MiniFSDP:
 
         # Flatten the weights and pad to align with world size
         raw_data_list = [
-            _get_raw_data(w).view(-1) if isinstance(w, Float8Tensor) else w.view(-1)
+            _get_raw_data(w).view(-1) if isinstance(w, QuantizedTensor) else w.view(-1)
             for w in weights
         ]
-        if isinstance(weights[0], Float8Tensor):
+        if isinstance(weights[0], QuantizedTensor):
             raw_data_list = [_get_raw_data(w).view(-1) for w in weights]
         else:
             raw_data_list = [w.view(-1) for w in weights]
@@ -282,7 +292,7 @@ class MiniFSDP:
                 self.weight_indices.append((None, None))
                 self.shard_indices.append((None, None))
 
-            if isinstance(weights[idx], Float8Tensor):
+            if isinstance(weights[idx], QuantizedTensor):
                 replace_raw_data(
                     weights[idx], self.flatten_weight[start:end].view(weights[idx].shape)
                 )
@@ -378,7 +388,7 @@ class MiniFSDP:
             master_weight -= grad * self.lr
 
         # Step 3: Cast master weights to FP8 or BF16 precision
-        if isinstance(self.weights[0], Float8Tensor):
+        if isinstance(self.weights[0], QuantizedTensor):
             local_weights = []
             for model_weight, local_weight in zip(self.weights, self.local_weights):
                 if local_weight is None:
@@ -441,15 +451,15 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 16, **linear_kwargs),
+            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 16, **linear_kwargs),
+        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -545,12 +555,13 @@ def _test_zero_1(dp_group):
 
 def quantization_recipe(quantization) -> Recipe:
     """Quantization recipe setup"""
+    fp8_format = Format.HYBRID
     if quantization == "fp8":
-        return DelayedScaling(
-            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-        )
+        return DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
     elif quantization == "fp8_cs":
-        return Float8CurrentScaling()
+        return Float8CurrentScaling(fp8_format=fp8_format)
+    elif quantization == "fp8_block":
+        return Float8BlockScaling(fp8_format=fp8_format)
     else:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
@@ -574,15 +585,15 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 16, **linear_kwargs),
+            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 16, **linear_kwargs),
+        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -599,7 +610,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
     optimizer_fp8 = MiniZero_1([w for w in model_fp8.parameters()], 10.0, dp_group)
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
-    for _ in range(100):
+    for i in range(100):
         for w_fp8, w in zip(model_fp8.parameters(), model.parameters()):
             w_fp8.main_grad.zero_()
             w.main_grad.zero_()
@@ -660,7 +671,9 @@ def main(argv=None, namespace=None):
     dist.init_process_group(**dist_init_kwargs)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--quantization", type=str, default=None, choices=["fp8", "fp8_cs"])
+    parser.add_argument(
+        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
+    )
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")

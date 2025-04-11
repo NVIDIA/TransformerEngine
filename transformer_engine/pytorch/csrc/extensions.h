@@ -260,6 +260,13 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype, float margin);
 
+void compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, size_t w,
+                          size_t start_offset, size_t block_len);
+
+void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale, size_t h,
+                  size_t w, size_t start_offset, size_t block_len,
+                  const transformer_engine::DType out_dtype);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
