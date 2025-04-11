@@ -44,6 +44,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
+        assert rowwise
         self.dtype = fp8_dtype
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
@@ -167,11 +168,6 @@ class Float8BlockQuantizer(Quantizer):
             colwise_shape.append(shape[i])
         return tuple(colwise_shape)
 
-    # TODO(kwyss): With FP8 gather support, we need to implement a
-    # shape/layout/swizzle check to know whether FP8 gather works
-    # cleanly by stacking data without aliasing tiles and whether
-    # the scales also stack on the proper dimensions.
-
     def make_empty(
         self,
         shape: Iterable[int],
@@ -185,16 +181,13 @@ class Float8BlockQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = None
-        scale_inv = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
-            scale_shape = self.get_scale_shape(shape, columnwise=False)
-            scale_inv = torch.empty(
-                scale_shape,
-                dtype=torch.float32,
-                device=device,
-            )
+        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        scale_shape = self.get_scale_shape(shape, columnwise=False)
+        scale_inv = torch.empty(
+            scale_shape,
+            dtype=torch.float32,
+            device=device,
+        )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -425,8 +418,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
-        self._rowwise_scale_inv = torch.Tensor() if self._rowwise_scale_inv is not None else None
-        self._columnwise_scale_inv = torch.Tensor() if self._columnwise_scale_inv is not None else None
 
     @classmethod
     def _make_in_reduce_ex(
@@ -498,6 +489,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
+            dst.dtype = src.dtype
 
         # Check that tensor dimensions match
         if (

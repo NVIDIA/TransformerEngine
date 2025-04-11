@@ -520,7 +520,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._data = torch.Tensor() if self._data is not None else None
         self._transpose = torch.Tensor() if self._transpose is not None else None
-        self._scale_inv = torch.Tensor() if self._scale_inv is not None else None
         self._transpose_invalid = True
 
     @classmethod
