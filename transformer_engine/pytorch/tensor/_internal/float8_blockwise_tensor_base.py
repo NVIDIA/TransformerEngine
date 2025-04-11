@@ -36,8 +36,8 @@ class Float8BlockwiseQTensorBase:
     def __new__(
         cls,
         *args,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
@@ -71,10 +71,16 @@ class Float8BlockwiseQTensorBase:
     def prepare_for_saving(
         self,
     ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
-        """Prepare the tensor base for saving for backward"""
+        """
+        Prepare the tensor base for saving for backward
+
+        This does not clear the tensors currently, because with PP config
+        that clears the weight cache between micro-batches. If the rowwise
+        data is not required for backward, this is a possible memory
+        pessimization, but is consistent with the other quantized tensor
+        classes.
+        """
         tensors = [self._rowwise_data, self._columnwise_data]
-        self._rowwise_data = None
-        self._columnwise_data = None
         return tensors, self
 
     def restore_from_saved(

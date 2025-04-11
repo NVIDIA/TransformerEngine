@@ -16,10 +16,14 @@
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
+#include "common/transpose/cast_transpose.h"
 #include "common/utils.cuh"
 
 namespace transformer_engine {
 namespace {
+
+using transformer_engine::detail::FP8BlockwiseColumnwiseOption;
+using transformer_engine::detail::FP8BlockwiseRowwiseOption;
 
 // clang-format off
 /*
@@ -138,15 +142,17 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 
 template <bool kAligned, typename CType, typename IType, typename OType>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-    block_scaled_1d_cast_transpose_kernel(const IType* const input, OType* const output_c,
-                                          OType* const output_t, CType* const tile_scales_inv_c,
-                                          CType* const tile_scales_inv_t, const size_t row_length,
-                                          const size_t num_rows, const size_t scale_stride_x,
-                                          const size_t scale_stride_y,
-                                          const size_t scale_t_stride_x,
-                                          const size_t scale_t_stride_y, const float epsilon,
-                                          bool return_transpose, bool pow_2_scaling) {
+__global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
+    const IType* const input, OType* const output_c, OType* const output_t,
+    CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
+    const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
+    const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
+    FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
+    const bool pow_2_scaling) {
+  bool return_rowwise = rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE;
+  bool return_columnwise_transpose =
+      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE;
+
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecOut>;
   union IVec {
@@ -203,7 +209,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   __syncthreads();
 
   // Step 2: Cast and store to output_c
-  {
+  if (return_rowwise) {
     constexpr int r_stride =
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
@@ -294,7 +300,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   // Step 3: Transpose, cast and store to output_t
-  if (return_transpose) {
+  if (return_columnwise_transpose) {
     constexpr int c_stride =
         kThreadsPerBlock / kNumThreadsStore;  // Stride in columns of shared memory
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
@@ -389,10 +395,15 @@ namespace transformer_engine::detail {
 void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
                                          SimpleTensor& scale_inv_t, SimpleTensor& output,
                                          SimpleTensor& output_t, const float epsilon,
-                                         const bool return_transpose, const bool pow2_scale,
-                                         cudaStream_t stream) {
+                                         FP8BlockwiseRowwiseOption rowwise_option,
+                                         FP8BlockwiseColumnwiseOption columnwise_option,
+                                         const bool pow2_scale, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise);
-  NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
+
+  // assert that rowwise_option and columnwise_option are not both NONE
+  NVTE_CHECK(rowwise_option != FP8BlockwiseRowwiseOption::NONE ||
+                 columnwise_option != FP8BlockwiseColumnwiseOption::NONE,
+             "rowwise_option and columnwise_option cannot both be NONE");
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_elements = row_length;
@@ -408,21 +419,24 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
   }
 
   // Options for scale layout of cuBLAS GEMM kernel.
-
-  NVTE_CHECK(input.shape.size() == output.shape.size(),
-             "Input and output must have the same shape.");
-
   size_t scale_stride_x = 0;
   size_t scale_stride_y = 0;
-  NVTE_CHECK(scale_inv.shape.size() == 2, "Scale dimension must be 2.");
-  size_t scale_k = scale_inv.shape[1];
-  scale_stride_x = scale_k;
-  scale_stride_y = 1;
-
   size_t scale_t_stride_x = 0;
   size_t scale_t_stride_y = 0;
 
-  if (return_transpose) {
+  if (rowwise_option != FP8BlockwiseRowwiseOption::NONE) {
+    NVTE_CHECK(rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE,
+               "Unexpected rowwise enum value");
+    NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
+    NVTE_CHECK(scale_inv.shape.size() == 2, "Scale dimension must be 2.");
+    size_t scale_k = scale_inv.shape[1];
+    scale_stride_x = scale_k;
+    scale_stride_y = 1;
+  }
+
+  if (columnwise_option != FP8BlockwiseColumnwiseOption::NONE) {
+    NVTE_CHECK(columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE,
+               "Unexpected columnwise enum value");
     NVTE_CHECK(output_t.shape.size() == input.shape.size(),
                "output_t must have same number of dimensions as input.");
     if (output_t.shape.size() > 0) {
@@ -469,10 +483,10 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                   reinterpret_cast<OutputType*>(output_t.dptr),
                   reinterpret_cast<float*>(scale_inv.dptr),
                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
-                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, return_transpose,
-                  pow2_scale);)  // kAligned
-          )                      // OutputType
-      )                          // InputType
+                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
+                  columnwise_option, pow2_scale);)  // kAligned
+          )                                         // OutputType
+      )                                             // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
