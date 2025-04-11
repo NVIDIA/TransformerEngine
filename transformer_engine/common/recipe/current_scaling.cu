@@ -154,6 +154,7 @@ __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *sca
                                                const float epsilon) {
   *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon,
                                        std::numeric_limits<float>::max());
+  printf("ScaleInv: %f\n", 1.f / *scale_ptr);
 }
 
 }  // namespace

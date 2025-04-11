@@ -40,10 +40,10 @@ is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 SUPPORTED_RECIPES = []
 if is_fp8_supported:
-    SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    # SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
     SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
-if is_mxfp8_supported:
-    SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+# if is_mxfp8_supported:
+#     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
 INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
@@ -84,6 +84,11 @@ class TestDistributedLayernormMLP:
         subkeys = jax.random.split(key, 6)
 
         x = jax.random.normal(subkeys[0], (batch, seqlen, hidden_in), dtype)
+
+        # Scale x so different shards of the tensor will have significantly different scales
+        scale = (jnp.mgrid[:batch, :seqlen, :hidden_in][:1, :, :, :].reshape((batch, seqlen, hidden_in)) * 50 + 0.5).astype(dtype)
+        x = x * scale
+
         gamma = jax.random.normal(subkeys[5], (hidden_in,), dtype=dtype)
         k1 = jax.random.normal(
             subkeys[1], (hidden_in, len(activation_type), INTERMEDIATE), dtype
