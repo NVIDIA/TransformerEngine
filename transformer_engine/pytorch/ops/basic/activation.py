@@ -43,7 +43,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
     cache_quantized_input: bool, default = False
         Quantize input tensor when caching for use in the backward
         pass. This will typically reduce memory usage but require
-        extra compute and increase numerical error.
+        extra compute and increase numerical error. This feature is
+        highly experimental.
 
     """
 
