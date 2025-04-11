@@ -91,6 +91,46 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     return ret;
   }
 
+  struct PatternDims {
+    int64_t a_rows_start{};
+    int64_t a_rows_num{};
+    int64_t a_cols_start{};
+    int64_t a_cols_num{};
+    int64_t b_rows_start{};
+    int64_t b_rows_num{};
+    int64_t b_cols_start{};
+    int64_t b_cols_num{};
+    int64_t d_rows_start{};
+    int64_t d_rows_num{};
+    int64_t d_cols_start{};
+    int64_t d_cols_num{};
+  };
+
+  PatternDims AgGemm(int64_t m, int64_t n, int64_t k) {
+    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
+    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
+
+    int64_t a_cols_start{};
+    int64_t b_cols_start{};
+    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+    return PatternDims{
+        .a_rows_start = 0,
+        .a_rows_num = k,
+        .a_cols_start = a_cols_start,
+        .a_cols_num = a_cols_num,
+        .b_rows_start = 0,
+        .b_rows_num = k,
+        .b_cols_start = b_cols_start,
+        .b_cols_num = b_cols_num,
+        .d_rows_start = a_cols_start,
+        .d_rows_num = a_cols_num,
+        .d_cols_start = 0,
+        .d_cols_num = n,
+    };
+  }
+
   template <typename T>
   void TestAgGemm(size_t m, size_t n, size_t k, transformer_engine::DType dtype) {
     cudaStream_t stream{};
@@ -108,19 +148,12 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
     auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
 
-    auto a_cols = nvte_comm_gemm_numroc(ctx_, m);
-    auto b_cols = nvte_comm_gemm_numroc(ctx_, n);
-
-    int64_t a_cols_start{};
-    int64_t b_cols_start{};
-    MPI_Scan(&a_cols, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Scan(&b_cols, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-    a_cols_start -= a_cols;
-    b_cols_start -= b_cols;
-
-    auto a = MakeDeviceTensorFromData<T>(adata, 0, a_cols_start, k, a_cols, k, dtype, stream);
-    auto b = MakeDeviceTensorFromData<T>(bdata, 0, b_cols_start, k, b_cols, k, dtype, stream);
-    auto d = MakeDeviceTensor<T>(a_cols, n, dtype, stream);
+    auto dims = AgGemm(m, n, k);
+    auto a = MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
+                                         dims.a_rows_num, dims.a_cols_num, k, dtype, stream);
+    auto b = MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                         dims.b_rows_num, dims.b_cols_num, k, dtype, stream);
+    auto d = MakeDeviceTensor<T>(dims.d_rows_num, dims.d_cols_num, dtype, stream);
 
     transformer_engine::Tensor bias;
     transformer_engine::Tensor pre_act_out;
@@ -135,7 +168,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     nvte_cublas_gemm(&ga, &gb, &gd, &bias, &pre_act_out, transa, transb, grad, &workspace,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
 
-    std::vector<T> out(a_cols * n);
+    std::vector<T> out(dims.d_rows_num * dims.d_cols_num);
     NVTE_CHECK_CUDA(cudaMemcpyAsync(out.data(), d.data.dptr, out.size() * sizeof out[0],
                                     cudaMemcpyDefault, stream));
     std::vector<T> out_golden_global(m * n);
@@ -145,13 +178,11 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
 
-    auto out_golden = CopyLocalMatrix(out_golden_global, a_cols_start, 0, a_cols, n, m);
+    auto out_golden = CopyLocalMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
+                                      dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      std::ostringstream ss;
-      ss << rank_ << ": " << i << ": " << static_cast<float>(out[i]) << " "
-         << static_cast<float>(out_golden[i]);
-      std::cerr << ss.str() << "\n";
+      EXPECT_FLOAT_EQ(out[i], out_golden[i]);
     }
   }
 
