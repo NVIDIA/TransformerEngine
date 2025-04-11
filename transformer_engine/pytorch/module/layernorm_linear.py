@@ -1493,7 +1493,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
-    
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.

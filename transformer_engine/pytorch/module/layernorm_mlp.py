@@ -786,13 +786,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 grad_arg = True
                 if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling():
                     grad_arg = False
-                general_gemm_fc2_wgrad = functools.partial(general_gemm,
+                general_gemm_fc2_wgrad = functools.partial(
+                    general_gemm,
                     out_dtype=(
                         origin_fc2_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
-
                     workspace=get_workspace(),
                     layout="NT",
                     grad=grad_arg,
@@ -812,7 +812,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
 
                     if fc2_bias_grad is None:
-                        if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling() and fc2_bias is not None:
+                        if (
+                            ctx.fp8
+                            and ctx.fp8_recipe.float8_block_scaling()
+                            and fc2_bias is not None
+                        ):
                             # BGRAD not fused with GEMM for float8 blockwise gemm.
                             fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
 
@@ -980,8 +984,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
 
                 # wgrad GEMM
-                general_gemm_fc1_wgrad = functools.partial(general_gemm,
-                    out_dtype=origin_fc1_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype,
+                general_gemm_fc1_wgrad = functools.partial(
+                    general_gemm,
+                    out_dtype=(
+                        origin_fc1_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
+                    ),
                     workspace=get_workspace(),
                     layout="NT",
                     grad=fuse_gemm_and_bias_fc1_wgrad,
@@ -1740,7 +1749,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc1_bias_grad = None
             if self.use_bias:
                 if self.fc2_bias.grad is None:
-                    if self.fp8 and self.fp8_recipe.float8_block_scaling() and self.apply_bias and not self.gemm_bias_unfused_add:
+                    if (
+                        self.fp8
+                        and self.fp8_recipe.float8_block_scaling()
+                        and self.apply_bias
+                        and not self.gemm_bias_unfused_add
+                    ):
                         act_out = tensor_list_fc2[0]
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
                         fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)

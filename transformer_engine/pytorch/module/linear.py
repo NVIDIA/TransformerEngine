@@ -1299,7 +1299,6 @@ class Linear(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
 
-
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.

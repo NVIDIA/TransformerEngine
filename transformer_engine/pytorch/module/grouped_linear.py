@@ -695,7 +695,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
 
-
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.

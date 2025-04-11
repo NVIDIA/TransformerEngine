@@ -1562,6 +1562,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
@@ -1569,7 +1570,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-def test_layernorm_mlp_accuracy_split_bw(dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation):
+def test_layernorm_mlp_accuracy_split_bw(
+    dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
+):
     config = model_configs[model]
 
     ln_mlp_split_bw = LayerNormMLP(
@@ -1594,8 +1597,7 @@ def test_layernorm_mlp_accuracy_split_bw(dtype, bs, model, activation, normaliza
         device="cuda",
         split_bw=False,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-    ).eval() 
-
+    ).eval()
 
     # Share params
     with torch.no_grad():
@@ -1608,9 +1610,13 @@ def test_layernorm_mlp_accuracy_split_bw(dtype, bs, model, activation, normaliza
             ln_mlp_ref.fc1_bias = Parameter(ln_mlp_split_bw.fc1_bias.clone())
             ln_mlp_ref.fc2_bias = Parameter(ln_mlp_split_bw.fc2_bias.clone())
         if fuse_wgrad_accumulation:
-            ln_mlp_split_bw.fc1_weight.main_grad = torch.rand_like(ln_mlp_split_bw.fc1_weight, dtype=torch.float32)
+            ln_mlp_split_bw.fc1_weight.main_grad = torch.rand_like(
+                ln_mlp_split_bw.fc1_weight, dtype=torch.float32
+            )
             ln_mlp_ref.fc1_weight.main_grad = ln_mlp_split_bw.fc1_weight.main_grad.clone()
-            ln_mlp_split_bw.fc2_weight.main_grad = torch.rand_like(ln_mlp_split_bw.fc2_weight, dtype=torch.float32)
+            ln_mlp_split_bw.fc2_weight.main_grad = torch.rand_like(
+                ln_mlp_split_bw.fc2_weight, dtype=torch.float32
+            )
             ln_mlp_ref.fc2_weight.main_grad = ln_mlp_split_bw.fc2_weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_mlp_split_bw, bs, dtype, config, split_bw=True)
