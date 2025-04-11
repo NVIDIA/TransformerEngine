@@ -245,7 +245,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   if (create_transpose) {
     std::vector<size_t> transposed_shape;
     for (auto s : columnwise_torch_shape) {
-      transposed_shape.emplace_back(static_cast<size_t>(s))
+      transposed_shape.emplace_back(static_cast<size_t>(s));
     }
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, transposed_shape);
     tensor.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
