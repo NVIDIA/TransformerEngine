@@ -394,6 +394,37 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
+    def test_view_and_reshape(self, fp8_dtype: tex.DType, dtype: torch.dtype) -> None:
+        """Test view operations that preserve tensor shape"""
+        device = "cuda"
+        dims = [16, 16, 512]
+
+        x_hp = torch.rand(dims, dtype=dtype, device=device)
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        x_fp8 = quantizer.make_empty(x_hp.shape, dtype=dtype, device=device)
+        quantizer.update_quantized(x_hp.clone(), x_fp8)
+
+        # Test view with same shape
+        x_hp_view = x_hp.view(-1, dims[-1]).contiguous()
+        x_fp8_view = x_fp8.view(-1, dims[-1])
+        torch.testing.assert_close(
+            x_fp8_view.dequantize().contiguous(), x_hp_view, **_tols[fp8_dtype]
+        )
+
+        # Test reshape with same shape
+        x_hp_reshape = x_hp.reshape(-1, dims[-1]).contiguous()
+        x_fp8_reshape = x_fp8.reshape(-1, dims[-1])
+        torch.testing.assert_close(
+            x_fp8_reshape.dequantize().contiguous(), x_hp_reshape, **_tols[fp8_dtype]
+        )
+
+    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     def test_reshape_same_shape(
