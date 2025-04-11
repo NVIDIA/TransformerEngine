@@ -24,7 +24,7 @@ def set_offloading_param(tensor, param_name, value):
     if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
         setattr(tensor, param_name, value)
     else:
-        data_tensors = tensor.get_data_tensors()
+        data_tensors = tensor.get_data_tensors(scale_tensors=True)
         for tensor in data_tensors:
             if tensor is not None:
                 setattr(tensor, param_name, value)

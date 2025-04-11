@@ -91,8 +91,10 @@ class Float8BlockwiseQTensorBase:
         self._columnwise_data = tensors[1]
         return tensors[2:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scale_tensors: bool = False):
         """Get this Tensor's data."""
+        if scale_tensors:
+            return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
         return self._rowwise_data, self._columnwise_data
 
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:

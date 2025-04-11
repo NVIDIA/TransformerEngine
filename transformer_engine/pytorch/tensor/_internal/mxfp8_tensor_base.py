@@ -116,14 +116,11 @@ class MXFP8TensorBase:
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scale_tensors: bool = False):
         """Get this Tensor's data."""
-        return (
-            self._rowwise_data,
-            self._columnwise_data,
-            self._rowwise_scale_inv,
-            self._columnwise_scale_inv,
-        )
+        if scale_tensors:
+            return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
+        return self._rowwise_data, self._columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
