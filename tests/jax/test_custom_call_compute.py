@@ -74,7 +74,12 @@ def is_shape_supported_by_mxfp8(input_shape):
 
 def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
-        assert_allclose(a.scale_inv, b.scale_inv)
+        assert a.scale_inv.dtype == b.scale_inv.dtype
+        if a.scale_inv.dtype == jnp.float8_e8m0fnu:
+            # Compare MXFP8 scales as uint8
+            assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+        else:
+            assert_allclose(a.scale_inv, b.scale_inv)
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
