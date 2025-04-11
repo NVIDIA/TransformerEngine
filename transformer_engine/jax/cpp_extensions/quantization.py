@@ -27,7 +27,13 @@ from .misc import (
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor2x, ScaledTensor, ScaledTensorFactory
-from ..quantize import Quantizer, QuantizeLayout, DelayedScaleQuantizer, ScalingMode
+from ..quantize import (
+    Quantizer,
+    QuantizeLayout,
+    DelayedScaleQuantizer,
+    ScalingMode,
+    compute_scale_from_amax,
+)
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -311,7 +317,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING.value, ScalingMode.CURRENT_TENSOR_SCALING.value):
+            if scaling_mode in (
+                ScalingMode.DELAYED_TENSOR_SCALING.value,
+                ScalingMode.CURRENT_TENSOR_SCALING.value,
+            ):
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -384,7 +393,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING.value, ScalingMode.CURRENT_TENSOR_SCALING.value):
+            if scaling_mode in (
+                ScalingMode.DELAYED_TENSOR_SCALING.value,
+                ScalingMode.CURRENT_TENSOR_SCALING.value,
+            ):
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -619,6 +631,13 @@ def _quantize_dbias_impl(
             return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, None
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Globally reduce amax across all devices for current scaling so we have a single global scale.
+        # This differs from the PyTorch implementation which uses a local amax and scale per-device and persists this
+        # until the tensor is dequantized (e.g. in the GEMM).
+        amax = jnp.amax(jnp.abs(x), keepdims=True)
+        scale = compute_scale_from_amax(amax, quantizer.q_dtype)
+
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
@@ -646,8 +665,6 @@ def _quantize_dbias_impl(
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)
-
-    jax.debug.print('Global scale inv: {}', rowwise_scale_inv)
 
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,

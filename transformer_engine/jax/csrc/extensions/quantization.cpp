@@ -162,17 +162,6 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   }
 
   if (scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING) {
-    nvte_compute_amax(input_tensor.data(),   // input data
-                      output_tensor.data(),  // output data (for amax)
-                      stream);
-
-    QuantizationConfigWrapper quant_config;
-    /** defaults for now, TODO(Jeremy) move to parameter */
-    bool force_pow_2_scales = false;
-    float amax_epsilon = 0.0;
-    quant_config.set_force_pow_2_scales(force_pow_2_scales);
-    quant_config.set_amax_epsilon(amax_epsilon);
-    nvte_compute_scale_from_amax(output_tensor.data(), quant_config, stream);
     output_tensor.set_amax(nullptr, DType::kFloat32, std::vector<size_t>{1});
   }
 
