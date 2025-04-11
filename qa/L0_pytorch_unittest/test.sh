@@ -20,6 +20,7 @@ set -x
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 

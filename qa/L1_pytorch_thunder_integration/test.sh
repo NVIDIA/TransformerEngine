@@ -6,6 +6,7 @@ set -x
 
 : ${THUNDER_PATH:=/opt/pytorch/lightning-thunder}
 : ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
 
 pip3 install pytest==8.1.1 pytest-benchmark==5.1.0
 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml ${THUNDER_PATH}/thunder/tests/test_transformer_engine_executor.py
