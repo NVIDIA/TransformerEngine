@@ -1044,8 +1044,8 @@ def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
         out = out[0]
     loss = out.sum()
     loss.backward()
-    if split_bw and hasattr(block, "wgrad_comp"):
-        block.wgrad_comp()
+    if split_bw:
+        block.backward_dw()
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
@@ -1554,6 +1554,64 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("activation", all_activations)
+@pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_layernorm_mlp_accuracy_split_bw(dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation):
+    config = model_configs[model]
+
+    ln_mlp_split_bw = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        split_bw=True,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    ln_mlp_ref = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        split_bw=False,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval() 
+
+
+    # Share params
+    with torch.no_grad():
+        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp_split_bw.layer_norm_weight.clone())
+        if normalization != "RMSNorm":
+            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp_split_bw.layer_norm_bias.clone())
+        ln_mlp_ref.fc1_weight = Parameter(ln_mlp_split_bw.fc1_weight.clone())
+        ln_mlp_ref.fc2_weight = Parameter(ln_mlp_split_bw.fc2_weight.clone())
+        if bias:
+            ln_mlp_ref.fc1_bias = Parameter(ln_mlp_split_bw.fc1_bias.clone())
+            ln_mlp_ref.fc2_bias = Parameter(ln_mlp_split_bw.fc2_bias.clone())
+        if fuse_wgrad_accumulation:
+            ln_mlp_split_bw.fc1_weight.main_grad = torch.rand_like(ln_mlp_split_bw.fc1_weight, dtype=torch.float32)
+            ln_mlp_ref.fc1_weight.main_grad = ln_mlp_split_bw.fc1_weight.main_grad.clone()
+            ln_mlp_split_bw.fc2_weight.main_grad = torch.rand_like(ln_mlp_split_bw.fc2_weight, dtype=torch.float32)
+            ln_mlp_ref.fc2_weight.main_grad = ln_mlp_split_bw.fc2_weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(ln_mlp_split_bw, bs, dtype, config, split_bw=True)
+    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, split_bw=False)
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
 
 def _test_grouped_linear_accuracy(
     block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw=False
@@ -1601,10 +1659,10 @@ def _test_grouped_linear_accuracy(
     loss.backward()
     if split_bw:
         if isinstance(block, GroupedLinear):
-            block.wgrad_comp()
+            block.backward_dw()
         else:
             for i in range(num_gemms):
-                block[i].wgrad_comp()
+                block[i].backward_dw()
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]

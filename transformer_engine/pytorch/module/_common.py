@@ -281,8 +281,11 @@ class WeightGradStore:
             tensor_list, func = self.context.get()
             return func(*tensor_list), tensor_list
         else:
-            rank = torch.distributed.get_rank()
-            raise Exception(f"Pop empty queue. rank {rank}")
+            if torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+                raise Exception(f"Pop empty queue. rank {rank}")
+            else:
+                raise Exception("Pop empty queue. No distributed environment detected.")
 
     def assert_empty(self):
         """

@@ -18,7 +18,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
-from ._common import _ParameterInitMeta
+from ._common import _ParameterInitMeta, noop_cat
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -1081,3 +1081,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
+
+    def backward_dw(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
+        (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+        if not self.fuse_wgrad_accumulation:
+            unfused_weights = [getattr(self, name) for name in self.weight_names]
+            weight_tensor = noop_cat(unfused_weights)
+            if weight_tensor.grad is None:
+                weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+            if bias_tensor.grad is None:
+                bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
+        del grad_bias_
+        del wgrad
