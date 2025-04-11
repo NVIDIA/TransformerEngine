@@ -94,7 +94,11 @@ class MXFP8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
         """Prepare the tensor base for saving for backward"""
-        tensors = [self._rowwise_data, self._columnwise_data]
+        tensors = [self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv]
+        self._rowwise_data = None
+        self._columnwise_data = None
+        self._rowwise_scale_inv = None
+        self._columnwise_scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -103,11 +107,13 @@ class MXFP8TensorBase:
         """Restore the tensor base data from the saved tensors list."""
         self._rowwise_data = tensors[0]
         self._columnwise_data = tensors[1]
-        return tensors[2:]
+        self._rowwise_scale_inv = tensors[2]
+        self._columnwise_scale_inv = tensors[3]
+        return tensors[4:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
-        return self._rowwise_data, self._columnwise_data
+        return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
