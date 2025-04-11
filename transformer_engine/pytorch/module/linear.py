@@ -8,6 +8,7 @@ from functools import reduce
 from operator import mul as multiply_op
 
 import torch
+import functools
 
 import transformer_engine_torch as tex
 
@@ -21,7 +22,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, _fix_gathered_fp8_transpose
+from ._common import noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
@@ -81,6 +82,7 @@ class _Linear(torch.autograd.Function):
         is_first_microbatch: Union[bool, None],
         fp8: bool,
         fp8_calibration: bool,
+        wgrad_store: WeightGradStore,
         input_quantizer: Optional[Quantizer],
         weight_quantizer: Optional[Quantizer],
         output_quantizer: Optional[Quantizer],
@@ -371,6 +373,7 @@ class _Linear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+            ctx.wgrad_store = wgrad_store
 
         # Row Parallel Linear
         if ub_overlap_rs_fprop:
@@ -658,15 +661,14 @@ class _Linear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                wgrad, grad_bias_, _, rs_out = general_gemm(
-                    inputmat_total,
-                    grad_output,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
+                general_gemm_wgrad = functools.partial(
+                    general_gemm,
                     out_dtype=(
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
+                    workspace=get_workspace(),
+                    layout="NT",
+                    grad=True,
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
                     use_split_accumulator=use_split_accumulator,
@@ -676,6 +678,19 @@ class _Linear(torch.autograd.Function):
                     extra_output=rs_out,
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
+
+                if ctx.wgrad_store.split_bw():
+                    ctx.wgrad_store.put([inputmat_total, grad_output], general_gemm_wgrad)
+                else:
+                    wgrad, grad_bias_, _, rs_out = general_gemm_wgrad(inputmat_total, grad_output)
+
+                    if grad_bias is None:
+                        grad_bias = grad_bias_
+                    del grad_bias_
+
+                    # Deallocate input tensor
+                    if ctx.owns_input:
+                        clear_tensor_data(inputmat_total)
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                 if ctx.ub_bulk_wgrad:
@@ -684,16 +699,8 @@ class _Linear(torch.autograd.Function):
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)
 
-                if grad_bias is None:
-                    grad_bias = grad_bias_
-                del grad_bias_
-
-                # Deallocate input tensor
-                if ctx.owns_input:
-                    clear_tensor_data(inputmat_total)
-
             # Don't return grad bias if not needed
-            if not ctx.use_bias:
+            if not ctx.use_bias or ctx.wgrad_store.split_bw():
                 grad_bias = None
 
             # Make sure all tensor-parallel communication is finished
@@ -743,6 +750,7 @@ class _Linear(torch.autograd.Function):
             None,  # is_first_microbatch
             None,  # fp8
             None,  # fp8_calibration
+            None,  # wgrad_store
             None,  # input_quantizer
             None,  # weight_quantizer
             None,  # output_quantizer
@@ -864,6 +872,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        split_bw: bool = False,
     ) -> None:
         super().__init__()
 
@@ -876,6 +885,8 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+
+        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1181,6 +1192,7 @@ class Linear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
+                self.wgrad_store,
                 input_quantizer,
                 weight_quantizer,
                 output_quantizer,
@@ -1286,3 +1298,24 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
+
+    def wgrad_comp(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
+        if not self.wgrad_store.split_bw():
+            return
+        with torch.cuda.nvtx.range("_Linear_wgrad"):
+            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            if not self.fuse_wgrad_accumulation:
+                unfused_weights = [getattr(self, name) for name in self.weight_names]
+                weight_tensor = noop_cat(unfused_weights)
+                if weight_tensor.grad is None:
+                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+            if self.use_bias:
+                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+                if bias_tensor.grad is None:
+                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
+            del grad_bias_
+            del wgrad
