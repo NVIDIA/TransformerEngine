@@ -74,11 +74,11 @@ class Float8BlockwiseQTensorBase:
         """
         Prepare the tensor base for saving for backward
 
-        This does not clear the tensors currently, because with PP config	
-        that clears the weight cache between micro-batches. If the rowwise	
-        data is not required for backward, this is a possible memory	
-        pessimization, but is consistent with the other quantized tensor	
-        classes.	
+        This does not clear the tensors currently, because with PP config
+        that clears the weight cache between micro-batches. If the rowwise
+        data is not required for backward, this is a possible memory
+        pessimization, but is consistent with the other quantized tensor
+        classes.
         """
         tensors = [self._rowwise_data, self._columnwise_data]
         return tensors, self
