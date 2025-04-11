@@ -10,8 +10,6 @@ import torch
 import triton
 import triton.language as tl
 
-from transformer_engine_torch import DType as TE_DType
-
 
 @triton.jit
 def _row_id_map_pass_1_kernel(
@@ -116,11 +114,14 @@ def _permute_kernel(
     output_ptr,
     row_id_map_ptr,
     probs_ptr,
+    scale_ptr,
     permuted_probs_ptr,
+    permuted_scale_ptr,
     # sizes
     num_tokens,
     num_experts,
     hidden_size,
+    scale_hidden_dim,
     # strides
     stride_input_token,
     stride_input_hidden,
@@ -128,9 +129,14 @@ def _permute_kernel(
     stride_output_hidden,
     stride_probs_token,
     stride_probs_expert,
+    stride_scale_token,
+    stride_scale_hidden,
     stride_permuted_probs_token,
+    stride_permuted_scale_token,
+    stride_permuted_scale_hidden,
     # metas
     PERMUTE_PROBS: tl.constexpr,
+    PERMUTE_SCALE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -140,11 +146,21 @@ def _permute_kernel(
         mask = cur_off < hidden_size
         input_off = pid * stride_input_token + cur_off * stride_input_hidden
         inp = tl.load(input_ptr + input_off, mask=mask)
+        if PERMUTE_SCALE:
+            mask_scale = cur_off < scale_hidden_dim
+            scale_off = pid * stride_scale_token + cur_off * stride_scale_hidden
+            scale = tl.load(scale_ptr + scale_off, mask=mask_scale)
         for expert_idx in range(num_experts):
             dst_row = tl.load(row_id_map_ptr + expert_idx * num_tokens + pid)
             if dst_row != -1:
                 output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
                 tl.store(output_ptr + output_off, inp, mask=mask)
+                if PERMUTE_SCALE:
+                    permuted_scale_off = (
+                        dst_row * stride_permuted_scale_token
+                        + cur_off * stride_permuted_scale_hidden
+                    )
+                    tl.store(permuted_scale_ptr + permuted_scale_off, scale, mask=mask_scale)
                 if PERMUTE_PROBS:
                     if cur_pos == 0:
                         prob_off = pid * stride_probs_token + expert_idx * stride_probs_expert
@@ -173,10 +189,12 @@ def permute_with_mask_map(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
     probs: torch.Tensor,
+    scale: torch.Tensor,
     num_tokens: int,
     num_experts: int,
     num_out_tokens: int,
     hidden_size: int,
+    scale_hidden_dim: int,
 ):
     # pylint: disable=missing-function-docstring
     output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
@@ -184,26 +202,42 @@ def permute_with_mask_map(
         permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
     else:
         permuted_probs = None
+
+    if scale is not None:
+        permuted_scale = torch.empty(
+            (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
+        )
+    else:
+        permuted_scale = None
+
     grid = (num_tokens,)
     _permute_kernel[grid](
         inp,
         output,
         row_id_map,
         probs,
+        scale,
         permuted_probs,
+        permuted_scale,
         num_tokens,
         num_experts,
         hidden_size,
+        scale_hidden_dim,
         inp.stride(0),
         inp.stride(1),
         output.stride(0),
         output.stride(1),
         probs.stride(0) if probs is not None else None,
         probs.stride(1) if probs is not None else None,
+        scale.stride(0) if scale is not None else None,
+        scale.stride(1) if scale is not None else None,
         permuted_probs.stride(0) if permuted_probs is not None else None,
+        permuted_scale.stride(0) if permuted_scale is not None else None,
+        permuted_scale.stride(1) if permuted_scale is not None else None,
         PERMUTE_PROBS=probs is not None,
+        PERMUTE_SCALE=scale is not None,
     )
-    return output, permuted_probs
+    return output, permuted_scale, permuted_probs
 
 
 @triton.jit
@@ -232,18 +266,9 @@ def _unpermute_kernel(
     # metas
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
-    FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == "e5m2":
-        data_type = tl.float8e5
-        pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == "e4m3":
-        data_type = tl.float8e4nv
-        pytorch_tensor_dtype = tl.uint8
-    else:
-        data_type = input_ptr.dtype.element_ty
-        assert FP8_DTYPE is None
+    data_type = input_ptr.dtype.element_ty
     compute_type = tl.float32
 
     pid = tl.program_id(0)
@@ -257,8 +282,6 @@ def _unpermute_kernel(
             if src_row != -1:
                 input_off = src_row * stride_input_token + current_offset * stride_input_hidden
                 inp = tl.load(input_ptr + input_off, mask=mask)
-                if FP8_DTYPE is not None:
-                    inp = inp.to(data_type, bitcast=True)
                 inp = inp.to(compute_type)
                 if WITH_MERGING_PROBS:
                     merging_prob_off = (
@@ -279,14 +302,7 @@ def _unpermute_kernel(
                         tl.store(unpermuted_probs_ptr + unpermuted_prob_off, prob)
                     else:
                         tl.store(unpermuted_probs_ptr + unpermuted_prob_off, 0.0)
-        if FP8_DTYPE is not None:
-            if not WITH_MERGING_PROBS:
-                # Directly adding these value may cause overflow for fp8, we scale it here.
-                # The outside fp8_scale_inv is also scaled in the meantime.
-                accumulator /= num_experts
-            accumulator = accumulator.to(data_type).to(pytorch_tensor_dtype, bitcast=True)
-        else:
-            accumulator = accumulator.to(data_type)
+        accumulator = accumulator.to(data_type)
         output_off = pid * stride_output_token + current_offset * stride_output_hidden
         tl.store(output_ptr + output_off, accumulator, mask=mask)
         current_start += BLOCK_SIZE
@@ -315,15 +331,8 @@ def unpermute_with_mask_map(
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
-    fp8_dtype: TE_DType,
 ):
     # pylint: disable=missing-function-docstring
-    if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = "e5m2"
-    elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = "e4m3"
-    else:
-        fp8_dtype = None
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     if permuted_probs is not None:
         unpermuted_probs = torch.empty(
@@ -353,7 +362,6 @@ def unpermute_with_mask_map(
         unpermuted_probs.stride(1) if unpermuted_probs is not None else None,
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
-        FP8_DTYPE=fp8_dtype,
     )
     return output, unpermuted_probs
 
@@ -383,18 +391,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
     stride_merging_probs_grad_token,
     stride_merging_probs_grad_expert,
     # metas
-    FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == "e5m2":
-        data_type = tl.float8e5
-        pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == "e4m3":
-        data_type = tl.float8e4nv
-        pytorch_tensor_dtype = tl.uint8
-    else:
-        data_type = fwd_output_grad_ptr.dtype.element_ty
-        assert FP8_DTYPE is None
+    data_type = fwd_output_grad_ptr.dtype.element_ty
     compute_type = tl.float32
 
     pid = tl.program_id(0)
@@ -411,8 +410,6 @@ def _unpermute_bwd_with_merging_probs_kernel(
                     + current_offset * stride_fwd_output_grad_hidden
                 )
                 inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
-                if FP8_DTYPE is not None:
-                    inp = inp.to(data_type, bitcast=True)
                 inp = inp.to(compute_type)
                 merging_prob_off = (
                     pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
@@ -420,8 +417,6 @@ def _unpermute_bwd_with_merging_probs_kernel(
                 merging_prob = tl.load(merging_probs_ptr + merging_prob_off).to(compute_type)
                 output = inp * merging_prob
                 output = output.to(data_type)
-                if FP8_DTYPE is not None:
-                    output = output.to(pytorch_tensor_dtype, bitcast=True)
                 output_off = (
                     dst_row * stride_fwd_input_grad_token
                     + current_offset * stride_fwd_input_grad_hidden
@@ -432,8 +427,6 @@ def _unpermute_bwd_with_merging_probs_kernel(
                     dst_row * stride_fwd_input_token + current_offset * stride_fwd_input_hidden
                 )
                 fwd_input = tl.load(fwd_input_ptr + fwd_input_off, mask=mask)
-                if FP8_DTYPE is not None:
-                    fwd_input = fwd_input.to(data_type, bitcast=True)
                 prob_grad_accum += fwd_input.to(compute_type) * inp
                 current_start += BLOCK_SIZE
             probs_grad = tl.sum(prob_grad_accum).to(merging_probs_grad_ptr.dtype.element_ty)
@@ -474,15 +467,8 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     num_experts: int,
     num_out_tokens: int,
     hidden_size: int,
-    fp8_dtype: TE_DType,
 ):
     # pylint: disable=missing-function-docstring
-    if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = "e5m2"
-    elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = "e4m3"
-    else:
-        fp8_dtype = None
     act_grad = torch.empty(
         (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
     )
@@ -510,7 +496,6 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
         merging_probs.stride(1),
         merging_probs_grad.stride(0),
         merging_probs_grad.stride(1),
-        fp8_dtype,
     )
     return act_grad, merging_probs_grad
 
