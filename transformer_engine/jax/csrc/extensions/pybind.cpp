@@ -138,17 +138,17 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("RMSNorm", NVTE_Norm_Type::RMSNorm)
       .export_values();
 
-  pybind11::enum_<NVTEScalingMode>(m, "NVTE_Scaling_Mode", pybind11::module_local())
-      .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)
-      .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
-      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
+  pybind11::enum_<JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode", pybind11::module_local())
+      .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
+      .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
       .export_values();
 
-  pybind11::enum_<transformer_engine::jax::QuantizeAxis>(m, "QuantizeAxis",
-                                                         pybind11::module_local())
-      .value("ROWWISE", transformer_engine::jax::QuantizeAxis::ROWWISE)
-      .value("COLWISE", transformer_engine::jax::QuantizeAxis::COLWISE)
-      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeAxis::ROWWISE_COLWISE)
+  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
+                                                           pybind11::module_local())
+      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
+      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
+      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
       .export_values();
 }
 

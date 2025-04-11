@@ -15,7 +15,11 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-from .quantize import QuantizerSet, noop_quantizer_set
+from .quantize import (
+    QuantizerSet,
+    noop_quantizer_set,
+    with_sharding_constraint_by_logical_axes,
+)
 
 
 def dense(
@@ -23,6 +27,8 @@ def dense(
     kernel: jnp.ndarray,
     bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
+    input_axes: Tuple[str, ...] = None,
+    kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -48,12 +54,12 @@ def dense(
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
             output += jnp.reshape(bias, bias_new_shape)
     else:
-        output = _dense(x, kernel, bias, contracting_dims, quantizer_set)
+        output = _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set)
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3,))
-def _dense(x, kernel, bias, contracting_dims, quantizer_set):
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
+def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set):
     """Internal implementation of dense layer transformation with custom VJP.
 
     This function implements the core dense layer transformation logic with support
@@ -64,32 +70,37 @@ def _dense(x, kernel, bias, contracting_dims, quantizer_set):
         kernel: Weight matrix
         bias: Optional bias tensor
         contracting_dims: Contracting dimensions specification
+        input_axes: Logical axes for sharding the activation input
+        kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
         Transformed output tensor
     """
-    output, _ = _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set)
+    output, _ = _dense_fwd_rule(
+        x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set
+    )
     return output
 
 
-def _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
+def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set):
     """Forward pass rule for dense layer transformation.
-
-    Args:
-        x: Input tensor
-        kernel: Weight matrix
-        bias: Optional bias tensor
-        contracting_dims: Contracting dimensions specification
-        quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
         Tuple of (output, context) for backward pass
     """
     x_contracting_dims, k_contracting_dims = contracting_dims
 
-    casted_x = tex.quantize(x, quantizer_set.x)
-    casted_kernel = tex.quantize(kernel, quantizer_set.kernel)
+    flatten_axis_x = -len(x_contracting_dims)
+    flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
+
+    casted_x = tex.quantize(x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x)
+    casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
+
+    casted_kernel = tex.quantize(
+        kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel
+    )
+    casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     # GEMM NN
     output = tex.gemm(
@@ -97,6 +108,7 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
         casted_kernel.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
+
     use_bias = bias is not None
     if use_bias:
         bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
@@ -109,17 +121,15 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
         kernel.shape,
         use_bias,
         quantizer_set,
+        flatten_axis_k,
     )
     return output, ctx
 
 
-def _dense_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argument
+def _dense_bwd_rule(
+    contracting_dims, input_axes, kernel_axes, ctx, grad
+):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
-
-    Args:
-        contracting_dims: Contracting dimensions specification
-        ctx: Context from forward pass
-        grad: Gradient from upstream
 
     Returns:
         Tuple of gradients with respect to inputs
@@ -133,9 +143,12 @@ def _dense_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argu
         kernel_shape,
         use_bias,
         quantizer_set,
+        flatten_axis_k,
     ) = ctx
 
-    casted_grad, dbias = tex.quantize_dbias(grad, is_dbias=use_bias, quantizer=quantizer_set.dgrad)
+    casted_grad, dbias = tex.quantize_dbias(
+        grad, is_dbias=use_bias, flatten_axis=flatten_axis_k, quantizer=quantizer_set.dgrad
+    )
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
@@ -151,6 +164,7 @@ def _dense_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argu
         rowwise_casted_kernel,
         (g_constracting_dim, k_constracting_dim),
     )
+    dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
     # GEMM TN
     # x_non_contracting_dims
@@ -161,6 +175,7 @@ def _dense_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argu
     wgrad = tex.gemm(
         colwise_casted_x, casted_grad.get_colwise_tensor(), (x_constracting_dim, g_constracting_dim)
     )
+    wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
     return dgrad, wgrad, dbias, quantizer_set
 

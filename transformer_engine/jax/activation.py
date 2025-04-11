@@ -91,7 +91,6 @@ def _activation_bwd_rule(activation_type, ctx, g):
     (x, _) = ctx
     assert x.dtype == g.dtype
     dx = tex.dact_lu(g, x, activation_type)
-    dx = jnp.reshape(dx, x.shape)
     return (dx, None)
 
 

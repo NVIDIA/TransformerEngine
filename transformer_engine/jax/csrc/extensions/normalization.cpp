@@ -14,7 +14,8 @@ namespace jax {
 
 pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
                                              DType w_dtype, DType out_dtype,
-                                             NVTE_Norm_Type norm_type, int scaling_mode,
+                                             NVTE_Norm_Type norm_type,
+                                             JAXX_Scaling_Mode scaling_mode,
                                              bool zero_centered_gamma, float epsilon, int sm_margin,
                                              bool is_training) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
@@ -26,12 +27,11 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
   auto gamma_tensor = TensorWrapper(nullptr, weight_shape, in_dtype);
   auto rsigma_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
-  auto _scaling_mode = static_cast<NVTEScalingMode>(scaling_mode);
-  auto output_tensor = TensorWrapper(_scaling_mode);
+  auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(nullptr, out_dtype, input_shape);
 
   // WAR: NVTE Norms query the is_training from whereas columwise_data is allocated
-  if (is_training && _scaling_mode == NVTE_MXFP8_1D_SCALING) {
+  if (is_training && scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
     int temp = 1;
     output_tensor.set_columnwise_data(static_cast<void *>(&temp), out_dtype, input_shape);
   }
@@ -47,7 +47,7 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
                        output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        dummy_work_tensor.data(), num_sm, zero_centered_gamma, nullptr);
   } else {
-    NVTE_CHECK(scaling_mode != NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING || !zero_centered_gamma,
+    NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || !zero_centered_gamma,
                "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), epsilon, output_tensor.data(),
                      rsigma_tensor.data(), dummy_work_tensor.data(), num_sm, zero_centered_gamma,
@@ -64,7 +64,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                           Result_Type colwise_scale_inv_buf, Result_Type amax_buf,
                           Result_Type mu_buf, Result_Type rsigma_buf, Result_Type wkspace_buf,
                           int norm_type, bool zero_centered_gamma, double epsilon,
-                          int64_t sm_margin, int scaling_mode, bool is_2x) {
+                          int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, bool is_2x) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
@@ -80,7 +80,6 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
   auto *workspace = wkspace_buf->untyped_data();
 
-  auto _scaling_mode = static_cast<NVTEScalingMode>(scaling_mode);
   auto _norm_type = static_cast<NVTE_Norm_Type>(norm_type);
   auto _is_2x = static_cast<bool>(is_2x);
 
@@ -105,7 +104,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - _sm_margin;
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, wkspace_dtype);
 
-  auto output_tensor = TensorWrapper(_scaling_mode);
+  auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
 
   if (is_fp8_dtype(out_dtype)) {
@@ -117,7 +116,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
             scale_inv_buf->dimensions().back()});
   }
 
-  if (_scaling_mode == NVTE_DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
     cudaMemsetAsync(amax, 0, sizeof(float), stream);
     output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
@@ -142,7 +141,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                        output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        workspace_tensor.data(), num_sm, zero_centered_gamma, stream);
   } else {
-    NVTE_CHECK(scaling_mode != NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING || !zero_centered_gamma,
+    NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || !zero_centered_gamma,
                "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), _epsilon, output_tensor.data(),
                      rsigma_tensor.data(), workspace_tensor.data(), num_sm, zero_centered_gamma,
@@ -170,7 +169,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Attr<bool>("zero_centered_gamma")
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
-                                  .Attr<int64_t>("scaling_mode")
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("is_2x"),
                               FFI_CudaGraph_Traits);
 

@@ -215,48 +215,14 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   if (tensor == nullptr) {
     NVTE_ERROR("Invalid tensor");
   }
-  NVTEShape ret;
 
   // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  switch (t.scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        // We can infer tensor shape if FP8 tensor only has FP8 data
-        // transpose. However, NVTEShape only contains a pointer and
-        // cannot store temporary data. We hack around this by caching
-        // the tensor shape within the empty FP8 data.
-        auto &shape_cache = const_cast<std::vector<size_t> &>(t.data.shape);
-        shape_cache.clear();
-        if (!t.columnwise_data.shape.empty()) {
-          for (size_t i = 1; i < t.columnwise_data.shape.size(); i++) {
-            shape_cache.push_back(t.columnwise_data.shape[i]);
-          }
-          shape_cache.push_back(t.columnwise_data.shape.front());
-        }
-        ret.data = shape_cache.data();
-        ret.ndim = shape_cache.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        ret.data = t.columnwise_data.shape.data();
-        ret.ndim = t.columnwise_data.shape.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    default:
-      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"",
-                 transformer_engine::to_string(t.scaling_mode), "\"");
-  }
+  const std::vector<size_t> &rowwise_shape = t.rowwise_shape_ref();
 
+  NVTEShape ret;
+  ret.data = rowwise_shape.data();
+  ret.ndim = rowwise_shape.size();
   return ret;
 }
 
@@ -463,6 +429,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(buf, &config_.amax_epsilon, attr_size);
       break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(buf, &config_.noop_tensor, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -491,6 +460,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(&config_.noop_tensor, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

@@ -89,7 +89,11 @@ def generate_pspec(logical_axis_names):
     Convert logical axes to PartitionSpec
     """
     rules = get_sharding_map_logic_axis_to_mesh_axis()
-    mesh_axis_names = [rules[name] for name in logical_axis_names]
+    # mesh_axis_names = [rules[name] for name in logical_axis_names]
+    mesh_axis_names = []
+    for name in logical_axis_names:
+        axis_name = rules[name] if name in rules else None
+        mesh_axis_names.append(axis_name)
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
     return pspec
 
@@ -112,7 +116,7 @@ def with_sharding_constraint_by_logical_axes(x: jnp.array, logical_axis_names: t
     """
     A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
     """
-    if logical_axis_names is None:
+    if not logical_axis_names:
         return x
 
     assert len(x.shape) == len(logical_axis_names)
@@ -315,3 +319,25 @@ class ShardingType(Enum):
     TP_ROW = (MajorShardingType.TP, "tp_row")
     DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
+
+
+def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
+    """Get logical axes for non-contracting dimensions.
+
+    Args:
+        ndim: Number of dimensions in the tensor.
+        logical_axes: Tuple of logical axes for each dimension.
+        contracting_dims: Set of dimensions that are being contracted.
+
+    Returns:
+        Tuple of logical axes for non-contracting dimensions.
+    """
+    if not logical_axes:
+        logical_axes = (None,) * ndim
+    elif len(logical_axes) < ndim:
+        logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
+    assert len(logical_axes) == ndim
+
+    non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
+    non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
+    return non_contracting_logical_axes

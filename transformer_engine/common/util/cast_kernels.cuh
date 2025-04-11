@@ -142,7 +142,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       OType out_colwise_sh[MXFP8_BUFFERS_NUM][MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / MXFP8_BUFFERS_NUM;
-  constexpr int transaction_size = shmem_buff_size * (IS_DACT ? 2 : 1);
 
   const bool is_master_thread = (threadIdx.x == 0);
 
@@ -513,7 +512,6 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   __shared__ alignas(128) OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / FP8_BUFFERS_NUM;
-  constexpr int transaction_size = shmem_buff_size * (IS_DACT ? 2 : 1);
 
   const bool is_master_thread = (threadIdx.x == 0);
 
@@ -927,7 +925,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   bool use_colwise_scaling = output->has_columnwise_data();
   checkCuDriverContext(stream);
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  const auto &input_shape = input.data.shape;
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
   if (use_rowwise_scaling) {
@@ -1218,9 +1215,9 @@ namespace detail {
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETensor noop,
-                     NVTETensor output, NVTETensor dbias, NVTETensor workspace,
-                     cudaStream_t stream) {
+void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor output,
+                     NVTETensor dbias, NVTETensor workspace,
+                     const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   const Tensor *input_tensor;
   const Tensor *activation_input_tensor;
   if constexpr (IS_DBIAS || IS_DACT) {
@@ -1235,6 +1232,12 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
   auto output_tensor = reinterpret_cast<Tensor *>(output);
   auto dbias_tensor = reinterpret_cast<Tensor *>(dbias);
   auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
+
+  const QuantizationConfig *quant_config_cpp =
+      reinterpret_cast<const QuantizationConfig *>(quant_config);
+
+  // extract noop tensor from quant_config_cpp if it's not null
+  const NVTETensor noop = quant_config_cpp ? quant_config_cpp->noop_tensor : nullptr;
   const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
 
   switch (output_tensor->scaling_mode) {
@@ -1260,6 +1263,36 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_2D: {
+      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
+      bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : true;
+      float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
+      quantize_transpose_square_blockwise(
+          input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+          output_tensor->data, output_tensor->columnwise_data, epsilon,
+          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D: {
+      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
+      bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
+      float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
+      FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
+                                                     ? FP8BlockwiseRowwiseOption::ROWWISE
+                                                     : FP8BlockwiseRowwiseOption::NONE;
+      FP8BlockwiseColumnwiseOption columnwise_option =
+          output_tensor->has_columnwise_data() ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
+                                               : FP8BlockwiseColumnwiseOption::NONE;
+      quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
+                                          output_tensor->columnwise_scale_inv, output_tensor->data,
+                                          output_tensor->columnwise_data, epsilon, rowwise_option,
+                                          columnwise_option, force_pow_2_scales, stream);
       break;
     }
     default:
