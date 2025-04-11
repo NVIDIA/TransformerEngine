@@ -28,14 +28,16 @@ class TestDistributedSoftmax:
         all_reduce_loss_bytes = 4  # 1 * FP32
         return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
-    def generate_inputs(self, shape, mesh_resource, softmax_type, dtype, bad_sharding):
+    def generate_inputs(
+        self, shape, mesh_resource, softmax_type, dtype, bad_sharding, broadcast_batch_mask
+    ):
         batch, _, sqelen, _ = shape
 
         x = random.normal(random.PRNGKey(1124), shape, dtype=dtype)
         if softmax_type == SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
             mask = make_causal_mask(batch, sqelen)
         else:
-            mask = make_self_mask(batch, sqelen)
+            mask = make_self_mask(1 if broadcast_batch_mask else batch, sqelen)
 
         if not bad_sharding:
             x_pspec = PartitionSpec(
@@ -45,7 +47,11 @@ class TestDistributedSoftmax:
             x_pspec = PartitionSpec(
                 mesh_resource.dp_resource, None, None, mesh_resource.tp_resource
             )
-        mask_pspec = PartitionSpec(mesh_resource.dp_resource, None, None, None)
+
+        if broadcast_batch_mask:
+            mask_pspec = PartitionSpec(None, None, None, None)
+        else:
+            mask_pspec = PartitionSpec(mesh_resource.dp_resource, None, None, None)
 
         return (x, mask), (x_pspec, mask_pspec)
 
@@ -67,16 +73,7 @@ class TestDistributedSoftmax:
         output = jax.nn.softmax(x * scale_factor)
         return jnp.mean(output)
 
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("data_shape", [[32, 12, 128, 128], [64, 16, 1024, 1024]])
-    @pytest.mark.parametrize(
-        "softmax_type",
-        [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED, SoftmaxType.SCALED_UPPER_TRIANG_MASKED],
-    )
-    @pytest.mark.parametrize("scale_factor", [1.0, 3.0])
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize("bad_sharding", [False, True])
-    def test_softmax(
+    def impl_test_softmax(
         self,
         device_count,
         mesh_shape,
@@ -87,15 +84,20 @@ class TestDistributedSoftmax:
         scale_factor,
         dtype,
         bad_sharding,
+        broadcast_batch_mask,
+        use_shardy,
     ):
+        if broadcast_batch_mask and softmax_type != SoftmaxType.SCALED_MASKED:
+            pytest.skip("Softmax type has no mask.")
 
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         target_func = partial(
             self.target_func, scale_factor=scale_factor, softmax_type=softmax_type
         )
         ref_func = partial(self.ref_func, scale_factor=scale_factor, dtype=dtype)
 
         (x, mask), (x_pspec, mask_pspec) = self.generate_inputs(
-            data_shape, mesh_resource, softmax_type, dtype, bad_sharding
+            data_shape, mesh_resource, softmax_type, dtype, bad_sharding, broadcast_batch_mask
         )
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
@@ -129,4 +131,70 @@ class TestDistributedSoftmax:
                         assert "Sharding the hidden dimension is not supported" in str(w), (
                             "Softmax primitive did not raise the correct warning for "
                             "unsupported sharding in the hidden dimension."
+                            f"{str(w)}"
                         )
+
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest.mark.parametrize("data_shape", [[32, 12, 128, 128], [64, 16, 1024, 1024]])
+    @pytest.mark.parametrize(
+        "softmax_type",
+        [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED, SoftmaxType.SCALED_UPPER_TRIANG_MASKED],
+    )
+    @pytest.mark.parametrize("scale_factor", [1.0, 3.0])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize("bad_sharding", [False, True])
+    @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
+    def test_softmax(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        softmax_type,
+        scale_factor,
+        dtype,
+        bad_sharding,
+        broadcast_batch_mask,
+    ):
+        self.impl_test_softmax(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            softmax_type,
+            scale_factor,
+            dtype,
+            bad_sharding,
+            broadcast_batch_mask,
+            use_shardy=False,
+        )
+
+    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
+    @pytest.mark.parametrize("softmax_type", [SoftmaxType.SCALED, SoftmaxType.SCALED_MASKED])
+    @pytest.mark.parametrize("bad_sharding", [False, True])
+    @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
+    def test_softmax_shardy(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        softmax_type,
+        bad_sharding,
+        broadcast_batch_mask,
+    ):
+        self.impl_test_softmax(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape=[32, 12, 128, 128],
+            softmax_type=softmax_type,
+            scale_factor=1.0,
+            dtype=DTYPES[0],
+            bad_sharding=bad_sharding,
+            broadcast_batch_mask=broadcast_batch_mask,
+            use_shardy=True,
+        )

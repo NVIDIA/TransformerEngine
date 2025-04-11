@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes, lax
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -42,6 +43,7 @@ from ..sharding import (
     get_mesh_axis_rank,
     get_all_mesh_axes,
     num_of_devices,
+    with_sharding_constraint,
 )
 
 
@@ -618,6 +620,35 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
         return mesh, impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del mesh, result_types
+
+        # Keep in sync with `infer_sharding_from_operands`.
+        # We only need the first input. Fill up the rest with placeholders.
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        # The RNG state sharding cannot be expressed as a Shardy rule. We use with_sharding_constraint
+        # instead. This has to happen outside of the primitive, see `fused_attn_fwd`.
+        rng_sharding = (f"…{len(value_types)}",)
+
+        if config.qkv_layout.is_qkvpacked():
+            input_spec[0] = ("…0", "seqlen", "three", "head", "hidden")
+        elif config.qkv_layout.is_kvpacked() or config.qkv_layout.is_separate():
+            input_spec[0] = ("…0", "seqlen", "head", "hidden")
+        else:
+            raise ValueError(f"Unsupported {config.qkv_layout=}")
+
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        out_sharding = ("…0", "seqlen", "head", "hidden")
+        if is_packed_softmax:
+            softmax_aux_sharding = ("…0", "seqlen", "head", "i")
+        else:
+            softmax_aux_sharding = ("…0", "head", "seqlen", "i")
+
+        return SdyShardingRule(
+            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+        )
+
 
 register_primitive(FusedAttnFwdPrimitive)
 
@@ -997,6 +1028,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             return local_dq, local_dk, local_dv, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del config, mesh
+        # We only care about the four first arguments.
+        # Keep in sync with `infer_sharding_from_operands`.
+        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
+        return SdyShardingRule(input_spec, output_spec)
 
 
 register_primitive(FusedAttnBwdPrimitive)
@@ -2436,13 +2476,15 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    return primitive.bind(
+    output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,
         bias,
         seed,
         *seq_desc_flatten,
         config=fused_config,
     )
+    rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+    return (output, softmax_aux, rng_state)
 
 
 def fused_attn_bwd(

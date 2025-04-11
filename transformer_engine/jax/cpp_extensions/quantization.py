@@ -10,6 +10,7 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -469,6 +470,48 @@ class DBiasQuantizePrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
+
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            len(value_types[0].shape), unique_var="i", flatten_axis=flatten_axis
+        )
+
+        x_axes = scale_rules.input_spec
+        colwise_scale_inv = scale_rules.colwise_rule
+
+        out = x_axes
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+                colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
+            else:
+                colwise_out = x_axes
+        else:
+            colwise_out = ("j",)
+            colwise_scale_inv = ("k",)
+
+        dbias = x_axes[flatten_axis:] if is_dbias else ("l",)
+        amax = ("m",)
+
+        return SdyShardingRule(
+            (x_axes, ("…1",)),
+            (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
+            **scale_rules.factor_sizes,
+        )
 
 
 register_primitive(DBiasQuantizePrimitive)
