@@ -104,7 +104,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !is_supported_nontn_fp8_gemm();
+  bool create_transpose = columnwise_usage && !nvte_is_supported_nontn_fp8_gemm();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }
@@ -215,7 +215,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !is_supported_nontn_fp8_gemm();
+  bool create_transpose = columnwise_usage && !nvte_is_supported_nontn_fp8_gemm();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }
@@ -245,7 +245,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   if (create_transpose) {
     std::vector<size_t> transposed_shape;
     for (auto s : columnwise_torch_shape) {
-      transposed_shape.emplace_back(static_cast<size_t>(s));
+      transposed_shape.emplace_back(static_cast<size_t>(s))
     }
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, transposed_shape);
     tensor.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
