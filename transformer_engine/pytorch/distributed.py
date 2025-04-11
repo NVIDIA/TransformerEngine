@@ -1241,17 +1241,16 @@ def gather_along_first_dim(
     return out, handle
 
 
-
-
 # Global cache to store symmetric memory tensors
 symmetric_mem_cache = {}
+
 
 def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group, tag=None):
     """
     Gets or creates a symmetric memory tensor with specified properties.
-    
+
     Reuses cached tensors when available to avoid redundant creation and rendezvous operations.
-    
+
     Parameters
     ----------
     tensor_numel : int
@@ -1264,7 +1263,7 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
         Process group for rendezvous operation.
     tag : Any, optional
         Optional identifier to further distinguish tensors.
-        
+
     Returns
     -------
     torch.Tensor
@@ -1290,6 +1289,7 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
         msg = symmetric_mem_cache[cache_key]
 
     return msg
+
 
 def symmetric_all_reduce(
     inp: torch.Tensor,
