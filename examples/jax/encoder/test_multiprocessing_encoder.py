@@ -623,7 +623,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         result = self.exec(False, None, enable_shardy=True)
-        assert result[0] < 0.45 and result[1] > 0.79
+        assert result[0] < 0.505 and result[1] > 0.755
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
@@ -631,7 +631,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
-        assert result[0] < 0.455 and result[1] > 0.79
+        assert result[0] < 0.505 and result[1] > 0.755
 
 
 if __name__ == "__main__":

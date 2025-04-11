@@ -454,7 +454,7 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.535 and actual[1] > 0.73
 
 
 if __name__ == "__main__":

@@ -399,4 +399,5 @@ class TestDistributedLayernormMLP:
             dtype,
             use_fp8=True,
             fp8_recipe=fp8_recipe,
+            use_shardy=False,
         )
