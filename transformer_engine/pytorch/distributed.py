@@ -1160,9 +1160,32 @@ def gather_along_first_dim(
     return out, handle
 
 
+
+
 # Global cache to store symmetric memory tensors
 symmetric_mem_cache = {}
 
+def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group, tag=None):
+    # Create a cache key based on tensor properties and group
+    cache_key = (tensor_numel, tensor_dtype, tensor_device, tp_group.group_name, tag)
+
+    # Check if we already have a symmetric memory tensor for this configuration
+    if cache_key not in symmetric_mem_cache:
+        # Create a new symmetric memory tensor if not in cache
+        msg = symm_mem.empty(
+            tensor_numel,
+            dtype=tensor_dtype,
+            device=tensor_device,
+        )
+        # Perform the rendezvous once for this tensor
+        symm_mem.rendezvous(msg, group=tp_group)
+        # Store in cache
+        symmetric_mem_cache[cache_key] = msg
+    else:
+        # Reuse the existing symmetric memory tensor
+        msg = symmetric_mem_cache[cache_key]
+
+    return msg
 
 def symmetric_all_reduce(
     inp: torch.Tensor,
@@ -1227,24 +1250,8 @@ def symmetric_all_reduce(
     tensor_dtype = inp.dtype
     tensor_device = inp.device
 
-    # Create a cache key based on tensor properties and group
-    cache_key = (tensor_numel, tensor_dtype, tensor_device, group_name)
-
-    # Check if we already have a symmetric memory tensor for this configuration
-    if cache_key not in symmetric_mem_cache:
-        # Create a new symmetric memory tensor if not in cache
-        msg = symm_mem.empty(
-            tensor_numel,
-            dtype=tensor_dtype,
-            device=tensor_device,
-        )
-        # Perform the rendezvous once for this tensor
-        symm_mem.rendezvous(msg, group=tp_group)
-        # Store in cache
-        symmetric_mem_cache[cache_key] = msg
-    else:
-        # Reuse the existing symmetric memory tensor
-        msg = symmetric_mem_cache[cache_key]
+    # Get symmetric memory tensor. Build or retrieve from cache.
+    msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
 
     msg.copy_(inp.reshape(-1))
 
