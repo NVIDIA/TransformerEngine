@@ -1740,8 +1740,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc1_bias_grad = None
             if self.use_bias:
                 if self.fc2_bias.grad is None:
-                    if self.fp8 and self.fp8_recipe.float8_block_scaling()
-                        and self.apply_bias and not self.gemm_bias_unfused_add:
+                    if self.fp8 and self.fp8_recipe.float8_block_scaling() and self.apply_bias and not self.gemm_bias_unfused_add:
                         act_out = tensor_list_fc2[0]
                         # BGRAD not fused with GEMM for float8 blockwise gemm.
                         fc2_bias_grad_ = act_out.view(-1, act_out.shape[-1]).sum(dim=0)
