@@ -1299,6 +1299,10 @@ def symmetric_all_reduce(
 ):
     """
     Performs an all-reduce operation across multiple processes using symmetric memory.
+    If the input tensor is already in the symmetric memory cache we can avoid copy
+    overheads by just directly using the input tensor for all reduce.  Externally
+    created symmetric memory tensors not in the cache currently will not be able to
+    avoid the extra copies.
 
     Parameters
     ----------
@@ -1327,7 +1331,7 @@ def symmetric_all_reduce(
         - The second element is the async work handle if async_op=True,
           otherwise None.
     """
-    assert async_op is False, "Async symetric ops no supported"
+    assert async_op is False, "Async symmetric ops no supported yet"
     assert HAS_TORCH_SYMMETRIC, "Could not import symetric memory from torch"
 
     if get_distributed_world_size(tp_group) == 1:
@@ -1354,19 +1358,29 @@ def symmetric_all_reduce(
     tensor_dtype = inp.dtype
     tensor_device = inp.device
 
-    # Get symmetric memory tensor. Build or retrieve from cache.
-    msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
+    input_id = id(inp)
+    is_cached = any(id(cached_tensor) == input_id for cached_tensor in symmetric_mem_cache.values())
+    # Check if the input tensor is already in the symmetric memory cache. If it is we can avoid copy overheads.
+    if is_cached:
+        all_reduce_impl(
+            inp,
+            "sum",
+            group_name,
+        )
+    else:
+        # Get symmetric memory tensor. Build or retrieve from cache.
+        msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
 
-    msg.copy_(inp.reshape(-1))
+        msg.copy_(inp.reshape(-1))
 
-    all_reduce_impl(
-        msg,
-        "sum",
-        group_name,
-    )
+        all_reduce_impl(
+            msg,
+            "sum",
+            group_name,
+        )
 
-    # Copy the result back to the input tensor
-    inp.copy_(msg.reshape(tensor_shape))
+        # Copy the result back to the input tensor
+        inp.copy_(msg.reshape(tensor_shape))
 
     return inp, None
 
