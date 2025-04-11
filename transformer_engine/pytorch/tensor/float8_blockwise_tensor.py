@@ -624,7 +624,7 @@ class _ViewFunc(torch.autograd.Function):
             )
             if grad._columnwise_data is not None:
                 new_columnwise_data = grad._columnwise_data.view(
-                    ctx.shape[2:], ctx.shape[1], ctx.shape[0]
+                    [ctx.shape[-1], ctx.shape[-2]] + list(ctx.shape[:-2])
                 )
             else:
                 new_columnwise_data = None
