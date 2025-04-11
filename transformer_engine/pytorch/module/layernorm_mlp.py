@@ -576,7 +576,9 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
         elif set_parallel_mode and tensor_parallel:
             if symmetric_ar_type is not None:
-                fc2_out, _ = symmetric_all_reduce(fc2_out, tp_group, all_reduce_type=symmetric_ar_type)
+                fc2_out, _ = symmetric_all_reduce(
+                    fc2_out, tp_group, all_reduce_type=symmetric_ar_type
+                )
             else:
                 fc2_out, _ = allreduce(fc2_out, tp_group)
 
@@ -1586,7 +1588,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
-                self.symmetric_ar_type
+                self.symmetric_ar_type,
             )
             out = fwd_fn(*args)
 
