@@ -89,14 +89,12 @@ class GroupedGemmPrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, *args, num_gemms, scaling_mode, out_dtype, has_bias):
         del out_dtype
-        workspace_size = get_cublas_workspace_size_bytes()
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
             ctx,
             *args,
             num_gemms=num_gemms,
             scaling_mode=int(scaling_mode),
             has_bias=has_bias,
-            workspace_size=workspace_size,
         )
 
     @staticmethod
@@ -348,6 +346,7 @@ def swizzled_scale(scales):
     rows, cols = scales.shape
     scales = scales.reshape(rows // 128, 4, 32, cols // 4, 4)
     scales = jnp.transpose(scales, (0, 3, 2, 1, 4))
+    scales = scales.reshape(rows, cols)
     return scales
 
 

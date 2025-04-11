@@ -17,8 +17,7 @@ namespace jax {
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
                           Variadic_Result_Type output_list, int64_t num_gemms,
-                          JAXX_Scaling_Mode scaling_mode, int64_t has_bias,
-                          int64_t workspace_size) {
+                          JAXX_Scaling_Mode scaling_mode, int64_t has_bias) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
@@ -127,8 +126,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
         rhs_sinv_shape[i] = rhs_sinv_shape_[i];
       }
 
-      TensorWrapper lhs_i_(NVTE_MXFP8_1D_SCALING);
-      TensorWrapper rhs_i_(NVTE_MXFP8_1D_SCALING);
+      NVTEScalingMode nvte_scaling_mode = get_nvte_scaling_mode(scaling_mode);
+      TensorWrapper lhs_i_(nvte_scaling_mode);
+      TensorWrapper rhs_i_(nvte_scaling_mode);
       lhs_i_.set_rowwise_data(lhs_ptr, lhs_dtype, lhs_shape);
       rhs_i_.set_rowwise_data(rhs_ptr, rhs_dtype, rhs_shape);
       lhs_i_.set_rowwise_scale_inv(lhs_sinv_ptr, DType::kFloat8E8M0, lhs_sinv_shape);
@@ -168,6 +168,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
   auto workspace_get = output_list.get<Buffer_Type>(num_gemms);
   Result_Type workspace = workspace_get.value();
   uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
+  size_t workspace_size = workspace->dimensions()[0] / num_streams;
   auto workspace_shape = std::vector<size_t>{workspace_size};
   for (int i = 0; i < num_streams; i++) {
     auto workspace_i =
@@ -192,8 +193,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .RemainingRets()         // output list
                                   .Attr<int64_t>("num_gemms")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<int64_t>("has_bias")
-                                  .Attr<int64_t>("workspace_size"),
+                                  .Attr<int64_t>("has_bias"),
                               FFI_CudaGraph_Traits);
 
 }  // namespace jax
