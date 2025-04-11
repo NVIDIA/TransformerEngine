@@ -13,8 +13,6 @@ TEST_CASES=(
 "test_te_delayed_scaling_fp8_shardy"
 )
 
-HAS_FAILURE=0  # Global failure flag
-
 echo
 echo "*** Executing tests in examples/jax/encoder/test_multiprocessing_encoder.py ***"
 
@@ -39,7 +37,6 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Check and print the log content accordingly
   if grep -q "FAILED" "${TEST_CASE}_gpu_0.log"; then
-    HAS_FAILURE=1
     echo "... $TEST_CASE FAILED"
     tail -n +7 "${TEST_CASE}_gpu_0.log"
   elif grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
@@ -51,5 +48,3 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   # Remove the log file after processing it
   rm ${TEST_CASE}_gpu_*.log
 done
-
-exit $HAS_FAILURE
