@@ -330,39 +330,40 @@ class _moe_permute_mask_map(torch.autograd.Function):
             scale_hidden_dim,
         )
 
-        if per_tensor_recipe:
-            output = Float8Tensor(
-                data=output,
-                fp8_dtype=fp8_dtype,
-                fp8_scale_inv=fp8_scale_inv,
-                shape=output.shape,
-                dtype=fake_dtype,
-            )
-        elif blockwise_recipe:
-            output = Float8BlockwiseQTensor(
-                shape=output.shape,
-                dtype=fake_dtype,
-                rowwise_data=output,
-                rowwise_scale_inv=permuted_scale.T.contiguous(),
-                columnwise_data=None,
-                columnwise_scale_inv=None,
-                fp8_dtype=fp8_dtype,
-                quantizer=None,
-                is_2D_scaled=False,
-                requires_grad=output.requires_grad,
-            )
-        elif mxfp8_recipe:
-            output = MXFP8Tensor(
-                shape=output.shape,
-                dtype=fake_dtype,
-                fp8_dtype=fp8_dtype,
-                rowwise_data=output,
-                rowwise_scale_inv=permuted_scale.contiguous(),
-                columnwise_data=None,
-                columnwise_scale_inv=None,
-                quantizer=None,
-                requires_grad=output.requires_grad,
-            )
+        if fp8:
+            if per_tensor_recipe:
+                output = Float8Tensor(
+                    data=output,
+                    fp8_dtype=fp8_dtype,
+                    fp8_scale_inv=fp8_scale_inv,
+                    shape=output.shape,
+                    dtype=fake_dtype,
+                )
+            elif blockwise_recipe:
+                output = Float8BlockwiseQTensor(
+                    shape=output.shape,
+                    dtype=fake_dtype,
+                    rowwise_data=output,
+                    rowwise_scale_inv=permuted_scale.T.contiguous(),
+                    columnwise_data=None,
+                    columnwise_scale_inv=None,
+                    fp8_dtype=fp8_dtype,
+                    quantizer=None,
+                    is_2D_scaled=False,
+                    requires_grad=output.requires_grad,
+                )
+            elif mxfp8_recipe:
+                output = MXFP8Tensor(
+                    shape=output.shape,
+                    dtype=fake_dtype,
+                    fp8_dtype=fp8_dtype,
+                    rowwise_data=output,
+                    rowwise_scale_inv=permuted_scale.contiguous(),
+                    columnwise_data=None,
+                    columnwise_scale_inv=None,
+                    quantizer=None,
+                    requires_grad=output.requires_grad,
+                )
 
         ctx.save_for_backward(row_id_map)
         ctx.num_experts = num_experts
@@ -532,39 +533,40 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     scale_hidden_dim,
                 )
 
-            if per_tensor_recipe:
-                act_grad = Float8Tensor(
-                    data=act_grad,
-                    fp8_dtype=fp8_dtype,
-                    fp8_scale_inv=fp8_scale_inv,
-                    shape=act_grad.shape,
-                    dtype=fake_dtype,
-                )
-            elif blockwise_recipe:
-                act_grad = Float8BlockwiseQTensor(
-                    shape=act_grad.shape,
-                    dtype=fake_dtype,
-                    rowwise_data=act_grad,
-                    rowwise_scale_inv=permuted_scale.T.contiguous(),
-                    columnwise_data=None,
-                    columnwise_scale_inv=None,
-                    fp8_dtype=fp8_dtype,
-                    quantizer=None,
-                    is_2D_scaled=False,
-                    requires_grad=act_grad.requires_grad,
-                )
-            elif mxfp8_recipe:
-                act_grad = MXFP8Tensor(
-                    shape=act_grad.shape,
-                    dtype=fake_dtype,
-                    fp8_dtype=fp8_dtype,
-                    rowwise_data=act_grad,
-                    rowwise_scale_inv=permuted_scale.contiguous(),
-                    columnwise_data=None,
-                    columnwise_scale_inv=None,
-                    quantizer=None,
-                    requires_grad=act_grad.requires_grad,
-                )
+            if fp8:
+                if per_tensor_recipe:
+                    act_grad = Float8Tensor(
+                        data=act_grad,
+                        fp8_dtype=fp8_dtype,
+                        fp8_scale_inv=fp8_scale_inv,
+                        shape=act_grad.shape,
+                        dtype=fake_dtype,
+                    )
+                elif blockwise_recipe:
+                    act_grad = Float8BlockwiseQTensor(
+                        shape=act_grad.shape,
+                        dtype=fake_dtype,
+                        rowwise_data=act_grad,
+                        rowwise_scale_inv=permuted_scale.T.contiguous(),
+                        columnwise_data=None,
+                        columnwise_scale_inv=None,
+                        fp8_dtype=fp8_dtype,
+                        quantizer=None,
+                        is_2D_scaled=False,
+                        requires_grad=act_grad.requires_grad,
+                    )
+                elif mxfp8_recipe:
+                    act_grad = MXFP8Tensor(
+                        shape=act_grad.shape,
+                        dtype=fake_dtype,
+                        fp8_dtype=fp8_dtype,
+                        rowwise_data=act_grad,
+                        rowwise_scale_inv=permuted_scale.contiguous(),
+                        columnwise_data=None,
+                        columnwise_scale_inv=None,
+                        quantizer=None,
+                        requires_grad=act_grad.requires_grad,
+                    )
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
