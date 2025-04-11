@@ -32,7 +32,26 @@ __all__ = [
     "BlockScaleQuantizer",
     "QuantizerFactory",
     "noop_quantizer_set",
+    "compute_scale_from_amax",
 ]
+
+
+def compute_scale_from_amax(amax: jnp.ndarray, q_dtype: jnp.dtype) -> jnp.ndarray:
+    """Compute scale from amax value.
+
+    Args:
+        amax: Maximum absolute value of the tensor
+        q_dtype: Quantization data type
+
+    Returns:
+        Scale value
+    """
+    fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
+    scale = jnp.ones((1,))
+    sf = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
+    sf = jnp.where(amax > 0.0, sf, scale)
+    sf = jnp.where(jnp.isfinite(amax), sf, scale)
+    return sf
 
 
 @register_pytree_node_class
@@ -377,18 +396,12 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             Updated scale value
         """
         # 2. Calculate the current scale
-        fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
-
         if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
             amax = jnp.max(amax_history, axis=-1, keepdims=True)
         else:
             amax = amax_history[0:1]
 
-        sf = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
-        sf = jnp.where(amax > 0.0, sf, scale)
-        sf = jnp.where(jnp.isfinite(amax), sf, scale)
-        scale = scale.at[0].set(sf[0])
-        return scale
+        return compute_scale_from_amax(amax, q_dtype)
 
     @staticmethod
     @jax.jit

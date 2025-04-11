@@ -242,7 +242,7 @@ class QuantizeConfig:
             fp8_recipe: The FP8 recipe to use for initialization
         """
         cls.INITIALIZED = True
-        cls.MARGIN = fp8_recipe.margin if 'margin' in dir(fp8_recipe) else 0.0
+        cls.MARGIN = fp8_recipe.margin if "margin" in dir(fp8_recipe) else 0.0
         cls.FP8_FORMAT = fp8_recipe.fp8_format
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
         cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
