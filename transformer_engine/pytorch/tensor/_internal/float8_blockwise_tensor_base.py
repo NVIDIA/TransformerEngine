@@ -73,7 +73,6 @@ class Float8BlockwiseQTensorBase:
     ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
         """
                 Prepare the tensor base for saving for backward
-
                 This does not clear the tensors currently, because with PP config	
                 that clears the weight cache between micro-batches. If the rowwise	
                 data is not required for backward, this is a possible memory	
