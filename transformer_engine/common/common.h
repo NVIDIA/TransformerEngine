@@ -27,7 +27,6 @@
 #include "./util/cuda_driver.h"
 #include "./util/logging.h"
 
-
 namespace transformer_engine {
 
 std::string to_string(const DType type);

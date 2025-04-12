@@ -6,8 +6,8 @@
 
 #include <pybind.h>
 
-#include "common/common.h"
 #include "common.h"
+#include "common/common.h"
 #include "pybind.h"
 #include "torch/torch.h"
 #include "util.h"

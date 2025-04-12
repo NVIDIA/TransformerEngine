@@ -255,8 +255,9 @@ def non_tn_fp8_gemm_supported() -> bool:
     non-TN layouts for FP8 GEMMs.
     """
     device_capability = torch.cuda.get_device_capability()
-    return device_capability >= (10, 0) and device_capability < (12, 0) or \
-        device_capability >= (13, 0)
+    return (
+        device_capability >= (10, 0) and device_capability < (12, 0) or device_capability >= (13, 0)
+    )
 
 
 @functools.lru_cache(maxsize=None)
