@@ -486,8 +486,8 @@ QUANTIZE_OUTPUT_DTYPES = {
 }
 
 ALL_QUANTIZE_TEST_SHAPES = [
-    (32, 256, 128),
-    (64, 32, 32, 256),
+    (32, 64),
+    (2, 64, 32),
 ]
 
 QUANTIZE_TEST_SHAPES = {

@@ -215,10 +215,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     @return: the output of 'f' with the colwise output calculated
     """
     should_apply_war = (
-        quantizer is not None
-        and quantizer.scaling_mode
-        in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING)
-        and quantizer.is_2x2x()
+        quantizer is not None and quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
     )
     if not should_apply_war:
         return None

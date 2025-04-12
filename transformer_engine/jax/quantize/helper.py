@@ -94,7 +94,7 @@ def _check_fp8_support(scaling_mode, gpu_id) -> Tuple[bool, str]:
         A tuple of (bool, str) indicating support and any error message
     """
     gpu_arch = get_device_compute_capability(gpu_id)
-    if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
+    if scaling_mode.is_tensor_scaling():
         return _check_delayed_scaling_fp8_support(gpu_arch)
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         return _check_block_scaling_fp8_support(gpu_arch)

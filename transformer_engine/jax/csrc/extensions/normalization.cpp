@@ -107,9 +107,10 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
 
-  NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
-             "Current tensor scaling does not support fused operations. Please call this primitive "
-             "in higher-precision then quantize with current scaling.");
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
 
   if (is_fp8_dtype(out_dtype)) {
     output_tensor.set_rowwise_scale_inv(

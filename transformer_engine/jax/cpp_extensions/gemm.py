@@ -453,7 +453,7 @@ def grouped_gemm(
         if scaling_mode == ScalingMode.NO_SCALING:
             lhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
             rhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING):
+        if scaling_mode.is_tensor_scaling():
             lhs_sinv_list_.append(lhs.scale_inv)
             rhs_sinv_list_.append(rhs.scale_inv)
         if scaling_mode == ScalingMode.MXFP8_1D_SCALING:

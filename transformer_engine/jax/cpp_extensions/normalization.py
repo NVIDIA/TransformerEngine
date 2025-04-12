@@ -929,8 +929,7 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
         )
-        out = quantizer.quantize(out, dq_dtype=x.dtype)
-        # out,_ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
         return out, mu, rsigma
 
     is_2x2x = quantizer.is_2x2x()
@@ -949,10 +948,10 @@ def layernorm_fwd(
         mu,
         rsigma,
     ) = NormFwdPrimitive.outer_primitive.bind(
-        x,
+        x.astype(jnp.float32),
         scale,
-        gamma,
-        beta,
+        gamma.astype(jnp.float32),
+        beta.astype(jnp.float32),
         norm_type=NVTE_Norm_Type.LayerNorm,
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
@@ -1149,10 +1148,10 @@ def rmsnorm_fwd(
         _,
         rsigma,
     ) = NormFwdPrimitive.outer_primitive.bind(
-        x,
+        x.astype(jnp.float32),
         scale,
-        gamma,
-        beta,
+        gamma.astype(jnp.float32),
+        beta.astype(jnp.float32),
         norm_type=NVTE_Norm_Type.RMSNorm,
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
