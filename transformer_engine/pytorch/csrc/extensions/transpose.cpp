@@ -25,7 +25,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   }
 
   // Choose implementation
-  // Note: Currently only have fused kernel for FP8 per-tensor scaling
+  // Note: Currently only have fused kernel for FP8 cast-transpose
   bool with_fused_kernel = true;
 
   // create TE tensors from input
@@ -59,10 +59,17 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   NVTE_CHECK(nvte_tensor_output_list.size() == nvte_tensor_input_list.size(),
              "Number of input and output tensors must match");
 
+  for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
+    if (nvte_tensor_columnwise_data(nvte_tensor_output_list[i]) == nullptr) {
+      with_fused_kernel = false;
+      break;
+    }
+  }
+
   // Launch TE kernel
   if (with_fused_kernel) {
-    nvte_multi_quantize(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                        nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+                              nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
   } else {
     for (size_t i = 0; i < py_output_objects_list.size(); i++) {
       quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);

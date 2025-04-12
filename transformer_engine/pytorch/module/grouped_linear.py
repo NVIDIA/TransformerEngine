@@ -497,6 +497,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
 
         self._offsets = {"input": 0, "weight": 1, "output": 2, "grad_output": 0, "grad_input": 1}
+        self._num_fp8_tensors_per_gemm = {
+            "fwd": 3,
+            "bwd": 2,
+        }
 
         if tp_group is None:
             self.tp_size = tp_size
