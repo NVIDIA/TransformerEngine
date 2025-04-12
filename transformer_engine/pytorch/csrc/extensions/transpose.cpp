@@ -69,6 +69,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
                               nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
   } else {
     for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
+      // TODO: switch to nvte_quantize_v2 with advanced numerical options
       nvte_quantize(nvte_tensor_input_list[i], nvte_tensor_output_list[i],
                     at::cuda::getCurrentCUDAStream());
     }
