@@ -533,7 +533,7 @@ class BasicLinear(BasicOperation):
             x_local = x_local.detach()
 
         # Configure input tensor for backward pass
-        if with_quantized_compute:
+        if with_quantized_compute and isinstance(x_local, QuantizedTensor):
             x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         return y, x_local, w
