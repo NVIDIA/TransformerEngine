@@ -27,6 +27,7 @@
 #include "./util/cuda_driver.h"
 #include "./util/logging.h"
 
+
 namespace transformer_engine {
 
 std::string to_string(const DType type);
@@ -584,8 +585,16 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
 
 bool is_supported_by_CC_100();
 
+}  // namespace transformer_engine
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 bool nvte_is_supported_nontn_fp8_gemm();
 
-}  // namespace transformer_engine
+#ifdef __cplusplus
+}  // extern "C"
+#endif
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

@@ -12,7 +12,6 @@
 			*transformer_engine::rtc*;
 			transformer_engine::nvte_cudnn_handle_init*;
 			transformer_engine::nvte_cublas_handle_init*;
-			transformer_engine::nvte_is_supported_nontn_fp8_gemm*;
 			transformer_engine::typeToSize*;
 			transformer_engine::is_fp8_dtype*;
 			*transformer_engine::CommOverlapBase*;
@@ -21,5 +20,8 @@
 			*nvshmem_wait_on_stream*;
 			*nvshmemi_init_thread*
 		};
+		extern "C" {
+            nvte_is_supported_nontn_fp8_gemm*;
+        };
 	local: *;
 };
