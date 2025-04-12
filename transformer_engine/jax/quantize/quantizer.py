@@ -173,16 +173,6 @@ class CurrentScaleQuantizer(Quantizer):
     scaling_mode: ScalingMode = ScalingMode.CURRENT_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
-    def tree_flatten(self):
-        """Flatten the quantizer for JAX tree operations.
-
-        Returns:
-            Tuple of (children, aux_data) for tree operations
-        """
-        children = ()
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
-        return (children, aux_data)
-
     def get_data_layout(self) -> str:
         """Get the data data_layout string.
 

@@ -404,6 +404,25 @@ class ScalingMode(Enum):
         """
         return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
 
+    def is_tensor_scaling(self) -> bool:
+        """Check if this scaling mode is per-tensor scaling.
+
+        Returns:
+            True if the scaling mode is tensor scaling, False otherwise
+        """
+        return self in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        )
+
+    def is_1d_block_scaling(self) -> bool:
+        """Check if this scaling mode is 1D block scaling.
+
+        Returns:
+            True if the scaling mode is 1D block scaling, False otherwise
+        """
+        return self == ScalingMode.MXFP8_1D_SCALING
+
     def __eq__(self, other):
         """Compare this scaling mode with another.
 

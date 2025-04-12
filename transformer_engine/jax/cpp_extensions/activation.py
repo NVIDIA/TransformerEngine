@@ -1179,11 +1179,10 @@ def quantize_dact_dbias(
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
-        out, _ = quantize_dact_dbias(
+        out = dact_lu(
             dz=dz.astype(jnp.float32),
             x=x.astype(jnp.float32),
             activation_type=activation_type,
-            is_dbias=False,
             quantizer=None,
         )
         out, dbias = _quantize_dbias_impl(
@@ -1230,11 +1229,7 @@ def quantize_dact_dbias(
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
-    if (
-        quantizer.scaling_mode
-        in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING)
-        and quantizer.is_2x2x()
-    ):
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)
