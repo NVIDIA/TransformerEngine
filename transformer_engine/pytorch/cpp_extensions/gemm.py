@@ -174,14 +174,6 @@ def general_grouped_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
-    # assert [a.is_contiguous() for a in A]
-    # assert [b.is_contiguous() for b in B]
-
-    if isinstance(A[0], Float8TensorBase):
-        for a, b in zip(A, B):
-            assert_dim_for_fp8_exec(a._data)
-            assert_dim_for_fp8_exec(b._data)
-
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms
 
