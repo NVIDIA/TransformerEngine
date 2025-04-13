@@ -196,7 +196,6 @@ class _Linear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
 
         # Cast weight to expected dtype
-        ctx.weight_quantizer = weight_quantizer
         if not fp8:
             weightmat = cast_if_needed(weight, activation_dtype)
         else:
@@ -278,6 +277,7 @@ class _Linear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if is_grad_enabled:
+            ctx.weight_quantizer = weight_quantizer
             saved_inputmat = None
 
             ctx.backward_input_needs_gather = (

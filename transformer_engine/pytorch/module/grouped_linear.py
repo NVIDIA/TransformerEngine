@@ -126,7 +126,6 @@ class _GroupedLinear(torch.autograd.Function):
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
 
-        ctx.weight_quantizers = weight_quantizers
         if fp8:
             inputmats = tex.fused_multi_quantize(
                 inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
@@ -180,7 +179,7 @@ class _GroupedLinear(torch.autograd.Function):
                     weight_quantizers[i].calibrate(weights[i])
 
         if is_grad_enabled:
-
+            ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
             tensors_to_save, tensor_objects = prepare_for_saving(

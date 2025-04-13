@@ -301,8 +301,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_total = ln_out
 
         # Cast weights to expected dtype
-        ctx.fc1_weight_quantizer = fc1_weight_quantizer
-        ctx.fc2_weight_quantizer = fc2_weight_quantizer
         if not fp8:
             fc1_weight_final = cast_if_needed(fc1_weight, activation_dtype)
             fc2_weight_final = cast_if_needed(fc2_weight, activation_dtype)
@@ -480,6 +478,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc2_weight_final if fp8 and not isinstance(fc2_weight, Float8Tensor) else None,
             )
 
+            ctx.fc1_weight_quantizer = fc1_weight_quantizer
+            ctx.fc2_weight_quantizer = fc2_weight_quantizer
             if not fc1_weight.requires_grad:
                 if not return_layernorm_output:
                     clear_tensor_data(ln_out)

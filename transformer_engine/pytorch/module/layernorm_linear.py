@@ -242,7 +242,6 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
 
         # Cast weight to expected dtype
-        ctx.weight_quantizer = weight_quantizer
         if not fp8:
             quantized_weight = False
             weightmat = cast_if_needed(weight, activation_dtype)
@@ -324,6 +323,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 clear_tensor_data(ln_out, ln_out_total)
 
         if is_grad_enabled:
+            ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
