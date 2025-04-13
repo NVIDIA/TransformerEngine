@@ -34,6 +34,8 @@ int main(int argc, char* argv[]) {
 
 struct Params {
   transformer_engine::DType dtype;
+  bool transa;
+  bool transb;
   size_t m;
   size_t n;
   size_t k;
@@ -132,7 +134,8 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
   }
 
   template <typename T>
-  void TestAgGemm(size_t m, size_t n, size_t k, transformer_engine::DType dtype) {
+  void TestAgGemm(bool transa, bool transb, size_t m, size_t n, size_t k,
+                  transformer_engine::DType dtype) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
@@ -144,21 +147,23 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     std::vector<T> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(), [&rng, &dist] { return dist(rng); });
 
-    auto ga = MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype, stream);
+    auto ga = transa ? MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype, stream)
+                     : MakeDeviceTensorFromData<T>(adata, 0, 0, m, k, m, dtype, stream);
     auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
     auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
 
     auto dims = AgGemm(m, n, k);
-    auto a = MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
-                                         dims.a_rows_num, dims.a_cols_num, k, dtype, stream);
+    auto a = transa
+                 ? MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
+                                               dims.a_rows_num, dims.a_cols_num, k, dtype, stream)
+                 : MakeDeviceTensorFromData<T>(adata, dims.a_cols_start, dims.a_rows_start,
+                                               dims.a_cols_num, dims.a_rows_num, m, dtype, stream);
     auto b = MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
                                          dims.b_rows_num, dims.b_cols_num, k, dtype, stream);
     auto d = MakeDeviceTensor<T>(dims.d_rows_num, dims.d_cols_num, dtype, stream);
 
     transformer_engine::Tensor bias;
     transformer_engine::Tensor pre_act_out;
-    bool transa = true;
-    bool transb = false;
     bool grad = false;
     bool accumulate = false;
     nvte_comm_gemm(ctx_, m, n, k, &a, &b, &d, &bias, &pre_act_out, transa, transb, grad, accumulate,
@@ -192,9 +197,12 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
 };
 
 TEST_P(CommGemmTest, AgGemm) {
-  auto [dtype, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType, { TestAgGemm<DType>(m, n, k, dtype); });
+  auto [dtype, transa, transb, m, n, k] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
+                                       { TestAgGemm<DType>(transa, transb, m, n, k, dtype); });
 }
 
-INSTANTIATE_TEST_SUITE_P(CommGemmShapes, CommGemmTest,
-                         testing::Values(Params{transformer_engine::DType::kFloat16, 8, 4, 2}));
+INSTANTIATE_TEST_SUITE_P(
+    CommGemmShapes, CommGemmTest,
+    testing::Values(Params{transformer_engine::DType::kFloat16, false, false, 8, 4, 2},
+                    Params{transformer_engine::DType::kFloat16, true, false, 8, 4, 2}));
