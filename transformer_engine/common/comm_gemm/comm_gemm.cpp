@@ -30,18 +30,81 @@ namespace {
 // exceptions, but these calls will typically be made from destructors, so cannot throw.
 
 using CalComm = std::unique_ptr<std::remove_pointer_t<cal_comm_t>, decltype(&cal_comm_destroy)>;
+
+CalComm CalCommCreate(const cal_comm_create_params_t& params) {
+  cal_comm_t raw{};
+  NVTE_CHECK_CAL(cal_comm_create(params, &raw));
+  return CalComm(raw, cal_comm_destroy);
+}
+
+template <typename HandlePtr, typename CreateFn, typename DestroyFn, typename... Args>
+auto CreateWithCudaCheck(CreateFn create_fn, DestroyFn destroy_fn, Args&&... args) {
+  using Handle = std::remove_pointer_t<HandlePtr>;
+  HandlePtr raw{};
+  NVTE_CHECK_CUDA(create_fn(&raw, std::forward<Args>(args)...));
+  return std::unique_ptr<Handle, DestroyFn>(raw, destroy_fn);
+}
+
 using CudaStream =
     std::unique_ptr<std::remove_pointer_t<cudaStream_t>, decltype(&cudaStreamDestroy)>;
-using CudaEvent =
-    std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, decltype(&cudaEventDestroy)>;
+
+CudaStream CudaStreamCreate() {
+  return CreateWithCudaCheck<cudaStream_t>(cudaStreamCreate, cudaStreamDestroy);
+}
+
+using CudaEvent = std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, decltype(&cudaEventDestroy)>;
+
+CudaEvent CudaEventCreate(unsigned flags) {
+  return CreateWithCudaCheck<cudaEvent_t>(cudaEventCreateWithFlags, cudaEventDestroy, flags);
+}
+
+template <bool raw_last, typename HandlePtr, typename CreateFn, typename DestroyFn,
+          typename... Args>
+auto CreateWithCublasMpCheck(CreateFn create_fn, DestroyFn destroy_fn, Args&&... args) {
+  using Handle = std::remove_pointer_t<HandlePtr>;
+  HandlePtr raw{};
+  if constexpr (raw_last) {
+    NVTE_CHECK_CUBLASMP(create_fn(std::forward<Args>(args)..., &raw));
+  } else {
+    NVTE_CHECK_CUBLASMP(create_fn(&raw, std::forward<Args>(args)...));
+  }
+  return std::unique_ptr<Handle, DestroyFn>(raw, destroy_fn);
+}
+
 using CublasMp =
     std::unique_ptr<std::remove_pointer_t<cublasMpHandle_t>, decltype(&cublasMpDestroy)>;
+
+CublasMp CublasMpCreate(cudaStream_t stream) {
+  return CreateWithCublasMpCheck<false, cublasMpHandle_t>(cublasMpCreate, cublasMpDestroy, stream);
+}
+
 using CublasMpGrid =
     std::unique_ptr<std::remove_pointer_t<cublasMpGrid_t>, decltype(&cublasMpGridDestroy)>;
+
+CublasMpGrid CublasMpGridCreate(int64_t nprow, int64_t npcol, cublasMpGridLayout_t layout,
+                                cal_comm_t comm) {
+  return CreateWithCublasMpCheck<true, cublasMpGrid_t>(cublasMpGridCreate, cublasMpGridDestroy,
+                                                       nprow, npcol, layout, comm);
+}
+
 using CublasMpMatrixDesc = std::unique_ptr<std::remove_pointer_t<cublasMpMatrixDescriptor_t>,
                                            decltype(&cublasMpMatrixDescriptorDestroy)>;
+
+CublasMpMatrixDesc CublasMpMatrixDescCreate(int64_t m, int64_t n, int64_t mb, int64_t nb,
+                                            int64_t rsrc, int64_t csrc, int64_t lld,
+                                            cudaDataType_t type, cublasMpGrid_t grid) {
+  return CreateWithCublasMpCheck<true, cublasMpMatrixDescriptor_t>(
+      cublasMpMatrixDescriptorCreate, cublasMpMatrixDescriptorDestroy, m, n, mb, nb, rsrc, csrc,
+      lld, type, grid);
+}
+
 using CublasMpMatmulDesc = std::unique_ptr<std::remove_pointer_t<cublasMpMatmulDescriptor_t>,
                                            decltype(&cublasMpMatmulDescriptorDestroy)>;
+
+CublasMpMatmulDesc CublasMpMatmulDescCreate(cublasComputeType_t compute_type) {
+  return CreateWithCublasMpCheck<false, cublasMpMatmulDescriptor_t>(
+      cublasMpMatmulDescriptorCreate, cublasMpMatmulDescriptorDestroy, compute_type);
+}
 
 calError_t allgather(void* src_buf, void* recv_buf, size_t size, void* /* data */, void** request) {
   MPI_Request req{};
@@ -107,10 +170,10 @@ void cublasmp_gemm(CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo, int64_t m, i
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   } else {
-    NVTE_CHECK(false);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, a1, a0, 0, 0, a1,
-                                                     get_cuda_dtype(a->dtype()),
-                                                     ctx->grid_row_major.get(), ctx->a_desc.get()));
+    NVTE_CHECK(a0 == k);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, block_size(ctx, m), k, 0, 0,
+                                                     block_size(ctx, m), get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_col_major.get(), ctx->a_desc.get()));
   }
   if (transb) {
     NVTE_CHECK(false);
@@ -198,43 +261,23 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
       .rank = rank,
       .local_device = local_device,
   };
-  cal_comm_t cal_comm_raw{};
-  NVTE_CHECK_CAL(cal_comm_create(params, &cal_comm_raw));
-  CalComm cal_comm(cal_comm_raw, cal_comm_destroy);
+  auto cal_comm = CalCommCreate(params);
 
-  cudaStream_t stream_raw{};
-  NVTE_CHECK_CUDA(cudaStreamCreate(&stream_raw));
-  CudaStream stream(stream_raw, cudaStreamDestroy);
-  cudaEvent_t event_raw{};
-  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&event_raw, cudaEventDisableTiming));
-  CudaEvent event(event_raw, cudaEventDestroy);
-  cublasMpHandle_t cublasmp_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpCreate(&cublasmp_raw, stream.get()));
-  CublasMp cublas_mp(cublasmp_raw, cublasMpDestroy);
+  auto stream = CudaStreamCreate();
+  auto event = CudaEventCreate(cudaEventDisableTiming);
+  auto cublas_mp = CublasMpCreate(stream.get());
 
-  cublasMpGrid_t col_major_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpGridCreate(params.nranks, 1, CUBLASMP_GRID_LAYOUT_COL_MAJOR,
-                                         cal_comm.get(), &col_major_raw));
-  CublasMpGrid col_major(col_major_raw, cublasMpGridDestroy);
-  cublasMpGrid_t row_major_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpGridCreate(1, params.nranks, CUBLASMP_GRID_LAYOUT_ROW_MAJOR,
-                                         cal_comm.get(), &row_major_raw));
-  CublasMpGrid row_major(row_major_raw, cublasMpGridDestroy);
+  auto col_major =
+      CublasMpGridCreate(params.nranks, 1, CUBLASMP_GRID_LAYOUT_COL_MAJOR, cal_comm.get());
+  auto row_major =
+      CublasMpGridCreate(1, params.nranks, CUBLASMP_GRID_LAYOUT_ROW_MAJOR, cal_comm.get());
 
-  cublasMpMatrixDescriptor_t raw{};
-  NVTE_CHECK_CUBLASMP(
-      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
-  CublasMpMatrixDesc a_desc(raw, cublasMpMatrixDescriptorDestroy);
-  NVTE_CHECK_CUBLASMP(
-      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
-  CublasMpMatrixDesc b_desc(raw, cublasMpMatrixDescriptorDestroy);
-  NVTE_CHECK_CUBLASMP(
-      cublasMpMatrixDescriptorCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get(), &raw));
-  CublasMpMatrixDesc d_desc(raw, cublasMpMatrixDescriptorDestroy);
+  // Pre-creating matrix descriptors here, will be initialized with the actual params later.
+  auto a_desc = CublasMpMatrixDescCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get());
+  auto b_desc = CublasMpMatrixDescCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get());
+  auto d_desc = CublasMpMatrixDescCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get());
 
-  cublasMpMatmulDescriptor_t matmul_raw{};
-  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorCreate(&matmul_raw, CUBLAS_COMPUTE_32F));
-  CublasMpMatmulDesc matmul_desc(matmul_raw, cublasMpMatmulDescriptorDestroy);
+  auto matmul_desc = CublasMpMatmulDescCreate(CUBLAS_COMPUTE_32F);
 
   return new CommGemmCtx{
       .nranks = nranks,
