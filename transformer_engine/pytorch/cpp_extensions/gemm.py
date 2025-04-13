@@ -9,10 +9,9 @@ import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..utils import assert_dim_for_fp8_exec, get_sm_count
+from ..utils import get_sm_count
 
 from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
