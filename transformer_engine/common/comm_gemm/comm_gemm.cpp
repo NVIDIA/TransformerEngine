@@ -232,7 +232,33 @@ void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
 void GemmArInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
                         const Tensor* b, const Tensor* d, const Tensor* bias,
                         const Tensor* pre_act_out, bool transa, bool transb) {
-  // TODO:
+  const auto a0 = a->flat_first_dim();
+  const auto a1 = a->flat_last_dim();
+  const auto b0 = b->flat_first_dim();
+  const auto b1 = b->flat_last_dim();
+  const auto d0 = d->flat_first_dim();
+  const auto d1 = d->flat_last_dim();
+
+  if (transa) {
+    NVTE_CHECK(a0 == m);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
+                                                     block_size(ctx, k), get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_col_major.get(), ctx->a_desc.get()));
+  } else {
+    NVTE_CHECK(false);
+  }
+  if (transb) {
+    NVTE_CHECK(false);
+  } else {
+    NVTE_CHECK(b0 == n);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
+                                                     block_size(ctx, k), get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_col_major.get(), ctx->b_desc.get()));
+  }
+  NVTE_CHECK(d1 == m);
+  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, m,
+                                                   get_cuda_dtype(d->dtype()),
+                                                   ctx->grid_row_major.get(), ctx->d_desc.get()));
 }
 
 using InitMatricesFn = void (*)(CommGemmCtx*, int64_t, int64_t, int64_t, const Tensor*,
