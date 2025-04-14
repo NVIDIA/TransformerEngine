@@ -48,17 +48,7 @@ class _moe_permute_index_map(torch.autograd.Function):
         assert inp.size(0) == index.size(0), "Permute not possible"
 
         # Data type check
-        fp8 = isinstance(inp, Float8Tensor)
-        if fp8:
-            assert (
-                inp._quantizer.scale.ndim == 0
-            ), "Only one factor scaling per tensor (Delayed Scaling) supported by moe_permute."
-            dtype = inp._fp8_dtype
-            fp8_scale_inv = inp._scale_inv
-            fake_dtype = inp.dtype
-            inp = inp._data
-        else:
-            dtype = TE_DType[inp.dtype]
+        dtype = TE_DType[inp.dtype]
         if index.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `index` of Permute is {index.dtype}! "
@@ -82,19 +72,9 @@ class _moe_permute_index_map(torch.autograd.Function):
             _moe_permute_index_map.max_expanded_token_num,
         )
 
-        if fp8:
-            permuted_act = Float8Tensor(
-                data=permuted_act,
-                fp8_dtype=dtype,
-                fp8_scale_inv=fp8_scale_inv,
-                shape=permuted_act.shape,
-                dtype=fake_dtype,
-            )
-
         ctx.row_id_map = row_id_map
         ctx.num_tokens = index.size(0)
         ctx.topK = index.size(1)
-        ctx.fp8 = fp8
         return permuted_act, row_id_map
 
     @staticmethod
@@ -111,30 +91,12 @@ class _moe_permute_index_map(torch.autograd.Function):
         if not permuted_act_grad.is_contiguous():
             permuted_act_grad = permuted_act_grad.contiguous()
 
-        if ctx.fp8:
-            assert isinstance(
-                permuted_act_grad, Float8Tensor
-            ), "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
-            dtype = permuted_act_grad._fp8_dtype
-            fp8_scale_inv = permuted_act_grad._scale_inv
-            fake_dtype = permuted_act_grad.dtype
-            permuted_act_grad = permuted_act_grad._data
-        else:
-            dtype = TE_DType[permuted_act_grad.dtype]
-
+        dtype = TE_DType[permuted_act_grad.dtype]
         act_grad = None
         if ctx.needs_input_grad[0]:
             act_grad = tex.moe_permute_bwd(
                 permuted_act_grad, dtype, ctx.row_id_map, torch.empty(0), ctx.num_tokens, ctx.topK
             )
-            if ctx.fp8:
-                act_grad = Float8Tensor(
-                    data=act_grad,
-                    fp8_dtype=dtype,
-                    fp8_scale_inv=fp8_scale_inv * ctx.topK,
-                    shape=act_grad.shape,
-                    dtype=fake_dtype,
-                )
 
         return act_grad, None, None, None
 
@@ -178,14 +140,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
         assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
 
         # Data type check
-        fp8 = isinstance(inp, Float8Tensor)
-        if fp8:
-            dtype = inp._fp8_dtype
-            fp8_scale_inv = inp._scale_inv
-            fake_dtype = inp.dtype
-            inp = inp._data
-        else:
-            dtype = TE_DType[inp.dtype]
+        dtype = TE_DType[inp.dtype]
         if row_id_map.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `row_id_map` of Unpermute is {row_id_map.dtype}! "
@@ -195,17 +150,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
 
         unpermuted_output = tex.moe_unpermute_fwd(inp, dtype, row_id_map, probs, num_tokens, topK)
 
-        if fp8:
-            unpermuted_output = Float8Tensor(
-                data=unpermuted_output,
-                fp8_dtype=dtype,
-                fp8_scale_inv=fp8_scale_inv,
-                shape=unpermuted_output.shape,
-                dtype=fake_dtype,
-            )
-
         ctx.save_for_backward(inp, row_id_map, probs)
-        ctx.fp8 = fp8
         return unpermuted_output
 
     @staticmethod
@@ -221,17 +166,8 @@ class _moe_unpermute_index_map(torch.autograd.Function):
         if not unpermuted_act_grad.is_contiguous():
             unpermuted_act_grad = unpermuted_act_grad.contiguous()
 
-        if ctx.fp8:
-            assert isinstance(
-                unpermuted_act_grad, Float8Tensor
-            ), "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
-            dtype = unpermuted_act_grad._fp8_dtype
-            fp8_scale_inv = unpermuted_act_grad._scale_inv
-            fake_dtype = unpermuted_act_grad.dtype
-            unpermuted_act_grad = unpermuted_act_grad._data
-        else:
-            dtype = TE_DType[unpermuted_act_grad.dtype]
 
+        dtype = TE_DType[unpermuted_act_grad.dtype]
         inp, row_id_map, probs = ctx.saved_tensors
 
         act_grad = None
@@ -240,14 +176,6 @@ class _moe_unpermute_index_map(torch.autograd.Function):
             act_grad, prob_grad = tex.moe_unpermute_bwd(
                 unpermuted_act_grad, inp, dtype, row_id_map, probs
             )
-            if ctx.fp8:
-                act_grad = Float8Tensor(
-                    data=act_grad,
-                    fp8_dtype=dtype,
-                    fp8_scale_inv=fp8_scale_inv,
-                    shape=act_grad.shape,
-                    dtype=fake_dtype,
-                )
         if not ctx.needs_input_grad[2]:
             prob_grad = None
 
@@ -608,7 +536,6 @@ def moe_permute(
         Refer to `routing_map` for more details.
     """
     if map_type == "index":
-        warnings.warn("map_type='index' is deprecated. Use map_type='mask' instead.")
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
         output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None)
@@ -688,7 +615,6 @@ def moe_unpermute(
         warnings.warn("probs kwarg is deprecated. Use merging_probs kwarg instead.")
         merging_probs = probs
     if map_type == "index":
-        warnings.warn("map_type='index' is deprecated. Use map_type='mask' instead.")
         return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
         return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
