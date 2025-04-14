@@ -459,14 +459,14 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             torch.cuda.current_stream().wait_stream(self.d2h_stream)
 
             # Time to free the activation memory after usage
-            for tensor_tag, _ in self.tensor_tag_to_buf.items():
+            for tensor_tag, tensor_buf in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
-                    if isinstance(self.tensor_tag_to_buf[tensor_tag], torch.Tensor):
+                    if isinstance(tensor_buf, torch.Tensor):
                         # Need to clear activation tensor - sometimes the reference exists in the code.
                         # This is the case for examlpe for the the Float8TensorBase class,
                         # which is saved directly inside the ctx and its internal tensors are
                         # saved inside save_for_backward.
-                        self.tensor_tag_to_buf[tensor_tag].data = torch.Tensor()
+                        tensor_buf.data = torch.Tensor()
                     # Release the pointer to the tensor
                     self.tensor_tag_to_buf[tensor_tag] = None
 
@@ -577,6 +577,12 @@ def get_cpu_offload_context(
 
     """
 
+    if not offload_weights and not offload_activations:
+        raise ValueError(
+            "CPU Offloading is enabled while it is not "
+            "mentioned what to offload (weights/activations)"
+        )
+
     if offload_weights:
         import warnings
 
@@ -586,7 +592,9 @@ def get_cpu_offload_context(
             DeprecationWarning,
         )
 
-    assert offload_activations, "Offloading activations is required."
+        # Weights offloading is deprecated but we maintain backward compatibility by doing nothing.
+        if not offload_activations:
+            return nullcontext(), lambda x: x
 
     def tensor_need_offloading_checker_activations(tensor):
         return hasattr(tensor, "activation_offloading")
