@@ -26,7 +26,7 @@ from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
-from ..cpp_extensions import is_softmax_kernel_available
+from ..cpp_extensions import is_softmax_kernel_available, jax_scaled_softmax, jax_scaled_upper_triang_masked_softmax
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
 from ..sharding import get_non_contracting_logical_axes
 
@@ -182,6 +182,7 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
         else:
             attention_bias = None
+            #change mask in testing too to not be a causal mask
             if mask is not None:
                 attention_bias = lax.select(
                     mask > 0,
@@ -203,7 +204,10 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             ):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
-                outputs = jax_nn.softmax(logits * self.scale_factor)
+                if self.softmax_type is not SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+                    outputs = jax_scaled_softmax(logits, self.scale_factor)
+                else:
+                    outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
 
         assert input_dtype == outputs.dtype
         return outputs
