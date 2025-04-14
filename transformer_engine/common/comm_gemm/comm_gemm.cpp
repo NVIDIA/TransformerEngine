@@ -259,6 +259,11 @@ void GemmArInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n * ctx->nranks, m, n, 0, 0, m,
                                                    get_cuda_dtype(d->dtype()),
                                                    ctx->grid_row_major.get(), ctx->d_desc.get()));
+
+  const cublasMpMatmulEpilogue_t epilogue = CUBLASMP_MATMUL_EPILOGUE_ALLREDUCE;
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE, &epilogue,
+      sizeof epilogue));
 }
 
 using InitMatricesFn = void (*)(CommGemmCtx*, int64_t, int64_t, int64_t, const Tensor*,
@@ -270,6 +275,8 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
                    const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
                    bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
+
   init_matrices_fn(ctx, m, n, k, a, b, d, bias, pre_act_out, transa, transb);
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
