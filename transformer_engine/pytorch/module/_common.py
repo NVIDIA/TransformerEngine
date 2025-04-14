@@ -10,6 +10,7 @@ from functools import reduce
 from operator import mul as multiply_op
 
 import torch
+import queue
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
@@ -216,3 +217,78 @@ class _ParameterInitMeta:
         """Safeguard reference to the parameter's parent module and initialization function."""
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
+
+
+class WeightGradStore:
+    """
+    A class to manage weight gradient storage and computation in Transformer modules.
+    This class enables split backward propagation for better memory efficiency.
+    """
+
+    def __init__(
+        self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True, ub_bulk_wgrad=False
+    ):
+        """
+        Initialize the WeightGradStore.
+
+        Args:
+            split_bw (bool): Whether to enable split backward propagation
+        """
+        if split_bw:
+            self.context = queue.Queue()
+            assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
+            self.enabled = split_bw
+        else:
+            self.context = None
+            self.enabled = False
+
+    def split_bw(self):
+        """
+        Get the current split backward propagation status.
+
+        Returns:
+            bool: True if split backward is enabled, False otherwise
+        """
+        return self.enabled
+
+    def enable_split_bw(self):
+        """Enable split backward propagation."""
+        self.enabled = True
+
+    def disable_split_bw(self):
+        """Disable split backward propagation."""
+        self.enabled = False
+
+    def put(self, tensor_list, func):
+        """
+        Store tensors and computation function for later execution.
+
+        Args:
+            tensor_list (list): List of tensors needed for computation
+            func (callable): Function to be executed with the tensors
+        """
+        assert self.enabled == True, "split_bw is not enabled"
+        self.context.put([tensor_list, func])
+        return
+
+    def pop(self):
+        """
+        Execute the stored computation with the stored tensors.
+        Raises an exception if the queue is empty.
+        """
+        assert self.enabled == True, "split_bw is not enabled"
+        if self.context.qsize() > 0:
+            tensor_list, func = self.context.get()
+            return func(*tensor_list), tensor_list
+        else:
+            rank = torch.distributed.get_rank()
+            raise Exception(f"Pop empty queue. rank {rank}")
+
+    def assert_empty(self):
+        """
+        Assert that the queue is empty.
+        Used for debugging and ensuring proper cleanup.
+        """
+        assert self.enabled == True, "split_bw is not enabled"
+        rank = torch.distributed.get_rank()
+        assert self.context.empty(), f"Queue is not empty. rank {rank}"
