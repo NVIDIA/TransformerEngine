@@ -1298,7 +1298,10 @@ def test_sanity_checkpointing_on_callables():
     inp = torch.randn(10, 10, device="cuda", requires_grad=True)
 
     # Checkpointed forward and backward pass
-    out_checkpoint = checkpoint(module, inp)
+    # I use module.forward() instead of module()
+    # to check that the checkpointing works on methods.
+    # This resulted in bug before.
+    out_checkpoint = checkpoint(module.forward, inp)
     out_checkpoint.sum().backward()
 
     grad_weight_checkpoint = module.weight.grad.clone()
@@ -1308,7 +1311,7 @@ def test_sanity_checkpointing_on_callables():
     module.zero_grad()
 
     # Standard forward and backward pass
-    out_standard = module(inp)
+    out_standard = module.forward(inp)
     out_standard.sum().backward()
 
     grad_weight_standard = module.weight.grad
