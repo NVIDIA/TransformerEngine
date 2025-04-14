@@ -633,6 +633,8 @@ class TestEncoder(unittest.TestCase):
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
         assert result[0] < 0.505 and result[1] > 0.755
 
+    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+
 
 if __name__ == "__main__":
     train_and_evaluate(encoder_parser(None))
