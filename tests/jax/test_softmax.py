@@ -139,6 +139,7 @@ class SoftmaxRunner:
         assert_allclose(primitive_out, reference_out, dtype=self.dtype)
         assert_allclose(primitive_grad_logits, reference_grad_logits, dtype=self.dtype)
 
+
 class SoftmaxPrimitivesRunner(SoftmaxRunner):
     """
     Jax Softmax Primitives runner
@@ -147,15 +148,17 @@ class SoftmaxPrimitivesRunner(SoftmaxRunner):
     @catch_unsupported
     def test_forward(self):
         return super().test_forward()
-    
+
     @catch_unsupported
     def test_backward(self):
         return super().test_backward()
+
 
 class SoftmaxModuleRunner:
     """
     Jax Softmax Modules runner
     """
+
     module_runner: SoftmaxRunner
     bias: None
 
@@ -169,12 +172,19 @@ class SoftmaxModuleRunner:
         """
         self.module_runner._setup_inputs()
         rng = jax.random.PRNGKey(0)
-        softmax_module = Softmax(scale_factor=self.module_runner.scale_factor, softmax_type=self.module_runner.softmax_type)
-        softmax_vars = softmax_module.init(rng,self.module_runner.logits, self.module_runner.mask)
-        module_out = softmax_module.apply(softmax_vars, self.module_runner.logits, self.module_runner.mask)#.astype(input_dtype)
-        reference_out = self.module_runner.reference_softmax(self.module_runner.logits, self.module_runner.mask, self.module_runner.scale_factor)
+        softmax_module = Softmax(
+            scale_factor=self.module_runner.scale_factor,
+            softmax_type=self.module_runner.softmax_type,
+        )
+        softmax_vars = softmax_module.init(rng, self.module_runner.logits, self.module_runner.mask)
+        module_out = softmax_module.apply(
+            softmax_vars, self.module_runner.logits, self.module_runner.mask
+        )  # .astype(input_dtype)
+        reference_out = self.module_runner.reference_softmax(
+            self.module_runner.logits, self.module_runner.mask, self.module_runner.scale_factor
+        )
         assert_allclose(module_out, reference_out, dtype=self.module_runner.dtype)
-        
+
 
 # Run softmax primitives test
 @pytest.mark.parametrize(
@@ -264,4 +274,3 @@ class TestSoftmaxModule:
         bias = None
         runner = SoftmaxModuleRunner(module_runner, bias)
         runner.test_forward()
-    
