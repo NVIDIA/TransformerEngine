@@ -461,8 +461,13 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Time to free the activation memory after usage
             for tensor_tag, _ in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
-                    # Need to clear activation tensor - sometimes the reference exists in the code.
-                    self.tensor_tag_to_buf[tensor_tag].data = torch.Tensor()
+                    if isinstance(self.tensor_tag_to_buf[tensor_tag], torch.Tensor):
+                        # Need to clear activation tensor - sometimes the reference exists in the code.
+                        # This is the case for examlpe for the the Float8TensorBase class,
+                        # which is saved directly inside the ctx and its internal tensors are
+                        # saved inside save_for_backward.
+                        self.tensor_tag_to_buf[tensor_tag].data = torch.Tensor()
+                    # Release the pointer to the tensor
                     self.tensor_tag_to_buf[tensor_tag] = None
 
             # Time to offload the next group
