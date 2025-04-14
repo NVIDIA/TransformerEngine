@@ -22,13 +22,16 @@ def mark_activation_offload(*tensors):
         if tensor is None:
             continue
         if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
-            setattr(tensor, "activation_offloading", True)
+            tensor.activation_offloading = True
         else:
             data_tensors = tensor.get_data_tensors()
             for tensor in data_tensors:
                 if tensor is not None:
-                    setattr(tensor, "activation_offloading", True)
-                    setattr(tensor, "internal_tensor", True)
+                    tensor.activation_offloading = True
+                    # This is a hack to force clear the tensor after it is offloaded.
+                    # It is needed, because .*TensorBase classes are saved in the ctx,
+                    # and they contain the reference to their data tensors.
+                    tensor.needs_force_clear = True
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -462,10 +465,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Time to free the activation memory after usage
             for tensor_tag, tensor_buf in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
-                    if hasattr(tensor_buf, "internal_tensor"):
-                        # Need to clear activation tensor - sometimes the reference exists in the code.
-                        # This is the case for examlpe for the the Float8TensorBase class,
-                        # which is saved directly inside the ctx and its internal tensors are
+                    if hasattr(tensor_buf, "needs_force_clear"):
+                        # Need to clear activation tensor - sometimes references persist in the code.
+                        # This is the case for example with the Float8TensorBase class,
+                        # which is saved directly inside the ctx while its internal tensors are
                         # saved inside save_for_backward.
                         tensor_buf.data = torch.Tensor()
                     # Release the pointer to the tensor
