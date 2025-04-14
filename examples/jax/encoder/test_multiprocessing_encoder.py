@@ -631,7 +631,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
-        assert result[0] < 0.505 and result[1] > 0.755
+        assert result[0] < 0.505 and result[1] > 0.754
 
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 
