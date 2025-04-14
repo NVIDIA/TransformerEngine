@@ -108,34 +108,11 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     int64_t d_cols_num{};
   };
 
-  PatternDims AgGemm(int64_t m, int64_t n, int64_t k) {
-    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
-    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
-
-    int64_t a_cols_start{};
-    int64_t b_cols_start{};
-    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-
-    return PatternDims{
-        .a_rows_start = 0,
-        .a_rows_num = k,
-        .a_cols_start = a_cols_start,
-        .a_cols_num = a_cols_num,
-        .b_rows_start = 0,
-        .b_rows_num = k,
-        .b_cols_start = b_cols_start,
-        .b_cols_num = b_cols_num,
-        .d_rows_start = a_cols_start,
-        .d_rows_num = a_cols_num,
-        .d_cols_start = 0,
-        .d_cols_num = n,
-    };
-  }
+  virtual PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) = 0;
 
   template <typename T>
-  void TestAgGemm(bool transa, bool transb, size_t m, size_t n, size_t k,
-                  transformer_engine::DType dtype) {
+  void Run(bool transa, bool transb, size_t m, size_t n, size_t k,
+           transformer_engine::DType dtype) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
@@ -149,25 +126,29 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
 
     auto ga = transa ? MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype, stream)
                      : MakeDeviceTensorFromData<T>(adata, 0, 0, m, k, m, dtype, stream);
-    auto gb = MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
+    auto gb = transb ? MakeDeviceTensorFromData<T>(bdata, 0, 0, n, k, n, dtype, stream)
+                     : MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
     auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
 
-    auto dims = AgGemm(m, n, k);
+    auto dims = DistributeTensors(m, n, k);
     auto a = transa
                  ? MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
                                                dims.a_rows_num, dims.a_cols_num, k, dtype, stream)
                  : MakeDeviceTensorFromData<T>(adata, dims.a_cols_start, dims.a_rows_start,
                                                dims.a_cols_num, dims.a_rows_num, m, dtype, stream);
-    auto b = MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
-                                         dims.b_rows_num, dims.b_cols_num, k, dtype, stream);
+    auto b = transb
+                 ? MakeDeviceTensorFromData<T>(bdata, dims.b_cols_start, dims.b_rows_start,
+                                               dims.b_cols_num, dims.b_rows_num, n, dtype, stream)
+                 : MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                               dims.b_rows_num, dims.b_cols_num, k, dtype, stream);
     auto d = MakeDeviceTensor<T>(dims.d_rows_num, dims.d_cols_num, dtype, stream);
 
     transformer_engine::Tensor bias;
     transformer_engine::Tensor pre_act_out;
     bool grad = false;
     bool accumulate = false;
-    nvte_comm_gemm(ctx_, m, n, k, &a, &b, &d, &bias, &pre_act_out, transa, transb, grad, accumulate,
-                   0 /*comm_sm_count*/, stream);
+    nvte_all_gather_gemm(ctx_, m, n, k, &a, &b, &d, &bias, &pre_act_out, transa, transb, grad,
+                         accumulate, 0 /*comm_sm_count*/, stream);
     auto workspace =
         MakeDeviceTensor<uint8_t>(1, 32 << 20, transformer_engine::DType::kByte, stream);
     nvte_cublas_gemm(&ga, &gb, &gd, &bias, &pre_act_out, transa, transb, grad, &workspace,
@@ -196,13 +177,115 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
   int rank_{};
 };
 
-TEST_P(CommGemmTest, AgGemm) {
+struct AgGemmTest : public CommGemmTest {
+  PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
+    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
+    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
+
+    int64_t a_cols_start{};
+    int64_t b_cols_start{};
+    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+    return PatternDims{
+        .a_rows_start = 0,
+        .a_rows_num = k,
+        .a_cols_start = a_cols_start,
+        .a_cols_num = a_cols_num,
+        .b_rows_start = 0,
+        .b_rows_num = k,
+        .b_cols_start = b_cols_start,
+        .b_cols_num = b_cols_num,
+        .d_rows_start = a_cols_start,
+        .d_rows_num = a_cols_num,
+        .d_cols_start = 0,
+        .d_cols_num = n,
+    };
+  }
+};
+
+struct GemmRsTest : public CommGemmTest {
+  PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
+    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
+    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
+
+    int64_t a_cols_start{};
+    int64_t b_cols_start{};
+    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+    return PatternDims{
+        .a_rows_start = 0,
+        .a_rows_num = k,
+        .a_cols_start = a_cols_start,
+        .a_cols_num = a_cols_num,
+        .b_rows_start = 0,
+        .b_rows_num = k,
+        .b_cols_start = b_cols_start,
+        .b_cols_num = b_cols_num,
+        .d_rows_start = a_cols_start,
+        .d_rows_num = a_cols_num,
+        .d_cols_start = 0,
+        .d_cols_num = n,
+    };
+  }
+};
+
+struct GemmArTest : public CommGemmTest {
+  PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
+    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
+    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
+
+    int64_t a_cols_start{};
+    int64_t b_cols_start{};
+    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+    return PatternDims{
+        .a_rows_start = 0,
+        .a_rows_num = k,
+        .a_cols_start = a_cols_start,
+        .a_cols_num = a_cols_num,
+        .b_rows_start = 0,
+        .b_rows_num = k,
+        .b_cols_start = b_cols_start,
+        .b_cols_num = b_cols_num,
+        .d_rows_start = a_cols_start,
+        .d_rows_num = a_cols_num,
+        .d_cols_start = 0,
+        .d_cols_num = n,
+    };
+  }
+};
+
+TEST_P(AgGemmTest, AgGemm) {
   auto [dtype, transa, transb, m, n, k] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
-                                       { TestAgGemm<DType>(transa, transb, m, n, k, dtype); });
+                                       { Run<DType>(transa, transb, m, n, k, dtype); });
+}
+
+TEST_P(GemmRsTest, GemmRs) {
+  auto [dtype, transa, transb, m, n, k] = GetParam();
+  // TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
+  //                                      { TestGemmRs<DType>(transa, transb, m, n, k, dtype); });
+}
+
+TEST_P(GemmArTest, GemmAr) {
+  auto [dtype, transa, transb, m, n, k] = GetParam();
+  // TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
+  //                                      { TestGemmAr<DType>(transa, transb, m, n, k, dtype); });
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    CommGemmShapes, CommGemmTest,
+    AgGemm, AgGemmTest,
     testing::Values(Params{transformer_engine::DType::kFloat16, false, false, 8, 4, 2},
+                    Params{transformer_engine::DType::kFloat16, false, true, 8, 4, 2},
                     Params{transformer_engine::DType::kFloat16, true, false, 8, 4, 2}));
+
+INSTANTIATE_TEST_SUITE_P(GemRs, GemmRsTest,
+                         testing::Values(Params{transformer_engine::DType::kFloat16, true, false, 2,
+                                                4, 8}));
+
+INSTANTIATE_TEST_SUITE_P(GemAr, GemmArTest,
+                         testing::Values(Params{transformer_engine::DType::kFloat16, true, false, 2,
+                                                4, 8}));
