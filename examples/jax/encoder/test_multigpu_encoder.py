@@ -456,6 +456,17 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.535 and actual[1] > 0.73
 
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_delayed_scaling_fp8_shardy(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "DelayedScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.535 and actual[1] > 0.73
+
+    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+
 
 if __name__ == "__main__":
     train_and_evaluate(encoder_parser(None))
