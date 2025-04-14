@@ -867,7 +867,7 @@ class Linear(TransformerEngineBaseModule):
         self.name = name
 
         if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn of userbuffers
+            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
