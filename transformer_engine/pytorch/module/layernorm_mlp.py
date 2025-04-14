@@ -801,7 +801,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-                if ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
                     ctx.wgrad_store.put([act_out, grad_output], general_gemm_fc2_wgrad)
                     fc2_wgrad = None
                     fc2_bias_grad = None
@@ -822,7 +822,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                         fc2_bias_grad = fc2_bias_grad_
                     del fc2_bias_grad_
-            if not ctx.wgrad_store.split_bw():
+            if ctx.wgrad_store is not None and not ctx.wgrad_store.split_bw():
                 clear_tensor_data(act_out)
 
             # bias computation
@@ -1002,7 +1002,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     extra_output=fc1_dgrad_rs_out,
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
-                if ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
                     ctx.wgrad_store.put([ln_out_total, dact], general_gemm_fc1_wgrad)
                     fc1_wgrad = None
                     # (fc1_wgrad_outputs), _ = ctx.wgrad_store.pop()
@@ -1738,7 +1738,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if not self.wgrad_store.split_bw():
+        if self.wgrad_store is None or not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_LayerNormMLP_wgrad"):
             (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()

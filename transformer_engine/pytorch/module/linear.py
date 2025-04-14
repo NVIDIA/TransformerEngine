@@ -7,8 +7,8 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
-import torch
 import functools
+import torch
 
 import transformer_engine_torch as tex
 
@@ -679,7 +679,7 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
 
-                if ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
                     ctx.wgrad_store.put([inputmat_total, grad_output], general_gemm_wgrad)
                 else:
                     wgrad, grad_bias_, _, rs_out = general_gemm_wgrad(inputmat_total, grad_output)
@@ -700,7 +700,7 @@ class _Linear(torch.autograd.Function):
                         dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)
 
             # Don't return grad bias if not needed
-            if not ctx.use_bias or ctx.wgrad_store.split_bw():
+            if not ctx.use_bias or (ctx.wgrad_store is not None and ctx.wgrad_store.split_bw()):
                 grad_bias = None
 
             # Make sure all tensor-parallel communication is finished
@@ -1304,7 +1304,7 @@ class Linear(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if not self.wgrad_store.split_bw():
+        if self.wgrad_store is None or not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_Linear_wgrad"):
             super().backward_dw()

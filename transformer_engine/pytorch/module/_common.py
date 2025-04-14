@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from functools import reduce
 from operator import mul as multiply_op
 
-import torch
 import queue
+import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
@@ -226,7 +226,7 @@ class WeightGradStore:
     """
 
     def __init__(
-        self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True, ub_bulk_wgrad=False
+        self, split_bw=False, ub_bulk_wgrad=False
     ):
         """
         Initialize the WeightGradStore.
@@ -236,7 +236,7 @@ class WeightGradStore:
         """
         if split_bw:
             self.context = queue.Queue()
-            assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
+            assert ub_bulk_wgrad is False, "ub_bulk_wgrad is not supported when enabling split_bw"
             self.enabled = split_bw
         else:
             self.context = None
@@ -267,31 +267,28 @@ class WeightGradStore:
             tensor_list (list): List of tensors needed for computation
             func (callable): Function to be executed with the tensors
         """
-        assert self.enabled == True, "split_bw is not enabled"
+        assert self.enabled is True, "split_bw is not enabled"
         self.context.put([tensor_list, func])
-        return
 
     def pop(self):
         """
         Execute the stored computation with the stored tensors.
         Raises an exception if the queue is empty.
         """
-        assert self.enabled == True, "split_bw is not enabled"
+        assert self.enabled is True, "split_bw is not enabled"
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
             return func(*tensor_list), tensor_list
-        else:
-            if torch.distributed.is_initialized():
-                rank = torch.distributed.get_rank()
-                raise Exception(f"Pop empty queue. rank {rank}")
-            else:
-                raise Exception("Pop empty queue. No distributed environment detected.")
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            raise Exception(f"Pop empty queue. rank {rank}")
+        raise Exception("Pop empty queue. No distributed environment detected.")
 
     def assert_empty(self):
         """
         Assert that the queue is empty.
         Used for debugging and ensuring proper cleanup.
         """
-        assert self.enabled == True, "split_bw is not enabled"
+        assert self.enabled is True, "split_bw is not enabled"
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"
