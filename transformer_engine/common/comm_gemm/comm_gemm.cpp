@@ -194,7 +194,39 @@ void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
 void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
                         const Tensor* b, const Tensor* d, const Tensor* bias,
                         const Tensor* pre_act_out, bool transa, bool transb) {
-  // TODO:
+  const auto a0 = a->flat_first_dim();
+  const auto a1 = a->flat_last_dim();
+  const auto b0 = b->flat_first_dim();
+  const auto b1 = b->flat_last_dim();
+  const auto d0 = d->flat_first_dim();
+  const auto d1 = d->flat_last_dim();
+
+  if (transa) {
+    NVTE_CHECK(a0 == m);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, m, block_size(ctx, k), m, 0, 0,
+                                                     block_size(ctx, k), get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_col_major.get(), ctx->a_desc.get()));
+  } else {
+    NVTE_CHECK(a1 == m);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, k, m, block_size(ctx, k), 0, 0, m,
+                                                     get_cuda_dtype(a->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->a_desc.get()));
+  }
+  if (transb) {
+    NVTE_CHECK(b1 == n);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
+        n, k, block_size(ctx, n), block_size(ctx, k), 0, 0, block_size(ctx, n),
+        get_cuda_dtype(b->dtype()), ctx->grid_row_major.get(), ctx->b_desc.get()));
+  } else {
+    NVTE_CHECK(b0 == n);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
+        k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
+        get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
+  }
+  NVTE_CHECK(d1 == m);
+  NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, m,
+                                                   get_cuda_dtype(d->dtype()),
+                                                   ctx->grid_row_major.get(), ctx->d_desc.get()));
 }
 
 void GemmArInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
