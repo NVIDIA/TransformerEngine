@@ -16,18 +16,18 @@ __all__ = ["get_cpu_offload_context"]
 CPUOffloadEnabled = False
 
 
-def set_offloading_param(tensor, param_name, value):
+def mark_activation_offload(*tensors):
     """Set the type of the offloading needed for a tensor."""
-    assert param_name in ["weight_offloading", "activation_offloading"]
-    if tensor is None:
-        return
-    if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
-        setattr(tensor, param_name, value)
-    else:
-        data_tensors = tensor.get_data_tensors()
-        for tensor in data_tensors:
-            if tensor is not None:
-                setattr(tensor, param_name, value)
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
+            setattr(tensor, "activation_offloading", True)
+        else:
+            data_tensors = tensor.get_data_tensors()
+            for tensor in data_tensors:
+                if tensor is not None:
+                    setattr(tensor, "activation_offloading", True)
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -461,6 +461,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Time to free the activation memory after usage
             for tensor_tag, _ in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
+                    # Need to clear activation tensor - sometimes the reference exists in the code.
+                    self.tensor_tag_to_buf[tensor_tag].data = torch.Tensor()
                     self.tensor_tag_to_buf[tensor_tag] = None
 
             # Time to offload the next group
@@ -538,7 +540,7 @@ def get_cpu_offload_context(
     num_layers: int = 1,
     model_layers: int = 1,
     offload_activations: bool = True,
-    offload_weights: bool = True,
+    offload_weights: bool = False,
 ):
     """
     This function returns the CPU Offload context and the synchronizer function that needs to be
@@ -570,27 +572,19 @@ def get_cpu_offload_context(
 
     """
 
+    if offload_weights:
+        import warnings
+        warnings.warn(
+            "Offloading weights is deprecated. Using offload_weights=True does not have any effect.",
+            DeprecationWarning,
+        )
+
+    assert offload_activations, "Offloading activations is required."
+
     def tensor_need_offloading_checker_activations(tensor):
         return hasattr(tensor, "activation_offloading")
 
-    # This includes the Gradient Accumulation Buffer
-    def tensor_need_offloading_checker_weights(tensor):
-        return hasattr(tensor, "weight_offloading")
-
-    def tensor_need_offloading_checker_all(tensor):
-        return hasattr(tensor, "activation_offloading") or hasattr(tensor, "weight_offloading")
-
-    if offload_activations and offload_weights:
-        tensor_need_offloading_checker = tensor_need_offloading_checker_all
-    elif offload_activations:
-        tensor_need_offloading_checker = tensor_need_offloading_checker_activations
-    elif offload_weights:
-        tensor_need_offloading_checker = tensor_need_offloading_checker_weights
-    else:
-        raise ValueError(
-            "CPU Offloading is enabled while it is not "
-            "mentioned what to offload (weights/activations)"
-        )
+    tensor_need_offloading_checker = tensor_need_offloading_checker_activations
 
     cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
         num_offload_group=num_layers,

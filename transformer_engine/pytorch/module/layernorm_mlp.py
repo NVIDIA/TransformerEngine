@@ -63,7 +63,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -445,23 +445,9 @@ class _LayerNormMLP(torch.autograd.Function):
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
         else:
             if cpu_offloading:
-                if fp8 and fc1_weight_final is not None:
-                    set_offloading_param(fc1_weight_final, "weight_offloading", True)
-                if fp8 and fc2_weight_final is not None:
-                    set_offloading_param(fc2_weight_final, "weight_offloading", True)
-                set_offloading_param(ln_weight, "weight_offloading", True)
-                set_offloading_param(fc1_weight, "weight_offloading", True)
-                set_offloading_param(fc2_weight, "weight_offloading", True)
-                set_offloading_param(fc1_bias, "weight_offloading", True)
+                mark_activation_offload(
+                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out)
 
-                set_offloading_param(inputmat, "activation_offloading", True)
-                set_offloading_param(mu, "activation_offloading", True)
-                set_offloading_param(rsigma, "activation_offloading", True)
-                set_offloading_param(mu, "activation_offloading", True)
-                set_offloading_param(ln_out, "activation_offloading", True)
-                set_offloading_param(fc1_out, "activation_offloading", True)
-                set_offloading_param(fc1_out_without_bias, "activation_offloading", True)
-                set_offloading_param(act_out, "activation_offloading", True)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
