@@ -225,9 +225,7 @@ class WeightGradStore:
     This class enables split backward propagation for better memory efficiency.
     """
 
-    def __init__(
-        self, split_bw=False, ub_bulk_wgrad=False
-    ):
+    def __init__(self, split_bw=False, ub_bulk_wgrad=False):
         """
         Initialize the WeightGradStore.
 
