@@ -388,7 +388,7 @@ void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
-  cublasmp_gemm(AgGemmInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P, m, n, k,
+  cublasmp_gemm(AgGemmInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
                 static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
                 static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
                 static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
@@ -399,7 +399,7 @@ void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                               const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                               bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
-  cublasmp_gemm(GemmRsInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P, m, n, k,
+  cublasmp_gemm(GemmRsInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
                 static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
                 static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
                 static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
@@ -410,7 +410,7 @@ void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
-  cublasmp_gemm(GemmRsInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_SPLIT_P2P, m, n, k,
+  cublasmp_gemm(GemmArInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
                 static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
                 static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
                 static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
