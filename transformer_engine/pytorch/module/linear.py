@@ -277,6 +277,7 @@ class _Linear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if is_grad_enabled:
+            ctx.weight_quantizer = weight_quantizer
             saved_inputmat = None
 
             ctx.backward_input_needs_gather = (
@@ -573,6 +574,12 @@ class _Linear(torch.autograd.Function):
                         dgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
+
+                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensor):
+                    weight_fp8.update_usage(
+                        rowwise_usage=ctx.weight_quantizer.rowwise_usage,
+                        columnwise_usage=ctx.weight_quantizer.columnwise_usage,
+                    )
 
                 dgrad, *_, rs_out = general_gemm(
                     weight_fp8,

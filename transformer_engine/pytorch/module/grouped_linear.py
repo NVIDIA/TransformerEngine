@@ -173,7 +173,7 @@ class _GroupedLinear(torch.autograd.Function):
                     weight_quantizers[i].calibrate(weights[i])
 
         if is_grad_enabled:
-
+            ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
             # TODO: update after #1638 is merged. # pylint: disable=fixme
@@ -294,6 +294,12 @@ class _GroupedLinear(torch.autograd.Function):
                     device=ctx.device,
                 )
 
+                for weight, quantizer in zip(weights, ctx.weight_quantizers):
+                    if quantizer is not None and isinstance(weight, QuantizedTensor):
+                        weight.update_usage(
+                            rowwise_usage=quantizer.rowwise_usage,
+                            columnwise_usage=quantizer.columnwise_usage,
+                        )
                 general_grouped_gemm(
                     weights,
                     grad_output,
