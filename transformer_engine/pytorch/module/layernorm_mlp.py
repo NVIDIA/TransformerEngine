@@ -1331,7 +1331,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = (
             ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
-        
+
         if self.symmetric_ar_type is not None:
             assert torch_version() >= (
                 2,

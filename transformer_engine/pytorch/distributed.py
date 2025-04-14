@@ -1386,6 +1386,7 @@ def symmetric_all_reduce(
 
     return inp, None
 
+
 def allreduce(
     inp: torch.Tensor,
     tp_group: Optional[dist_group_type] = None,
