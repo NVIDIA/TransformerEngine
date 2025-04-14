@@ -40,6 +40,7 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
+    symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     in_fp8_activation_recompute_phase,
@@ -65,6 +66,8 @@ from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
     general_gemm,
 )
+
+from transformer_engine.pytorch import torch_version
 
 __all__ = ["LayerNormLinear"]
 
@@ -116,6 +119,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        symmetric_ar_type: str,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
 
@@ -442,7 +446,10 @@ class _LayerNormLinear(torch.autograd.Function):
             if sequence_parallel:
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
-                out, _ = allreduce(out, tp_group)
+                if symmetric_ar_type is not None:
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                else:
+                    out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
@@ -885,6 +892,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # symmetric_ar_type
         )
 
 
@@ -1001,6 +1009,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
+        symmetric_ar_type: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -1016,6 +1025,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output = return_layernorm_output
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
+        self.symmetric_ar_type = symmetric_ar_type
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1080,6 +1090,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
+
+        if self.symmetric_ar_type is not None:
+            assert torch_version() >= (
+                2,
+                7,
+                0,
+            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(
@@ -1396,6 +1413,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.symmetric_ar_type,
             )
             out = fwd_fn(*args)
 

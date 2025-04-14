@@ -38,6 +38,7 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
+    symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
@@ -63,6 +64,7 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
+from transformer_engine.pytorch import torch_version
 
 __all__ = ["Linear"]
 
@@ -106,6 +108,7 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        symmetric_ar_type: str,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -380,7 +383,10 @@ class _Linear(torch.autograd.Function):
             if sequence_parallel:
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
-                out, _ = allreduce(out, tp_group)
+                if symmetric_ar_type is not None:
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                else:
+                    out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
         out = out.view(-1, *inp_shape[1:-1], out_features)
@@ -768,6 +774,7 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # symmetric_ar_type
         )
 
 
@@ -864,6 +871,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
+        symmetric_ar_type: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -876,6 +884,7 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.symmetric_ar_type = symmetric_ar_type
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -940,6 +949,13 @@ class Linear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
+
+        if self.symmetric_ar_type is not None:
+            assert torch_version() >= (
+                2,
+                7,
+                0,
+            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -1206,6 +1222,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.symmetric_ar_type,
             )
             out = linear_fn(*args)
         if self.gemm_bias_unfused_add:
