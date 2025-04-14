@@ -12,7 +12,6 @@ from ..constants import TE_DType
 from ..utils import get_sm_count
 
 from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
 __all__ = [
@@ -25,46 +24,6 @@ __all__ = [
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
-
-
-def swizzle_inputs(A: torch.Tensor, B: torch.Tensor, layout: str):
-    """Swizzle gemm inputs and return original scaling factor inverses."""
-    if not isinstance(A, MXFP8TensorBase) or not isinstance(B, MXFP8TensorBase):
-        return None
-
-    original_scale_inverses = (
-        A._rowwise_scale_inv,
-        A._columnwise_scale_inv,
-        B._rowwise_scale_inv,
-        B._columnwise_scale_inv,
-    )
-
-    if layout[0] == "T":
-        A._rowwise_scale_inv = tex.rowwise_swizzle(A._rowwise_data, A._rowwise_scale_inv)
-    else:
-        A._columnwise_scale_inv = tex.columnwise_swizzle(
-            A._columnwise_data, A._columnwise_scale_inv
-        )
-
-    if layout[1] == "N":
-        B._rowwise_scale_inv = tex.rowwise_swizzle(B._rowwise_data, B._rowwise_scale_inv)
-    else:
-        B._columnwise_scale_inv = tex.columnwise_swizzle(
-            B._columnwise_data, B._columnwise_scale_inv
-        )
-
-    return original_scale_inverses
-
-
-def reset_swizzled_inputs(A, B, scale_inverses):
-    """Reset the swizzled scale inverses after GEMM."""
-    if scale_inverses is not None:
-        (
-            A._rowwise_scale_inv,
-            A._columnwise_scale_inv,
-            B._rowwise_scale_inv,
-            B._columnwise_scale_inv,
-        ) = scale_inverses
 
 
 def general_gemm(
@@ -141,9 +100,7 @@ def general_gemm(
         "bulk_overlap": bulk_overlap,
     }
 
-    original_scale_inverses = swizzle_inputs(A, B, layout)
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    reset_swizzled_inputs(A, B, original_scale_inverses)
 
     return out, bias_grad, gelu_input, extra_output
 
@@ -199,8 +156,6 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    # TODO: Move the swizzle to the C++ side. # pylint: disable=fixme
-    original_scale_inverses_list = [swizzle_inputs(A[i], B[i], layout) for i in range(num_gemms)]
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
@@ -220,7 +175,5 @@ def general_grouped_gemm(
         use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
     )
-    for i in range(num_gemms):
-        reset_swizzled_inputs(A[i], B[i], original_scale_inverses_list[i])
 
     return out, bias, gelu_input

@@ -258,7 +258,11 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   if (tensor == nullptr) return sizeof(float);
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return transformer_engine::typeToSize(t.data.dtype);
+  if (t.data.dptr != nullptr) {
+    return transformer_engine::typeToSize(t.data.dtype);
+  } else {
+    return transformer_engine::typeToSize(t.columnwise_data.dtype);
+  }
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {

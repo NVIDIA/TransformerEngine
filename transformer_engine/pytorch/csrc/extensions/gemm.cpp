@@ -175,8 +175,14 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
+  std::vector<std::optional<at::Tensor>> original_scale_inverses_list;
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
+    // Optionally swizzle the scaling factors
+    original_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
+    original_scale_inverses_list.emplace_back(
+        std::move(swizzle_scaling_factors(B_tensor, !transb)));
+
     if (comm_overlap) {
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
@@ -313,6 +319,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       te_pre_gelu_out_vector, te_workspace_vector;
   std::vector<TensorWrapper> wrappers;
   std::vector<at::Tensor> D_vectors;
+  std::vector<std::optional<at::Tensor>> original_scale_inverses_list;
 
   auto none = py::none();
 
@@ -378,6 +385,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       if (pre_gelu_out[i].numel() != 0) pre_gelu_out[i].zero_();
       continue;
     }
+
+    // Optionally swizzle the scaling factors
+    original_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
+    original_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
 
     auto te_D = makeTransformerEngineTensor(out_tensor);
     auto te_bias = makeTransformerEngineTensor(bias[i]);

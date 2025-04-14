@@ -50,11 +50,11 @@ std::vector<py::object> fused_attn_fwd(
     NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
-    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
-    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded,
+    const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
+    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -63,8 +63,8 @@ std::vector<py::object> fused_attn_bwd(
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
@@ -270,12 +270,12 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const NVTE_QKV_Format qkv_format, const bool interleaved,
-                              const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                              const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                               const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
-                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                               const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank);
 
 /***************************************************************************************************
@@ -396,7 +396,8 @@ void nvshmem_finalize();
  * swizzle
  **************************************************************************************************/
 
-void swizzle_scaling_factors(transformer_engine::TensorWrapper &input, bool trans);
+std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper &input,
+                                                  bool trans);
 
 at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
