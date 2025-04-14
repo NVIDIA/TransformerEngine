@@ -29,7 +29,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor,
     ScalingMode,
     QuantizerFactory,
-    QuantizeAxis,
+    QuantizeLayout,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -48,21 +48,21 @@ FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(256, 128), (128, 256)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = helper.is_fp8_available()
-is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 supported_scaling_modes = []
 """ Find supported scaling modes"""
 if is_fp8_supported:
-    supported_scaling_modes.append(ScalingMode.NVTE_DELAYED_TENSOR_SCALING)
+    supported_scaling_modes.append(ScalingMode.DELAYED_TENSOR_SCALING)
 if is_mxfp8_supported:
-    supported_scaling_modes.append(ScalingMode.NVTE_MXFP8_1D_SCALING)
+    supported_scaling_modes.append(ScalingMode.MXFP8_1D_SCALING)
 
 
 def is_shape_supported_by_mxfp8(input_shape):
     try:
         if isinstance(input_shape, type(pytest.param(0))):
             input_shape = input_shape.values[0]
-        ScalingMode.NVTE_MXFP8_1D_SCALING.get_scale_shape_2x(input_shape)
+        ScalingMode.MXFP8_1D_SCALING.get_scale_shape_2x(input_shape)
         return True
     except:
         # get_scale_shapes will raise an exception if the shape is not supported
@@ -82,8 +82,9 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
 
 def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
     if isinstance(a, ScaledTensor1x):
-        if a.layout == "T":
-            b_transpose = jnp.transpose(b, (-1, *range(b.ndim - 1)))
+        if a.data_layout == "T":
+            flatten_axis = a.data.ndim - a.flatten_axis
+            b_transpose = jnp.transpose(b, (*range(flatten_axis, b.ndim), *range(flatten_axis)))
             assert_allclose(a.dequantize(), b_transpose, dtype=a.data.dtype)
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
@@ -141,7 +142,8 @@ class TestActivation:
     def test_act_grad(self, shape, activation_type):
         key = jax.random.PRNGKey(0)
         x = jax.random.uniform(key, shape, jnp.float32)
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
 
         value_n_grad_primitive_func = jit(
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1,)
@@ -159,7 +161,8 @@ class TestActivation:
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     def test_act_grad_with_delayed_scaling_fp8(self, random_inputs, activation_type, output_type):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(
@@ -167,9 +170,9 @@ class TestActivation:
         )
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             q_dtype=output_type,
-            q_axis=QuantizeAxis.ROWWISE,
+            q_layout=QuantizeLayout.ROWWISE,
         )
 
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, quantizer)
@@ -182,19 +185,22 @@ class TestActivation:
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_act_forward_with_delayed_scaling_fp8(
-        self, random_inputs, activation_type, output_type, q_axis
+        self, random_inputs, activation_type, output_type, q_layout
     ):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
             n_quantizers=2,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             q_dtype=output_type,
-            q_axis=q_axis,
+            q_layout=q_layout,
         )
 
         te_output = tex.act_lu(x, activation_type, te_quantizer)
@@ -203,19 +209,21 @@ class TestActivation:
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("shape", [(128, 128)])
+    @pytest_parametrize_wrapper("shape", [(2, 64, 1, 256)])
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_act_forward_with_block_scaling_fp8(
-        self, random_inputs, activation_type, output_type, q_axis
+        self, random_inputs, activation_type, output_type, q_layout
     ):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING, q_dtype=output_type, q_axis=q_axis
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
         )
 
         output = tex.act_lu(x, activation_type, quantizer)
@@ -324,9 +332,11 @@ class TestNorm:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_norm_grad_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_axis
+        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
     ):
         """
         Test transformer_engine.jax.layernorm.layernorm
@@ -335,7 +345,9 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING, q_dtype=out_dtype, q_axis=q_axis
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            q_dtype=out_dtype,
+            q_layout=q_layout,
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -351,7 +363,7 @@ class TestNorm:
         inp_dtype,
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
     ):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 3)
@@ -363,7 +375,7 @@ class TestNorm:
         gamma = jnp.asarray(gamma, inp_dtype)
 
         quantizer, ref_quantizer = QuantizerFactory.create(
-            n_quantizers=2, scaling_mode=scaling_mode, q_dtype=out_dtype, q_axis=q_axis
+            n_quantizers=2, scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout
         )
         if norm_type == "layernorm":
             beta = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -1, 1)
@@ -391,9 +403,11 @@ class TestNorm:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_norm_forward_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_axis
+        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
     ):
         if norm_type == "rmsnorm" and zero_centered_gamma is True:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
@@ -406,8 +420,8 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
-            q_axis=q_axis,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            q_layout=q_layout,
         )
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
@@ -423,8 +437,8 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING,
-            q_axis=QuantizeAxis.ROWWISE_COLWISE,
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            q_layout=QuantizeLayout.ROWWISE_COLWISE,
         )
 
 
@@ -434,14 +448,14 @@ QUANTIZE_OUTPUT_DTYPES = {
 }
 
 ALL_QUANTIZE_TEST_SHAPES = [
-    (128, 128),
-    (4, 256, 512),
+    (32, 64),
+    (2, 64, 32),
 ]
 
 QUANTIZE_TEST_SHAPES = {
     "L0": [
-        (256, 128),
-        (64, 16, 2, 256),
+        (32, 256, 128),
+        (64, 32, 32, 256),
     ],
     "L2": ALL_QUANTIZE_TEST_SHAPES,
 }
@@ -457,48 +471,52 @@ QUANTIZATION_INPUT_DTYPE = {
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
 @pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
-    "q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE]
+    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
 class TestQuantize:
     """
     Purely quantization related tests that will always test on a wider set of types and shapes
     """
 
-    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_axis):
+    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
         key = jax.random.PRNGKey(0)
 
         # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
         quantizer = QuantizerFactory.create(
             scaling_mode=scaling_mode,
             q_dtype=q_dtype,
-            q_axis=q_axis,
+            q_layout=q_layout,
         )
+        # Adding dimension to test if padding is done correctly when flatten 3D to 2D
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             x = jax.random.uniform(key, input_shape, in_dtype)
 
-            scaled_tensor = quantizer.quantize(x)
+            scaled_tensor = quantizer.quantize(x, flatten_axis=flatten_axis)
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
-    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_axis):
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
-            input_shape
-        ):
-            pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
+    def test_quantize_bitwise(
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
+    ):
 
         key = jax.random.PRNGKey(0)
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_axis=q_axis
+            n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        jax_output = _jax_quantize(input, quantizer=jax_quantizer)
+        jax_output = _jax_quantize(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        te_output = tex.quantize(input, quantizer=te_quantizer)
-        assert_bitwise_scaled_tensors(jax_output, te_output)
+        te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
+        assert_bitwise_scaled_tensors(te_output, jax_output)
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -508,10 +526,14 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("input_shape", QUANTIZE_TEST_SHAPES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
-    def test_quantize_dbias(self, in_dtype, input_shape, out_dtype, scaling_mode, q_axis):
-        transpose_axis = -1
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
+    @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
+    def test_quantize_dbias(
+        self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, flatten_axis
+    ):
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
@@ -520,35 +542,37 @@ class TestFusedQuantize:
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         jax_quantizer, te_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_axis=q_axis
+            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        te_output, te_dbias = jit(lambda input: tex.quantize_dbias(input, quantizer=te_quantizer))(
-            input
-        )
-
-        jax_output, jax_dbias = jit(
-            lambda input: _jax_quantize_dbias(
-                input,
-                quantizer=jax_quantizer,
+        te_output, te_dbias = jit(
+            lambda input: tex.quantize_dbias(
+                input, quantizer=te_quantizer, flatten_axis=flatten_axis
             )
         )(input)
 
-        assert_bitwise_scaled_tensors(jax_output, te_output)
+        jax_output, jax_dbias = jit(
+            lambda input: _jax_quantize_dbias(
+                input, quantizer=jax_quantizer, flatten_axis=flatten_axis
+            )
+        )(input)
 
-        assert_allclose(jax_dbias, te_dbias)
+        assert_bitwise_scaled_tensors(te_output, jax_output)
+
+        assert_allclose(te_dbias, jax_dbias)
 
     def _test_quantize_dact_dbias(
-        self, in_dtype, input_shape, out_dtype, scaling_mode, activation_type, is_dbias, q_axis
+        self, in_dtype, input_shape, out_dtype, scaling_mode, activation_type, is_dbias, q_layout
     ):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(subkeys[0], input_shape, in_dtype, -1, 1)
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         dz = jax.random.uniform(subkeys[1], input_shape, in_dtype, -1, 1)
 
         jax_quantizer, te_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_axis=q_axis
+            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
         is_casted_output = te_quantizer is not None
 
@@ -573,12 +597,12 @@ class TestFusedQuantize:
         )(dz, x)
 
         if is_casted_output:
-            assert_bitwise_scaled_tensors(jax_output, te_output)
+            assert_bitwise_scaled_tensors(te_output, jax_output)
         else:
-            assert_allclose(jax_output, te_output)
+            assert_allclose(te_output, jax_output)
 
         if is_dbias:
-            assert_allclose(jax_dbias, te_dbias)
+            assert_allclose(te_dbias, jax_dbias)
 
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
@@ -594,10 +618,10 @@ class TestFusedQuantize:
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=in_dtype,
-            scaling_mode=ScalingMode.NVTE_NO_SCALING,
+            scaling_mode=ScalingMode.NO_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
-            q_axis=QuantizeAxis.ROWWISE,
+            q_layout=QuantizeLayout.ROWWISE,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -605,18 +629,20 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_quantize_dact_dbias_delayed_scaling(
-        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_axis
+        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
     ):
         self._test_quantize_dact_dbias(
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
-            q_axis=q_axis,
+            q_layout=q_layout,
         )
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
@@ -626,9 +652,11 @@ class TestFusedQuantize:
     )
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
-    @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_quantize_dact_dbias_mxfp8_scaling(
-        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_axis
+        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
     ):
         if reduce(operator.mul, input_shape[:-1]) % 128 != 0 or input_shape[-1] % 128 != 0:
             # TODO(Jeremy): Remove this if pulling in newer TE branch supports non-full-tile shapes.
@@ -642,78 +670,78 @@ class TestFusedQuantize:
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING,
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
-            q_axis=q_axis,
+            q_layout=q_layout,
         )
 
 
 class TestDense:
-    def _ref_gemm_with_jnp_dot(self, a, b, layout):
-        if layout[0] == "T":
+    def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
+        if data_layout[0] == "T":
             a = jnp.swapaxes(a, -1, -2)
-        if layout[1] == "T":
+        if data_layout[1] == "T":
             b = jnp.swapaxes(b, -1, -2)
         return jnp.dot(a, b)
 
-    def _generate_gemm_input(self, m, n, k, layout):
+    def _generate_gemm_input(self, m, n, k, data_layout):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(
             subkeys[0],
-            (m if layout[0] == "N" else k, k if layout[0] == "N" else m),
+            (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
             dtype=jnp.bfloat16,
         ) / jnp.sqrt(k)
         w = jax.random.uniform(
             subkeys[1],
-            (k if layout[1] == "N" else n, n if layout[1] == "N" else k),
+            (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
             dtype=jnp.bfloat16,
         ) / jnp.sqrt(n)
-        lhs_contracting_dim = (1,) if layout[0] == "N" else (0,)
-        rhs_contracting_dim = (0,) if layout[1] == "N" else (1,)
+        lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+        rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
         contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
         return (x, w, contracting_dims)
 
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
-    @pytest_parametrize_wrapper("layout", ["TN", "NT", "NN", "TT"])
-    def test_gemm_bf16(self, m, n, k, layout):
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
+    def test_gemm_bf16(self, m, n, k, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         primitive_out = tex.gemm(x, w, contracting_dims)
-        ref_out = self._ref_gemm_with_jnp_dot(x, w, layout)
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("layout", ["TN", "NT", "NN", "TT"])
-    def test_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, layout):
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
+    def test_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=False
         )
         primitive_out = tex.gemm(
             x, w, contracting_dims=contracting_dims, quantizer_set=quantizer_set
         )
-        ref_out = self._ref_gemm_with_jnp_dot(x, w, layout)
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
 
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     def test_dense_grad_bf16(self, m, n, k):
-        layout = "NN"
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+        data_layout = "NN"
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         def primitive_func(x, w, contracting_dims):
             primitive_out = dense(x, w, contracting_dims=contracting_dims)
             return jnp.mean(primitive_out)
 
-        def ref_func(x, w, layout):
-            return jnp.mean(self._ref_gemm_with_jnp_dot(x, w, layout))
+        def ref_func(x, w, data_layout):
+            return jnp.mean(self._ref_gemm_with_jnp_dot(x, w, data_layout))
 
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1))
 
@@ -722,19 +750,19 @@ class TestDense:
         primitive_out, (primitive_x_grad, primitive_w_grad) = value_n_grad_primitive_func(
             x, w, contracting_dims
         )
-        ref_out, (ref_x_grad, ref_w_grad) = value_n_grad_ref_func(x, w, layout)
+        ref_out, (ref_x_grad, ref_w_grad) = value_n_grad_ref_func(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=jnp.bfloat16)
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_dense_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
-        layout = "NN"
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+        data_layout = "NN"
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         key = jax.random.PRNGKey(1)
         bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
@@ -745,9 +773,9 @@ class TestDense:
             )
             return jnp.mean(primitive_out)
 
-        def ref_func(x, w, bias, layout):
+        def ref_func(x, w, bias, data_layout):
             return jnp.mean(
-                self._ref_gemm_with_jnp_dot(x, w, layout) + jnp.expand_dims(bias, axis=0)
+                self._ref_gemm_with_jnp_dot(x, w, data_layout) + jnp.expand_dims(bias, axis=0)
             )
 
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
@@ -757,13 +785,15 @@ class TestDense:
             scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=True
         )
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             primitive_out, (primitive_x_grad, primitive_w_grad, primitive_bias_grad) = (
                 value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
             )
 
-        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(x, w, bias, layout)
+        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(
+            x, w, bias, data_layout
+        )
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=q_dtype)
@@ -791,7 +821,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 
 class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("m,n,k", [(512, 128, 128)])
+    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
@@ -800,7 +830,7 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -856,7 +886,7 @@ class TestFusedDense:
             x, w, gamma, beta
         )
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             prim_out, (
                 prim_x_grad,
@@ -873,7 +903,7 @@ class TestFusedDense:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=q_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("m,n,k", [(512, 128, 256)])
+    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
@@ -886,7 +916,7 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -898,13 +928,13 @@ class TestFusedDense:
 
         x = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
         kernel_1 = jax.random.normal(
-            subkeys[1], (k, len(activation_type) * n), jnp.bfloat16
+            subkeys[1], (k, len(activation_type), n), jnp.bfloat16
         ) / jnp.sqrt(k)
         kernel_2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16) / jnp.sqrt(n)
         gamma = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
         beta = None  # was tested in TestNorm
         if use_bias:
-            bias_1 = jax.random.normal(subkeys[3], (len(activation_type) * n), jnp.bfloat16)
+            bias_1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
             bias_2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
             bias_1 = None
@@ -963,7 +993,7 @@ class TestFusedDense:
         value_n_grad_prim_func = value_and_grad(prim_func, range(6))
         value_n_grad_ref_func = value_and_grad(ref_func, range(6))
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             prim_out, (
                 prim_x_grad,
@@ -1039,19 +1069,19 @@ class TestGroupedDense:
         subkeys = jax.random.split(key, len(shape_list) * 2)
 
         lhs_list, rhs_list, contracting_dims_list = [], [], []
-        for i, ((m, n, k), layout) in enumerate(zip(shape_list, layout_list)):
+        for i, ((m, n, k), data_layout) in enumerate(zip(shape_list, layout_list)):
             lhs = jax.random.uniform(
                 subkeys[2 * i],
-                (m if layout[0] == "N" else k, k if layout[0] == "N" else m),
+                (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
                 dtype=dtype,
             )
             rhs = jax.random.uniform(
                 subkeys[2 * i + 1],
-                (k if layout[1] == "N" else n, n if layout[1] == "N" else k),
+                (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
                 dtype=dtype,
             )
-            lhs_contracting_dim = (1,) if layout[0] == "N" else (0,)
-            rhs_contracting_dim = (0,) if layout[1] == "N" else (1,)
+            lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+            rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
             contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
             lhs_list.append(lhs)

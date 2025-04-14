@@ -101,17 +101,21 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
     bool use_split_accumulator, int math_sm_count);
 
+namespace transformer_engine::pytorch {
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
-                                             std::optional<std::vector<py::handle>> output_list,
+std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
+                                             std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list,
                                              transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
+
+}  // namespace transformer_engine::pytorch
 
 namespace transformer_engine::pytorch {
 
@@ -265,16 +269,14 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const bool transpose_output_memory);
+                              const NVTE_QKV_Format qkv_format, const bool interleaved,
+                              const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                              const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const bool transpose_output_memory);
-
-at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs, const int cp_size, const int cp_rank);
-
-at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs, const int cp_size, const int cp_rank);
+                               const NVTE_QKV_Format qkv_format, const bool interleaved,
+                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                               const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous
@@ -372,6 +374,23 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
+
+/***************************************************************************************************
+ * NVSHMEM APIs
+ **************************************************************************************************/
+
+namespace nvshmem_api {
+void init_nvshmem_backend(c10d::ProcessGroup *process_group);
+
+torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+
+void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
+                                    torch::Tensor signal);
+
+void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
+
+void nvshmem_finalize();
+}  // namespace nvshmem_api
 
 /***************************************************************************************************
  * swizzle

@@ -15,46 +15,33 @@
 namespace transformer_engine {
 namespace jax {
 
-constexpr static size_t MXFP8_BLOCK_SIZE = 32;
-
-// Note: we only support TN-GEMM for now (TN in cuBLASLt == NT in JAX)
-Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lhs_sinv_ptr,
-                           const DType &lhs_sinv_dtype, uint8_t *rhs_ptr, const DType &rhs_dtype,
-                           uint8_t *rhs_sinv_ptr, const DType &rhs_sinv_dtype, uint8_t *bias_ptr,
-                           const DType &bias_dtype, uint8_t *out_ptr, const DType &out_dtype,
-                           uint8_t *workspace_ptr, const size_t workspace_size, size_t num_gemms,
-                           int32_t *dim_list_ptr, const int64_t &scaling_mode,
-                           cudaStream_t stream) {
-  size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
-  size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
-  size_t lhs_sinv_dtype_bytes = te_dtype_bytes(lhs_sinv_dtype);
-  size_t rhs_sinv_dtype_bytes = te_dtype_bytes(rhs_sinv_dtype);
-  size_t bias_dtype_bytes = te_dtype_bytes(bias_dtype);
-  size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
-  NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
-  NVTE_CHECK(lhs_sinv_dtype_bytes == rhs_sinv_dtype_bytes,
-             "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
-
-  size_t dim_list_bytes = sizeof(int32_t) * 3 * num_gemms;
-  std::unique_ptr<int32_t[]> dim_list_host = std::make_unique<int32_t[]>(3 * num_gemms);
-
-  cudaMemcpyAsync(dim_list_host.get(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                  stream);
-  // Note: This may break cudaGraph.
-  cudaStreamSynchronize(stream);
-
+Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
+                          Variadic_Result_Type output_list, int64_t num_gemms,
+                          JAXX_Scaling_Mode scaling_mode, int64_t has_bias) {
   // Notes on matrix layouts and transpose:
-  // Jax uses row-major layout, on entering this function, each input matrix pair:
+  // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major with size [m, k],
   //   B: row-major with size [n, k], needs transpose,
   // on exiting this function, JAX expect:
   //   C: row-major with size [m, n].
-  // cuBLAS uses column-major layout, in this view, each input matrix pair:
+  // cuBLAS uses column-major data_layout, in this view, each input matrix pair:
   //   A: column-major with size [k, m], needs transpose,
   //   B: column-major with size [k, n].
   // If we call cuBLAS GEMM for A * B, the output will be:
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
+
+  if (num_gemms <= 0) {
+    return ffi_with_cuda_error_check();
+  }
+  size_t expected_input_size = has_bias ? 5 * num_gemms : 4 * num_gemms;
+  size_t expected_output_size = num_gemms + 1;
+  size_t actual_input_size = input_list.size();
+  size_t actual_output_size = output_list.size();
+  NVTE_CHECK(actual_input_size == expected_input_size, "Expected %zu input tensors, got %zu",
+             expected_input_size, actual_input_size);
+  NVTE_CHECK(actual_output_size == expected_output_size, "Expected %zu output tensors, got %zu",
+             expected_output_size, actual_output_size);
 
   bool trans_lhs = true;
   bool trans_rhs = false;
@@ -79,10 +66,40 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
   std::vector<NVTETensor> out_list;
   std::vector<NVTETensor> workspace_list;
 
+  int lhs_list_offset = 0;
+  int rhs_list_offset = num_gemms;
+  int lhs_sinv_list_offset = 2 * num_gemms;
+  int rhs_sinv_list_offset = 3 * num_gemms;
+  int bias_list_offset = 4 * num_gemms;
+  int out_list_offset = 0;
   for (int i = 0; i < num_gemms; i++) {
-    size_t m = dim_list_host[i * 3];
-    size_t n = dim_list_host[i * 3 + 1];
-    size_t k = dim_list_host[i * 3 + 2];
+    Buffer_Type lhs_i = input_list.get<Buffer_Type>(lhs_list_offset + i).value();
+    Buffer_Type rhs_i = input_list.get<Buffer_Type>(rhs_list_offset + i).value();
+    Buffer_Type lhs_sinv_i = input_list.get<Buffer_Type>(lhs_sinv_list_offset + i).value();
+    Buffer_Type rhs_sinv_i = input_list.get<Buffer_Type>(rhs_sinv_list_offset + i).value();
+    Result_Type out_i = output_list.get<Buffer_Type>(out_list_offset + i).value();
+
+    DType lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_i.element_type());
+    DType rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_i.element_type());
+    DType out_dtype = convert_ffi_datatype_to_te_dtype(out_i->element_type());
+
+    void *lhs_ptr = lhs_i.untyped_data();
+    void *rhs_ptr = rhs_i.untyped_data();
+    void *lhs_sinv_ptr = lhs_sinv_i.untyped_data();
+    void *rhs_sinv_ptr = rhs_sinv_i.untyped_data();
+    void *out_ptr = out_i->untyped_data();
+
+    // Placeholder for bias since it can be empty
+    DType bias_dtype = DType::kFloat32;
+    void *bias_ptr = nullptr;
+
+    auto lhs_shape_ = lhs_i.dimensions();
+    auto rhs_shape_ = rhs_i.dimensions();
+
+    // lhs and rhs has shape [1, m, k] and [1, n, k]
+    size_t m = lhs_shape_[1];
+    size_t n = rhs_shape_[1];
+    size_t k = lhs_shape_[2];
 
     auto lhs_shape = std::vector<size_t>{m, k};
     auto rhs_shape = std::vector<size_t>{n, k};
@@ -90,54 +107,54 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     auto lhs_sinv_shape = std::vector<size_t>{1, 1};
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
-    if (scaling_mode == NVTE_NO_SCALING || scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      auto lhs_i = TensorWrapper(static_cast<void *>(lhs_ptr), lhs_shape, lhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(lhs_sinv_ptr));
-      auto rhs_i = TensorWrapper(static_cast<void *>(rhs_ptr), rhs_shape, rhs_dtype, nullptr,
-                                 nullptr, reinterpret_cast<float *>(rhs_sinv_ptr));
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
-    } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
-                 MXFP8_BLOCK_SIZE, k);
-      size_t sinv_k = k / MXFP8_BLOCK_SIZE;
-      lhs_sinv_shape[0] = m;
-      lhs_sinv_shape[1] = sinv_k;
-      rhs_sinv_shape[0] = n;
-      rhs_sinv_shape[1] = sinv_k;
-
+    if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
+        scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+      float *amax_dptr = nullptr;
+      float *scale_dptr = nullptr;
+      auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, amax_dptr, scale_dptr,
+                                  reinterpret_cast<float *>(lhs_sinv_ptr));
+      auto rhs_i_ = TensorWrapper(rhs_ptr, rhs_shape, rhs_dtype, amax_dptr, scale_dptr,
+                                  reinterpret_cast<float *>(rhs_sinv_ptr));
+      lhs_wrapper_list.push_back(std::move(lhs_i_));
+      rhs_wrapper_list.push_back(std::move(rhs_i_));
+    } else if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       // Note: the scale_inv array should have been swizzled in Python before lowering
-      TensorWrapper lhs_i(NVTE_MXFP8_1D_SCALING);
-      TensorWrapper rhs_i(NVTE_MXFP8_1D_SCALING);
-      lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
-      rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
-      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_sinv_ptr), DType::kFloat8E8M0,
-                                  lhs_sinv_shape);
-      rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_sinv_ptr), DType::kFloat8E8M0,
-                                  rhs_sinv_shape);
+      auto lhs_sinv_shape_ = lhs_sinv_i.dimensions();
+      auto rhs_sinv_shape_ = rhs_sinv_i.dimensions();
+      for (int i = 0; i < 2; i++) {
+        lhs_sinv_shape[i] = lhs_sinv_shape_[i];
+        rhs_sinv_shape[i] = rhs_sinv_shape_[i];
+      }
 
-      lhs_wrapper_list.push_back(std::move(lhs_i));
-      rhs_wrapper_list.push_back(std::move(rhs_i));
+      NVTEScalingMode nvte_scaling_mode = get_nvte_scaling_mode(scaling_mode);
+      TensorWrapper lhs_i_(nvte_scaling_mode);
+      TensorWrapper rhs_i_(nvte_scaling_mode);
+      lhs_i_.set_rowwise_data(lhs_ptr, lhs_dtype, lhs_shape);
+      rhs_i_.set_rowwise_data(rhs_ptr, rhs_dtype, rhs_shape);
+      lhs_i_.set_rowwise_scale_inv(lhs_sinv_ptr, DType::kFloat8E8M0, lhs_sinv_shape);
+      rhs_i_.set_rowwise_scale_inv(rhs_sinv_ptr, DType::kFloat8E8M0, rhs_sinv_shape);
+
+      lhs_wrapper_list.push_back(std::move(lhs_i_));
+      rhs_wrapper_list.push_back(std::move(rhs_i_));
     } else {
-      NVTE_ERROR("Unsupported scaling mode: ", scaling_mode);
+      NVTE_ERROR("Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
 
-    auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
-    lhs_ptr += m * k * lhs_dtype_bytes;
-    rhs_ptr += n * k * rhs_dtype_bytes;
-    out_ptr += m * n * out_dtype_bytes;
-    lhs_sinv_ptr += lhs_sinv_shape[0] * lhs_sinv_shape[1] * lhs_sinv_dtype_bytes;
-    rhs_sinv_ptr += rhs_sinv_shape[0] * rhs_sinv_shape[1] * rhs_sinv_dtype_bytes;
-
+    auto out_i_ = TensorWrapper(out_ptr, out_shape, out_dtype);
     void *pre_gelu_ptr = nullptr;
     auto bias_shape = std::vector<size_t>{0};
     auto pre_gelu_shape = std::vector<size_t>{0};
-    if (bias_ptr != nullptr) bias_shape[0] = n;
+    if (has_bias) {
+      auto bias_i_get = input_list.get<Buffer_Type>(bias_list_offset + i);
+      Buffer_Type bias_i = bias_i_get.value();
+      bias_ptr = bias_i.untyped_data();
+      bias_dtype = convert_ffi_datatype_to_te_dtype(bias_i.element_type());
+      bias_shape[0] = n;
+    }
     auto bias_i = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
-    if (bias_ptr != nullptr) bias_ptr += n * bias_dtype_bytes;
     auto pre_gelu_i = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, out_dtype);
 
-    out_wrapper_list.push_back(std::move(out_i));
+    out_wrapper_list.push_back(std::move(out_i_));
     bias_wrapper_list.push_back(std::move(bias_i));
     pre_gelu_wrapper_list.push_back(std::move(pre_gelu_i));
 
@@ -148,6 +165,10 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
     out_list.push_back(out_wrapper_list.back().data());
   }
 
+  auto workspace_get = output_list.get<Buffer_Type>(num_gemms);
+  Result_Type workspace = workspace_get.value();
+  uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
+  size_t workspace_size = workspace->dimensions()[0] / num_streams;
   auto workspace_shape = std::vector<size_t>{workspace_size};
   for (int i = 0; i < num_streams; i++) {
     auto workspace_i =
@@ -165,49 +186,14 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
   return ffi_with_cuda_error_check();
 }
 
-Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_flatten,
-                          Buffer_Type lhs_sinv_flatten, Buffer_Type rhs_flatten,
-                          Buffer_Type rhs_sinv_flatten, Buffer_Type bias_flatten,
-                          Buffer_Type dim_list, Result_Type out_flatten,
-                          Result_Type workspace_flatten, int64_t num_gemms, int64_t scaling_mode) {
-  // Inputs
-  auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_flatten.untyped_data());
-  auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_flatten.untyped_data());
-  auto lhs_sinv_ptr = reinterpret_cast<uint8_t *>(lhs_sinv_flatten.untyped_data());
-  auto rhs_sinv_ptr = reinterpret_cast<uint8_t *>(rhs_sinv_flatten.untyped_data());
-  auto bias_ptr = reinterpret_cast<uint8_t *>(bias_flatten.untyped_data());
-  auto dim_list_ptr = reinterpret_cast<int32_t *>(dim_list.untyped_data());
-  auto lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_flatten.element_type());
-  auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_flatten.element_type());
-  auto lhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(lhs_sinv_flatten.element_type());
-  auto rhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(rhs_sinv_flatten.element_type());
-  auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias_flatten.element_type());
-
-  // Outputs
-  auto out_ptr = reinterpret_cast<uint8_t *>(out_flatten->untyped_data());
-  auto out_dtype = convert_ffi_datatype_to_te_dtype(out_flatten->element_type());
-  auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace_flatten->untyped_data());
-  auto workspace_size = workspace_flatten->dimensions().back() / num_streams;
-
-  return GroupedGemmImpl(lhs_ptr, lhs_dtype, lhs_sinv_ptr, lhs_sinv_dtype, rhs_ptr, rhs_dtype,
-                         rhs_sinv_ptr, rhs_sinv_dtype, bias_ptr, bias_dtype, out_ptr, out_dtype,
-                         workspace_ptr, workspace_size, num_gemms, dim_list_ptr, scaling_mode,
-                         stream);
-}
-
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // lhs_flatten
-                                  .Arg<Buffer_Type>()      // lhs_sinv_flatten
-                                  .Arg<Buffer_Type>()      // rhs_flatten
-                                  .Arg<Buffer_Type>()      // rhs_sinv_flatten
-                                  .Arg<Buffer_Type>()      // bias_flatten
-                                  .Arg<Buffer_Type>()      // dim_list
-                                  .Ret<Buffer_Type>()      // out_flatten
-                                  .Ret<Buffer_Type>()      // workspace_flatten
+                                  .RemainingArgs()         // input list
+                                  .RemainingRets()         // output list
                                   .Attr<int64_t>("num_gemms")
-                                  .Attr<int64_t>("scaling_mode"),
+                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Attr<int64_t>("has_bias"),
                               FFI_CudaGraph_Traits);
 
 }  // namespace jax

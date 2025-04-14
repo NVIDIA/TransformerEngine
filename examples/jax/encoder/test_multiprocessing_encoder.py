@@ -343,6 +343,7 @@ def get_state_sharding(state, params_sharding):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
+    jax.config.update("jax_use_shardy_partitioner", args.enable_shardy)
     if args.process_id == 0:
         nltk.download("punkt_tab")
 
@@ -565,6 +566,9 @@ def encoder_parser(args):
         default=0,
         help="the ID number of the current process (default: 0)",
     )
+    parser.add_argument(
+        "--enable-shardy", action="store_true", default=False, help="Enable Shardy (experimental)."
+    )
 
     return parser.parse_args(args)
 
@@ -573,7 +577,7 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    def exec(self, use_fp8, fp8_recipe):
+    def exec(self, use_fp8, fp8_recipe, *, enable_shardy=False):
         """Run 3 epochs for testing"""
         args = encoder_parser([])
 
@@ -589,6 +593,7 @@ class TestEncoder(unittest.TestCase):
         args.num_process = num_gpu
         args.process_id = self.process_id
         args.fp8_recipe = fp8_recipe
+        args.enable_shardy = enable_shardy
 
         return train_and_evaluate(args)
 
@@ -613,6 +618,22 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling")
         assert result[0] < 0.505 and result[1] > 0.754
+
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    def test_te_bf16_shardy(self):
+        """Test Transformer Engine with BF16"""
+        result = self.exec(False, None, enable_shardy=True)
+        assert result[0] < 0.505 and result[1] > 0.755
+
+    @unittest.skipIf(
+        not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
+    )
+    def test_te_delayed_scaling_fp8_shardy(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
+        result = self.exec(True, "DelayedScaling", enable_shardy=True)
+        assert result[0] < 0.505 and result[1] > 0.754
+
+    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 
 
 if __name__ == "__main__":
