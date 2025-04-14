@@ -1207,6 +1207,11 @@ def test_permutation_mask_map_fp8(
     num_out_tokens,
     recipe,
 ):
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+
     _test_permutation_mask_map_fp8(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
