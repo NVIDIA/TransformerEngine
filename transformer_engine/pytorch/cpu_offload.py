@@ -28,6 +28,7 @@ def mark_activation_offload(*tensors):
             for tensor in data_tensors:
                 if tensor is not None:
                     setattr(tensor, "activation_offloading", True)
+                    setattr(tensor, "internal_tensor", True)
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -461,7 +462,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Time to free the activation memory after usage
             for tensor_tag, tensor_buf in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
-                    if isinstance(tensor_buf, torch.Tensor):
+                    if hasattr(tensor_buf, "internal_tensor"):
                         # Need to clear activation tensor - sometimes the reference exists in the code.
                         # This is the case for examlpe for the the Float8TensorBase class,
                         # which is saved directly inside the ctx and its internal tensors are
