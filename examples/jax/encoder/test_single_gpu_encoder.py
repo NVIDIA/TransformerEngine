@@ -203,7 +203,6 @@ def check_fp8(state, var_collect, inputs, masks, labels):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
-    jax.config.update("jax_use_shardy_partitioner", args.enable_shardy)
     train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
     rng = jax.random.PRNGKey(args.seed)
@@ -321,9 +320,6 @@ def encoder_parser(args):
         default="DelayedScaling",
         help="Use FP8 recipe (default: DelayedScaling)",
     )
-    parser.add_argument(
-        "--enable-shardy", action="store_true", default=False, help="Enable Shardy (experimental)."
-    )
 
     return parser.parse_args(args)
 
@@ -357,31 +353,6 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with MXFP8"""
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.455 and actual[1] > 0.79
-
-    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
-    def test_te_bf16_shardy(self):
-        """Test Transformer Engine with BF16"""
-        self.args.enable_shardy = True
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.45 and actual[1] > 0.79
-
-    @unittest.skipIf(not is_fp8_supported, fp8_reason)
-    def test_te_delayed_scaling_fp8_shardy(self):
-        """Test Transformer Engine with DelayedScaling FP8"""
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "DelayedScaling"
-        self.args.enable_shardy = True
-        actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.455 and actual[1] > 0.79
-
-    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    def test_te_mxfp8_shardy(self):
-        """Test Transformer Engine with MXFP8"""
-        self.args.use_fp8 = True
-        self.args.fp8_recipe = "MXFP8BlockScaling"
-        self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.455 and actual[1] > 0.79
 
