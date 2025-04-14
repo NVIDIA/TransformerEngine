@@ -369,11 +369,26 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   size_t m_dim = numel / k_dim;
   constexpr size_t kBlockLen = 128;
 
+  py::object py_data{py::none()};
+  py::object py_columnwise_data{py::none()};
+  py::object py_scale_inv_rowwise{py::none()};
+  py::object py_scale_inv_columnwise{py::none()};
+  if (!output.is_none()) {
+    NVTE_CHECK(detail::IsFloat8BlockwiseQTensor(output.ptr()),
+               "Wrong Tensor type provided for reuse. ",
+               "Expected Float8BlockwiseQTensor or Float8BlockwiseQTensorBase, but got ",
+               py::repr(output).cast<std::string>());
+    py_data = output.attr("_rowwise_data");
+    py_columnwise_data = output.attr("_columnwise_data");
+    py_scale_inv_rowwise = output.attr("_rowwise_scale_inv");
+    py_scale_inv_columnwise = output.attr("_columnwise_scale_inv");
+  }
+
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
       data_rowwise = std::move(*rowwise_data);
     } else {
-      data_rowwise = at::empty(torch_shape, opts);
+      data_rowwise = create_torch_tensor(torch_shape, opts, py_data);
     }
     size_t sinv0 = 0;
     size_t sinv1 = 0;
