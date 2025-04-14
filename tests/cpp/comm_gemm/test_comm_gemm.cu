@@ -254,25 +254,22 @@ struct GemmRsTest : public CommGemmTest {
 
 struct GemmArTest : public CommGemmTest {
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
-    auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
-    auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
+    auto rows_num = nvte_comm_gemm_numroc(ctx_, k);
 
-    int64_t a_cols_start{};
-    int64_t b_cols_start{};
-    MPI_Exscan(&a_cols_num, &a_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Exscan(&b_cols_num, &b_cols_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    int64_t rows_start{};
+    MPI_Exscan(&rows_num, &rows_start, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
 
     return PatternDims{
-        .a_rows_start = 0,
-        .a_rows_num = k,
-        .a_cols_start = a_cols_start,
-        .a_cols_num = a_cols_num,
-        .b_rows_start = 0,
-        .b_rows_num = k,
-        .b_cols_start = b_cols_start,
-        .b_cols_num = b_cols_num,
-        .d_rows_start = a_cols_start,
-        .d_rows_num = a_cols_num,
+        .a_rows_start = rows_start,
+        .a_rows_num = rows_num,
+        .a_cols_start = 0,
+        .a_cols_num = m,
+        .b_rows_start = rows_start,
+        .b_rows_num = rows_num,
+        .b_cols_start = 0,
+        .b_cols_num = n,
+        .d_rows_start = 0,
+        .d_rows_num = m,
         .d_cols_start = 0,
         .d_cols_num = n,
     };
@@ -301,8 +298,8 @@ TEST_P(GemmRsTest, GemmRs) {
 
 TEST_P(GemmArTest, GemmAr) {
   auto [dtype, transa, transb, m, n, k] = GetParam();
-  // TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
-  //                                      { TestGemmAr<DType>(transa, transb, m, n, k, dtype); });
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
+                                       { Run<DType>(transa, transb, m, n, k, dtype); });
 }
 
 INSTANTIATE_TEST_SUITE_P(
