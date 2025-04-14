@@ -348,7 +348,6 @@ class _LayerNormLinear(torch.autograd.Function):
             if cpu_offloading:
                 mark_activation_offload(inputmat, mu, rsigma, ln_out)
 
-
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves

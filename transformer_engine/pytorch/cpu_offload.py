@@ -579,8 +579,10 @@ def get_cpu_offload_context(
 
     if offload_weights:
         import warnings
+
         warnings.warn(
-            "Offloading weights is deprecated. Using offload_weights=True does not have any effect.",
+            "Offloading weights is deprecated. Using offload_weights=True does not have any"
+            " effect.",
             DeprecationWarning,
         )
 

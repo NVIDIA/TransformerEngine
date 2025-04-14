@@ -4322,7 +4322,9 @@ class FlashAttention(torch.nn.Module):
             from .cpu_offload import CPUOffloadEnabled
 
             if CPUOffloadEnabled:
-                mark_activation_offload(query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv)
+                mark_activation_offload(
+                    query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
+                )
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
