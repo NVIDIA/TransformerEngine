@@ -145,18 +145,30 @@ Flax
 
 Installation
 ============
-.. installation
 
-Pre-requisites
-^^^^^^^^^^^^^^^^^^^^
-* Linux x86_64
-* CUDA 12.1+ (CUDA 12.8+ for Blackwell)
-* NVIDIA Driver supporting CUDA 12.1 or later
-* cuDNN 9.3 or later
-
-Docker
+System Requirements
 ^^^^^^^^^^^^^^^^^^^^
 
+* **Hardware:** Blackwell, Hopper, Grace Hopper/Blackwell, Ada, Ampere
+
+* **OS:** Linux (official), WSL2 (limited support)
+
+* **Software:**
+
+  * CUDA: 12.1+ (Hopper/Ada/Ampere), 12.8+ (Blackwell) with compatible NVIDIA drivers
+  * cuDNN: 9.3+
+  * Compiler: GCC 9+ or Clang 10+ with C++17 support
+  * Python: 3.12 recommended
+
+* **Source Build Requirements:** CMake 3.18+, Ninja, Git 2.17+, pybind11 2.6.0+
+
+* **Notes:** FP8 features require Compute Capability 8.9+ (Hopper/Blackwell)
+
+Installation Methods
+^^^^^^^^^^^^^^^^^^^
+
+Docker (Recommended)
+^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
 For example to use the NGC PyTorch container interactively,
@@ -167,41 +179,134 @@ For example to use the NGC PyTorch container interactively,
 
 Where 25.01 (corresponding to January 2025 release) is the container version.
 
-pip
-^^^^^^^^^^^^^^^^^^^^
-To install the latest stable version of Transformer Engine,
+**Benefits of using NGC containers:**
+
+* All dependencies pre-installed with compatible versions and optimized configurations
+* NGC PyTorch 23.08+ containers include FlashAttention-2
+
+pip Installation
+^^^^^^^^^^^^^^^^^^^
+
+**Prerequisites for pip installation:**
+
+* A compatible C++ compiler
+* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) installed
+
+To install the latest stable version with pip:
 
 .. code-block:: bash
 
-    pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    # For PyTorch integration
+    pip install transformer_engine[pytorch]
+    
+    # For JAX integration
+    pip install transformer_engine[jax]
+    
+    # For both frameworks
+    pip install transformer_engine[pytorch,jax]
 
-This will automatically detect if any supported deep learning frameworks are installed and build
-Transformer Engine support for them. To explicitly specify frameworks, set the environment variable
-NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
-
-Alternatively, the package can be directly installed from
-`Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+Alternatively, install directly from the GitHub repository:
 
 .. code-block:: bash
 
-    pip3 install transformer_engine[pytorch]
+    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be
-explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]).
-Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX
-and PyTorch extensions.
+When installing from GitHub, you can explicitly specify frameworks using the environment variable:
 
-From source
-^^^^^^^^^^^
-`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_.
+.. code-block:: bash
 
-Compiling with FlashAttention-2
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine release v0.11.0 added support for FlashAttention-2 in PyTorch for improved performance.
+    NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+Source Installation
+^^^^^^^^^^^^^^^^^^^
+
+`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
+
+Conda Installation (Experimental)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Transformer Engine is available through conda-forge:
+
+.. code-block:: bash
+
+    # Create a new conda environment with Transformer Engine
+    conda create -n transformer_engine python=3.10
+    conda activate transformer_engine
+    
+    # Install Transformer Engine with PyTorch
+    conda install transformer-engine -c conda-forge
+    
+    # For full features with specific CUDA version
+    conda install transformer-engine pytorch cudatoolkit=12.1 -c conda-forge -c nvidia
+
+This installation method is currently being developed through the conda-forge project:
+`NVIDIA TransformerEngine conda-forge recipe <https://github.com/conda-forge/staged-recipes/pull/29403>`_
+
+Environment Variables
+^^^^^^^^^^^^^^^^^^^
+These environment variables can be set before installation to customize the build process:
+
+* **CUDA_PATH**: Path to CUDA installation
+* **CUDNN_PATH**: Path to cuDNN installation
+* **CXX**: Path to C++ compiler
+* **NVTE_FRAMEWORK**: Comma-separated list of frameworks to build for (e.g., ``pytorch,jax``)
+* **MAX_JOBS**: Limit number of parallel build jobs (default varies by system)
+* **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
+
+Compiling with FlashAttention
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Transformer Engine supports both FlashAttention-2 and FlashAttention-3 in PyTorch for improved performance. FlashAttention-3 was added in release v1.11 and is prioritized over FlashAttention-2 when both are present in the environment.
+
+You can verify which FlashAttention version is being used by setting these environment variables:
+
+.. code-block:: bash
+
+    NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 python your_script.py
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 
-Note that NGC PyTorch 23.08+ containers include FlashAttention-2.
+Troubleshooting
+^^^^^^^^^^^^^^^^^^^
+
+**Common Issues and Solutions:**
+
+1. **ABI Compatibility Issues:**
+
+   * **Symptoms:** ``ImportError`` with undefined symbols when importing transformer_engine
+   * **Solution:** Ensure PyTorch and Transformer Engine are built with the same C++ ABI setting. Rebuild PyTorch from source with matching ABI.
+   * **Context:** If you're using PyTorch built with a different C++ ABI than your system's default, you may encounter these undefined symbol errors. This is particularly common with pip-installed PyTorch outside of containers.
+
+2. **Missing Headers or Libraries:**
+
+   * **Symptoms:** CMake errors about missing headers (``cudnn.h``, ``cublas_v2.h``, ``filesystem``, etc.)
+   * **Solution:** Install missing development packages or set environment variables to point to correct locations:
+
+     .. code-block:: bash
+
+         export CUDA_PATH=/path/to/cuda
+         export CUDNN_PATH=/path/to/cudnn
+
+   * If CMake can't find a C++ compiler, set the ``CXX`` environment variable.
+   * Ensure all paths are correctly set before installation.
+
+3. **Build Resource Issues:**
+
+   * **Symptoms:** Compilation hangs, system freezes, or out-of-memory errors
+   * **Solution:** Limit parallel builds:
+
+     .. code-block:: bash
+
+         MAX_JOBS=1 NVTE_BUILD_THREADS_PER_JOB=1 pip install ...
+
+4. **Verbose Build Logging:**
+
+   * For detailed build logs to help diagnose issues:
+
+     .. code-block:: bash
+
+         cd transformer_engine
+         pip install -v -v -v .
+
+Reference: https://github.com/NVIDIA/TransformerEngine/issues/355#issuecomment-2394353816
 
 Breaking Changes
 ================
