@@ -1251,6 +1251,8 @@ def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_gr
 
     Reuses cached tensors when available to avoid redundant creation and rendezvous operations.
 
+    Note: This function always returns a 1D tensor.
+
     Parameters
     ----------
     tensor_numel : int
