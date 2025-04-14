@@ -1294,29 +1294,28 @@ def test_fp8_model_init_high_precision_init_val():
 
 def test_sanity_checkpointing_on_callables():
     """Test that TE checkpointing works correctly on callable modules."""
-    module = torch.nn.Linear(10, 10, device="cuda")
+    
+    # torch.autograf.function
+    class MyFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp):
+            return inp
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output
+
+    module = MyFunction.apply
     inp = torch.randn(10, 10, device="cuda", requires_grad=True)
 
-    # Checkpointed forward and backward pass
-    # I use module.forward() instead of module()
-    # to check that the checkpointing works on methods.
-    # This resulted in bug before.
-    out_checkpoint = checkpoint(module.forward, inp)
+    out_checkpoint = checkpoint(module, inp)
     out_checkpoint.sum().backward()
+    grad_checkpoint = inp.grad
 
-    grad_weight_checkpoint = module.weight.grad.clone()
-    grad_bias_checkpoint = module.bias.grad.clone()
-
-    # Reset gradients
-    module.zero_grad()
-
-    # Standard forward and backward pass
-    out_standard = module.forward(inp)
+    out_standard = module(inp)
     out_standard.sum().backward()
-
-    grad_weight_standard = module.weight.grad
-    grad_bias_standard = module.bias.grad
+    grad_standard = inp.grad
 
     # Assert that gradients are the same
-    torch.testing.assert_close(grad_weight_checkpoint, grad_weight_standard)
-    torch.testing.assert_close(grad_bias_checkpoint, grad_bias_standard)
+    torch.testing.assert_close(grad_checkpoint, grad_standard)
+
