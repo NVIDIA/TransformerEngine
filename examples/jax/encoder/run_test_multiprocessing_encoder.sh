@@ -16,6 +16,8 @@ TEST_CASES=(
 echo
 echo "*** Executing tests in examples/jax/encoder/test_multiprocessing_encoder.py ***"
 
+HAS_FAILURE=0  # Global failure flag
+
 # Run each test case across all GPUs
 for TEST_CASE in "${TEST_CASES[@]}"; do
   echo
@@ -37,14 +39,19 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Check and print the log content accordingly
   if grep -q "FAILED" "${TEST_CASE}_gpu_0.log"; then
+    HAS_FAILURE=1
     echo "... $TEST_CASE FAILED"
     tail -n +7 "${TEST_CASE}_gpu_0.log"
   elif grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE SKIPPED"
-  else
+  elif grep -q "PASSED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE PASSED"
+  else
+    echo "Invalid ${TEST_CASE}_gpu_0.log"
   fi
 
   # Remove the log file after processing it
   rm ${TEST_CASE}_gpu_*.log
 done
+
+exit $HAS_FAILURE
