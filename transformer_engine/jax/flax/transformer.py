@@ -220,12 +220,20 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if mask is not None:
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
-                if mask is not None:
-                    return SoftmaxType.SCALED_MASKED, mask
-                return SoftmaxType.SCALED, mask
+            # For the cases where mask exists, use SCALED_MASKED as it is the only primitive which accepts a mask.
+            # Mask must exist for the following conditions:
+            # i) mask is supposed to be provided by user, i.e. padding, padding_causal, arbitrary
+            # ii) mask is causal and SWA exists
+            if mask is not None:
+                return SoftmaxType.SCALED_MASKED, mask
+            # Mask will not be considered (whether provided or not by user) for the following conditions:
+            # i) mask is not expected to be provided by the user, i.e. no_mask
+            # ii) mask is causal and SWA does not exist
+            else:
+                if attn_mask_type is AttnMaskType.CAUSAL_MASK:
+                    return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+                elif attn_mask_type is AttnMaskType.NO_MASK:
+                    return SoftmaxType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
