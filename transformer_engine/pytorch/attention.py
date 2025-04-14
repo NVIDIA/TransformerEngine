@@ -80,6 +80,7 @@ import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
+from .cpu_offload import set_offloading_param
 
 
 # Setup Attention Logging
@@ -4324,7 +4325,7 @@ class FlashAttention(torch.nn.Module):
                 tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
                 for tensor in tensor_list:
                     if tensor is not None:
-                        tensor.activation_offloading = True
+                        set_offloading_param(tensor, "activation_offloading", True)
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
@@ -4726,12 +4727,14 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 tensor_list = [q, k, v, out_save]
 
-            tensor_list.extend(aux_ctx_tensors)
-
             qkv_layout = "sbhd_sbhd_sbhd"
             for tensor in tensor_list:
                 if tensor is not None:
-                    tensor.activation_offloading = True
+                    set_offloading_param(tensor, "activation_offloading", True)
+
+            for tensor in aux_ctx_tensors:
+                if tensor is not None:
+                    set_offloading_param(tensor, "activation_offloading", True)
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
