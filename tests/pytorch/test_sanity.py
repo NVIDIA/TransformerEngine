@@ -1294,7 +1294,7 @@ def test_fp8_model_init_high_precision_init_val():
 
 def test_sanity_checkpointing_on_callables():
     """Test that TE checkpointing works correctly on callable modules."""
-    
+
     # torch.autograf.function
     class MyFunction(torch.autograd.Function):
         @staticmethod
@@ -1318,4 +1318,3 @@ def test_sanity_checkpointing_on_callables():
 
     # Assert that gradients are the same
     torch.testing.assert_close(grad_checkpoint, grad_standard)
-
