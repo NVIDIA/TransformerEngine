@@ -1189,6 +1189,7 @@ fp8_recipes = [
     recipe.Float8BlockScaling(),
 ]
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("te_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
 @pytest.mark.parametrize("num_tokens", [2048])

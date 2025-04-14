@@ -166,7 +166,6 @@ class _moe_unpermute_index_map(torch.autograd.Function):
         if not unpermuted_act_grad.is_contiguous():
             unpermuted_act_grad = unpermuted_act_grad.contiguous()
 
-
         dtype = TE_DType[unpermuted_act_grad.dtype]
         inp, row_id_map, probs = ctx.saved_tensors
 
