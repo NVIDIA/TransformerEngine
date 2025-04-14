@@ -3,11 +3,11 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <algorithm>
 
 #include "extensions.h"
 #include "kv_cache.cuh"
 #include "thd_utils.cuh"
+#include "transformer_engine/transformer_engine.h"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -453,12 +453,7 @@ std::vector<py::object> fused_attn_bwd(
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
 
-    NVTEShape temp_shape;
-    NVTE_CHECK(tmp.size() <= sizeof(temp_shape.owned_data) / sizeof(temp_shape.owned_data[0]),
-               "Too many dims for NVTEShape:", tmp.size());
-    std::copy(tmp.begin(), tmp.end(), temp_shape.owned_data);
-    temp_shape.ndim = tmp.size();
-    temp_shape.data = temp_shape.owned_data;
+    NVTEShape temp_shape = nvte_make_shape(tmp.data(), tmp.size());
     NVTEBasicTensor temp_data = {
         Aux_CTX_Tensors[i].data_ptr(),
         static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),

@@ -136,6 +136,15 @@ void *nvte_tensor_data(const NVTETensor tensor);
  */
 void *nvte_tensor_columnwise_data(const NVTETensor tensor);
 
+/*! \brief Construct a shape from an array of dimension sizes.
+ *
+ *  \param[data] Pointer to start of shape array.
+ *  \param[data] Number of dimensions (must be <= 14)
+ *
+ *  \return A shape. The shape will own its own copy of the data.
+ */
+NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
+
 /*! \brief Get a tensor's data shape.
  *
  *  \param[in] tensor Tensor.
@@ -337,8 +346,6 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
 #ifdef __cplusplus
 }  // extern "C"
 
-#include <algorithm>
-#include <stdexcept>
 #include <vector>
 
 /*! \namespace transformer_engine
@@ -368,24 +375,6 @@ enum class DType {
  *  \param[in] DType      TE Datatype of interest
  */
 bool is_fp8_dtype(const DType t);
-
-// Alternative to bringing in logging.h for transformer_engine.h
-#define NVTE_CHECK_SIMPLE(expr, msg)   \
-  {                                    \
-    if (!(expr)) {                     \
-      throw ::std::runtime_error(msg); \
-    }                                  \
-  }
-
-inline NVTEShape init_nvte_shape_from_data(const size_t *data, size_t ndim) {
-  NVTEShape ret;
-  NVTE_CHECK_SIMPLE(ndim <= sizeof(ret.owned_data) / sizeof(ret.owned_data[0]),
-                    "Too many dims for NVTEShape");
-  std::copy(data, data + ndim, ret.owned_data);
-  ret.data = ret.owned_data;
-  ret.ndim = ndim;
-  return ret;
-}
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -439,9 +428,9 @@ class TensorWrapper {
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
                 float *scale_inv_dptr = nullptr, const std::vector<size_t> &scale_inv_shape = {1},
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
-      : TensorWrapper(dptr, init_nvte_shape_from_data(shape.data(), shape.size()), dtype, amax_dptr,
+      : TensorWrapper(dptr, nvte_make_shape(shape.data(), shape.size()), dtype, amax_dptr,
                       scale_dptr, scale_inv_dptr,
-                      init_nvte_shape_from_data(scale_inv_shape.data(), scale_inv_shape.size()),
+                      nvte_make_shape(scale_inv_shape.data(), scale_inv_shape.size()),
                       scaling_mode) {}
 
   /*! \brief Constructs new empty TensorWrapper.
@@ -558,10 +547,7 @@ class TensorWrapper {
    */
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) {
-      NVTEShape ret;
-      ret.data = nullptr;
-      ret.ndim = 0;
-      return ret;
+      return nvte_make_shape(nullptr, 0);
     }
     return nvte_tensor_shape(tensor_);
   }
@@ -572,9 +558,7 @@ class TensorWrapper {
    */
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
-      NVTEShape ret;
-      ret.data = nullptr;
-      ret.ndim = 0;
+      return nvte_make_shape(nullptr, 0);
       return ret;
     }
     return nvte_tensor_columnwise_shape(tensor_);
@@ -690,10 +674,7 @@ class TensorWrapper {
    */
   const NVTEShape scale_inv_shape() const noexcept {
     if (tensor_ == nullptr) {
-      NVTEShape ret;
-      ret.data = nullptr;
-      ret.ndim = 0;
-      return ret;
+      return nvte_make_shape(nullptr, 0);
     }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
@@ -722,13 +703,7 @@ class TensorWrapper {
   }
 
   NVTEShape convertShape(const std::vector<size_t> &s) {
-    NVTEShape converted;
-    NVTE_CHECK_SIMPLE(s.size() <= sizeof(converted.owned_data) / sizeof(converted.owned_data[0]),
-                      "Too many dims for NVTEShape.");
-    std::copy(s.begin(), s.end(), converted.owned_data);
-    converted.ndim = s.size();
-    converted.data = converted.owned_data;
-    return converted;
+    return nvte_make_shape(s.data(), s.size());
   }
 
   /*! \brief Wrapped NVTETensor. */

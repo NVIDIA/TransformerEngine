@@ -95,17 +95,6 @@ struct TypeInfo{
     constexpr static size_t size = sizeof(T);
 };
 
-NVTEShape InitializeShapeFromData(const size_t* data,
-                                    size_t ndim) {
-  NVTEShape ret;
-  NVTE_CHECK(ndim <= sizeof(ret.owned_data) / sizeof(ret.owned_data[0]),
-                    "Too many dims for NVTEShape");
-  std::copy(data, data + ndim, ret.owned_data);
-  ret.data = ret.owned_data;
-  ret.ndim = ndim;
-  return ret;
-}
-
 class Tensor {
  public:
   Tensor(const std::string& name,
@@ -120,7 +109,7 @@ class Tensor {
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(name, InitializeShapeFromData(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
+    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 

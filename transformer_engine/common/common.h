@@ -14,7 +14,6 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
@@ -79,13 +78,8 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
-    NVTEShape tmp_shape;
-    NVTE_CHECK(this->shape.size() <=
-               sizeof(tmp_shape.owned_data) / sizeof(tmp_shape.owned_data[0]));
-    std::copy(this->shape.begin(), this->shape.end(), tmp_shape.owned_data);
-    tmp_shape.data = tmp_shape.owned_data;
-    tmp_shape.ndim = this->shape.size();
-    return {dptr, static_cast<NVTEDType>(dtype), std::move(tmp_shape)};
+    return {dptr, static_cast<NVTEDType>(dtype),
+            nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
   int numel() const {

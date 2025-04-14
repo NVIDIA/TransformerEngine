@@ -113,13 +113,7 @@ struct scale_inv_meta {
 };
 
 NVTEShape convertShape(const std::vector<size_t>& s) {
-  NVTEShape converted;
-  NVTE_CHECK(s.size() <= sizeof(converted.owned_data) / sizeof(converted.owned_data[0]),
-             "Too many dims for NVTEShape: ", s.size());
-  std::copy(s.begin(), s.end(), converted.owned_data);
-  converted.ndim = s.size();
-  converted.data = converted.owned_data;
-  return converted;
+  return nvte_make_shape(s.data(), s.size());
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
@@ -265,8 +259,7 @@ Tensor::Tensor(const std::string& name,
   }
 
   if (columnwise) {
-    std::copy(columnwise_shape_vec.begin(), columnwise_shape_vec.end(), columnwise_shape.owned_data);
-    columnwise_shape.ndim = columnwise_shape_vec.size();
+    columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
   }
 
   tensor_ = TensorWrapper(scaling_mode);
