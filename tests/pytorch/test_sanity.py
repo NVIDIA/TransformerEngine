@@ -42,6 +42,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.distributed import checkpoint
 from test_numerics import reset_rng_states, dtype_tols
 
 # Only run FP8 tests on supported devices.
@@ -1289,3 +1290,30 @@ def test_fp8_model_init_high_precision_init_val():
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
+
+
+def test_sanity_checkpointing_on_callables():
+    """Test that TE checkpointing works correctly on callable modules."""
+    module = torch.nn.Linear(10, 10, device="cuda")
+    inp = torch.randn(10, 10, device="cuda", requires_grad=True)
+
+    # Checkpointed forward and backward pass
+    out_checkpoint = checkpoint(module, inp)
+    out_checkpoint.sum().backward()
+
+    grad_weight_checkpoint = module.weight.grad.clone()
+    grad_bias_checkpoint = module.bias.grad.clone()
+
+    # Reset gradients
+    module.zero_grad()
+
+    # Standard forward and backward pass
+    out_standard = module(inp)
+    out_standard.sum().backward()
+
+    grad_weight_standard = module.weight.grad
+    grad_bias_standard = module.bias.grad
+
+    # Assert that gradients are the same
+    torch.testing.assert_close(grad_weight_checkpoint, grad_weight_standard)
+    torch.testing.assert_close(grad_bias_checkpoint, grad_bias_standard)
