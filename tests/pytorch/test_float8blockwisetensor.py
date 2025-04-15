@@ -110,7 +110,10 @@ class TestFloat8BlockwiseTensor:
         dims = _to_list(dims)
 
         # Initialize random data
+        # Note: Make sure values are not all close to zero, or else
+        # test may pass trivially.
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
+        x_ref.view(-1)[0] = 0.75
         x_ref_cuda = x_ref.to("cuda")
 
         # Cast to FP8 and back
@@ -149,6 +152,24 @@ class TestFloat8BlockwiseTensor:
             block_scaling_dim=block_scaling_dim,
         )
         self._test_quantize_dequantize(quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol)
+
+    @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("block_scaling_dim", [1])
+    def test_quantize_dequantize_columnwise_only(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, block_scaling_dim: int
+    ) -> None:
+        atol = _tols[fp8_dtype]["atol"]
+        rtol = _tols[fp8_dtype]["rtol"]
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=False,
+            columnwise=True,
+            block_scaling_dim=block_scaling_dim,
+        )
+        self._test_quantize_dequantize(
+            quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol, use_cpp_allocation=True
+        )
 
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]

@@ -23,6 +23,7 @@ from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
+    Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -34,8 +35,10 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -43,6 +46,7 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _multi_stream_cublas_workspace = []
+_dummy_wgrads = {}
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
@@ -76,6 +80,22 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
     return _multi_stream_cublas_workspace
+
+
+def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape."""
+    assert len(shape) == 2
+    global _dummy_wgrads
+    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
+        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
+    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
 
 
 def initialize_ub(
@@ -499,6 +519,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8CurrentScalingRecipeState
             ):
                 return
+            if recipe.float8_block_scaling() and isinstance(
+                recipe_state, Float8BlockScalingRecipeState
+            ):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -841,7 +865,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
-                    grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)
+                    grad_output,
+                    (
+                        QuantizedTensor,
+                        Float8TensorBase,
+                        MXFP8TensorBase,
+                        Float8BlockwiseQTensorBase,
+                    ),
                 ):
                     grad_output = quantizer(grad_output)
 
@@ -859,11 +889,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # FP8 without all-gather: fused bgrad + cast + transpose
         grad_bias = None
         if ctx.use_bias:
-            if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
+            if isinstance(
+                grad_output,
+                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+            ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
+                if isinstance(quantizer, Float8BlockQuantizer):
+                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
+                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                else:
+                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+        if not isinstance(
+            grad_output,
+            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+        ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
