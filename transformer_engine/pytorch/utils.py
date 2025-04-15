@@ -333,11 +333,14 @@ def round_up_to_nearest_multiple(value, multiple):
 def needs_quantized_gemm(obj, rowwise=True):
     """Used to check if obj will need quantized gemm or normal gemm."""
     if isinstance(obj, DebugQuantizedTensor):
-        return (
-            type(obj.get_tensor(not rowwise))  # pylint: disable=unidiomatic-typecheck
-            not in [torch.Tensor, torch.nn.Parameter]
-        )
-    return type(obj) not in [torch.Tensor, torch.nn.Parameter]  # pylint: disable=unidiomatic-typecheck
+        return type(obj.get_tensor(not rowwise)) not in [  # pylint: disable=unidiomatic-typecheck
+            torch.Tensor,
+            torch.nn.Parameter,
+        ]
+    return type(obj) not in [
+        torch.Tensor,
+        torch.nn.Parameter,
+    ]  # pylint: disable=unidiomatic-typecheck
 
 
 @functools.lru_cache(maxsize=None)
