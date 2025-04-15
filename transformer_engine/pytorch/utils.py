@@ -12,8 +12,6 @@ from typing import Any, Callable, List, Optional, Tuple
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 
-from .tensor.quantized_tensor import QuantizedTensor
-
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
