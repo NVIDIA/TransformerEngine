@@ -29,6 +29,7 @@ from ..sharding import with_sharding_constraint_by_logical_axes
 from ..cpp_extensions import (
     is_softmax_kernel_available,
     jax_scaled_softmax,
+    jax_scaled_masked_softmax,
     jax_scaled_upper_triang_masked_softmax,
 )
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
@@ -186,26 +187,17 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
         # use default jax based implementation
         else:
-            attention_bias = None
-            # change mask in testing too to not be a causal mask
-            if mask is not None:
-                attention_bias = lax.select(
-                    mask > 0,
-                    jnp.full(mask.shape, -1e10),
-                    jnp.full(mask.shape, 0.0),
-                )
-                attention_bias = attention_bias.astype(input_dtype)
-
             if bias is not None:
-                attention_bias = _combine_biases(attention_bias, bias)
+                logits = logits + bias.astype(input_dtype)
 
-            if attention_bias is not None:
-                logits = logits + attention_bias.astype(input_dtype)
-
-            if self.softmax_type is not SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+            if self.softmax_type is SoftmaxType.SCALED:
                 outputs = jax_scaled_softmax(logits, self.scale_factor)
-            else:
+            elif self.softmax_type is SoftmaxType.SCALED_MASKED:
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
+            elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
                 outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
+            else:
+                raise ValueError(f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]")
         assert input_dtype == outputs.dtype
         return outputs
 

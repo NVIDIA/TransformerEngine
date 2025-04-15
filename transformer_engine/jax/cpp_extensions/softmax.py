@@ -32,6 +32,7 @@ __all__ = [
     "scaled_upper_triang_masked_softmax_bwd",
     "is_softmax_kernel_available",
     "jax_scaled_softmax",
+    "jax_scaled_masked_softmax",
     "jax_scaled_upper_triang_masked_softmax",
 ]
 
@@ -798,10 +799,16 @@ register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)
 
 
 def jax_scaled_softmax(logits: jnp.ndarray, scale_factor: float):
+    """
+    JAX based implementation of scaled softmax
+    """
     return jax.nn.softmax(scale_factor * logits)
 
 
-def _jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float):
+def jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_factor: float):
+    """
+    JAX based implementation of scaled and masked softmax
+    """
     if mask is not None:
         logits += jax.lax.select(
             mask > 0,
@@ -812,6 +819,9 @@ def _jax_scaled_masked_softmax(logits: jnp.ndarray, mask: jnp.ndarray, scale_fac
 
 
 def jax_scaled_upper_triang_masked_softmax(logits: jnp.ndarray, scale_factor: float):
+    """
+    JAX based implementation of scaled and upper triangle masked softmax
+    """
     mask = 1 - jnp.tril(jnp.ones_like(logits))
     logits += jax.lax.select(
         mask > 0,
@@ -839,7 +849,7 @@ def scaled_masked_softmax_fwd(
     Return FP16/BF16 tensor
     """
     if not ScaledMaskedSoftmaxFwdPrimitive.enabled():
-        return _jax_scaled_masked_softmax(logits, mask, scale_factor)
+        return jax_scaled_masked_softmax(logits, mask, scale_factor)
     return ScaledMaskedSoftmaxFwdPrimitive.outer_primitive.bind(
         logits, mask, scale_factor=scale_factor
     )
@@ -858,7 +868,7 @@ def scaled_masked_softmax_bwd(
     """
     if not ScaledMaskedSoftmaxBwdPrimitive.enabled():
         _, vjp_func = jax.vjp(
-            partial(_jax_scaled_masked_softmax, scale_factor=scale_factor), logits, mask
+            partial(jax_scaled_masked_softmax, scale_factor=scale_factor), logits, mask
         )
         return vjp_func(dz)[0]
     return ScaledMaskedSoftmaxBwdPrimitive.outer_primitive.bind(
