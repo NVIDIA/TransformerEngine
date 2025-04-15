@@ -32,7 +32,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     for t in tensors:
         if t is not None:
-            if isinstance(t, QuantizedTensor):
+            if hasattr(t, "clear"):
                 t.clear()
             else:
                 t.data = torch.Tensor()
