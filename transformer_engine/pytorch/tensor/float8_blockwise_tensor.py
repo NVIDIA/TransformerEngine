@@ -563,7 +563,7 @@ class _ViewFunc(torch.autograd.Function):
                     "the last 2 dimensions "
                     f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)})"
                 )
-        else:  
+        else:
             # For the case of 1D scaled tensor, the last dimension should not change
             if shape[-1] != ctx.shape[-1]:
                 raise RuntimeError(
@@ -574,7 +574,7 @@ class _ViewFunc(torch.autograd.Function):
 
         if list(shape) == list(tensor.shape):
             return tensor
-        
+
         # Construct new tensor if shape is provided
         new_rowwise_data = None
         new_columnwise_data = None
@@ -583,7 +583,7 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._columnwise_data is not None:
             # Maybe changed in the future
             if tensor._is_2D_scaled:
-                columnwise_shape = list(shape[-2:])+ list(shape[:-2])
+                columnwise_shape = list(shape[-2:]) + list(shape[:-2])
             else:
                 columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
@@ -676,7 +676,7 @@ class _ReshapeFunc(torch.autograd.Function):
                     "the last 2 dimensions "
                     f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
                 )
-        else:  
+        else:
             # For the case of 1D scaled tensor, the last dimension should not change
             if shape[-1] != ctx.shape[-1]:
                 raise RuntimeError(
@@ -695,7 +695,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._columnwise_data is not None:
             # Maybe changed in the future
             if tensor._is_2D_scaled:
-                columnwise_shape = list(shape[-2:])+ list(shape[:-2])
+                columnwise_shape = list(shape[-2:]) + list(shape[:-2])
             else:
                 columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)

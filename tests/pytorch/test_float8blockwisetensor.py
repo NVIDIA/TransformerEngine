@@ -373,17 +373,22 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
-    @pytest.mark.parametrize("dims", [[16, 16, 512], [16, 16, 512, 16], [12,7,11],[13,14,16],[2,3,5]])
-    def test_view_and_reshape_1D(self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]) -> None:
+    @pytest.mark.parametrize(
+        "dims", [[16, 16, 512], [16, 16, 512, 16], [12, 7, 11], [13, 14, 16], [2, 3, 5]]
+    )
+    def test_view_and_reshape_1D(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]
+    ) -> None:
         """Test view operations that preserve tensor shape"""
         device = "cuda"
+
         def is_bitwise_equal(a, b):
             if a.numel() != b.numel():
                 return False
             a_flat = a.reshape(-1).view(torch.uint8)
             b_flat = b.reshape(-1).view(torch.uint8)
             return torch.all((a_flat ^ b_flat) == 0)
-        
+
         x_hp = torch.rand(dims, dtype=dtype, device=device)
         quantizer = Float8BlockQuantizer(
             fp8_dtype=fp8_dtype,
@@ -419,20 +424,22 @@ class TestFloat8BlockwiseTensor:
         assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
         assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
 
-
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
-    @pytest.mark.parametrize("dims", [[16, 16, 512, 16], [2,512,512,128], [3,13,14,16]])
-    def test_view_and_reshape_2D(self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]) -> None:
+    @pytest.mark.parametrize("dims", [[16, 16, 512, 16], [2, 512, 512, 128], [3, 13, 14, 16]])
+    def test_view_and_reshape_2D(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]
+    ) -> None:
         """Test view operations that preserve tensor shape"""
         device = "cuda"
+
         def is_bitwise_equal(a, b):
             if a.numel() != b.numel():
                 return False
             a_flat = a.reshape(-1).view(torch.uint8)
             b_flat = b.reshape(-1).view(torch.uint8)
             return torch.all((a_flat ^ b_flat) == 0)
-        
+
         x_hp = torch.rand(dims, dtype=dtype, device=device)
         quantizer = Float8BlockQuantizer(
             fp8_dtype=fp8_dtype,
@@ -467,8 +474,6 @@ class TestFloat8BlockwiseTensor:
         # Check the bitwise equality of the inner data
         assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
         assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
-
-
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
