@@ -156,7 +156,7 @@ class SoftmaxPrimitivesRunner(SoftmaxRunner):
 
 class SoftmaxModuleRunner:
     """
-    Jax Softmax Modules runner
+    Jax Softmax Module runner
     """
 
     module_runner: SoftmaxRunner
@@ -170,20 +170,21 @@ class SoftmaxModuleRunner:
         """
         Test transformer_engine.jax.flax.module.Softmax fwd rule
         """
-        self.module_runner._setup_inputs()
+        runner = self.module_runner
+        runner._setup_inputs()
         rng = jax.random.PRNGKey(0)
         softmax_module = Softmax(
-            scale_factor=self.module_runner.scale_factor,
-            softmax_type=self.module_runner.softmax_type,
+            scale_factor=runner.scale_factor,
+            softmax_type=runner.softmax_type,
         )
-        softmax_vars = softmax_module.init(rng, self.module_runner.logits, self.module_runner.mask)
+        softmax_vars = softmax_module.init(rng, runner.logits, runner.mask)
         module_out = softmax_module.apply(
-            softmax_vars, self.module_runner.logits, self.module_runner.mask
-        )  # .astype(input_dtype)
-        reference_out = self.module_runner.reference_softmax(
-            self.module_runner.logits, self.module_runner.mask, self.module_runner.scale_factor
+            softmax_vars, runner.logits, runner.mask
         )
-        assert_allclose(module_out, reference_out, dtype=self.module_runner.dtype)
+        reference_out = runner.reference_softmax(
+            runner.logits, runner.mask, runner.scale_factor
+        )
+        assert_allclose(module_out, reference_out, dtype=runner.dtype)
 
 
 # Run softmax primitives test

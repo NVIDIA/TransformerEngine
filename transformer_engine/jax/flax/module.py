@@ -202,51 +202,6 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         return outputs
 
 
-"""         if self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
-        ):
-
-            if bias is not None:
-                logits = logits + bias.astype(input_dtype)
-
-            mask_ = mask
-            if self.softmax_type is not SoftmaxType.SCALED_MASKED:
-                mask_ = None
-
-            outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
-        else:
-            attention_bias = None
-            #change mask in testing too to not be a causal mask
-            if mask is not None:
-                attention_bias = lax.select(
-                    mask > 0,
-                    jnp.full(mask.shape, -1e10),
-                    jnp.full(mask.shape, 0.0),
-                )
-                attention_bias = attention_bias.astype(input_dtype)
-
-            if bias is not None:
-                attention_bias = _combine_biases(attention_bias, bias)
-
-            if attention_bias is not None:
-                logits = logits + attention_bias.astype(input_dtype)
-
-            # For the case that self.softmax == SoftmaxType.SCALED_UPPER_TRIANG_MASKED
-            # and kernel is unavailable, then try on pure scaled softmax custom calls.
-            if is_softmax_kernel_available(
-                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, input_dtype
-            ):
-                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
-            else:
-                if self.softmax_type is not SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
-                    outputs = jax_scaled_softmax(logits, self.scale_factor)
-                else:
-                    outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
-
-        assert input_dtype == outputs.dtype
-        return outputs"""
-
-
 class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     r"""
     Applies layer normalization over a mini-batch of inputs.
