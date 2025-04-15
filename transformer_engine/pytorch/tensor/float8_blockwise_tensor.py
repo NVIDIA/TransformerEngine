@@ -583,7 +583,7 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._columnwise_data is not None:
             # Maybe changed in the future
             if tensor._is_2D_scaled:
-                columnwise_shape = [shape[-2]] + [shape[-1]] + list(shape[:-2])
+                columnwise_shape = list(shape[-2:])+ list(shape[:-2])
             else:
                 columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
@@ -612,7 +612,11 @@ class _ViewFunc(torch.autograd.Function):
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
             if grad._columnwise_data is not None:
-                new_columnwise_data = grad._columnwise_data.view(ctx.shape[-1], -1)
+                if grad._is_2D_scaled:
+                    columnwise_shape = list(ctx.shape[-2:]) + list(ctx.shape[:-2])
+                else:
+                    columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             else:
                 new_columnwise_data = None
             dgrad = Float8BlockwiseQTensor(
@@ -691,7 +695,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._columnwise_data is not None:
             # Maybe changed in the future
             if tensor._is_2D_scaled:
-                columnwise_shape = [shape[-2]] + [shape[-1]] + list(shape[:-2])
+                columnwise_shape = list(shape[-2:])+ list(shape[:-2])
             else:
                 columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
@@ -722,7 +726,10 @@ class _ReshapeFunc(torch.autograd.Function):
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
             if grad._columnwise_data is not None:
-                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                if grad._is_2D_scaled:
+                    columnwise_shape = list(ctx.shape[-2:]) + list(ctx.shape[:-2])
+                else:
+                    columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
                 new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             dgrad = Float8BlockwiseQTensor(
                 shape=ctx.shape,
