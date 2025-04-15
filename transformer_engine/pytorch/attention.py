@@ -6484,6 +6484,8 @@ class MultiheadAttention(torch.nn.Module):
             equal length. Please note that these formats do not reflect how
             tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
             For that, please use `get_qkv_layout` to gain the layout information.
+    name: str, default = `None`
+        name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
