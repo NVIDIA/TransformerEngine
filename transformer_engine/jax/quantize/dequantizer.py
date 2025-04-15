@@ -21,63 +21,19 @@ __all__ = ["ScalingModeToDequantizerMap"]
 
 @dataclass
 class Dequantizer(ABC):
+    """
+    Base Dequantizer Class
+    """
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def _dequantize_func(data, scale_inv, dq_dtype, **kwargs):
         pass
 
-    @abstractmethod
     @staticmethod
+    @abstractmethod
     def dequantize(scaled_tensor):
         pass
-
-    # TODO (Phuong): use grouped_dequantize with group_size = 1 replacing dequantize
-    @staticmethod
-    def grouped_dequantize(grouped_scaled_tensor):
-        data = grouped_scaled_tensor.data
-        scale_inv = grouped_scaled_tensor.scale_inv
-        group_sizes = grouped_scaled_tensor.group_sizes
-        other_sizes = grouped_scaled_tensor.other_sizes
-        flatten_axis = grouped_scaled_tensor.flatten_axis
-        scaling_mode = grouped_scaled_tensor.scaling_mode
-
-        data_ndim = 1 + len(other_sizes)
-
-        flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
-
-        output = []
-        matrix_sizes = group_sizes * math.prod(other_sizes)
-        data = jnp.split(data, matrix_sizes)
-
-        scale_inv_ptr = 0
-        for i, data_i in enumerate(data):
-            data_shape_i = (group_sizes[i], *other_sizes)
-            assert math.prod(data_shape_i) == data_i.size, (
-                f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
-                f" {data_i.size}"
-            )
-            scale_shape_i = scaling_mode.get_scale_shape(
-                data_shape_i,
-                grouped_scaled_tensor.is_colwise,
-                is_padded=True,
-                flatten_axis=flatten_axis,
-            )
-            scale_shape_i_size = math.prod(scale_shape_i)
-            scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
-            out_i = Dequantizer._dequantize_func(
-                data_i.reshape(data_shape_i),
-                scale_inv_i.reshape(scale_shape_i),
-                grouped_scaled_tensor.dq_dtype,
-                scaling_mode=grouped_scaled_tensor.scaling_mode,
-                is_colwise=grouped_scaled_tensor.is_colwise,
-                flatten_axis=grouped_scaled_tensor.flatten_axis,
-            )
-            output.append(out_i)
-            scale_inv_ptr += scale_shape_i_size
-
-        # TODO(Phuong): Stack the output to a single ndarray !?
-        return output
 
 
 class TensorScaleDequantizer(Dequantizer):
@@ -89,7 +45,8 @@ class TensorScaleDequantizer(Dequantizer):
     """
 
     @staticmethod
-    def _dequantize_func(data, scale_inv, dq_dtype):
+    def _dequantize_func(data, scale_inv, dq_dtype, **kwargs):
+        del kwargs
         return jnp.asarray(
             data.astype(jnp.float32) * scale_inv.astype(jnp.float32),
             dq_dtype,
@@ -108,7 +65,7 @@ class TensorScaleDequantizer(Dequantizer):
         Returns:
             The dequantized tensor in the specified data type
         """
-        return Dequantizer._dequantize_func(
+        return TensorScaleDequantizer._dequantize_func(
             scaled_tensor.data, scaled_tensor.scale_inv, scaled_tensor.dq_dtype
         )
 
@@ -160,7 +117,7 @@ class BlockScaleDequantizer(Dequantizer):
         Returns:
             The dequantized tensor in the specified data type
         """
-        return Dequantizer.__dq_func_block_scaling_impl(
+        return BlockScaleDequantizer._dequantize_func(
             scaled_tensor.data,
             scaled_tensor.scale_inv,
             scaled_tensor.dq_dtype,
@@ -174,3 +131,54 @@ ScalingModeToDequantizerMap = {
     ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
 }
+
+
+@staticmethod
+def _grouped_dequantize(grouped_scaled_tensor):
+    data = grouped_scaled_tensor.data
+    scale_inv = grouped_scaled_tensor.scale_inv
+    group_sizes = grouped_scaled_tensor.group_sizes
+    other_sizes = grouped_scaled_tensor.other_sizes
+    flatten_axis = grouped_scaled_tensor.flatten_axis
+    scaling_mode = grouped_scaled_tensor.scaling_mode
+
+    data_ndim = 1 + len(other_sizes)
+
+    flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+
+    output = []
+    matrix_sizes = group_sizes * math.prod(other_sizes)
+    data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
+
+    scale_inv_ptr = 0
+    for i, data_i in enumerate(data):
+        data_shape_i = (group_sizes[i], *other_sizes)
+        assert math.prod(data_shape_i) == data_i.size, (
+            f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
+            f" {data_i.size}"
+        )
+        scale_shape_i = scaling_mode.get_scale_shape(
+            data_shape_i,
+            grouped_scaled_tensor.is_colwise,
+            is_padded=True,
+            flatten_axis=flatten_axis,
+        )
+        scale_shape_i_size = math.prod(scale_shape_i)
+        scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
+        dequantizer_type = ScalingModeToDequantizerMap.get(grouped_scaled_tensor.scaling_mode)
+        out_i = dequantizer_type._dequantize_func(
+            data_i.reshape(data_shape_i),
+            scale_inv_i.reshape(scale_shape_i),
+            grouped_scaled_tensor.dq_dtype,
+            scaling_mode=grouped_scaled_tensor.scaling_mode,
+            is_colwise=grouped_scaled_tensor.is_colwise,
+            flatten_axis=grouped_scaled_tensor.flatten_axis,
+        )
+        output.append(out_i)
+        scale_inv_ptr += scale_shape_i_size
+
+    # TODO(Phuong): Stack the output to a single ndarray !?
+    return output
+
+
+Dequantizer.grouped_dequantize = _grouped_dequantize

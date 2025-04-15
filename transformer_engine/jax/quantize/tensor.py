@@ -123,7 +123,7 @@ class ScaledTensor1x(ScaledTensor):
     _dq_func: Callable
     is_colwise: bool
     data_layout: str
-    flatten_axis: int = -1
+    flatten_axis: int
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -263,13 +263,13 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     data: jnp.ndarray  # 1d flattened
     scale_inv: jnp.ndarray  # 1d flattened
     group_sizes: jnp.ndarray
-    other_sizes: Tuple[int]
+    other_sizes: Tuple
     scaling_mode: ScalingMode
     dq_dtype: jnp.dtype
     _dq_func: Callable
     is_colwise: bool
     data_layout: str
-    flatten_axis: int = -1
+    flatten_axis: int
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
@@ -278,12 +278,8 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         data_ndim = 1 + len(self.other_sizes)
         flatten_axis = data_ndim + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
         assert (
-            0 < flatten_axis < len(data_ndim)
-        ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
-
-        if self.data_layout == "T":
-            flatten_axis = data_ndim - flatten_axis
-        self.flatten_axis = flatten_axis
+            0 < flatten_axis < data_ndim
+        ), f"flatten_axis {flatten_axis} is out of bounds for data.ndim = {data_ndim}"
 
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
             self.data.shape,
@@ -429,8 +425,8 @@ class ScaledTensorFactory:
             A ScaledTensor1x instance
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
-        if group_sizes:
-            assert other_sizes, "other_sizes is not given"
+        if group_sizes is not None:
+            assert other_sizes is not None, "other_sizes is not given for GroupedScaledTensor1x"
             return GroupedScaledTensor1x(
                 data=data,
                 scale_inv=scale_inv,
