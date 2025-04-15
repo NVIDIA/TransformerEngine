@@ -219,7 +219,8 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
     return ret;
   }
   NVTE_CHECK(ndim <= sizeof(ret.owned_data) / sizeof(ret.owned_data[0]),
-             "Too many dims for NVTEShape (", ndim, ")");
+             "Too many dims for NVTEShape (requested: ", ndim,
+             ", max: ", sizeof(ret.owned_data) / sizeof(ret.owned_data[0]), ")");
   std::copy(data, data + ndim, ret.owned_data);
   ret.data = ret.owned_data;
   ret.ndim = ndim;
