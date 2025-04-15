@@ -38,7 +38,7 @@ def restore_from_saved(
     tensors: list[Optional[Any]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
-) -> list[Optional[Any]]:
+) -> list[Optional[Any]] | tuple[list[Optional[Any]], list[Optional[torch.Tensor]]]:
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
     for tensor in tensors:
