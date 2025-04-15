@@ -1065,9 +1065,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
 
-            # Tensor in the cache shoud be instance of the torch.Tensor,
-            # because it is not internal to only one run of the forward pass.
-            # Setting internal=True would result into removing the data in prepare_for_saving(...).
+            # Ensure the tensor in the cache is an instance of torch.Tensor,
+            # as it persists beyond a single forward pass.
+            # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
             quantizer_internal = quantizer.internal
             quantizer.internal = False
             out = quantizer(tensor)

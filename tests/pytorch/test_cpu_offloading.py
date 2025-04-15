@@ -17,7 +17,7 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 fp8_recipes = [
     None,  # non-fp8
-    # recipe.MXFP8BlockScaling(), - scale inverse tensors offloading doest not work yet
+    recipe.MXFP8BlockScaling(),
     recipe.Float8CurrentScaling(),
     recipe.DelayedScaling(),
 ]
