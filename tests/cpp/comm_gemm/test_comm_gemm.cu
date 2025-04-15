@@ -115,6 +115,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
                         bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                         cudaStream_t stream) = 0;
 
+
   template <typename T>
   void Run(bool transa, bool transb, size_t m, size_t n, size_t k,
            transformer_engine::DType dtype) {
@@ -172,8 +173,11 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     auto out_golden = CopyLocalMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
                                       dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
+    // TODO: use cuda::std::numeric_limits<T>::epsilon(), when it's not broken.
+    const double dtype_epsilon = 1e-3;
+    const auto atol = dtype_epsilon * k;
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(out[i], out_golden[i], 1e-2);
+      EXPECT_NEAR(out[i], out_golden[i], atol);
     }
   }
 
