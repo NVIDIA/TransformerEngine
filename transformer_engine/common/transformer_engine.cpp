@@ -235,7 +235,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   std::vector<size_t> shape = t.shape();
 
-  rerturn nvte_make_shape(shape.data(), shape.size());
+  return nvte_make_shape(shape.data(), shape.size());
 }
 
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {

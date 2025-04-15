@@ -451,7 +451,12 @@ std::vector<py::object> fused_attn_bwd(
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
+    std::vector<size_t> tmp;
+    const std::vector<int64_t> &signed_shape = Aux_CTX_Tensors[i].sizes().vec();
+    tmp.reserve(signed_shape.size());
+    for (int64_t ele : signed_shape) {
+      tmp.push_back(ele);
+    }
 
     NVTEShape temp_shape = nvte_make_shape(tmp.data(), tmp.size());
     NVTEBasicTensor temp_data = {
