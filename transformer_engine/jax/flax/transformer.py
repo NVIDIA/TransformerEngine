@@ -220,20 +220,12 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if mask is not None:
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-            # For the cases where mask exists, use SCALED_MASKED as it is the only primitive which accepts a mask.
-            # Mask must exist for the following conditions:
-            # i) mask is supposed to be provided by user, i.e. padding, padding_causal, arbitrary
-            # ii) mask is causal and SWA exists
             if mask is not None:
                 return SoftmaxType.SCALED_MASKED, mask
-            # Mask will not be considered (whether provided or not by user) for the following conditions:
-            # i) mask is not expected to be provided by the user, i.e. no_mask
-            # ii) mask is causal and SWA does not exist
-            else:
-                if attn_mask_type is AttnMaskType.CAUSAL_MASK:
-                    return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-                elif attn_mask_type is AttnMaskType.NO_MASK:
-                    return SoftmaxType.SCALED, mask
+            if attn_mask_type is AttnMaskType.CAUSAL_MASK:
+                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+            if attn_mask_type is AttnMaskType.NO_MASK:
+                return SoftmaxType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
                 "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
@@ -454,6 +446,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+    
+       attn_mask_type       mask/sequence_descriptor       SW         softmax type
+       --------------------------------------------------------------------------------------------
+       no_mask              None                           None       SCALED
+       causal               None                           None       SCALED_UPPER_TRIANG_MASKED
+       causal               None                           Yes        SCALED_MASKED
+       padding              Required                       X          SCALED_MASKED
+       padding_causal       Required                       X          SCALED_MASKED
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.

@@ -13,7 +13,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from jax import lax
-from jax import nn as jax_nn
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
