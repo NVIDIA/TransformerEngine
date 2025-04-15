@@ -8,4 +8,3 @@ from .gemm import *
 from .normalization import *
 from .quantization import *
 from .softmax import *
-from .transpose import *
