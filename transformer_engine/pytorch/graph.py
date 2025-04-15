@@ -111,9 +111,7 @@ def _make_graphed_callables(
         ), "`reuse_graph_inputs` and `reuse_graph_outputs` are only available in training mode."
         len_args = len(sample_args[0])
         for arg in sample_args:
-            assert len_args == len(
-                arg
-            ), f"Arguments must have same length and shape for reusing."
+            assert len_args == len(arg), f"Arguments must have same length and shape for reusing."
         sample_args = list(sample_args)
         len_kwargs = len(sample_kwargs[0])
         for kwarg in sample_kwargs:
@@ -406,8 +404,7 @@ def _make_graphed_callables(
                     # For now, assumes all static_outputs require grad
                     if not reuse_graph_inputs or not static_grad_exists:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o.requires_grad else None
-                            for o in static_outputs
+                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
                         with torch.cuda.graph(bwd_graph, pool=mempool):
@@ -428,13 +425,9 @@ def _make_graphed_callables(
                             for input_idx, arg in enumerate(static_input_surface):
                                 if reuse_graph_outputs and static_grad_exists:
                                     if static_grad_inputs[input_idx] is not None:
-                                        static_grad_inputs[input_idx].copy_(
-                                            grad_inputs[grad_idx]
-                                        )
+                                        static_grad_inputs[input_idx].copy_(grad_inputs[grad_idx])
                                         grad_idx += 1
-                                elif (
-                                    isinstance(arg, torch.Tensor) and arg.requires_grad
-                                ):
+                                elif isinstance(arg, torch.Tensor) and arg.requires_grad:
                                     static_grad_inputs.append(grad_inputs[grad_idx])
                                     grad_idx += 1
                                 else:
