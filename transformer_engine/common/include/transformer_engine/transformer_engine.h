@@ -559,7 +559,6 @@ class TensorWrapper {
   const NVTEShape columnwise_shape() const noexcept {
     if (tensor_ == nullptr) {
       return nvte_make_shape(nullptr, 0);
-      return ret;
     }
     return nvte_tensor_columnwise_shape(tensor_);
   }
