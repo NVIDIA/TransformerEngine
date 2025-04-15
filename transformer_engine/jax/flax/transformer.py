@@ -446,7 +446,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
-    
+
        attn_mask_type       mask/sequence_descriptor       SW         softmax type
        --------------------------------------------------------------------------------------------
        no_mask              None                           None       SCALED
