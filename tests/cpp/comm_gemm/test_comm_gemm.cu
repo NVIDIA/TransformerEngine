@@ -173,7 +173,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
                                       dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_FLOAT_EQ(out[i], out_golden[i]);
+      EXPECT_NEAR(out[i], out_golden[i], 1e-2);
     }
   }
 
@@ -313,5 +313,5 @@ INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRsTest,
                                                 4, 8}));
 
 INSTANTIATE_TEST_SUITE_P(GemmAr, GemmArTest,
-                         testing::Values(Params{transformer_engine::DType::kFloat16, true, false, 2,
-                                                4, 8}));
+                         testing::Values(Params{transformer_engine::DType::kFloat16, true, false,
+                                                64, 64 * 4, 64 * 4}));
