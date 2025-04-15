@@ -73,14 +73,12 @@ class Float8BlockwiseQTensorBase:
     ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
         """
         Prepare the tensor base for saving for backward
-
-        This does not clear the tensors currently, because with PP config
-        that clears the weight cache between micro-batches. If the rowwise
-        data is not required for backward, this is a possible memory
-        pessimization, but is consistent with the other quantized tensor
-        classes.
         """
-        tensors = [self._rowwise_data, self._columnwise_data]
+        tensors = [self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv]
+        self._rowwise_data = None
+        self._columnwise_data = None
+        self._rowwise_scale_inv = None
+        self._columnwise_scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -89,7 +87,9 @@ class Float8BlockwiseQTensorBase:
         """Restore the tensor base data from the saved tensors list."""
         self._rowwise_data = tensors[0]
         self._columnwise_data = tensors[1]
-        return tensors[2:]
+        self._rowwise_scale_inv = tensors[2]
+        self._columnwise_scale_inv = tensors[3]
+        return tensors[4:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
