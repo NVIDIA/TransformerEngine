@@ -323,6 +323,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 clear_tensor_data(ln_out, ln_out_total)
 
         if is_grad_enabled:
+            ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
@@ -651,6 +652,11 @@ class _LayerNormLinear(torch.autograd.Function):
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
+            if ctx.weight_quantizer is not None and isinstance(weight, QuantizedTensor):
+                weight.update_usage(
+                    rowwise_usage=ctx.weight_quantizer.rowwise_usage,
+                    columnwise_usage=ctx.weight_quantizer.columnwise_usage,
+                )
             dgrad, *_ = general_gemm(
                 weight,
                 grad_output,

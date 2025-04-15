@@ -661,10 +661,13 @@ def checkpoint(
             **kwargs,
         )
 
-    # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
-    # to scatter/gather activations that we will recompute anyway.
-    setattr(function, "fsdp_wrapped", False)
-    setattr(function, "fsdp_group", None)
+    from .module.base import TransformerEngineBaseModule
+
+    if isinstance(function, TransformerEngineBaseModule):
+        # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
+        # to scatter/gather activations that we will recompute anyway.
+        setattr(function, "fsdp_wrapped", False)
+        setattr(function, "fsdp_group", None)
 
     # Otherwise discard unused te.utils.checkpoint.checkpoint() arguments
     # and execute TE's own checkpointing
