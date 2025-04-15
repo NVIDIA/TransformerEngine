@@ -44,8 +44,7 @@ else:
 
 __all__ = ["gemm",
            "grouped_gemm",
-           "collective_fp8_gemm_impl",
-           "collective_gemm_impl"]
+           "collective_gemm"]
 
 
 num_cublas_streams = 4
@@ -545,6 +544,7 @@ def grouped_gemm(
         out_tensors.append(out_flat.reshape(*lhs_remain_shape, *rhs_remain_shape))
 
     return out_tensors
+
 class CollectiveGemmPrimitive(BasePrimitive):
     """
     cuBlasLt GEMM Primitive w/ support for distributed inputs
@@ -795,8 +795,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
-        out_amax,
-        out_scale,
         out_dtype,
         batched_output,
         contracting_dims,
@@ -875,8 +873,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
             rhs_scale_inv,
             bias,
             gelu_input,
-            out_amax,
-            out_scale,
             out_dtype=out_dtype,
             batched_output=False,
             contracting_dims=contracting_dims_2d,
@@ -1143,76 +1139,33 @@ class CollectiveGemmPrimitive(BasePrimitive):
 register_primitive(CollectiveGemmPrimitive)
 
 
-def collective_fp8_gemm_impl(
-    lhs: ArrayLike,
-    lhs_scale_inv: ArrayLike,
-    rhs_t: ArrayLike,
-    rhs_scale_inv: ArrayLike,
-    bias: Optional[ArrayLike] = None,
-    gelu_input: Optional[ArrayLike] = None,
-    out_amax: Optional[ArrayLike] = None,
-    out_scale: Optional[ArrayLike] = None,
-    out_dtype: jnp.dtype = jnp.bfloat16,
-    batched_output: bool = False,
-    fuse_gelu: bool = False,
-    fuse_bias: bool = False,
-    accumulate: bool = False,
-    use_split_accumulator: bool = False,
-) -> Tuple[ArrayLike, ...]:
-    """FP8 mat-mul with `nvte_cublas_gemm()` custom op."""
-    if out_dtype is not None and jax_dtype_is_fp8(out_dtype):
-        assert out_amax is not None and out_scale is not None, "Missing output amax and scale."
-    else:
-        out_amax = jnp.zeros(0, dtype=jnp.float32)
-        out_scale = jnp.zeros(0, dtype=jnp.float32)
-
-    if not fuse_bias:
-        bias = jnp.zeros(0, dtype=jnp.bfloat16)
-    else:
-        assert bias is not None, "Missing bias in forward GEMM when bias epilogue is enabled."
-
-    if not fuse_gelu:
-        gelu_input = jnp.zeros(0, dtype=bias.dtype)
-    elif gelu_input is None:
-        gelu_shape = (reduce(operator.mul, lhs.shape[:-1]), rhs_t.shape[-1])
-        gelu_input = jnp.zeros(gelu_shape, dtype=bias.dtype)
-
-    out, out_amax, out_scale, pre_gelu_out, _ = CollectiveGemmPrimitive.outer_primitive.bind(
-        lhs,
-        lhs_scale_inv,
-        rhs_t,
-        rhs_scale_inv,
-        bias,
-        gelu_input,
-        out_amax,
-        out_scale,
-        out_dtype=out_dtype,
-        batched_output=batched_output,
-        contracting_dims=(-1, -1),
-        fuse_gelu=fuse_gelu,
-        fuse_bias=fuse_bias,
-        grad=False,
-        accumulate=accumulate,
-        use_split_accumulator=use_split_accumulator,
-    )
-
-    return out, out_amax, out_scale, pre_gelu_out
-
-
-def collective_gemm_impl(
-    lhs: ArrayLike,
-    rhs: ArrayLike,
-    bias: Optional[ArrayLike] = None,
+def collective_gemm(
+    lhs: Union[jnp.ndarray, ScaledTensor],
+    rhs: Union[jnp.ndarray, ScaledTensor],
+    bias: jnp.ndarray = None,
     gelu_input: Optional[ArrayLike] = None,
     batched_output: bool = False,
-    contracting_dims: Tuple[int, int] = (-1, -2),
+    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     fuse_gelu: bool = False,
-    fuse_bias: bool = False,
     grad: bool = False,
     accumulate: bool = False,
     use_split_accumulator: bool = False,
 ) -> Tuple[ArrayLike, ...]:
     """Non-FP8 mat-mul with `nvte_cublas_gemm()` custom op."""
+
+    if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
+        scaling_mode = lhs.scaling_mode
+        out_dtype = lhs.dq_dtype
+        # For ScaledTensors and NVTE_DELAYED_TENSOR_SCALING, need to handle internal layout
+        if lhs.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+            assert not (
+                lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
+            ), "FP8 GEMM does not support E5M2 * E5M2"
+    else:
+        # For jnp.ndarray, only consider contracting_dims, layout is always NN
+        scaling_mode = ScalingMode.NVTE_NO_SCALING
+        out_dtype = lhs.dtype
+
     lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
     lhs_outer_dim, rhs_outer_dim = map(
         mirror_dim,
@@ -1220,12 +1173,10 @@ def collective_gemm_impl(
         (lhs.ndim, rhs.ndim),
     )
 
-    if not fuse_bias:
+    if bias is None:
         bias = jnp.zeros(0, dtype=lhs.dtype)
     elif grad:
         bias = jnp.zeros(rhs.shape[rhs_outer_dim], dtype=lhs.dtype)
-    else:
-        assert bias is not None, "Missing bias in forward GEMM when bias epilogue is enabled."
 
     if not fuse_gelu:
         gelu_input = jnp.zeros(0, dtype=lhs.dtype)
@@ -1239,21 +1190,27 @@ def collective_gemm_impl(
         gelu_shape = (batch_size * lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
         gelu_input = jnp.zeros(gelu_shape, dtype=lhs.dtypes)
 
-    dummy_fp8_meta = jnp.zeros(0, dtype=jnp.float32)
+    if scaling_mode == ScalingMode.NVTE_NO_SCALING:
+        lhs_scale_inv = jnp.ones(1, dtype=jnp.float32)
+        rhs_scale_inv = jnp.ones(1, dtype=jnp.float32)
+    if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        lhs_scale_inv = lhs.scale_inv.reshape(-1)
+        rhs_scale_inv = rhs.scale_inv.reshape(-1)
+    if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        lhs_scale_inv = lhs_scale_inv.reshape(-1)
+        rhs_scale_inv = rhs_scale_inv.reshape(-1)
+
     out, _, _, pre_gelu_out, bias_grad = CollectiveGemmPrimitive.outer_primitive.bind(
         lhs,
-        dummy_fp8_meta,
+        lhs_scale_inv,
         rhs,
-        dummy_fp8_meta,
+        rhs_scale_inv,
         bias,
         gelu_input,
-        dummy_fp8_meta,
-        dummy_fp8_meta,
-        out_dtype=lhs.dtype,
+        scaling_mode=scaling_mode,
+        out_dtype=out_dtype,
         batched_output=batched_output,
         contracting_dims=contracting_dims,
-        fuse_gelu=fuse_gelu,
-        fuse_bias=fuse_bias,
         grad=grad,
         accumulate=accumulate,
         use_split_accumulator=use_split_accumulator,
