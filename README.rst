@@ -222,25 +222,6 @@ Source Installation
 
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
 
-Conda Installation (Experimental)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine is available through conda-forge:
-
-.. code-block:: bash
-
-    # Create a new conda environment with Transformer Engine
-    conda create -n transformer_engine python=3.10
-    conda activate transformer_engine
-    
-    # Install Transformer Engine with PyTorch
-    conda install transformer-engine -c conda-forge
-    
-    # For full features with specific CUDA version
-    conda install transformer-engine pytorch cudatoolkit=12.1 -c conda-forge -c nvidia
-
-This installation method is currently being developed through the conda-forge project:
-`NVIDIA TransformerEngine conda-forge recipe <https://github.com/conda-forge/staged-recipes/pull/29403>`_
-
 Environment Variables
 ^^^^^^^^^^^^^^^^^^^
 These environment variables can be set before installation to customize the build process:
