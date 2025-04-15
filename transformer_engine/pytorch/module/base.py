@@ -24,6 +24,7 @@ from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
+    Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -35,8 +36,10 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -524,6 +527,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8CurrentScalingRecipeState
             ):
                 return
+            if recipe.float8_block_scaling() and isinstance(
+                recipe_state, Float8BlockScalingRecipeState
+            ):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -867,7 +874,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
-                    grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)
+                    grad_output,
+                    (
+                        QuantizedTensor,
+                        Float8TensorBase,
+                        MXFP8TensorBase,
+                        Float8BlockwiseQTensorBase,
+                    ),
                 ):
                     grad_output = quantizer(grad_output)
 
@@ -902,11 +915,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # FP8 without all-gather: fused bgrad + cast + transpose
         grad_bias = None
         if ctx.use_bias:
-            if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
+            if isinstance(
+                grad_output,
+                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+            ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
+                if isinstance(quantizer, Float8BlockQuantizer):
+                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
+                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                else:
+                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+        if not isinstance(
+            grad_output,
+            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+        ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
