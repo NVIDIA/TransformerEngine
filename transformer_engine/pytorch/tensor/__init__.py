@@ -50,7 +50,7 @@ def get_all_tensor_types():
     """
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
-
+    from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockwiseQTensorBase
     all_tensor_types = [
         torch.Tensor,
         torch.nn.Parameter,
@@ -58,5 +58,7 @@ def get_all_tensor_types():
         Float8TensorBase,
         MXFP8Tensor,
         MXFP8TensorBase,
+        Float8BlockwiseQTensor,
+        Float8BlockwiseQTensorBase,
     ]
     return all_tensor_types
