@@ -178,12 +178,8 @@ class SoftmaxModuleRunner:
             softmax_type=runner.softmax_type,
         )
         softmax_vars = softmax_module.init(rng, runner.logits, runner.mask)
-        module_out = softmax_module.apply(
-            softmax_vars, runner.logits, runner.mask
-        )
-        reference_out = runner.reference_softmax(
-            runner.logits, runner.mask, runner.scale_factor
-        )
+        module_out = softmax_module.apply(softmax_vars, runner.logits, runner.mask)
+        reference_out = runner.reference_softmax(runner.logits, runner.mask, runner.scale_factor)
         assert_allclose(module_out, reference_out, dtype=runner.dtype)
 
 

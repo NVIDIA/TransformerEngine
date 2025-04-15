@@ -197,7 +197,10 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
                 outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
             else:
-                raise ValueError(f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED, SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]")
+                raise ValueError(
+                    f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED,"
+                    " SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                )
         assert input_dtype == outputs.dtype
         return outputs
 
