@@ -562,13 +562,7 @@ void fused_out_correction_helper(at::Tensor &out, const std::vector<at::Tensor> 
   unsigned int grid_x;
 
   grid_x = (static_cast<size_t>(total_tokens) * tile / 2 + block - 1) / block;
-  dim3 grid = {grid_x, num_heads, 2};
-
-  if (softmax_lse_in_packed_format == true) {
-    printf("!!!!!!!!!!Packed lse format is used!!!!!!!!!!!!! \n");
-  } else {
-    printf("!!!!!!!!!!Packed lse format is not used!!!!!!!!!!!!! \n");
-  }
+  dim3 grid = {grid_x, (unsigned int)num_heads, 2};
 
   constexpr int max_tensors = 64;
   transformer_engine::fused_attn::TensorList<max_tensors> tensors;

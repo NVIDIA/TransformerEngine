@@ -302,16 +302,16 @@ struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_THD> : QKVIndexCalculatorBase {
   }
 
   __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
-    int flat_token_id = half_cu_seqlens[seq_id] * 2 + token_id;
-    int offset = flat_token_id * num_heads + head_id;
-    offset *= dim_per_head;
+    int flat_token_id = half_cu_seqlens_[seq_id] * 2 + token_id;
+    int offset = flat_token_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
     return offset;
   }
 
   __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
-    int token_id = half_cu_seqlens_[seq_id] * 2 + token_id;
-    int half_token_id = token_id - half_cu_seqlens_[seq_id + 1];
-    int offset = half_token_id * num_heads_ + head_id;
+    int flat_token_id = half_cu_seqlens_[seq_id] * 2 + token_id;
+    int half_flat_token_id = flat_token_id - half_cu_seqlens_[seq_id + 1];
+    int offset = half_flat_token_id * num_heads_ + head_id;
     offset *= dim_per_head_;
     return offset;
   }
@@ -320,7 +320,7 @@ struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_THD> : QKVIndexCalculatorBase {
 // describe lse tensor format for simplified computation.
 struct LseIndexCalculatorBase {
   int batch_size_, seq_len_, num_heads_, num_total_tokens_;
-  int *cu_seqlens_;
+  int *half_cu_seqlens_;
 
   __forceinline__ __device__ LseIndexCalculatorBase(int batch_size, int seq_len, int num_heads,
                                                     int num_total_tokens, int *half_cu_seqlens)
@@ -346,7 +346,7 @@ struct LseIndexCalculator : LseIndexCalculatorBase {
     int half_seq_len = seq_len_ / 2;
     int half_token_id;
     if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
-      half_token_id = token_id - (cu_seqlens_[seq_id + 1] - cu_seqlens_[seq_id]);
+      half_token_id = token_id - (half_cu_seqlens_[seq_id + 1] - half_cu_seqlens_[seq_id]);
     } else {
       half_token_id = token_id - half_seq_len;
     }
@@ -363,15 +363,15 @@ struct LseIndexCalculator<NVTE_QKV_Format::NVTE_THD, true> : LseIndexCalculatorB
       : LseIndexCalculatorBase(BatchSize, SeqLen, NumHeads, NumTotalTokens, CuSeqlens) {}
 
   __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
-    int flat_token_id = token_id + cu_seqlens_[seq_id] * 2;
+    int flat_token_id = token_id + half_cu_seqlens_[seq_id] * 2;
     int offset = head_id * num_total_tokens_ + flat_token_id;
     return offset;
   }
   __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
-    int token_id = token_id + cu_seqlens_[seq_id] * 2;
-    int half_token_id = token_id - cu_seqlens_[seq_id + 1];
+    int flat_token_id = token_id + half_cu_seqlens_[seq_id] * 2;
+    int half_flat_token_id = flat_token_id - half_cu_seqlens_[seq_id + 1];
     int num_half_total_tokens = num_total_tokens_ / 2;
-    int offset = head_id * num_half_total_tokens + half_token_id;
+    int offset = head_id * num_half_total_tokens + half_flat_token_id;
     return offset;
   }
 };
@@ -419,7 +419,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
   // It's necessary to handle out and lse differently because their formats maybe different.
   QKVIndexCalculator<out_format> out_calculator(batch, lse_seqlen, num_heads, dim_per_head,
-                                                cu_seqlens_s, num_total_tokens);
+                                                 num_total_tokens,cu_seqlens_s);
   LseIndexCalculator<out_format, softmax_lse_in_packed_format> lse_calculator(
       batch, lse_seqlen, num_heads, num_total_tokens, cu_seqlens_s);
 
@@ -430,7 +430,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
   for (int token_id = tile_id; token_id < num_total_tokens / 2; token_id += num_tiles) {
     int seq_id = out_calculator.compute_seq_id(token_id);
-    int local_token_id = out_calculator.compute_local_token_id(token_id, seq_id);
+    int local_token_id = out_calculator.compute_token_id(token_id, seq_id);
     int head_id = blockIdx.y;
 
     size_t idx_out_full =
