@@ -243,10 +243,10 @@ class MiniFSDP:
 
         # Flatten the weights and pad to align with world size
         raw_data_list = [
-            _get_raw_data(w).view(-1) if isinstance(w, Float8Tensor) else w.view(-1)
+            _get_raw_data(w).view(-1) if isinstance(w, QuantizedTensor) else w.view(-1)
             for w in weights
         ]
-        if isinstance(weights[0], Float8Tensor):
+        if isinstance(weights[0], QuantizedTensor):
             raw_data_list = [_get_raw_data(w).view(-1) for w in weights]
         else:
             raw_data_list = [w.view(-1) for w in weights]
@@ -282,7 +282,7 @@ class MiniFSDP:
                 self.weight_indices.append((None, None))
                 self.shard_indices.append((None, None))
 
-            if isinstance(weights[idx], Float8Tensor):
+            if isinstance(weights[idx], QuantizedTensor):
                 replace_raw_data(
                     weights[idx], self.flatten_weight[start:end].view(weights[idx].shape)
                 )
@@ -378,19 +378,13 @@ class MiniFSDP:
             master_weight -= grad * self.lr
 
         # Step 3: Cast master weights to FP8 or BF16 precision
-        if isinstance(self.weights[0], Float8Tensor):
+        if isinstance(self.weights[0], QuantizedTensor):
             local_weights = []
-            for model_weight, local_weight in zip(self.weights, self.local_weights):
+            for local_weight in self.local_weights:
                 if local_weight is None:
                     local_weights.append(None)
                     continue
 
-                quantizer = model_weight._get_quantizer()
-                if isinstance(quantizer, Float8CurrentScalingQuantizer):
-                    local_weight = quantizer.create_tensor_from_data(
-                        local_weight.view(-1),
-                        model_weight.dtype,
-                    )
                 local_weights.append(local_weight)
 
             cast_master_weights_to_fp8(
