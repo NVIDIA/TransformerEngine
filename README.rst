@@ -245,6 +245,7 @@ You can verify which FlashAttention version is being used by setting these envir
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 
+.. troubleshooting-begin-marker-do-not-remove
 Troubleshooting
 ^^^^^^^^^^^^^^^^^^^
 
@@ -286,6 +287,8 @@ Troubleshooting
 
          cd transformer_engine
          pip install -v -v -v --no-build-isolation .
+
+.. troubleshooting-end-marker-do-not-remove
 
 Breaking Changes
 ================
