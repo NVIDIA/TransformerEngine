@@ -133,7 +133,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             # Otherwise sequence i will start from positional encoding
             # corresponding to start_positions[i].
             start_positions = torch.Tensor()
-        
+
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         assert tensor_format in (
@@ -142,7 +142,14 @@ class FusedRoPEFunc(torch.autograd.Function):
             "thd",
         ), f"Unsupported tensor_format: {tensor_format}."
         output = tex.fused_rope_forward(
-            t, freqs, start_positions, QKVFormat[tensor_format], interleaved, cu_seqlens, cp_size, cp_rank
+            t,
+            freqs,
+            start_positions,
+            QKVFormat[tensor_format],
+            interleaved,
+            cu_seqlens,
+            cp_size,
+            cp_rank,
         )
         ctx.save_for_backward(freqs, cu_seqlens, start_positions)
         ctx.tensor_format = tensor_format
@@ -305,9 +312,10 @@ def apply_rotary_pos_emb(
     cp_rank: int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
-    assert not (start_positions is not None and not fused), \
-        """start_positions != None and fused=False is not supported"""
-    
+    assert not (
+        start_positions is not None and not fused
+    ), """start_positions != None and fused=False is not supported"""
+
     assert (
         tensor_format != "thd" or cu_seqlens is not None
     ), "cu_seqlens must not be None when tensor_format is 'thd'."
