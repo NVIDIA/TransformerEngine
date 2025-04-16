@@ -19,6 +19,8 @@ import torch
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
+_logger = logging.getLogger(__name__)
+
 
 @functools.lru_cache(maxsize=None)
 def torch_version() -> tuple[int, ...]:
@@ -43,15 +45,15 @@ def _load_library():
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
             f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
-            " transformer-engine[pytorch]==VERSION'"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            "'pip3 install transformer-engine[pytorch]==VERSION'"
         )
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
-                "Could not find package %s. Install transformer-engine using 'pip"
-                " install transformer-engine[pytorch]==VERSION'",
+            _logger.info(
+                "Could not find package %s. Install transformer-engine using "
+                "'pip3 install transformer-engine[pytorch]==VERSION'",
                 module_name,
             )
 
@@ -60,8 +62,12 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)
@@ -83,8 +89,8 @@ from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,

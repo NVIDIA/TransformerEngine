@@ -14,6 +14,8 @@
 #include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
+#include <c10/util/Float8_e4m3fn.h>
+#include <c10/util/Float8_e5m2.h>
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -49,6 +51,9 @@
 #include "common/util/logging.h"
 
 namespace transformer_engine::pytorch {
+
+// in python we have: dist_group_type = torch.distributed.ProcessGroup
+using dist_group_type = c10d::ProcessGroup;
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
@@ -131,6 +136,60 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8CurrentScalingQuantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+
+  explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8BlockQuantizer : public Quantizer {
+ public:
+  // Which float8 type is used for q data.
+  DType dtype;
+  // Options about how to quantize the tensor
+  // Quantization scales are rounded down to powers of 2.
+  bool force_pow_2_scales = false;
+  // Amax within quantization tile has a floor of epsilon.
+  float amax_epsilon = 0.0;
+
+ private:
+  int block_scaling_dim = 2;
+
+ public:
+  // Initializes from a python handle to a Float8BlockQuantizer
+  explicit Float8BlockQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override {
+    return (block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  }
+
+  // Gets rowwise and columnwise_data from tensor and sets them on wrapper
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  // Create a python Float8BlockQuantized tensor and C++ wrapper
+  // for the tensor. Should set quantized data, scales for rowwise
+  // and optionally columnwise usage.
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;

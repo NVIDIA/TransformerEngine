@@ -93,15 +93,8 @@ class MXFP8TensorBase:
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
-        """Prepare the tensor base for saving for backward
-
-        After calling this, the tensor instance does not hold any
-        data.
-
-        """
+        """Prepare the tensor base for saving for backward"""
         tensors = [self._rowwise_data, self._columnwise_data]
-        self._rowwise_data = None
-        self._columnwise_data = None
         return tensors, self
 
     def restore_from_saved(
@@ -122,7 +115,9 @@ class MXFP8TensorBase:
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
-        return self._rowwise_data.size(*args, **kwargs)
+        if self._rowwise_data is not None:
+            return self._rowwise_data.size(*args, **kwargs)
+        return self._columnwise_data.size(*args, **kwargs)
 
     def __repr__(self):
         data_rowwise = self.dequantize()

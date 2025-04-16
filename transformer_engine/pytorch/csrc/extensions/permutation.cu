@@ -52,18 +52,11 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                                   sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
                                   num_tokens * topK);
 
-  // Activations type
-  at::ScalarType _st;
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Byte;
-  else
-    _st = input.scalar_type();
-
   // Output buffer alloc
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;
-  at::Tensor permuted_output = torch::empty(
-      {num_out_tokens, num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
+  at::Tensor permuted_output =
+      torch::empty({num_out_tokens, num_cols},
+                   torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
   at::Tensor row_id_map = torch::empty(
       {num_tokens * topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
@@ -100,17 +93,10 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType d
   using namespace transformer_engine::pytorch;
   int num_cols = input.size(1);
 
-  // Activations type
-  at::ScalarType _st;
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Byte;
-  else
-    _st = input.scalar_type();
-
   // Output buffer alloc
-  at::Tensor unpermuted_output = torch::empty(
-      {num_tokens, num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
+  at::Tensor unpermuted_output =
+      torch::empty({num_tokens, num_cols},
+                   torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -136,17 +122,10 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
   const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
   int num_cols = input_bwd.size(1);
 
-  // Activations type
-  at::ScalarType _st;
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Byte;
-  else
-    _st = input_bwd.scalar_type();
-
   // Output buffer alloc
-  at::Tensor act_grad = torch::empty({input_fwd.size(0), num_cols},
-                                     torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
+  at::Tensor act_grad =
+      torch::empty({input_fwd.size(0), num_cols},
+                   torch::dtype(input_bwd.scalar_type()).device(torch::kCUDA).requires_grad(false));
   at::Tensor prob_grad = torch::empty(
       {num_tokens, topK}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
 

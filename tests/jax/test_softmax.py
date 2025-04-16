@@ -18,6 +18,7 @@ from utils import assert_allclose
 
 from transformer_engine.jax.cpp_extensions import is_softmax_kernel_available
 from transformer_engine.jax.softmax import SoftmaxType, softmax
+from transformer_engine.jax.flax.module import Softmax
 
 
 def catch_unsupported(method):
@@ -94,7 +95,6 @@ class SoftmaxRunner:
             case _:
                 raise ValueError(f"Unknown {self.softmax_type=}")
 
-    @catch_unsupported
     def test_forward(self):
         """
         Test transformer_engine.jax.softmax.softmax fwd rule
@@ -104,7 +104,6 @@ class SoftmaxRunner:
         reference_out = __class__.reference_softmax(self.logits, self.mask, self.scale_factor)
         assert_allclose(primitive_out, reference_out, dtype=self.dtype)
 
-    @catch_unsupported
     def test_backward(self):
         """
         Test transformer_engine.jax.softmax.softmax bwd rule
@@ -141,6 +140,50 @@ class SoftmaxRunner:
         assert_allclose(primitive_grad_logits, reference_grad_logits, dtype=self.dtype)
 
 
+class SoftmaxPrimitivesRunner(SoftmaxRunner):
+    """
+    Jax Softmax Primitives runner
+    """
+
+    @catch_unsupported
+    def test_forward(self):
+        return super().test_forward()
+
+    @catch_unsupported
+    def test_backward(self):
+        return super().test_backward()
+
+
+class SoftmaxModuleRunner:
+    """
+    Jax Softmax Module runner
+    """
+
+    module_runner: SoftmaxRunner
+    bias: None
+
+    def __init__(self, module_runner, bias):
+        self.module_runner = module_runner
+        self.bias = bias
+
+    def test_forward(self):
+        """
+        Test transformer_engine.jax.flax.module.Softmax fwd rule
+        """
+        runner = self.module_runner
+        runner._setup_inputs()
+        rng = jax.random.PRNGKey(0)
+        softmax_module = Softmax(
+            scale_factor=runner.scale_factor,
+            softmax_type=runner.softmax_type,
+        )
+        softmax_vars = softmax_module.init(rng, runner.logits, runner.mask)
+        module_out = softmax_module.apply(softmax_vars, runner.logits, runner.mask)
+        reference_out = runner.reference_softmax(runner.logits, runner.mask, runner.scale_factor)
+        assert_allclose(module_out, reference_out, dtype=runner.dtype)
+
+
+# Run softmax primitives test
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h",
     [
@@ -165,7 +208,7 @@ class SoftmaxRunner:
         pytest.param(jnp.float16, id="FP16"),
     ],
 )
-class TestSoftmax:
+class TestSoftmaxPrimitives:
     """
     Test transformer_engine.jax.softmax.softmax
     """
@@ -175,7 +218,7 @@ class TestSoftmax:
         """
         Test forward with parameterized configs
         """
-        runner = SoftmaxRunner(b, s_q, s_kv, h, scale_factor, softmax_type, dtype)
+        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_type, dtype)
         runner.test_forward()
 
     @staticmethod
@@ -183,5 +226,48 @@ class TestSoftmax:
         """
         Test forward with parameterized configs
         """
-        runner = SoftmaxRunner(b, s_q, s_kv, h, scale_factor, softmax_type, dtype)
+        runner = SoftmaxPrimitivesRunner(b, s_q, s_kv, h, scale_factor, softmax_type, dtype)
         runner.test_backward()
+
+
+# Run Softmax module test
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h",
+    [
+        pytest.param(8, 16, 16, 16, id="8-16-16-16"),
+        pytest.param(8, 512, 512, 16, id="8-512-512-16"),
+        pytest.param(2, 8, 16384, 8, id="2-8-16384-8"),
+        # triggers backup framework implementation due to (s_q % 4) != 0
+        pytest.param(8, 511, 512, 16, id="8-511-512-16"),
+    ],
+)
+@pytest.mark.parametrize("scale_factor", [0.125])
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(SoftmaxType.SCALED, id="SCALED"),
+        pytest.param(SoftmaxType.SCALED_MASKED, id="SCALED_MASKED"),
+        pytest.param(SoftmaxType.SCALED_UPPER_TRIANG_MASKED, id="SCALED_UPPER_TRIANG_MASKED"),
+    ],
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
+class TestSoftmaxModule:
+    """
+    Test transformer_engine.jax.flax.module.Softmax
+    """
+
+    @staticmethod
+    def test_forward(b, s_q, s_kv, h, scale_factor, softmax_type, dtype):
+        """
+        Test forward with parameterized configs
+        """
+        module_runner = SoftmaxRunner(b, s_q, s_kv, h, scale_factor, softmax_type, dtype)
+        bias = None
+        runner = SoftmaxModuleRunner(module_runner, bias)
+        runner.test_forward()

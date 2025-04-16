@@ -38,6 +38,8 @@ void compute_ref(const InputType *data, OutputType *output_c, OutputType *output
   *amax = current_max;
 }
 
+
+// delayed tensor scaling test
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H) {
   using namespace test;
@@ -75,6 +77,7 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_t", output, ref_output_t.get(), false, atol, rtol);
 }
 
+
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {768, 1024},
                                                      {256, 65536},
@@ -101,6 +104,7 @@ TEST_P(CTTestSuite, TestCastTranspose) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+      // delayed tensor scaling
       performTest<InputType, OutputType>(size.first, size.second);
     );
   );

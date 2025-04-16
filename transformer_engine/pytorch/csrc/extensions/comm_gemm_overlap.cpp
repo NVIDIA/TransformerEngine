@@ -26,8 +26,7 @@ CommOverlapHelper::CommOverlapHelper() {
 }  // empty constructor for NVTE_UB_WITH_MPI=1
 
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     std::optional<c10d::ProcessGroup *> intra_domain_group,
-                                     std::optional<c10d::ProcessGroup *> inter_domain_group) {
+                                     std::optional<c10d::ProcessGroup *> intra_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
   pgs.insert({"world", world_group});
   myrank = pgs["world"]->getRank();
@@ -53,20 +52,9 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
       mynode = 0;
       numnodes = 1;
     } else {
-      // Intra-node group is different than the world group so there must be multiple nodes
-      NVTE_CHECK(
-          inter_domain_group.has_value(),
-          "Internal TE error: Inter-node group cannot be `None` when intra-node group is not ",
-          "identical to the world_group!");
-
       // Get node ID and number of nodes
-      NVTE_CHECK(
-          inter_domain_group.value()->getBackendType() == backend,
-          "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
-          "group!", pgs["world"]->getBackendName());
-      pgs.insert({"inter", inter_domain_group.value()});
-      mynode = pgs["inter"]->getRank();
-      numnodes = pgs["inter"]->getSize();
+      mynode = myrank / numlocal;
+      numnodes = numranks / numlocal;
     }
   } else {
     // Intra-node group is not set so we assume there is only 1 node
@@ -169,15 +157,15 @@ void CommOverlap::copy_into_buffer(py::handle input, py::handle quantizer, bool 
 
   char *ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr());
   if (local_chunk) {
-    if (input_tensor.numel() * _tp_size > (int64_t)_ubuf.numel())
+    if (input_tensor.numel() * _tp_size > _ubuf.numel())
       NVTE_ERROR("input is larger than the local communication buffer!");
-    if (input_tensor.element_size() != (int64_t)_ubuf.element_size())
+    if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
     ubuf_ptr += (_ubuf.numel() / _tp_size) * _tp_id * _ubuf.element_size();
   } else {
-    if (input_tensor.numel() > (int64_t)_ubuf.numel())
+    if (input_tensor.numel() > _ubuf.numel())
       NVTE_ERROR("input is larger than the global communication buffer!");
-    if (input_tensor.element_size() != (int64_t)_ubuf.element_size())
+    if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
   }
 
@@ -201,7 +189,7 @@ py::object CommOverlap::get_buffer(py::handle quantizer, bool local_chunk,
   std::vector<int64_t> torch_shape;
   if (shape.has_value()) {
     torch_shape = shape.value();
-    auto requested = product(torch_shape);
+    size_t requested = product(torch_shape);
     auto expected = local_chunk ? _ubuf.numel() / _tp_size : _ubuf.numel();
     NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
                ") does not match allocated buffer size (", expected, ")!");
@@ -265,18 +253,18 @@ void CommOverlapP2P::copy_into_buffer(py::handle input, py::handle quantizer, bo
   at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
   if (local_chunk) {
     // Copy input to the target ubuf chunk by rank offset
-    if (input_tensor.numel() * _tp_size > (int64_t)_ubuf.numel())
+    if (input_tensor.numel() * _tp_size > _ubuf.numel())
       NVTE_ERROR("input is larger than the local communication buffer!");
-    if (input_tensor.element_size() != (int64_t)_ubuf.element_size())
+    if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
     NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].dptr(), input_ptr,
                                     input_tensor.numel() * input_tensor.element_size(),
                                     cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
 
   } else {
-    if (input_tensor.numel() > (int64_t)_ubuf.numel())
+    if (input_tensor.numel() > _ubuf.numel())
       NVTE_ERROR("input is larger than the global communication buffer!");
-    if (input_tensor.element_size() != (int64_t)_ubuf.element_size())
+    if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
     NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubuf.dptr(), input_ptr,
                                     input_tensor.numel() * input_tensor.element_size(),
@@ -292,7 +280,7 @@ py::object CommOverlapP2P::get_buffer(py::handle quantizer, bool local_chunk,
   std::vector<int64_t> torch_shape;
   if (shape.has_value()) {
     torch_shape = shape.value();
-    auto requested = product(torch_shape);
+    size_t requested = product(torch_shape);
     auto expected = local_chunk ? _ubufs[_tp_id].numel() : _ubuf.numel();
     NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
                ") does not match allocated buffer size (", expected, ")!");

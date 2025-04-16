@@ -2,21 +2,22 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-from dataclasses import dataclass, replace
-from functools import partial, reduce
 import operator
 import os
-from typing import Optional, Tuple
 import warnings
+from dataclasses import dataclass, replace
+from functools import partial, reduce
+from typing import Optional, Tuple
+from packaging import version
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes, lax
-from jax.interpreters import mlir
-from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
+from jax.experimental.custom_partitioning import SdyShardingRule
 
+import transformer_engine_jax
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -26,19 +27,13 @@ from transformer_engine.jax.attention import (
     SequenceDescriptor,
 )
 
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
-
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
-    is_ffi_enabled,
-    get_xla_flag,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -48,7 +43,14 @@ from ..sharding import (
     get_mesh_axis_rank,
     get_all_mesh_axes,
     num_of_devices,
+    with_sharding_constraint,
 )
+
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -223,7 +225,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     Fused Attention Forward Primitive
     """
 
-    name = "te_fused_attn_forward"
+    name = "te_fused_attn_forward_ffi"
     multiple_results = True
     impl_static_args = (13,)
     inner_primitive = None
@@ -291,7 +293,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             # cuDNN 9.6 reduces the required softmax shape
             if get_cudnn_version() >= (9, 6, 0):
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                if config.qkv_layout.is_thd():
+                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                else:
+                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
             else:
                 softmax_shape = (
                     *batch_shape,
@@ -393,90 +398,40 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        if is_ffi_enabled():
-            name = "te_fused_attn_forward_ffi"
-            out = ffi.ffi_lowering(name)(
-                ctx,
-                q,
-                k,
-                v,
-                bias,
-                seed,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-                _q_segment_ids,
-                _kv_segment_ids,
-                _q_segment_pos,
-                _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-                input_batch=input_batch,
-                bias_batch=bias_batch,
-                q_max_seqlen=q_max_seqlen,
-                kv_max_seqlen=kv_max_seqlen,
-                attn_heads=attn_heads,
-                num_gqa_groups=num_gqa_groups,
-                bias_heads=bias_heads,
-                head_dim=head_dim,
-                max_segments_per_seq=config.max_segments_per_seq,
-                scaling_factor=float(config.scaling_factor),
-                dropout_probability=float(config.dropout_probability),
-                bias_type=int(config.attn_bias_type.value),
-                mask_type=int(config.attn_mask_type.value),
-                qkv_layout=int(config.qkv_layout.value),
-                is_training=config.is_training,
-                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-                window_size_left=config.window_size[0],
-                window_size_right=config.window_size[1],
-            )
-        else:
-            operands = [
-                q,
-                k,
-                v,
-                bias,
-                seed,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-            ]
-            operand_shapes = map(lambda x: x.type.shape, operands)
-            out_types = [
-                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
-                for output in ctx.avals_out
-            ]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            wkspace_aval = ctx.avals_out[-1]
-
-            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-                input_batch,
-                bias_batch,
-                q_max_seqlen,
-                kv_max_seqlen,
-                attn_heads,
-                num_gqa_groups,
-                bias_heads,
-                head_dim,
-                config.max_segments_per_seq,
-                wkspace_aval.size,
-                config.scaling_factor,
-                config.dropout_probability,
-                config.attn_bias_type,
-                config.attn_mask_type,
-                config.qkv_layout,
-                jax_dtype_to_te_dtype(q_aval.dtype),
-                jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                config.is_training,
-                not FusedAttnHelper.is_non_deterministic_allowed(),
-                config.window_size[0],
-                config.window_size[1],
-            )
-
-            out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
-
-        return out
+        return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            head_dim=head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=config.window_size[0],
+            window_size_right=config.window_size[1],
+        )
 
     @staticmethod
     def impl(
@@ -603,28 +558,49 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
+
+        # when supported softmax_aux shape is (b, s, h, 1) for thd on cudnn 9.6+
+        # otherwise softmax_aux shape is (b, h, s, 1) or (b, h, s, max_segments)
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+
         if config.qkv_layout.is_qkvpacked():
             # q_spec = (...batch, q_seqlen, 3, head, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-4], q_spec[-2], None)
+                )
         elif config.qkv_layout.is_kvpacked():
             # q_spec = (...batch, q_seqlen, head, hidden)
             # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+                )
         elif config.qkv_layout.is_separate():
             # q_spec = (...batch, q_seqlen, head, hidden)
             # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+                )
         else:
             raise ValueError(f"Unsupported {config.qkv_layout=}")
+
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
         return (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -644,6 +620,35 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
         return mesh, impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del mesh, result_types
+
+        # Keep in sync with `infer_sharding_from_operands`.
+        # We only need the first input. Fill up the rest with placeholders.
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        # The RNG state sharding cannot be expressed as a Shardy rule. We use with_sharding_constraint
+        # instead. This has to happen outside of the primitive, see `fused_attn_fwd`.
+        rng_sharding = (f"…{len(value_types)}",)
+
+        if config.qkv_layout.is_qkvpacked():
+            input_spec[0] = ("…0", "seqlen", "three", "head", "hidden")
+        elif config.qkv_layout.is_kvpacked() or config.qkv_layout.is_separate():
+            input_spec[0] = ("…0", "seqlen", "head", "hidden")
+        else:
+            raise ValueError(f"Unsupported {config.qkv_layout=}")
+
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        out_sharding = ("…0", "seqlen", "head", "hidden")
+        if is_packed_softmax:
+            softmax_aux_sharding = ("…0", "seqlen", "head", "i")
+        else:
+            softmax_aux_sharding = ("…0", "head", "seqlen", "i")
+
+        return SdyShardingRule(
+            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+        )
+
 
 register_primitive(FusedAttnFwdPrimitive)
 
@@ -653,7 +658,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     Fused Attention Backward Primitive
     """
 
-    name = "te_fused_attn_backward"
+    name = "te_fused_attn_backward_ffi"
     multiple_results = True
     impl_static_args = (16,)
     inner_primitive = None
@@ -785,96 +790,43 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        if is_ffi_enabled():
-            name = "te_fused_attn_backward_ffi"
-            out = ffi.ffi_lowering(name)(
-                ctx,
-                q,
-                k,
-                v,
-                bias,
-                softmax_aux,
-                rng_state,
-                output,
-                doutput,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-                q_segment_ids,
-                kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-                input_batch=input_batch,
-                bias_batch=bias_batch,
-                q_max_seqlen=q_max_seqlen,
-                kv_max_seqlen=kv_max_seqlen,
-                attn_heads=attn_heads,
-                num_gqa_groups=num_gqa_groups,
-                bias_heads=bias_heads,
-                head_dim=head_dim,
-                max_segments_per_seq=config.max_segments_per_seq,
-                scaling_factor=float(config.scaling_factor),
-                dropout_probability=float(config.dropout_probability),
-                bias_type=int(config.attn_bias_type.value),
-                mask_type=int(config.attn_mask_type.value),
-                qkv_layout=int(config.qkv_layout.value),
-                is_training=config.is_training,
-                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-                window_size_left=config.window_size[0],
-                window_size_right=config.window_size[1],
-            )
-        else:
-            operands = [
-                q,
-                k,
-                v,
-                bias,
-                softmax_aux,
-                rng_state,
-                output,
-                doutput,
-                q_cu_seqlen,
-                kv_cu_seqlen,
-                q_seq_offsets,
-                k_seq_offsets,
-            ]
-            operand_shapes = map(lambda x: x.type.shape, operands)
-            out_types = [
-                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
-                for output in ctx.avals_out
-            ]
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
-            wkspace_aval = ctx.avals_out[-1]
-
-            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-                input_batch,
-                bias_batch,
-                q_max_seqlen,
-                kv_max_seqlen,
-                attn_heads,
-                num_gqa_groups,
-                bias_heads,
-                head_dim,
-                config.max_segments_per_seq,
-                wkspace_aval.size,
-                config.scaling_factor,
-                config.dropout_probability,
-                config.attn_bias_type,
-                config.attn_mask_type,
-                config.qkv_layout,
-                jax_dtype_to_te_dtype(q_aval.dtype),
-                jax_dtype_to_te_dtype(wkspace_aval.dtype),
-                config.is_training,
-                not FusedAttnHelper.is_non_deterministic_allowed(),
-                config.window_size[0],
-                config.window_size[1],
-            )
-
-            out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
-
-        return out
+        return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            q_segment_ids,
+            kv_segment_ids,
+            q_segment_pos,
+            kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            head_dim=head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=config.window_size[0],
+            window_size_right=config.window_size[1],
+        )
 
     @staticmethod
     def impl(
@@ -1076,6 +1028,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             return local_dq, local_dk, local_dv, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        del config, mesh
+        # We only care about the four first arguments.
+        # Keep in sync with `infer_sharding_from_operands`.
+        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
+        return SdyShardingRule(input_spec, output_spec)
 
 
 register_primitive(FusedAttnBwdPrimitive)
@@ -1607,14 +1568,7 @@ class _FusedAttnCPWithP2PHelper:
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
         use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "1")))
-
-        # nvbug(4675071): Disable the HLO verifier for channel ID checks.
-        # A WAR was added to XLA: https://github.com/openxla/xla/pull/16779
-        def truthy(val):
-            return val.lower() in ["1", "true"]
-
-        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
-        return x
+        return use_scan
 
     def check_supported(self):
         """Checks if the context parallel implementation is supported by the given arguments."""
@@ -1659,8 +1613,7 @@ class _FusedAttnCPWithP2PHelper:
         if not self.use_scanloop():
             warnings.warn(
                 "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment and"
-                " add --xla_experimental_ignore_channel_id=true to XLA_FLAGS."
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
             )
 
     def get_step_config(self, attn_mask_type) -> _FusedAttnConfig:
@@ -2240,7 +2193,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     subblock_config,
                 )
 
-                # TODO(rewang): THD softmax_aux layout is acutally [B, S, H]
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
                 def skip_correction(_output, _softmax_aux, output_per_step, softmax_aux_per_step):
@@ -2275,8 +2227,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
             (_, _, _, output, softmax_aux) = carry
-
-            softmax_aux = softmax_aux.reshape((batch, head, q_max_seqlen, 1))
 
             return output.astype(q.dtype), softmax_aux, rng_state
 
@@ -2526,13 +2476,15 @@ def fused_attn_fwd(
                 primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
     seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
-    return primitive.bind(
+    output, softmax_aux, rng_state = primitive.bind(
         *qkv_for_primitive,
         bias,
         seed,
         *seq_desc_flatten,
         config=fused_config,
     )
+    rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+    return (output, softmax_aux, rng_state)
 
 
 def fused_attn_bwd(

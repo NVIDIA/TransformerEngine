@@ -6,6 +6,7 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstring>
 #include <iostream>
 
 #include "common.h"
@@ -150,8 +151,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
-    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      NVTE_CHECK(t.amax.dptr != nullptr, "FP8 output ", name, " must have amax tensor");
+    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && t.amax.dptr != nullptr) {
       NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Invalid amax dtype (expected ",
                  to_string(DType::kFloat32), ", got ", to_string(t.amax.dtype), ")");
       NVTE_CHECK(product(t.amax.shape) == 1, "Invalid shape of amax in output ", name,
@@ -212,37 +212,24 @@ NVTEDType nvte_tensor_type(const NVTETensor tensor) {
 }
 
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
-  if (tensor == nullptr) return {nullptr, 0};
+  if (tensor == nullptr) {
+    NVTE_ERROR("Invalid tensor");
+  }
+
+  // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  const std::vector<size_t> &rowwise_shape = t.rowwise_shape_ref();
+
   NVTEShape ret;
-
-  // FP8 tensor keeps shape in rowwise data
-  if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-    ret.data = t.data.shape.data();
-    ret.ndim = t.data.shape.size();
-    return ret;
-  }
-
-  // Get shape based on what data is available
-  if (t.has_data()) {
-    ret.data = t.data.shape.data();
-    ret.ndim = t.data.shape.size();
-    return ret;
-  }
-  if (t.has_columnwise_data()) {
-    ret.data = t.columnwise_data.shape.data();
-    ret.ndim = t.columnwise_data.shape.size();
-    return ret;
-  }
-
-  // Tensor has no data
-  ret.data = t.data.shape.data();
-  ret.ndim = t.data.shape.size();
+  ret.data = rowwise_shape.data();
+  ret.ndim = rowwise_shape.size();
   return ret;
 }
 
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
-  if (tensor == nullptr) return {nullptr, 0};
+  if (tensor == nullptr) {
+    NVTE_ERROR("Invalid tensor");
+  }
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   NVTEShape ret;
   ret.data = t.columnwise_data.shape.data();
@@ -250,25 +237,20 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   return ret;
 }
 
-size_t nvte_tensor_ndim(const NVTETensor tensor) {
-  if (tensor == nullptr) return 0;
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return t.data.shape.size();
-}
+size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(tensor).ndim; }
 
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
-  if (tensor == nullptr) return 0;
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  NVTE_CHECK(dim >= 0 && dim < t.data.shape.size(), "Invalid dimension index: ", dim);
-  return t.data.shape[dim];
+  const auto &shape = nvte_tensor_shape(tensor);
+  NVTE_CHECK(0 <= dim && dim < shape.ndim, "Attempted to access index ", dim,
+             " in a shape array with ", shape.ndim, " entries");
+  return shape.data[dim];
 }
 
 size_t nvte_tensor_numel(const NVTETensor tensor) {
-  if (tensor == nullptr) return 0;
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  const auto &shape = nvte_tensor_shape(tensor);
   size_t numel = 1;
-  for (auto size : t.data.shape) {
-    numel *= size;
+  for (size_t i = 0; i < shape.ndim; i++) {
+    numel *= shape.data[i];
   }
   return numel;
 }
@@ -407,8 +389,88 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    float zero = 0.0f;
-    cudaMemcpyAsync(t.amax.dptr, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
+    cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
   }
-  cudaStreamSynchronize(stream);
+}
+
+NVTEQuantizationConfig nvte_create_quantization_config() {
+  return new transformer_engine::QuantizationConfig;
+}
+
+void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr, void *buf,
+                                            size_t size_in_bytes, size_t *size_written) {
+  // Write attribute size
+  NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
+             "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
+  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  *size_written = attr_size;
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for quantization config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+
+  // Write to buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
+  const auto &config_ = *reinterpret_cast<const transformer_engine::QuantizationConfig *>(config);
+  switch (attr) {
+    case kNVTEQuantizationConfigForcePow2Scales:
+      std::memcpy(buf, &config_.force_pow_2_scales, attr_size);
+      break;
+    case kNVTEQuantizationConfigAmaxEpsilon:
+      std::memcpy(buf, &config_.amax_epsilon, attr_size);
+      break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(buf, &config_.noop_tensor, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr, const void *buf,
+                                            size_t size_in_bytes) {
+  // Check attribute and buffer
+  NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
+             "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for quantization config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
+  auto &config_ = *reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
+  switch (attr) {
+    case kNVTEQuantizationConfigForcePow2Scales:
+      std::memcpy(&config_.force_pow_2_scales, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigAmaxEpsilon:
+      std::memcpy(&config_.amax_epsilon, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(&config_.noop_tensor, buf, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
+  if (config != nullptr) {
+    delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
+  }
 }

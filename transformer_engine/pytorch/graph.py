@@ -91,6 +91,14 @@ def _make_graphed_callables(
         sample_args = (sample_args,)
         sample_kwargs = (sample_kwargs,)
 
+    # Check training/inference
+    is_training = all(c.training for c in callables)
+    if not is_training and any(c.training for c in callables):
+        assert False, (
+            "make_graphed_callables only supports when modules are all in training or all in"
+            " inference mode."
+        )
+
     # Check sizes of args
     if _order is None:
         assert len(sample_args) == len(callables)
@@ -255,13 +263,16 @@ def _make_graphed_callables(
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
-                grad_inputs = torch.autograd.grad(
-                    outputs=tuple(o for o in outputs if o.requires_grad),
-                    inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                    grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
-                    only_inputs=True,
-                    allow_unused=allow_unused_input,
-                )
+                if is_training:
+                    grad_inputs = torch.autograd.grad(
+                        outputs=tuple(o for o in outputs if o.requires_grad),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                        grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
+                        only_inputs=True,
+                        allow_unused=allow_unused_input,
+                    )
+                else:
+                    grad_inputs = None
                 del outputs, grad_inputs
             # The following code is added specifically for MCore's special requirements,
             # aimed at preventing warmup from altering the control flow.
@@ -314,22 +325,23 @@ def _make_graphed_callables(
                     static_grad_outputs = tuple(
                         torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                     )
-                    with torch.cuda.graph(bwd_graph, pool=mempool):
-                        grad_inputs = torch.autograd.grad(
-                            outputs=tuple(o for o in static_outputs if o.requires_grad),
-                            inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                            grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                            only_inputs=True,
-                            allow_unused=allow_unused_input,
-                            retain_graph=retain_graph_in_backward,
-                        )
+                    if is_training:
+                        with torch.cuda.graph(bwd_graph, pool=mempool):
+                            grad_inputs = torch.autograd.grad(
+                                outputs=tuple(o for o in static_outputs if o.requires_grad),
+                                inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                                grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
+                                only_inputs=True,
+                                allow_unused=allow_unused_input,
+                                retain_graph=retain_graph_in_backward,
+                            )
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
                     static_grad_inputs = []
                     grad_idx = 0
                     for arg in static_input_surface:
-                        if arg.requires_grad:
+                        if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                             static_grad_inputs.append(grad_inputs[grad_idx])
                             grad_idx += 1
                         else:
@@ -366,22 +378,23 @@ def _make_graphed_callables(
             static_grad_outputs = tuple(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
-            with torch.cuda.graph(bwd_graph, pool=mempool):
-                grad_inputs = torch.autograd.grad(
-                    outputs=tuple(o for o in static_outputs if o.requires_grad),
-                    inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                    grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                    only_inputs=True,
-                    allow_unused=allow_unused_input,
-                    retain_graph=retain_graph_in_backward,
-                )
+            if is_training:
+                with torch.cuda.graph(bwd_graph, pool=mempool):
+                    grad_inputs = torch.autograd.grad(
+                        outputs=tuple(o for o in static_outputs if o.requires_grad),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                        grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
+                        only_inputs=True,
+                        allow_unused=allow_unused_input,
+                        retain_graph=retain_graph_in_backward,
+                    )
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.
             static_grad_inputs = []
             grad_idx = 0
             for arg in static_input_surface:
-                if arg.requires_grad:
+                if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                     static_grad_inputs.append(grad_inputs[grad_idx])
                     grad_idx += 1
                 else:
@@ -422,7 +435,10 @@ def _make_graphed_callables(
 
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
-                    if static_input_surface[i].data_ptr() != inputs[i].data_ptr():
+                    if (
+                        isinstance(static_input_surface[i], torch.Tensor)
+                        and static_input_surface[i].data_ptr() != inputs[i].data_ptr()
+                    ):
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph

@@ -333,7 +333,7 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
   const transformer_engine::Tensor *input_fwd_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_permute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                             reinterpret_cast<T *>(output_cu->data.dptr),
@@ -359,7 +359,7 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
   const transformer_engine::Tensor *prob_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(prob);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_unpermute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                               reinterpret_cast<T *>(output_cu->data.dptr),
