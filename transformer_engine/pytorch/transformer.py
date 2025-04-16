@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention import (
     MultiheadAttention,
 )
@@ -33,6 +34,7 @@ from transformer_engine.pytorch.constants import (
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
@@ -184,6 +186,8 @@ class TransformerLayer(torch.nn.Module):
                          head size. Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
+    name: str, default = `None`
+        name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
@@ -277,6 +281,7 @@ class TransformerLayer(torch.nn.Module):
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -336,6 +341,8 @@ class TransformerLayer(torch.nn.Module):
 
         self.attn_input_format = attn_input_format
 
+        self.name = name
+
         attention_args = (
             hidden_size,
             num_attention_heads,
@@ -376,6 +383,7 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
+            name=name + ".self_attention" if name is not None else None,
         )
 
         if layer_type == "decoder":
@@ -389,6 +397,7 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
+                name=name + ".inter_attention" if name is not None else None,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -423,6 +432,7 @@ class TransformerLayer(torch.nn.Module):
             activation=activation,
             normalization=normalization,
             device=device,
+            name=name + ".layernorm_mlp" if name is not None else None,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -678,6 +688,9 @@ class TransformerLayer(torch.nn.Module):
             assert all(
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
+
+        if TEDebugState.debug_enabled:
+            TransformerEngineBaseModule._validate_name(self)
 
         # For AMP
         if torch.is_autocast_enabled():

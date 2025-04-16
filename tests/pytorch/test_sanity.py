@@ -42,6 +42,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.distributed import checkpoint
 from test_numerics import reset_rng_states, dtype_tols
 
 # Only run FP8 tests on supported devices.
@@ -553,14 +554,10 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
             pytest.skip(reason_for_no_fp8_block_scaling)
-        if fp8_recipe.mxfp8():
-            pytest.skip("Grouped linear does not support MXFP8")
-        if fp8_recipe.float8_current_scaling():
-            pytest.skip("Grouped linear does not support FP8 current scaling")
-        if fp8_recipe.float8_block_scaling():
-            pytest.skip("Grouped linear does not support FP8 block scaling")
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -1289,3 +1286,31 @@ def test_fp8_model_init_high_precision_init_val():
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
+
+
+def test_sanity_checkpointing_on_callables():
+    """Test that TE checkpointing works correctly on callable modules."""
+
+    # torch.autograf.function
+    class MyFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp):
+            return inp
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output
+
+    module = MyFunction.apply
+    inp = torch.randn(10, 10, device="cuda", requires_grad=True)
+
+    out_checkpoint = checkpoint(module, inp)
+    out_checkpoint.sum().backward()
+    grad_checkpoint = inp.grad
+
+    out_standard = module(inp)
+    out_standard.sum().backward()
+    grad_standard = inp.grad
+
+    # Assert that gradients are the same
+    torch.testing.assert_close(grad_checkpoint, grad_standard)
