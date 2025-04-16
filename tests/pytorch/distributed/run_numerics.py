@@ -299,9 +299,11 @@ def _loss_backward(output_single_node, output_distributed):
     LOSS_FN(output_single_node, target).backward()
     LOSS_FN(output_distributed, target).backward()
 
+
 def _loss_backward_dw(model_single_node, model_distributed):
     model_single_node.backward_dw()
     model_distributed.backward_dw()
+
 
 def _alloc_main_grad(model_single_node, model_distributed):
     for model in [model_single_node, model_distributed]:
