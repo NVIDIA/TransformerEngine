@@ -162,7 +162,7 @@ System Requirements
 
 * **Source Build Requirements:** CMake 3.18+, Ninja, Git 2.17+, pybind11 2.6.0+
 
-* **Notes:** FP8 features require Compute Capability 8.9+ (Hopper/Blackwell)
+* **Notes:** FP8 features require Compute Capability 8.9+ (Ada/Hopper/Blackwell)
 
 Installation Methods
 ^^^^^^^^^^^^^^^^^^^
