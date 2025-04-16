@@ -17,9 +17,9 @@ from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
-    MultiheadAttention,
     _attention_backends,
 )
+from transformer_engine.pytorch.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.dot_product_attention.utils import (
     FlashAttentionUtils,
     get_attention_backend,
