@@ -16,10 +16,11 @@ from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
+from common import is_bf16_supported, get_fp8_recipe_from_name_string
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
-from common import is_bf16_supported
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
@@ -59,7 +60,7 @@ class Net(nn.Module):
         return x
 
 
-@partial(jax.jit)
+@jax.jit
 def train_step(state, inputs, masks, labels, var_collect, rngs):
     """Computes gradients, loss and accuracy for a single batch."""
 
@@ -195,9 +196,8 @@ def get_datasets(max_seq_len):
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
     rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
-    assert "fp8_" in str(
-        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs)
-    )
+    func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
+    assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
 
 def train_and_evaluate(args):
@@ -214,7 +214,12 @@ def train_and_evaluate(args):
     mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
     label_shape = [args.batch_size]
 
-    with te.fp8_autocast(enabled=args.use_fp8):
+    if args.use_fp8:
+        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+    else:
+        fp8_recipe = None
+
+    with te.fp8_autocast(enabled=args.use_fp8, fp8_recipe=fp8_recipe):
         encoder = Net(num_embed)
         # We use nn.Embed, thus inputs need to be in int
         inputs = jnp.zeros(input_shape, dtype=jnp.int32)
@@ -309,6 +314,12 @@ def encoder_parser(args):
         default=False,
         help="Use FP8 for inference and training without recalibration",
     )
+    parser.add_argument(
+        "--fp8-recipe",
+        action="store_true",
+        default="DelayedScaling",
+        help="Use FP8 recipe (default: DelayedScaling)",
+    )
 
     return parser.parse_args(args)
 
@@ -316,12 +327,12 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
-    @classmethod
-    def setUpClass(cls):
-        """Run 4 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3"])
+    def setUp(self):
+        """Run 3 epochs for testing"""
+        self.args = encoder_parser(["--epochs", "3"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
@@ -329,10 +340,19 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79
 
-    @unittest.skipIf(not gpu_has_fp8, reason)
-    def test_te_fp8(self):
-        """Test Transformer Engine with FP8"""
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_delayed_scaling_fp8(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
         self.args.use_fp8 = True
+        self.args.fp8_recipe = "DelayedScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.455 and actual[1] > 0.79
+
+    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
+    def test_te_mxfp8(self):
+        """Test Transformer Engine with MXFP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.455 and actual[1] > 0.79
 
