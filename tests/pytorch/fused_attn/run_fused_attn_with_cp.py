@@ -2,17 +2,20 @@
 #
 # See LICENSE for license information.
 
-import os, sys, logging
+import logging
+import os
+import sys
 from contextlib import nullcontext
+
 import torch
 import torch.distributed as dist
-from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
-import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
-from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.attention import DotProductAttention, get_cu_seqlens_on_cp_rank
+from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 

@@ -10,30 +10,20 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
-from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import (
-    MultiheadAttention,
-)
+from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.constants import AttnMaskTypes, LayerTypes, dist_group_type
+from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.dot_product_attention.utils import check_set_window_size
 from transformer_engine.pytorch.jit import (
+    bias_dropout_add_fused_inference,
+    bias_dropout_add_fused_train,
+    get_bias_dropout_add,
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
-    get_bias_dropout_add,
-    bias_dropout_add_fused_train,
-    bias_dropout_add_fused_inference,
 )
-from transformer_engine.pytorch.utils import (
-    cast_if_needed,
-    get_default_init_method,
-)
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    LayerTypes,
-    dist_group_type,
-)
-from transformer_engine.pytorch.distributed import get_distributed_world_size
-
+from transformer_engine.pytorch.module import LayerNorm, LayerNormMLP, RMSNorm
+from transformer_engine.pytorch.utils import cast_if_needed, get_default_init_method
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 

@@ -4,17 +4,17 @@
 
 """Internal function used by multiple modules."""
 
-from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
-from ..utils import get_default_init_method
 from ..tensor.float8_tensor import Float8Tensor
+from ..utils import get_default_init_method
 
 
 def _get_normalization_func(normalization: str, forward: bool):

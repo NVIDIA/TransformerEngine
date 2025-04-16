@@ -4,84 +4,80 @@
 
 """Attention."""
 import collections
-from contextlib import nullcontext
-from importlib.metadata import version as get_pkg_version
-from importlib.metadata import PackageNotFoundError
+import logging
 import math
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
-import logging
+from contextlib import nullcontext
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_pkg_version
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import torch
 from packaging.version import Version as PkgVersion
 
-import torch
-
+# Import attention utils
+import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.utils import (
-    get_cudnn_version,
-    nvtx_range_pop,
-    nvtx_range_push,
+from transformer_engine.pytorch.constants import (
+    AttnBiasTypes,
+    AttnMaskTypes,
+    AttnTypes,
+    QKVLayouts,
+    TE_DType,
+    dist_group_type,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
-    FusedAttnBackend,
-    META_QKV,
     META_O,
+    META_QKV,
+    FusedAttnBackend,
+    fused_attn_bwd,
+    fused_attn_fwd,
 )
+from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
+    checkpoint,
+    gather_along_first_dim,
+    get_distributed_rank,
+    get_distributed_world_size,
+    graph_safe_rng_available,
+    reduce_scatter_along_first_dim,
+    set_all_rng_states,
+)
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
+from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
     get_fp8_torch_dtype,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import (
-    divide,
-    attention_mask_func,
-    split_tensor_along_dim,
-    get_device_compute_capability,
-    get_default_init_method,
-)
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    AttnBiasTypes,
-    QKVLayouts,
-    dist_group_type,
-    TE_DType,
-)
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    get_distributed_rank,
-    checkpoint,
-    set_all_rng_states,
-    CudaRNGStatesTracker,
-    graph_safe_rng_available,
-    gather_along_first_dim,
-    reduce_scatter_along_first_dim,
-)
-from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
-from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    divide,
+    get_cudnn_version,
+    get_default_init_method,
+    get_device_compute_capability,
+    nvtx_range_pop,
+    nvtx_range_push,
+    split_tensor_along_dim,
+)
 
-# Import attention utils
-import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
-from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
 from .cpu_offload import set_offloading_param
-
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -106,16 +102,16 @@ else:
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
-        )
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
@@ -141,6 +137,8 @@ try:
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
+    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
@@ -148,8 +146,6 @@ else:
     from flash_attn_3.flash_attn_interface import (
         flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
     )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
 

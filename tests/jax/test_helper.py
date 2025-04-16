@@ -8,12 +8,12 @@ import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from utils import assert_allclose
+
 from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.common.recipe import Format as FP8Format
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
-from transformer_engine.jax.quantize import QuantizeConfig, is_fp8_available, AmaxComputeAlgo
+from transformer_engine.jax.quantize import AmaxComputeAlgo, QuantizeConfig, is_fp8_available
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource
 
 is_fp8_supported, reason = is_fp8_available()

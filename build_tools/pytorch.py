@@ -8,11 +8,7 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import (
-    all_files_in_dir,
-    cuda_archs,
-    cuda_version,
-)
+from .utils import all_files_in_dir, cuda_archs, cuda_version
 
 
 def setup_pytorch_extension(

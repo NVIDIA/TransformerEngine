@@ -7,31 +7,23 @@
 # pylint: skip-file  ### TODO Debug Userbuffers support
 
 from __future__ import annotations
+
 from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine_torch import CommOverlapAlgo
+
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import get_ub, get_workspace
 from ...utils import canonicalize_device, canonicalize_dtype
+from .._common import convert_tensor, get_fp8_meta_from_fp8_tensor, is_float8_tensor, reshape
 from ..basic import BasicLinear, Bias, ReduceScatter
-from ..op import (
-    BasicOperation,
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
-from .._common import (
-    convert_tensor,
-    get_fp8_meta_from_fp8_tensor,
-    is_float8_tensor,
-    reshape,
-)
+from ..op import BasicOperation, FusedOperation, FusibleOperation, OperationContext
 
 
 class UserbuffersForwardLinear(FusedOperation):

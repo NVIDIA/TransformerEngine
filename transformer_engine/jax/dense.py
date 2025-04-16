@@ -9,17 +9,14 @@ It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
 """
 
-from typing import Tuple, Sequence
 from functools import partial
+from typing import Sequence, Tuple
+
 import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-from .quantize import (
-    QuantizerSet,
-    noop_quantizer_set,
-    with_sharding_constraint_by_logical_axes,
-)
+from .quantize import QuantizerSet, noop_quantizer_set, with_sharding_constraint_by_logical_axes
 
 
 def dense(

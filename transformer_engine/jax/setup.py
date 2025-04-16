@@ -21,9 +21,9 @@ behaviors for:
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import sys
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import setuptools
@@ -44,9 +44,9 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers, install_and_import
-from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
+from build_tools.te_version import te_version
+from build_tools.utils import copy_common_headers, install_and_import
 
 install_and_import("pybind11")
 from pybind11.setup_helpers import build_ext as BuildExtension

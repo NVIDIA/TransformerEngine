@@ -5,15 +5,16 @@
 """MoE Permutaion API"""
 import warnings
 from typing import Optional, Tuple
+
 import torch
 
-import transformer_engine_torch as tex
 import transformer_engine.pytorch.triton.permutation as triton_permutation
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 __all__ = [
     "moe_permute",

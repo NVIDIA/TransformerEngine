@@ -5,26 +5,42 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
 from torch.nn import init
 
 import transformer_engine_torch as tex
-
 from transformer_engine.common.recipe import Recipe
-from .base import (
-    get_workspace,
-    get_ub,
-    TransformerEngineBaseModule,
-    get_dummy_wgrad,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
+
+from ..constants import GemmParallelModes, dist_group_type
+from ..cpp_extensions import general_gemm
+from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..distributed import (
+    _fsdp_gather_tensors,
+    _fsdp_scatter_tensors,
+    allreduce,
+    gather_along_first_dim,
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    reduce_scatter_along_first_dim,
+    set_tensor_model_parallel_attributes,
 )
 from ..fp8 import FP8GlobalStateManager
+from ..graph import is_graph_capturing
+from ..jit import no_torch_dynamo
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    prepare_for_saving,
+    restore_from_saved,
+)
 from ..utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
@@ -36,34 +52,15 @@ from ..utils import (
     nvtx_range_push,
     requires_grad,
 )
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-    _fsdp_gather_tensors,
-)
-from ..constants import GemmParallelModes, dist_group_type
-from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, _fix_gathered_fp8_transpose
-from ..tensor.quantized_tensor import (
-    QuantizedTensor,
-    Quantizer,
-    prepare_for_saving,
-    restore_from_saved,
-)
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-
-from ..cpp_extensions import (
-    general_gemm,
+from ._common import _fix_gathered_fp8_transpose, apply_normalization, noop_cat
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    get_dummy_wgrad,
+    get_ub,
+    get_workspace,
 )
 
 __all__ = ["LayerNormLinear"]

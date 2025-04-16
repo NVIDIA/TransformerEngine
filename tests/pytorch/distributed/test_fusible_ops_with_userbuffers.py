@@ -19,14 +19,11 @@ import torch
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
+import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
-from transformer_engine.pytorch.ops.fused import (
-    UserbuffersBackwardLinear,
-    UserbuffersForwardLinear,
-)
+from transformer_engine.pytorch.ops.fused import UserbuffersBackwardLinear, UserbuffersForwardLinear
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions

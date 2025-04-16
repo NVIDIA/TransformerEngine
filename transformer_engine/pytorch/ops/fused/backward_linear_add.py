@@ -5,16 +5,14 @@
 """Fused backward dgrad GEMM + add."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
 from transformer_engine.pytorch.ops.basic import BasicLinear, MakeExtraOutput
-from transformer_engine.pytorch.ops.op import (
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from transformer_engine.pytorch.ops.op import FusedOperation, FusibleOperation, OperationContext
+
 from ...utils import clear_tensor_data
 
 
