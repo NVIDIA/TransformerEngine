@@ -253,7 +253,7 @@ class Float8BlockwiseQTensorBase:
             self._columnwise_scale_inv = torch.empty(
                 columnwise_scale_inv_shape,
                 dtype=self._rowwise_scale_inv.dtype,
-                device=self._rowwise_scale_inv.device
+                device=self._rowwise_scale_inv.device,
             )
         assert len(self._rowwise_scale_inv.shape) == 2
         assert len(self._columnwise_scale_inv.shape) == 2
