@@ -419,7 +419,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
   // It's necessary to handle out and lse differently because their formats maybe different.
   QKVIndexCalculator<out_format> out_calculator(batch, lse_seqlen, num_heads, dim_per_head,
-                                                 num_total_tokens,cu_seqlens_s);
+                                                num_total_tokens, cu_seqlens_s);
   LseIndexCalculator<out_format, softmax_lse_in_packed_format> lse_calculator(
       batch, lse_seqlen, num_heads, num_total_tokens, cu_seqlens_s);
 
