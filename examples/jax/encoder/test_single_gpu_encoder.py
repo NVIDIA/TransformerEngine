@@ -330,10 +330,9 @@ class TestEncoder(unittest.TestCase):
     is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
     is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
-    @classmethod
-    def setUpClass(cls):
-        """Run 4 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3"])
+    def setUp(self):
+        """Run 3 epochs for testing"""
+        self.args = encoder_parser(["--epochs", "3"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
