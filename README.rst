@@ -285,7 +285,7 @@ Troubleshooting
      .. code-block:: bash
 
          cd transformer_engine
-         pip install -v -v -v .
+         pip install -v -v -v --no-build-isolation .
 
 Reference: https://github.com/NVIDIA/TransformerEngine/issues/355#issuecomment-2394353816
 
