@@ -19,7 +19,11 @@ from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
-from transformer_engine.jax.cpp_extensions.normalization import _jax_layernorm, _jax_rmsnorm
+from transformer_engine.jax.cpp_extensions.normalization import (
+    _jax_layernorm,
+    _jax_rmsnorm,
+    is_norm_zero_centered_gamma_in_weight_dtype,
+)
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
@@ -421,7 +425,12 @@ class TestNorm:
             )
             ref_mu = None
 
-        assert_bitwise_scaled_tensors(output, ref_out)
+        if is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
+            # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
+            # for zero-centered gamma always
+            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+        else:
+            assert_bitwise_scaled_tensors(output, ref_out)
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
             assert_allclose(mu, ref_mu, dtype=inp_dtype)

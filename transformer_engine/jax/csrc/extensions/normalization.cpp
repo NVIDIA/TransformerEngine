@@ -24,7 +24,7 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
 
   // empty tensor wrappers are okay just to get workspace size
   auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, in_dtype);
+  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
   auto rsigma_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
