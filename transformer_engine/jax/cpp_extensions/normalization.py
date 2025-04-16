@@ -146,6 +146,10 @@ class NormFwdPrimitive(BasePrimitive):
 
         if norm_type == NVTE_Norm_Type.LayerNorm:
             assert gamma_aval.size == beta_aval.size
+            assert gamma_aval.dtype == beta_aval.dtype, (
+                f"gamma and beta should have the same dtype, but got {gamma_aval.dtype} and "
+                f"{beta_aval.dtype}"
+            )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
@@ -972,10 +976,10 @@ def layernorm_fwd(
         mu,
         rsigma,
     ) = NormFwdPrimitive.outer_primitive.bind(
-        x.astype(jnp.float32),
+        x,
         scale,
-        gamma.astype(jnp.float32),
-        beta.astype(jnp.float32),
+        gamma,
+        beta,
         norm_type=NVTE_Norm_Type.LayerNorm,
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
@@ -1155,8 +1159,8 @@ def rmsnorm_fwd(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
         out, rsigma = rmsnorm_fwd(
-            x=x,
-            gamma=gamma,
+            x=x.astype(jnp.float32),
+            gamma=gamma.astype(jnp.float32),
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             quantizer=None,
@@ -1180,10 +1184,10 @@ def rmsnorm_fwd(
         _,
         rsigma,
     ) = NormFwdPrimitive.outer_primitive.bind(
-        x.astype(jnp.float32),
+        x,
         scale,
-        gamma.astype(jnp.float32),
-        beta.astype(jnp.float32),
+        gamma,
+        beta,
         norm_type=NVTE_Norm_Type.RMSNorm,
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,

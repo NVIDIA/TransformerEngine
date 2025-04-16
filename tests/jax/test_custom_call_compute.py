@@ -19,7 +19,11 @@ from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
-from transformer_engine.jax.cpp_extensions.normalization import _jax_layernorm, _jax_rmsnorm
+from transformer_engine.jax.cpp_extensions.normalization import (
+    _jax_layernorm,
+    _jax_rmsnorm,
+    is_norm_zero_centered_gamma_in_weight_dtype,
+)
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
@@ -425,6 +429,10 @@ class TestNorm:
         if get_cudnn_version() < (9, 10, 0):
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
+            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+        elif is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
+            # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
+            # for zero-centered gamma always
             assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
         else:
             assert_bitwise_scaled_tensors(output, ref_out)
