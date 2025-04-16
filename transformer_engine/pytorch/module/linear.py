@@ -700,7 +700,7 @@ class _Linear(torch.autograd.Function):
                         dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)
 
             # Don't return grad bias if not needed
-            if not ctx.use_bias or (ctx.wgrad_store is not None and ctx.wgrad_store.split_bw()):
+            if not ctx.use_bias:
                 grad_bias = None
 
             # Make sure all tensor-parallel communication is finished
@@ -1298,13 +1298,3 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-
-    def backward_dw(self):
-        """
-        Execute the delayed weight gradient computation.
-        This method is called after the main backward pass to compute weight gradients.
-        """
-        if self.wgrad_store is None or not self.wgrad_store.split_bw():
-            return
-        with torch.cuda.nvtx.range("_Linear_wgrad"):
-            super().backward_dw()

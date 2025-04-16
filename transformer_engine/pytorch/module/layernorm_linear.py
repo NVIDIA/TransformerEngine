@@ -781,7 +781,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad = ub_obj_wgrad.get_buffer(None, local_chunk=True)
 
             # Don't return grad bias if not needed
-            if not ctx.use_bias or (ctx.wgrad_store is not None and ctx.wgrad_store.split_bw()):
+            if not ctx.use_bias:
                 grad_bias = None
 
             # Synchronize tensor parallel communication
@@ -1492,13 +1492,3 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.quantizers["scaling_bwd"][
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-
-    def backward_dw(self):
-        """
-        Execute the delayed weight gradient computation.
-        This method is called after the main backward pass to compute weight gradients.
-        """
-        if self.wgrad_store is None or not self.wgrad_store.split_bw():
-            return
-        with torch.cuda.nvtx.range("_LayerNormLinear_wgrad"):
-            super().backward_dw()

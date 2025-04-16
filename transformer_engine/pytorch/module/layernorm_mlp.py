@@ -804,7 +804,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
                     ctx.wgrad_store.put([act_out, grad_output], general_gemm_fc2_wgrad)
                     fc2_wgrad = None
-                    fc2_bias_grad = None
+                    # if fc2_bias is not None and fc2_bias_grad is None:
+                        # fc2_bias_grad = None
                 else:
                     fc2_wgrad, fc2_bias_grad_, *_ = general_gemm_fc2_wgrad(
                         act_out,
@@ -1751,7 +1752,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 if self.fc2_bias.grad is None:
                     if (
                         self.fp8
-                        and self.fp8_recipe.float8_block_scaling()
+                        and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
                         and self.apply_bias
                         and not self.gemm_bias_unfused_add
                     ):
