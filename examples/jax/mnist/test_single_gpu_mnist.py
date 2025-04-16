@@ -5,6 +5,8 @@
 import argparse
 import unittest
 from functools import partial
+import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +18,11 @@ from flax.training import train_state
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+
+DIR = str(Path(__file__).resolve().parents[1])
+sys.path.append(str(DIR))
+from encoder.common import is_bf16_supported, get_fp8_recipe_from_name_string
 
 IMAGE_H = 28
 IMAGE_W = 28
@@ -36,6 +43,9 @@ class Net(nn.Module):
             nn_Dense = te_flax.DenseGeneral
         else:
             nn_Dense = nn.Dense
+        # dtype is used for param init in TE but computation in Linen.nn
+
+        dtype = jnp.float32 if self.use_te else jnp.bfloat16
 
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=1, dtype=jnp.bfloat16)(x)
         x = nn.relu(x)
@@ -44,11 +54,13 @@ class Net(nn.Module):
         x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2))
         x = nn.Dropout(rate=0.25)(x, deterministic=disable_dropout)
         x = x.reshape(x.shape[0], -1)
-        x = nn_Dense(features=128, dtype=jnp.bfloat16)(x)
+        assert x.dtype == jnp.bfloat16
+        x = nn_Dense(features=128, dtype=dtype)(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=0.5)(x, deterministic=disable_dropout)
-        x = nn_Dense(features=16, dtype=jnp.bfloat16)(x)
-        x = nn.Dense(features=10, dtype=jnp.bfloat16)(x)
+        x = nn_Dense(features=32, dtype=dtype)(x)
+        x = nn_Dense(features=32, dtype=dtype)(x)
+        assert x.dtype == jnp.bfloat16
         return x
 
 
@@ -58,7 +70,7 @@ def apply_model(state, images, labels, var_collect, rngs=None):
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, images, disable_dropout, rngs=rngs)
-        one_hot = jax.nn.one_hot(labels, 10)
+        one_hot = jax.nn.one_hot(labels, 32)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
@@ -149,7 +161,7 @@ def get_datasets():
 
 def check_fp8(state, var_collect, input_shape, label_shape):
     "Check if model includes FP8."
-    assert "f8_" in str(
+    func_jaxpr = str(
         jax.make_jaxpr(apply_model)(
             state,
             jnp.empty(input_shape, dtype=jnp.bfloat16),
@@ -157,6 +169,7 @@ def check_fp8(state, var_collect, input_shape, label_shape):
             var_collect,
         )
     )
+    assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
 
 def train_and_evaluate(args):
@@ -175,7 +188,12 @@ def train_and_evaluate(args):
     input_shape = [args.batch_size, IMAGE_H, IMAGE_W, IMAGE_C]
     label_shape = [args.batch_size]
 
-    with te.fp8_autocast(enabled=args.use_fp8):
+    if args.use_fp8:
+        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+    else:
+        fp8_recipe = None
+
+    with te.fp8_autocast(enabled=args.use_fp8, fp8_recipe=fp8_recipe):
         cnn = Net(args.use_te)
         var_collect = cnn.init(init_rngs, jnp.empty(input_shape, dtype=jnp.bfloat16))
         tx = optax.sgd(args.lr, args.momentum)
@@ -273,6 +291,12 @@ def mnist_parser(args):
         ),
     )
     parser.add_argument(
+        "--fp8-recipe",
+        action="store_true",
+        default="DelayedScaling",
+        help="Use FP8 recipe (default: DelayedScaling)",
+    )
+    parser.add_argument(
         "--use-te", action="store_true", default=False, help="Use Transformer Engine"
     )
 
@@ -282,7 +306,8 @@ def mnist_parser(args):
 class TestMNIST(unittest.TestCase):
     """MNIST unittests"""
 
-    gpu_has_fp8, reason = te.fp8.is_fp8_available()
+    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     @classmethod
     def setUpClass(cls):
@@ -294,13 +319,14 @@ class TestMNIST(unittest.TestCase):
         """Check If loss and accuracy match target"""
         desired_traing_loss = 0.055
         desired_traing_accuracy = 0.98
-        desired_test_loss = 0.04
+        desired_test_loss = 0.045
         desired_test_accuracy = 0.098
         assert actual[0] < desired_traing_loss
         assert actual[1] > desired_traing_accuracy
         assert actual[2] < desired_test_loss
         assert actual[3] > desired_test_accuracy
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         self.args.use_te = True
@@ -308,10 +334,19 @@ class TestMNIST(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         self.verify(actual)
 
-    @unittest.skipIf(not gpu_has_fp8, reason)
-    def test_te_fp8(self):
-        """Test Transformer Engine with FP8"""
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_delayed_scaling_fp8(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
         self.args.use_fp8 = True
+        self.args.fp8_recipe = "DelayedScaling"
+        actual = train_and_evaluate(self.args)
+        self.verify(actual)
+
+    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
+    def test_te_mxfp8(self):
+        """Test Transformer Engine with MXFP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
         self.verify(actual)
 

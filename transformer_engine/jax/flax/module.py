@@ -4,12 +4,12 @@
 """
 Wrapper module for Transformer related layers with FP8 support.
 """
-import functools
+from functools import reduce
 import operator
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 
-import jax.numpy as jnp
 import numpy as np
+import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from jax import lax
@@ -17,14 +17,18 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from ..dot import type_safe_dot_general
-from ..fp8 import FP8Helper, FP8MetaPackage
-from ..layernorm import canonicalize_layernorm_type
-from ..layernorm import layernorm, layernorm_fp8_dot
-from ..layernorm_mlp import fused_layernorm_fp8_mlp, activation_lu
+from ..dense import dense
+
+from ..layernorm import canonicalize_norm_type
+from ..layernorm import layernorm
+from ..layernorm_dense import layernorm_dense
+from ..layernorm_mlp import layernorm_mlp
+from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
 from ..cpp_extensions import is_softmax_kernel_available
+from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
+from ..sharding import get_non_contracting_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -57,21 +61,24 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
 
 
 def _create_layernorm_parameters(
-    layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, dtype
+    norm_type,
+    shape,
+    scale_init,
+    scale_axes,
+    bias_init,
+    bias_axes,
+    input_dtype,
+    dtype,
 ):
-    scale = nn_partitioning.param_with_axes(
-        "scale", scale_init, shape, jnp.float32, axes=scale_axes
-    )
-    scale = jnp.asarray(scale, dtype)
+    scale = nn_partitioning.param_with_axes("scale", scale_init, shape, dtype, axes=scale_axes)
+    scale = scale.astype(input_dtype)
 
-    layernorm_type = canonicalize_layernorm_type(layernorm_type)
-    if layernorm_type == "layernorm":
-        bias = nn_partitioning.param_with_axes(
-            "ln_bias", bias_init, shape, jnp.float32, axes=bias_axes
-        )
-        bias = jnp.asarray(bias, dtype)
+    norm_type = canonicalize_norm_type(norm_type)
+    if norm_type == "layernorm":
+        bias = nn_partitioning.param_with_axes("ln_bias", bias_init, shape, dtype, axes=bias_axes)
+        bias = jnp.asarray(bias, input_dtype)
     else:
-        assert layernorm_type == "rmsnorm"
+        assert norm_type == "rmsnorm"
         bias = None
 
     return scale, bias
@@ -158,15 +165,15 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
         k_seqlen = inputs.shape[3]
-        dtype = inputs.dtype
+        input_dtype = inputs.dtype
         logits = inputs
 
         if self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, inputs.dtype
+            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
         ):
 
             if bias is not None:
-                logits = logits + bias.astype(dtype)
+                logits = logits + bias.astype(input_dtype)
 
             mask_ = mask
             if self.softmax_type is not SoftmaxType.SCALED_MASKED:
@@ -178,25 +185,27 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             if mask is not None:
                 attention_bias = lax.select(
                     mask > 0,
-                    jnp.full(mask.shape, -1e10).astype(dtype),
-                    jnp.full(mask.shape, 0.0).astype(dtype),
+                    jnp.full(mask.shape, -1e10),
+                    jnp.full(mask.shape, 0.0),
                 )
+                attention_bias = attention_bias.astype(input_dtype)
 
             if bias is not None:
                 attention_bias = _combine_biases(attention_bias, bias)
 
             if attention_bias is not None:
-                logits = logits + attention_bias.astype(dtype)
+                logits = logits + attention_bias.astype(input_dtype)
 
             # For the case that self.softmax == SoftmaxType.SCALED_UPPER_TRIANG_MASKED
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
             if is_softmax_kernel_available(
-                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, dtype
+                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, input_dtype
             ):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
 
+        assert input_dtype == outputs.dtype
         return outputs
 
 
@@ -260,8 +269,8 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the initial parameters.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
@@ -280,7 +289,8 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma
+            self.scale_init,
+            self.zero_centered_gamma,
         )
         super().__post_init__()
 
@@ -299,6 +309,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
         outputs : jax.numpy.ndarray
             Output tensors.
         """
+        input_dtype = x.dtype
 
         features = x.shape[-1]
         scale, ln_bias = _create_layernorm_parameters(
@@ -308,16 +319,19 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
             self.scale_axes,
             self.bias_init,
             self.bias_axes,
+            input_dtype,
             self.dtype,
         )
-        return layernorm(
+        out = layernorm(
             x,
             scale,
             ln_bias,
-            layernorm_type=self.layernorm_type,
+            norm_type=self.layernorm_type,
             zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.epsilon,
         )
+        assert out.dtype == input_dtype
+        return out
 
 
 class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-methods
@@ -325,49 +339,44 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
     Base class of transformer engine
     """
 
-    @staticmethod
-    def generate_fp8_meta_set(postfix: str) -> FP8MetaPackage:
+    def generate_quantizer_set(self, postfix: str = ""):
         """
         Generate a set of FP8 meta for a GEMM.
         """
 
-        input_name_post_fix = f"_i_{postfix}"
-        weight_name_post_fix = f"_w_{postfix}"
-        grad_name_post_fix = f"_g_{postfix}"
-
-        def generate_a_set(target_postfix):
-            amax = nn_partitioning.variable_with_axes(
-                FP8Helper.FP8_COLLECTION_NAME,
-                f"{FP8Helper.FP8_AMAX_NAME}{target_postfix}",
-                jnp.zeros,
-                (FP8Helper.AMAX_HISTORY_LEN,),
-                jnp.float32,
-                axes=(None,),
-            )
-
-            scale = nn_partitioning.variable_with_axes(
-                FP8Helper.FP8_COLLECTION_NAME,
-                f"{FP8Helper.FP8_SCALE_NAME}{target_postfix}",
+        def generate_quantize_meta(quantizer_name: str):
+            scale = self.variable(
+                QuantizeConfig.COLLECTION_NAME,
+                f"{quantizer_name}{postfix}_scale",
                 jnp.ones,
                 (1,),
                 jnp.float32,
-                axes=(None,),
-            )
+            ).value
+            amax_history = self.variable(
+                QuantizeConfig.COLLECTION_NAME,
+                f"{quantizer_name}{postfix}_amax_history",
+                jnp.zeros,
+                (QuantizeConfig.AMAX_HISTORY_LEN,),
+                jnp.float32,
+            ).value
+            return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-            return amax.value, scale.value
+        if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
+            x_meta = generate_quantize_meta("x")
+            kernel_meta = generate_quantize_meta("kernel")
+            grad_meta = generate_quantize_meta("grad")
+            quantize_meta_set = QuantizeMetaSet(x=x_meta, kernel=kernel_meta, grad=grad_meta)
+            kwargs = {"quantize_meta_set": quantize_meta_set}
+        else:
+            kwargs = {}
 
-        input_amax, input_scale = generate_a_set(input_name_post_fix)
-        weight_amax, weight_scale = generate_a_set(weight_name_post_fix)
-        grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
-
-        return FP8MetaPackage(
-            input_amax, input_scale, weight_amax, weight_scale, grad_amax, grad_scale
-        )
+        quantizer_set = QuantizerFactory.create_set(**kwargs)
+        return quantizer_set
 
 
 class DenseGeneral(TransformerEngineBase):
     r"""
-    Applies a linear transformation to the incoming data :math:`y = xA^T + b`.
+    Applies a dense layer transformation to the incoming data :math:`y = xA^T + b`.
 
     Parameters
     ----------
@@ -389,7 +398,7 @@ class DenseGeneral(TransformerEngineBase):
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
@@ -398,10 +407,14 @@ class DenseGeneral(TransformerEngineBase):
         :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
@@ -421,16 +434,19 @@ class DenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
+    input_axes: Tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
         """
-        Apply the linear transformation to the input.
+        Apply the dense layer transformation to the input.
 
         Parameters
         ----------
@@ -443,35 +459,42 @@ class DenseGeneral(TransformerEngineBase):
             Output tensors.
         """
 
+        input_dtype = inputs.dtype
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
-        inputs = jnp.asarray(inputs, self.dtype)
         axis = _normalize_axes(axis, inputs.ndim)
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-        kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
+
+        if self.kernel_axes:
+            assert len(kernel_shape) == len(self.kernel_axes), (
+                "Expected len(kernel_shape) to match len(kernel_axes),"
+                f"got kernel_shape {kernel_shape} and kernel_axes {self.kernel_axes}"
+            )
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
 
-        kernel = jnp.reshape(kernel, kernel_shape)
+        if not QuantizeConfig.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, jnp.float32, axes=self.bias_axes
-            )
-            bias = bias.astype(self.dtype)
+                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
+            ).astype(input_dtype)
         else:
             bias = None
 
+        quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
-        fp8_meta_pkg = None
-        if FP8Helper.is_fp8_enabled():
-            fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
-
-        y = type_safe_dot_general(
-            inputs, kernel, fp8_meta_pkg=fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+        y = dense(
+            inputs,
+            kernel,
+            contracting_dims=(axis, contract_ind),
+            input_axes=self.input_axes,
+            kernel_axes=self.kernel_axes,
+            quantizer_set=quantizer_set,
         )
 
         if self.enable_low_rank_adaptation:
@@ -480,21 +503,15 @@ class DenseGeneral(TransformerEngineBase):
                 *features[:-1],
                 self.low_rank_adaptation_dim,
             )
-            lora_a_kernel_init_shape = (
-                kernel_param_shape[0],
-                *features[:-1],
-                self.low_rank_adaptation_dim,
-            )
-            lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
+            lora_a_kernel_axes = (None,) * len(lora_a_kernel_shape)
             lora_a_kernel = nn_partitioning.param_with_axes(
                 "lora_a_kernel",
                 self.kernel_init,
-                lora_a_kernel_init_shape,
-                jnp.float32,
+                lora_a_kernel_shape,
+                self.dtype,
                 axes=lora_a_kernel_axes,
             )
-            lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
-            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+            lora_a_kernel = lora_a_kernel.astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
@@ -502,10 +519,10 @@ class DenseGeneral(TransformerEngineBase):
                 "lora_b_kernel",
                 nn.initializers.zeros,
                 lora_b_kernel_shape,
-                jnp.float32,
+                self.dtype,
                 axes=lora_b_kernel_axes,
             )
-            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+            lora_b_kernel = lora_b_kernel.astype(input_dtype)
 
             y += _apply_low_rank_adaptation(
                 inputs, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -514,19 +531,21 @@ class DenseGeneral(TransformerEngineBase):
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
             y += jnp.reshape(bias, bias_shape)
+
+        assert y.dtype == input_dtype
         return y
 
 
 class LayerNormDenseGeneral(TransformerEngineBase):
     r"""
-    Applies layer normalization followed by linear transformation to the incoming data.
+    Applies layer normalization followed by dense layer transformation to the incoming data.
 
     Parameters
     ----------
     features : Union[Iterable[int], int]
         The hidden size of each output sample.
     enable_layernorm: bool, default = True
-        Indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before dense layer transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
@@ -575,7 +594,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
@@ -595,7 +614,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
@@ -633,16 +652,23 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0,
+                "fan_in",
+                "truncated_normal",
+                dtype=self.dtype,
+            )
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma
+            self.scale_init,
+            self.zero_centered_gamma,
         )
+        self.quantizer_set = QuantizerFactory.create_set()
         super().__post_init__()
 
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
         """
-        Apply layer normalization to the input followed by a linear transformation.
+        Apply layer normalization to the input followed by a dense layer transformation.
 
         Parameters
         ----------
@@ -657,21 +683,22 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
+        assert self.axis == -1, "Only support axis = =-1 at this moment"
 
+        input_dtype = inputs.dtype
         ln_output = None
 
+        quantizer_set = self.generate_quantizer_set()
+
         fuse_layernorm = (
-            FP8Helper.is_fp8_enabled()
+            QuantizeConfig.is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
 
         if self.enable_layernorm:
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
-
-            assert self.axis == -1  # Only support axis = =-1 at this moment
             features = inputs.shape[-1]
-
             scale, ln_bias = _create_layernorm_parameters(
                 self.layernorm_type,
                 (features,),
@@ -679,6 +706,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 self.scale_axes,
                 self.ln_bias_init,
                 self.ln_bias_axes,
+                input_dtype,
                 self.dtype,
             )
 
@@ -687,7 +715,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                     inputs,
                     scale,
                     ln_bias,
-                    layernorm_type=self.layernorm_type,
+                    norm_type=self.layernorm_type,
                     zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.epsilon,
                 )
@@ -706,37 +734,38 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         axis = _normalize_axes(axis, y.ndim)
 
-        kernel_shape = tuple(y.shape[ax] for ax in axis) + features
-        kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
+        kernel_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-
-        kernel = jnp.reshape(kernel, kernel_shape)
+        if not QuantizeConfig.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
 
-        fp8_meta_pkg = None
-        if FP8Helper.is_fp8_enabled():
-            fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
-
         if fuse_layernorm:
-            z = layernorm_fp8_dot(
+            z = layernorm_dense(
                 y,
                 kernel,
                 scale,
                 ln_bias,
-                fp8_meta_pkg,
-                self.layernorm_type,
+                norm_type=self.layernorm_type,
                 zero_centered_gamma=self.zero_centered_gamma,
                 epsilon=self.epsilon,
                 layernorm_input_axes=self.layernorm_input_axes,
                 dot_input_axes=self.dot_input_axes,
+                kernel_axes=self.kernel_axes,
+                quantizer_set=quantizer_set,
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = type_safe_dot_general(
-                y, kernel, fp8_meta_pkg=fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+            z = dense(
+                y,
+                kernel,
+                contracting_dims=(axis, contract_ind),
+                input_axes=self.dot_input_axes,
+                kernel_axes=self.kernel_axes,
+                quantizer_set=quantizer_set,
             )
 
         if self.enable_low_rank_adaptation:
@@ -745,21 +774,15 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 *features[:-1],
                 self.low_rank_adaptation_dim,
             )
-            lora_a_kernel_init_shape = (
-                kernel_param_shape[0],
-                *features[:-1],
-                self.low_rank_adaptation_dim,
-            )
-            lora_a_kernel_axes = (None,) * len(lora_a_kernel_init_shape)
+            lora_a_kernel_axes = (None,) * len(lora_a_kernel_shape)
             lora_a_kernel = nn_partitioning.param_with_axes(
                 "lora_a_kernel",
                 self.kernel_init,
-                lora_a_kernel_init_shape,
-                jnp.float32,
+                lora_a_kernel_shape,
+                self.dtype,
                 axes=lora_a_kernel_axes,
             )
-            lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
-            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+            lora_a_kernel = lora_a_kernel.astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
@@ -767,10 +790,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 "lora_b_kernel",
                 nn.initializers.zeros,
                 lora_b_kernel_shape,
-                jnp.float32,
+                self.dtype,
                 axes=lora_b_kernel_axes,
             )
-            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+            lora_b_kernel = lora_b_kernel.astype(input_dtype)
 
             z += _apply_low_rank_adaptation(
                 y, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -779,9 +802,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         bias = None
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, jnp.float32, axes=self.bias_axes
-            )
-            bias = bias.astype(self.dtype)
+                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
+            ).astype(input_dtype)
 
         if bias is not None:
             bias_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
@@ -790,20 +812,22 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
 
+        assert z.dtype == input_dtype, f"output_dtype={z.dtype}, input_dtype={input_dtype}"
+        # z = z.reshape(*inputs.shape[: self.axis], *features)
         return z, ln_output  # dense_output, layer_norm_output
 
 
 class LayerNormMLP(TransformerEngineBase):
     r"""
     Applies layer normalization on the input followed by the MLP module,
-    consisting of 2 successive linear transformations, separated by given activations.
+    consisting of 2 successive dense layer transformations, separated by given activations.
 
     Parameters
     ----------
     intermediate_dim: int, default = 2048
         Intermediate size to which input samples are projected.
     enable_layernorm: bool, default = True
-        Indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before dense layer transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
@@ -835,14 +859,14 @@ class LayerNormMLP(TransformerEngineBase):
         Only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        Used for initializing the weights of both linear transformations.
+        Used for initializing the weights of both dense layer transformations.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     kernel_axes_1 : Tuple[str, ...], default = ('embed', 'act', 'mlp')
         The name of axes used to shard the weights with a corresponding mesh for
-        the weight of the first linear transformations.
+        the weight of the first dense layer transformation.
     kernel_axes_2 : Tuple[str, ...], default = ('mlp', 'embed')
         The name of axes used to shard the weights with a corresponding mesh for
-        the weight of the second linear transformations.
+        the weight of the second dense layer transformation.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting.
         If set to False, the layer will not learn an additive bias.
@@ -851,17 +875,17 @@ class LayerNormMLP(TransformerEngineBase):
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes_1: Tuple[str, ...], default = ('mlp',)
         The name of axes used to shard bias with a corresponding mesh  for
-        the weight of the first linear transformations.
+        the weight of the first dense layer transformation.
         Only used when :attr:`use_bias=True`.
     bias_axes_2: Tuple[str, ...], default = ('embed',)
         The name of axes used to shard bias with a corresponding mesh  for
-        the weight of the second linear transformations.
+        the weight of the second dense layer transformation.
         Only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     activations: Sequence[Union[str, Callable]], default = ('relu',)
-        The sequence of activation functions to apply after the first linear transformation.
+        The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
@@ -870,7 +894,7 @@ class LayerNormMLP(TransformerEngineBase):
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`.
@@ -894,7 +918,7 @@ class LayerNormMLP(TransformerEngineBase):
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
@@ -935,9 +959,12 @@ class LayerNormMLP(TransformerEngineBase):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
-            self.scale_init, self.zero_centered_gamma
+            self.scale_init,
+            self.zero_centered_gamma,
         )
         super().__post_init__()
 
@@ -961,11 +988,18 @@ class LayerNormMLP(TransformerEngineBase):
             The output tensors of layer normalization.
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
+        assert self.axis == -1, "Only support axis == -1 at this moment"
 
+        ffn1_quantizer_set = self.generate_quantizer_set("_0")
+        ffn2_quantizer_set = self.generate_quantizer_set("_1")
+
+        input_dtype = inputs.dtype
         ln_output = None
 
+        # TODO(Phuong): use fuse_layernorm for high-precision
+        # when NoOpQuantizer and Tensor are implemented
         fuse_layernorm = (
-            FP8Helper.is_fp8_enabled()
+            QuantizeConfig.is_fp8_enabled()
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
@@ -992,10 +1026,8 @@ class LayerNormMLP(TransformerEngineBase):
         use_fused_layernorm_mlp = (
             fuse_layernorm and is_act_implemented and self.intermediate_dropout_rate < 1e-3
         )
-
         # LayerNorm
         if self.enable_layernorm:
-            assert self.axis == -1  # Only support axis == -1 at this moment
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
 
             features = inputs.shape[-1]
@@ -1007,6 +1039,7 @@ class LayerNormMLP(TransformerEngineBase):
                 self.scale_axes,
                 self.ln_bias_init,
                 self.ln_bias_axes,
+                input_dtype,
                 self.dtype,
             )
 
@@ -1015,7 +1048,7 @@ class LayerNormMLP(TransformerEngineBase):
                     inputs,
                     scale,
                     ln_bias,
-                    layernorm_type=self.layernorm_type,
+                    norm_type=self.layernorm_type,
                     zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.epsilon,
                 )
@@ -1033,134 +1066,135 @@ class LayerNormMLP(TransformerEngineBase):
             for _ in range(num_kernels):
                 key, init_key = jax_random.split(key)
                 kernels.append(self.kernel_init(init_key, *init_args))
-            return jnp.stack(kernels, axis=stack_axis, dtype=jnp.float32)
-
-        wi_fp8_meta_pkg = None
-        wo_fp8_meta_pkg = None
-        if FP8Helper.is_fp8_enabled():
-            wi_fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("0")
-            wo_fp8_meta_pkg = TransformerEngineBase.generate_fp8_meta_set("1")
+            return jnp.stack(kernels, axis=stack_axis, dtype=self.dtype)
 
         num_activations = len(normalized_acts)
         axis = _canonicalize_tuple(self.axis)
         axis = _normalize_axes(axis, y.ndim)
-
-        intermediate_dim = _canonicalize_tuple((num_activations, self.intermediate_dim))
-        kernel_1_shape = tuple(y.shape[ax] for ax in axis) + intermediate_dim
-        kernel_1_each_shape = (np.prod([y.shape[ax] for ax in axis]), self.intermediate_dim)
+        kernel_1_each_shape = (np.prod([inputs.shape[ax] for ax in axis]), self.intermediate_dim)
         kernel_1 = nn_partitioning.param_with_axes(
             "wi_kernel",
             kernel_1_init,
             num_activations,
             -2,
             kernel_1_each_shape,
-            jnp.float32,
+            self.dtype,
             axes=self.kernel_axes_1,
         )
-        kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
+
+        if not QuantizeConfig.is_fp8_enabled():
+            kernel_1 = kernel_1.astype(input_dtype)
+
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
-        kernel_2_param_shape = (self.intermediate_dim, np.prod(hidden_size_tuple))
         kernel_2 = nn_partitioning.param_with_axes(
             "wo_kernel",
             self.kernel_init,
-            kernel_2_param_shape,
-            jnp.float32,
+            kernel_2_shape,
+            self.dtype,
             axes=self.kernel_axes_2,
         )
-        kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
+        if not QuantizeConfig.is_fp8_enabled():
+            kernel_2 = kernel_2.astype(input_dtype)
+
         contract_ind = tuple(range(0, len(axis)))
+
+        if self.use_bias:
+            bias_1_shape = (num_activations, self.intermediate_dim)
+            bias_1 = nn_partitioning.param_with_axes(
+                "wi_bias",
+                self.bias_init,
+                bias_1_shape,
+                self.dtype,
+                axes=self.bias_axes_1,
+            ).astype(input_dtype)
+
+            bias_2_shape = (hidden_size,)
+            bias_2 = nn_partitioning.param_with_axes(
+                "wo_bias",
+                self.bias_init,
+                bias_2_shape,
+                self.dtype,
+                axes=self.bias_axes_2,
+            ).astype(input_dtype)
+        else:
+            bias_1 = None
+            bias_2 = None
 
         ffn1_ckpt_name = "ffn1"
         ffn2_ckpt_name = "ffn2"
 
         if use_fused_layernorm_mlp:
-            assert self.axis == -1  # Only support axis = =-1 at this moment
-
-            if self.use_bias:
-                bias_1_shape = intermediate_dim
-                bias_1 = nn_partitioning.param_with_axes(
-                    "wi_bias", self.bias_init, bias_1_shape, jnp.float32, axes=self.bias_axes_1
-                )
-                bias_1 = bias_1.astype(self.dtype)
-
-                bias_2_shape = (hidden_size,)
-                bias_2 = nn_partitioning.param_with_axes(
-                    "wo_bias", self.bias_init, bias_2_shape, jnp.float32, axes=self.bias_axes_2
-                )
-                bias_2 = bias_2.astype(self.dtype)
-            else:
-                bias_1 = None
-                bias_2 = None
-
-            out = fused_layernorm_fp8_mlp(
+            out = layernorm_mlp(
                 y,
                 scale,
                 ln_bias,
                 [kernel_1, kernel_2],
                 [bias_1, bias_2],
-                [wi_fp8_meta_pkg, wo_fp8_meta_pkg],
                 self.layernorm_type,
                 zero_centered_gamma=self.zero_centered_gamma,
                 epsilon=self.epsilon,
-                layernorm_input_axes=self.layernorm_input_axes,
+                norm_input_axes=self.layernorm_input_axes,
                 dot_1_input_axes=self.dot_1_input_axes,
                 dot_2_input_axes=self.dot_2_input_axes,
+                kernel_1_axes=self.kernel_axes_1,
+                kernel_2_axes=self.kernel_axes_2,
                 ffn1_ckpt_name=ffn1_ckpt_name,
                 ffn2_ckpt_name=ffn2_ckpt_name,
                 activation_type=normalized_acts,
-                use_bias=self.use_bias,
+                quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
             )
+            out = out.reshape(*inputs.shape[: self.axis], *hidden_size_tuple)
 
         else:  # not use_fused_ln_geglu_mlp
             # DenseGeneral 1
             if fuse_layernorm:
-                x = layernorm_fp8_dot(
+                x = layernorm_dense(
                     y,
                     kernel_1,
                     scale,
                     ln_bias,
-                    wi_fp8_meta_pkg,
-                    self.layernorm_type,
+                    norm_type=self.layernorm_type,
                     zero_centered_gamma=self.zero_centered_gamma,
                     epsilon=self.epsilon,
                     layernorm_input_axes=self.layernorm_input_axes,
                     dot_input_axes=self.dot_1_input_axes,
+                    kernel_axes=self.kernel_axes_1,
+                    quantizer_set=ffn1_quantizer_set,
                 )
             else:
                 y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
-                x = type_safe_dot_general(
-                    y, kernel_1, fp8_meta_pkg=wi_fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+                x = dense(
+                    y,
+                    kernel_1,
+                    contracting_dims=(axis, contract_ind),
+                    input_axes=self.dot_1_input_axes,
+                    kernel_axes=self.kernel_axes_1,
+                    quantizer_set=ffn1_quantizer_set,
                 )
+            dot_1_output_axes = (
+                *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
+                *get_non_contracting_logical_axes(kernel_1.ndim, self.kernel_axes_1, contract_ind),
+            )
+            x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
-                wi_lora_a_kernel_shape = (
-                    *kernel_1_shape[: len(axis)],
-                    num_activations,
+                wi_lora_a_kernel_each_shape = (
+                    kernel_1_each_shape[: len(axis)],
                     self.low_rank_adaptation_dim,
                 )
-                wi_lora_a_kernel_init_shape = (
-                    kernel_1_each_shape[0],
-                    num_activations,
-                    self.low_rank_adaptation_dim,
-                )
-                wi_lora_a_kernel_init_each_shape = (
-                    kernel_1_each_shape[0],
-                    self.low_rank_adaptation_dim,
-                )
-                wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_init_shape)
+                wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_each_shape + 1)
                 wi_lora_a_kernel = nn_partitioning.param_with_axes(
                     "wi_lora_a_kernel",
                     kernel_1_init,
                     num_activations,
                     -2,
-                    wi_lora_a_kernel_init_each_shape,
-                    jnp.float32,
+                    wi_lora_a_kernel_each_shape,
+                    self.dtype,
                     axes=wi_lora_a_kernel_axes,
                 )
-                wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
-                wi_lora_a_kernel = wi_lora_a_kernel.astype(self.dtype)
+                wi_lora_a_kernel = wi_lora_a_kernel.astype(input_dtype)
 
                 wi_lora_b_kernel_shape = (
                     num_activations,
@@ -1172,41 +1206,35 @@ class LayerNormMLP(TransformerEngineBase):
                     "wi_lora_b_kernel",
                     nn.initializers.zeros,
                     wi_lora_b_kernel_shape,
-                    jnp.float32,
+                    self.dtype,
                     axes=wi_lora_b_kernel_axes,
                 )
-                wi_lora_b_kernel = wi_lora_b_kernel.astype(self.dtype)
+                wi_lora_b_kernel = wi_lora_b_kernel.astype(input_dtype)
 
                 x += _apply_low_rank_adaptation(
                     y,
                     axis,
-                    intermediate_dim,
+                    (num_activations, self.intermediate_dim),
                     wi_lora_a_kernel,
                     wi_lora_b_kernel,
                     self.low_rank_adaptation_alpha,
                 )
 
-            bias_1 = None
             if self.use_bias:
-                bias_1 = nn_partitioning.param_with_axes(
-                    "wi_bias", self.bias_init, intermediate_dim, jnp.float32, axes=self.bias_axes_1
-                )
-                bias_1 = bias_1.astype(self.dtype)
-                bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
                 x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
             if is_act_implemented:
-                z = activation_lu(x, normalized_acts)
+                z = activation(x, normalized_acts)
             else:
                 activations = []
                 x = jnp.split(x, num_activations, axis=-2)
                 for idx, act_fn in enumerate(normalized_acts):
                     x_i = _convert_to_activation_function(act_fn)(x[idx])
                     activations.append(x_i)
-                z = functools.reduce(operator.mul, activations)
-                # Remove act axis
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+                z = reduce(operator.mul, activations)
+                z = jnp.squeeze(z, axis=-2)
+            z = z.astype(input_dtype)
 
             z = nn.Dropout(
                 rate=self.intermediate_dropout_rate,
@@ -1215,10 +1243,16 @@ class LayerNormMLP(TransformerEngineBase):
             )(z, deterministic=deterministic)
 
             z = with_sharding_constraint_by_logical_axes(z, self.dot_2_input_axes)
+            z = z.astype(input_dtype)
 
             # DenseGeneral 2
-            out = type_safe_dot_general(
-                z, kernel_2, fp8_meta_pkg=wo_fp8_meta_pkg, contracting_dims=(axis, contract_ind)
+            out = dense(
+                z,
+                kernel_2,
+                contracting_dims=(axis, contract_ind),
+                input_axes=self.dot_2_input_axes,
+                kernel_axes=self.kernel_axes_2,
+                quantizer_set=ffn2_quantizer_set,
             )
 
             if self.enable_low_rank_adaptation:
@@ -1228,10 +1262,10 @@ class LayerNormMLP(TransformerEngineBase):
                     "wo_lora_a_kernel",
                     self.kernel_init,
                     wo_lora_a_kernel_shape,
-                    jnp.float32,
+                    self.dtype,
                     axes=wo_lora_a_kernel_axes,
                 )
-                wo_lora_a_kernel = wo_lora_a_kernel.astype(self.dtype)
+                wo_lora_a_kernel = wo_lora_a_kernel.astype(input_dtype)
 
                 wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
                 wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
@@ -1239,10 +1273,10 @@ class LayerNormMLP(TransformerEngineBase):
                     "wo_lora_b_kernel",
                     nn.initializers.zeros,
                     wo_lora_b_kernel_shape,
-                    jnp.float32,
+                    self.dtype,
                     axes=wo_lora_b_kernel_axes,
                 )
-                wo_lora_b_kernel = wo_lora_b_kernel.astype(self.dtype)
+                wo_lora_b_kernel = wo_lora_b_kernel.astype(input_dtype)
 
                 out += _apply_low_rank_adaptation(
                     z,
@@ -1253,14 +1287,10 @@ class LayerNormMLP(TransformerEngineBase):
                     self.low_rank_adaptation_alpha,
                 )
 
-            bias_2 = None
             if self.use_bias:
-                bias_2 = nn_partitioning.param_with_axes(
-                    "wo_bias", self.bias_init, (hidden_size,), jnp.float32, axes=self.bias_axes_2
-                )
-                bias_2 = bias_2.astype(self.dtype)
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 
+        assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output

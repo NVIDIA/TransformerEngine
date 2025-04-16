@@ -6,13 +6,17 @@ cmake_minimum_required(VERSION 3.21)
 
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
 # Hide non-necessary symbols in shared object.
@@ -54,6 +58,8 @@ list(APPEND transformer_engine_SOURCES
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise.cu
      activation/gelu.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
@@ -61,7 +67,6 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
-     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      normalization/common.cpp
@@ -75,13 +80,15 @@ list(APPEND transformer_engine_SOURCES
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
+     util/cuda_nvml.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
-     util/system.cpp
+     swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
@@ -91,10 +98,13 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cudart)
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -106,6 +116,13 @@ if (NVTE_UB_WITH_MPI)
     target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
     target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+endif()
+
+option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
+if (NVTE_ENABLE_NVSHMEM)
+    add_subdirectory(nvshmem_api)
+    target_link_libraries(transformer_engine PUBLIC nvshmemapi)
+    target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend

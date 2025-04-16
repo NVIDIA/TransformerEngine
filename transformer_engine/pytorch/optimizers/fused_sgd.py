@@ -3,6 +3,11 @@
 # See LICENSE for license information.
 
 """Fused SGD optimizer."""
+from __future__ import annotations
+from collections.abc import Iterable
+from typing import Any, Optional
+import warnings
+
 import torch
 from torch.optim.optimizer import Optimizer, required
 
@@ -37,8 +42,8 @@ class FusedSGD(Optimizer):
             parameter groups
         lr (float): learning rate
         momentum (float, optional): momentum factor (default: 0)
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
         dampening (float, optional): dampening for momentum (default: 0)
+        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
         nesterov (bool, optional): enables Nesterov momentum (default: False)
 
     Example:
@@ -74,15 +79,16 @@ class FusedSGD(Optimizer):
 
     def __init__(
         self,
-        params,
-        lr=required,
-        momentum=0,
-        dampening=0,
-        weight_decay=0,
-        nesterov=False,
+        params: Iterable[torch.nn.Parameter | dict],
+        lr: float | Any = required,
+        momentum: float = 0.0,
+        dampening: float = 0.0,
+        weight_decay: float = 0.0,
+        nesterov: bool = False,
+        *,
         wd_after_momentum=False,
         materialize_master_grads=True,
-        set_grad_none=False,
+        set_grad_none: Optional[bool] = None,  # deprecated
     ):
         if lr is not required and lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -98,7 +104,7 @@ class FusedSGD(Optimizer):
             "weight_decay": weight_decay,
             "nesterov": nesterov,
         }
-        if nesterov and (momentum <= 0 or dampening != 0):
+        if nesterov and (momentum <= 0.0 or dampening != 0.0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
         super().__init__(params, defaults)
 
@@ -106,7 +112,6 @@ class FusedSGD(Optimizer):
         self.materialize_master_grads = materialize_master_grads
         self.most_recent_scale = 1.0
         self.scale_set_by_backward = False
-        self.set_grad_none = set_grad_none
 
         # Skip buffer
         self._dummy_overflow_buf = torch.tensor(
@@ -114,14 +119,42 @@ class FusedSGD(Optimizer):
         )
         self.multi_tensor_sgd = tex.multi_tensor_sgd
 
+        # Deprecated options
+        self.set_grad_none = set_grad_none
+        if self.set_grad_none is not None:
+            warnings.warn(
+                "set_grad_none kwarg in FusedAdam constructor is deprecated. "
+                "Use set_to_none kwarg in zero_grad instead.",
+                DeprecationWarning,
+            )
+
     def __setstate__(self, state):
         super().__setstate__(state)
         for group in self.param_groups:
             group.setdefault("nesterov", False)
 
-    def zero_grad(self):
-        # pylint: disable=missing-function-docstring
-        if self.set_grad_none:
+    def zero_grad(self, set_to_none: Optional[bool] = None) -> None:
+        """Reset parameter gradients.
+
+        Arguments:
+            set_to_none (bool, optional): whether to set grads to `None`
+                instead of zeroing out buffers. (default: True)
+
+        """
+
+        # Handle deprecated set_grad_none option
+        if self.set_grad_none is not None:
+            if set_to_none is not None and set_to_none != self.set_grad_none:
+                raise ValueError(
+                    f"Called zero_grad with set_to_none={set_to_none}, "
+                    f"but FusedAdam was initialized with set_grad_none={self.set_grad_none}"
+                )
+            set_to_none = self.set_grad_none
+        if set_to_none is None:
+            set_to_none = True
+
+        # Reset grads
+        if set_to_none:
             for group in self.param_groups:
                 for p in group["params"]:
                     p.grad = None

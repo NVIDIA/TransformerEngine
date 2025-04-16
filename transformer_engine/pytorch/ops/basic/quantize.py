@@ -9,8 +9,8 @@ from typing import Optional
 
 import torch
 
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...tensor import Float8Tensor, QuantizedTensor
+from ...fp8 import FP8GlobalStateManager
+from ...tensor import QuantizedTensor
 from ..op import BasicOperation, OperationContext
 
 
@@ -38,10 +38,10 @@ class Quantize(BasicOperation):
         self._quantize_forward = forward
         self._quantize_backward = backward
 
-    def num_fp8_scales(self, mode: str) -> int:
-        if mode == "input" and self._quantize_forward:
+    def num_quantizers(self, mode: str) -> int:
+        if mode == "forward" and self._quantize_forward:
             return 1
-        if mode == "grad_output" and self._quantize_backward:
+        if mode == "backward" and self._quantize_backward:
             return 1
         return 0
 
@@ -61,15 +61,7 @@ class Quantize(BasicOperation):
         # Quantize if needed
         out = input_
         if quantize_forward and not isinstance(out, QuantizedTensor):
-            fp8_meta = self.get_fp8_meta("input")
-            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            out = Float8Tensor.to_float8(
-                out,
-                fp8_meta=fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-            )
+            out = self.get_quantizer("forward", 0)(out)
 
         ctx.quantize_backward = quantize_backward
         return out
@@ -81,13 +73,5 @@ class Quantize(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
         grad_input = grad_output
         if ctx.quantize_backward and not isinstance(grad_input, QuantizedTensor):
-            fp8_meta = self.get_fp8_meta("grad_output")
-            fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
-            grad_input = Float8Tensor.to_float8(
-                grad_input,
-                fp8_meta=fp8_meta,
-                fp8_meta_forward=False,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-            )
+            grad_input = self.get_quantizer("backward", 0)(grad_input)
         return grad_input, ()

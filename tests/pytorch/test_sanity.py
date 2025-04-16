@@ -8,7 +8,6 @@ from contextlib import nullcontext
 
 import torch
 import pytest
-import io
 import os
 
 from transformer_engine.pytorch.fp8 import (
@@ -26,6 +25,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch import (
     LayerNormLinear,
     Linear,
+    GroupedLinear,
     LayerNormMLP,
     TransformerLayer,
     RMSNorm,
@@ -34,19 +34,30 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.cpp_extensions import (
-    gemm,
-    fp8_gemm,
-    gelu,
-    cast_to_fp8,
-    cast_from_fp8,
-)
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
-from test_onnx_export import create_meta
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from test_numerics import reset_rng_states, dtype_tols
 
-# Only run FP8 tests on H100.
+# Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+
+
+def create_meta(scale_factor: float, size: int = 1):
+    meta = tex.FP8TensorMeta()
+    meta.amax_history = torch.zeros(1, size, dtype=torch.float32, device="cuda")
+    meta.scale_inv = torch.ones(size, dtype=torch.float32, device="cuda") / scale_factor
+    meta.scale = torch.ones(size, dtype=torch.float32, device="cuda") * scale_factor
+    return meta
 
 
 def custom_amax_to_scale(
@@ -95,36 +106,18 @@ model_configs = {
 }
 
 fp8_recipes = [
-    None,  # Handles non-FP8 case
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3),
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        override_linear_precision=(False, False, True),
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
+    None,  # Test non-FP8
+    recipe.MXFP8BlockScaling(),  # Test default
+    recipe.Float8CurrentScaling(),  # Test default
+    recipe.Float8BlockScaling(),  # Test default
+    recipe.DelayedScaling(),  # Test default
+    recipe.DelayedScaling(  # Test most_recent algo
         amax_history_len=16,
         amax_compute_algo="most_recent",
     ),
-    recipe.DelayedScaling(
-        margin=0,
+    recipe.DelayedScaling(  # Test custom amax and scale compute algo
         fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
-        amax_compute_algo="max",
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         amax_compute_algo=custom_amax_compute,
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         scaling_factor_compute_algo=custom_amax_to_scale,
     ),
 ]
@@ -136,7 +129,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 all_boolean = [True, False]
 batch_sizes_with_zero = [0, 1, 2]
 
-all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu"]
+all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "srelu", "qgelu", "qgeglu"]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 
@@ -236,6 +229,7 @@ def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
     torch.cuda.synchronize()
 
     assert te_out.dtype == dtype, "AMP wrong output type."
+    assert te_inp_hidden_states.grad is not None, "Gradient should not be empty"
     assert te_inp_hidden_states.grad.dtype == torch.float32, "AMP wrong dgrad type."
     for name, p in block.named_parameters():
         if p.requires_grad:
@@ -272,11 +266,14 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     loss.backward()
     torch.cuda.synchronize()
 
+    failed_grads = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
-            assert torch.count_nonzero(p.main_grad) > 0, "Gradient not accumulated."
+            if not torch.count_nonzero(p.main_grad) > 0:
+                failed_grads.append(name)
+    assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
@@ -411,6 +408,7 @@ def _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad)
     torch.cuda.synchronize()
 
     assert te_out.dtype == dtype, "AMP wrong output type."
+    assert te_inp.grad is not None, "Gradient should not be empty"
     assert te_inp.grad.dtype == torch.float32, "AMP wrong dgrad type."
     for name, p in block.named_parameters():
         if p.requires_grad:
@@ -445,6 +443,10 @@ def test_sanity_layernorm_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -474,6 +476,10 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -504,11 +510,15 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
     use_fp8 = fp8_recipe is not None
-    with fp8_model_init(enabled=use_fp8 and fp8_model_params):
+    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
         te_linear = Linear(
             config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
@@ -518,6 +528,61 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     ).cuda()
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         out = te_linear(inp_hidden_states)
+    loss = out.sum()
+    loss.backward()
+    assert out.shape == (num_tokens, ffn_hidden_size)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes_with_zero)
+@pytest.mark.parametrize("model", ["small", "weird"])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("use_bias", all_boolean)
+@pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
+@pytest.mark.parametrize("num_gemms", [4])
+def test_sanity_grouped_linear(
+    dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
+):
+    config = model_configs[model]
+    ffn_hidden_size = 4 * config.hidden_size
+    # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
+    bs = bs * 16
+    num_tokens = bs * config.seq_len * (num_gemms - 1)
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8():
+            pytest.skip("Grouped linear does not support MXFP8")
+        if fp8_recipe.float8_current_scaling():
+            pytest.skip("Grouped linear does not support FP8 current scaling")
+        if fp8_recipe.float8_block_scaling():
+            pytest.skip("Grouped linear does not support FP8 block scaling")
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+        te_grouped_linear = GroupedLinear(
+            num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
+        ).cuda()
+
+    inp_hidden_states = torch.randn(
+        num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    m_splits = [bs * config.seq_len] * num_gemms
+    if empty_split == "first":
+        m_splits[0] = 0
+    elif empty_split == "last":
+        m_splits[-1] = 0
+    elif empty_split == "middle":
+        m_splits[num_gemms // 2] = 0
+
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
@@ -539,6 +604,10 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -587,6 +656,10 @@ def test_sanity_gpt(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -652,6 +725,10 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, 
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -709,6 +786,10 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, no
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -764,6 +845,10 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -797,6 +882,10 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -833,6 +922,10 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -872,6 +965,10 @@ def test_sanity_gradient_accumulation_fusion(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -912,6 +1009,12 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if fp8_recipe.float8_block_scaling():
+            pytest.skip("cuda graph not supported for float8_block_scaling recipe")
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -962,7 +1065,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     inp = torch.reshape(scratchpad[offset:-offset], (N, N))
     weight = torch.reshape(scratchpad[offset * 2 :], (N, N))
 
-    _, _, _ = gemm(A=weight, B=inp, dtype=datatype, workspace=get_workspace())
+    _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
     torch.cuda.synchronize()
 
 
@@ -971,35 +1074,24 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     offset = 16
-    scratchpad = torch.randn(N * N + offset, device="cuda", dtype=datatype)
+    scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
 
-    fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
-    fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
+    scales = torch.ones(1).cuda().squeeze()
+    amaxes = torch.ones(1).cuda().squeeze()
+    dtype = tex.DType.kFloat8E4M3
+    fp8_quantizer = Float8Quantizer(scales, amaxes, dtype)
 
-    nb_inp_scales, nb_weight_scales = 1, N
-    scale_factor = 1.0
-    meta_inp = create_meta(scale_factor, nb_inp_scales)
-    meta_weight = create_meta(scale_factor, nb_weight_scales)
-    inp_type = tex.DType.kFloat8E4M3
-    weights_type = tex.DType.kFloat8E4M3
     outp_type = datatype
 
-    scratchpad_fp8 = cast_to_fp8(scratchpad, meta_weight, fp8_tensor_inp, inp_type)
-    inp_fp8 = torch.reshape(scratchpad_fp8[:-offset], (N, N))
-    weight_fp8 = torch.reshape(scratchpad_fp8[offset:], (N, N))
-    _, _ = fp8_gemm(
+    scratchpad_fp8 = fp8_quantizer(scratchpad)
+    inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))
+    weight_fp8 = torch.reshape(scratchpad_fp8[0][offset:], (N, N))
+    general_gemm(
         weight_fp8,
-        meta_weight.scale_inv,
-        fp8_tensor_weight,
-        inp_type,
         inp_fp8,
-        meta_inp.scale_inv,
-        fp8_tensor_inp,
-        weights_type,
-        outp_type,
         get_workspace(),
+        outp_type,
         bias=None,
-        use_bias=False,
         use_split_accumulator=False,
     )
     torch.cuda.synchronize()
@@ -1062,13 +1154,15 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
         init_method = init_method_normal(sigma)
         output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-        with fp8_model_init(enabled=fp8_enabled):
+        with fp8_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
             block = TransformerLayer(
                 config.hidden_size,
                 4 * config.hidden_size,
                 config.num_attention_heads,
                 init_method=init_method,
                 output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
                 fuse_qkv_params=True,
                 params_dtype=dtype,
                 device="cuda",
@@ -1128,3 +1222,70 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
             outputs.append(p.grad)
 
     return outputs
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_replace_raw_data_for_float8tensor():
+    """Test the functionality of replace_raw_data"""
+    torch.manual_seed(12345)
+    torch.cuda.manual_seed(12345)
+
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
+    random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
+    fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
+
+    attrs_to_check = ["_quantizer", "_fp8_dtype", "_scale_inv", "_transpose", "_transpose_invalid"]
+    attrs = {}
+    for attr in attrs_to_check:
+        attrs[attr] = getattr(fp8_tensor, attr)
+
+    old_data = fp8_tensor._data
+    new_data = torch.empty_like(old_data)
+    replace_raw_data(fp8_tensor, new_data)
+
+    # Make sure the new_data is properly assigned.
+    assert fp8_tensor._data.data_ptr() != old_data.data_ptr()
+    assert fp8_tensor._data.data_ptr() == new_data.data_ptr()
+    # Make sure the values are not changed.
+    torch.testing.assert_close(old_data, fp8_tensor._data, atol=0, rtol=0)
+    # Make sure other attributes are not changed (totally identical)
+    for attr in attrs_to_check:
+        assert id(getattr(fp8_tensor, attr)) == id(attrs[attr])
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_fp8_model_init_high_precision_init_val():
+    """Test fp8_model_init with preserve_high_precision_init_val=True"""
+    with fp8_model_init(preserve_high_precision_init_val=True):
+        model = Linear(768, 768)
+
+    weight = model.weight
+
+    assert isinstance(weight, QuantizedTensor), "Weight should be QuantizedTensor"
+    assert hasattr(weight, "_high_precision_init_val"), "_high_precision_init_val not found"
+    assert hasattr(weight, "get_high_precision_init_val"), "get_high_precision_init_val() not found"
+    assert hasattr(
+        weight, "clear_high_precision_init_val"
+    ), "clear_high_precision_init_val() not found"
+
+    high_precision = weight.get_high_precision_init_val()
+    assert high_precision.device.type == "cpu", "high_precision_init_val is not on the CPU"
+
+    new_weight = weight._get_quantizer().make_empty(
+        shape=weight.shape, dtype=weight.dtype, device=weight.device
+    )
+    weight._get_quantizer().update_quantized(high_precision.to(weight.device), new_weight)
+
+    torch.testing.assert_close(
+        new_weight.dequantize(dtype=weight.dtype),
+        weight.dequantize(dtype=weight.dtype),
+        rtol=0,
+        atol=0,
+    )
+
+    weight.clear_high_precision_init_val()
+    assert weight.get_high_precision_init_val() is None, "clear_high_precision_init_val() not work"
+    assert not hasattr(
+        weight, "._high_precision_init_val"
+    ), "clear_high_precision_init_val() not work"

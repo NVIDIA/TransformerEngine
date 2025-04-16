@@ -4,34 +4,46 @@
 
 """NVFuser functions and JIT utilities"""
 import os
+from functools import wraps
 from typing import Callable, Optional, Tuple
 
 import torch
 
 # pylint: disable=unnecessary-lambda-assignment
 
-jit_fuser = torch.jit.script
+
+def lazy_compile(func):
+    """Lazy compile a function with torch.compile
+
+    This decorator defers the compilation of a function until the first call, speeding up the
+    overall module's import time if these functions are not used.
+    """
+    compiled_func = None
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal compiled_func
+        if compiled_func is None:
+            compiled_func = torch.compile(func)
+        return compiled_func(*args, **kwargs)
+
+    return wrapper
+
+
+jit_fuser = lambda func: func
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    jit_fuser = torch.compile
+    jit_fuser = lazy_compile
+
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
 if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    dropout_fuser = torch.compile
+    dropout_fuser = lazy_compile
+
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda func: func
-if torch.__version__ >= "2":
-    import torch._dynamo
-
-    if torch.__version__ >= "2.1":
-        no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(
-            f, recursive=recursive
-        )
-    else:
-        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
+no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
 
 
 def set_jit_fusion_options() -> None:

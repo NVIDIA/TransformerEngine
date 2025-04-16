@@ -73,11 +73,8 @@ class BackwardLinearAdd(FusedOperation):
             grad_output=grad_output,
             input=x_local,
             weight=linear_op.weight,
-            input_dims=linear_op_ctx.input_dims,
-            weight_dims=linear_op.weight.size(),
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
-            device=linear_op.device,
             dtype=grad_input.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
@@ -86,10 +83,11 @@ class BackwardLinearAdd(FusedOperation):
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
-            with_fp8_compute=linear_op_ctx.with_fp8_compute,
-            weight_fp8_meta=linear_op_ctx.weight_fp8_meta,
-            grad_output_fp8_meta=linear_op_ctx.grad_output_fp8_meta,
-            grad_input_fp8_meta=linear_op_ctx.grad_input_fp8_meta,
+            with_quantized_compute=linear_op_ctx.with_quantized_compute,
+            input_quantizer=linear_op_ctx.input_quantizer,
+            weight_quantizer=linear_op_ctx.weight_quantizer,
+            grad_output_quantizer=linear_op_ctx.grad_output_quantizer,
+            grad_input_quantizer=linear_op_ctx.grad_input_quantizer,
         )
         if accumulate_into_main_grad:
             grad_weight = None

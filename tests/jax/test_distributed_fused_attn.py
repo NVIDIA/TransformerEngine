@@ -2,16 +2,17 @@
 #
 # See LICENSE for license information.
 
+import os
+import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import random
 from distributed_test_base import (
     generate_configs,
     generate_context_parallel_configs,
     generate_collectives_count,
 )
-from transformer_engine.jax import fp8_autocast
+from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -21,11 +22,9 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     CPStrategy,
+    ReorderStrategy,
 )
-from transformer_engine.jax.sharding import MeshResource
-import pytest
 
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 
 DTYPES = [jnp.bfloat16]
 
@@ -104,7 +103,7 @@ class TestDistributedSelfAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
@@ -176,7 +175,7 @@ class TestDistributedCrossAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
@@ -211,29 +210,29 @@ class TestDistributedCrossAttn:
     "data_shape",
     [
         # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
-        pytest.param([2, 128, 12, 128], id="2-128xCP-12-128"),
+        pytest.param([2, 128, 8, 128], id="2-128xCP-8-128"),
         pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
     ],
 )
-@pytest.mark.parametrize("kv_groups", [1, 4, 8, 12, 16])
+@pytest.mark.parametrize("kv_groups", [1, 8])
+@pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
 @pytest.mark.parametrize(
-    "attn_mask_type",
+    "qkv_layout, attn_mask_type",
     [
-        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
-        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-    ],
-)
-@pytest.mark.parametrize("dtype", [jnp.bfloat16])
-@pytest.mark.parametrize(
-    "qkv_layout",
-    [
-        pytest.param(QKVLayout.BSHD_BS2HD, id="COMBINED_KV"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
+        pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.CAUSAL_MASK, id="BSHD_KVPACKED-CAUSAL"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.CAUSAL_MASK, id="BSHD_SEPARATE-CAUSAL"),
+        pytest.param(QKVLayout.BSHD_BS2HD, AttnMaskType.NO_MASK, id="HD_KVPACKED-NO_MASK"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, AttnMaskType.NO_MASK, id="BSHD_SEPARATE-NO_MASK"),
+        pytest.param(
+            QKVLayout.THD_THD_THD,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            id="THD_SEPARATE-PADDING_CAUSAL",
+        ),
     ],
 )
 @pytest.mark.parametrize(
     "load_balanced",
-    [pytest.param(False, id="UNBALANCED"), pytest.param(True, id="BALANCED")],
+    [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
 )
 class TestDistributedContextParallelSelfAttn:
 
@@ -256,7 +255,6 @@ class TestDistributedContextParallelSelfAttn:
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
 
@@ -266,7 +264,6 @@ class TestDistributedContextParallelSelfAttn:
         data_shape = batch, seqlen, num_head, hidden
 
         num_kv_heads = num_head // kv_groups
-        scaling_factor = 1.0 / np.sqrt(num_head)
 
         runner = FusedAttnRunner(
             batch,
@@ -283,7 +280,7 @@ class TestDistributedContextParallelSelfAttn:
             qkv_layout,
             bias_shape,
             None,
-            SeqDescFormat.Seqlens,
+            SeqDescFormat.SegmentIDs,
             number_of_devices=device_count,
             mesh_shape=mesh_shape,
             mesh_axes=mesh_axes,
@@ -298,7 +295,7 @@ class TestDistributedContextParallelSelfAttn:
                 dtype,
                 qkv_layout,
                 attn_bias_type,
-                attn_mask_type,
+                mask_type,
                 dropout_prob,
                 num_head,
                 num_kv_heads,
@@ -341,6 +338,8 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
+        if qkv_layout.is_thd():
+            pytest.skip("THD doesn't support all gather context parallelism.")
         return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -355,6 +354,10 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.ALL_GATHER,
         )
 
+    @pytest.mark.parametrize(
+        "use_scan",
+        [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
+    )
     def test_context_parallel_ring_attn(
         self,
         device_count,
@@ -367,8 +370,17 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_scan,
     ):
-        return self.impl_test_context_parallel_attn(
+        if use_scan:
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
+        else:
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
+
+        if qkv_layout.is_thd() and not load_balanced:
+            pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+
+        self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -381,6 +393,8 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.RING,
         )
+        del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+        return
 
 
 class TestReorderCausalLoadBalancing:
@@ -394,17 +408,26 @@ class TestReorderCausalLoadBalancing:
         ],
     )
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
-    def test(self, cp_size, shape, qkv_format):
+    @pytest.mark.parametrize(
+        "reorder_strategy",
+        [
+            pytest.param(ReorderStrategy.DualChunkSwap, id="DualChunkSwap"),
+            pytest.param(ReorderStrategy.Striped, id="Striped"),
+        ],
+    )
+    def test(self, cp_size, shape, qkv_format, reorder_strategy):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
+        seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
             tensor = tensor.swapaxes(0, 1)
+            seq_dim = 0
 
         ref = tensor.copy()
 
-        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2])
-        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2])
+        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3])
+        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3])
 
-        reordered = reorder(tensor, cp_size, qkv_format)
-        inversed = inverse(reordered, cp_size, qkv_format)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim)
 
         assert jnp.array_equal(inversed, ref)

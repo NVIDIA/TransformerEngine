@@ -108,6 +108,8 @@ class RMSNorm(_RMSNormOp):
 
         # Flag for sequence parallelism (custom Megatron-LM integration)
         self.sequence_parallel: Optional[bool] = sequence_parallel
+        if sequence_parallel is not None:
+            self.weight.sequence_parallel = sequence_parallel
 
     def reset_rms_norm_parameters(self) -> None:
         """Deprecated"""

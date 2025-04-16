@@ -11,7 +11,7 @@ from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from .fp8 import (
     fp8_autocast,
@@ -90,6 +90,14 @@ def _make_graphed_callables(
         callables = (callables,)
         sample_args = (sample_args,)
         sample_kwargs = (sample_kwargs,)
+
+    # Check training/inference
+    is_training = all(c.training for c in callables)
+    if not is_training and any(c.training for c in callables):
+        assert False, (
+            "make_graphed_callables only supports when modules are all in training or all in"
+            " inference mode."
+        )
 
     # Check sizes of args
     if _order is None:
@@ -255,13 +263,16 @@ def _make_graphed_callables(
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
-                grad_inputs = torch.autograd.grad(
-                    outputs=tuple(o for o in outputs if o.requires_grad),
-                    inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                    grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
-                    only_inputs=True,
-                    allow_unused=allow_unused_input,
-                )
+                if is_training:
+                    grad_inputs = torch.autograd.grad(
+                        outputs=tuple(o for o in outputs if o.requires_grad),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                        grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
+                        only_inputs=True,
+                        allow_unused=allow_unused_input,
+                    )
+                else:
+                    grad_inputs = None
                 del outputs, grad_inputs
             # The following code is added specifically for MCore's special requirements,
             # aimed at preventing warmup from altering the control flow.
@@ -314,22 +325,23 @@ def _make_graphed_callables(
                     static_grad_outputs = tuple(
                         torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                     )
-                    with torch.cuda.graph(bwd_graph, pool=mempool):
-                        grad_inputs = torch.autograd.grad(
-                            outputs=tuple(o for o in static_outputs if o.requires_grad),
-                            inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                            grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                            only_inputs=True,
-                            allow_unused=allow_unused_input,
-                            retain_graph=retain_graph_in_backward,
-                        )
+                    if is_training:
+                        with torch.cuda.graph(bwd_graph, pool=mempool):
+                            grad_inputs = torch.autograd.grad(
+                                outputs=tuple(o for o in static_outputs if o.requires_grad),
+                                inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                                grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
+                                only_inputs=True,
+                                allow_unused=allow_unused_input,
+                                retain_graph=retain_graph_in_backward,
+                            )
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
                     static_grad_inputs = []
                     grad_idx = 0
                     for arg in static_input_surface:
-                        if arg.requires_grad:
+                        if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                             static_grad_inputs.append(grad_inputs[grad_idx])
                             grad_idx += 1
                         else:
@@ -366,22 +378,23 @@ def _make_graphed_callables(
             static_grad_outputs = tuple(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
-            with torch.cuda.graph(bwd_graph, pool=mempool):
-                grad_inputs = torch.autograd.grad(
-                    outputs=tuple(o for o in static_outputs if o.requires_grad),
-                    inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                    grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                    only_inputs=True,
-                    allow_unused=allow_unused_input,
-                    retain_graph=retain_graph_in_backward,
-                )
+            if is_training:
+                with torch.cuda.graph(bwd_graph, pool=mempool):
+                    grad_inputs = torch.autograd.grad(
+                        outputs=tuple(o for o in static_outputs if o.requires_grad),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                        grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
+                        only_inputs=True,
+                        allow_unused=allow_unused_input,
+                        retain_graph=retain_graph_in_backward,
+                    )
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.
             static_grad_inputs = []
             grad_idx = 0
             for arg in static_input_surface:
-                if arg.requires_grad:
+                if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                     static_grad_inputs.append(grad_inputs[grad_idx])
                     grad_idx += 1
                 else:
@@ -422,7 +435,10 @@ def _make_graphed_callables(
 
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
-                    if static_input_surface[i].data_ptr() != inputs[i].data_ptr():
+                    if (
+                        isinstance(static_input_surface[i], torch.Tensor)
+                        and static_input_surface[i].data_ptr() != inputs[i].data_ptr()
+                    ):
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
@@ -556,12 +572,16 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: DelayedScaling,
-) -> List[Any]:
+    fp8_recipe: Recipe,
+) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
+
+    if not isinstance(fp8_recipe, DelayedScaling):
+        return None
+
     fp8_tensors = []
     for module in modules:
         for m in module.modules():
@@ -579,9 +599,13 @@ def save_fp8_tensors(
 
 def restore_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_tensors: List[Any],
+    fp8_tensors: Optional[List[Any]],
 ) -> None:
     """Restore FP8 tensors."""
+
+    if fp8_tensors is None:
+        return
+
     for module in modules:
         for m in module.modules():
             module_tensors = fp8_tensors.pop(0)

@@ -8,7 +8,6 @@
 *.nsys-rep
 *.ncu-rep
 *.sqlite
-*.onnx
 *.eggs
 build/
 *.so
@@ -39,3 +38,4 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+tensor_dumps/

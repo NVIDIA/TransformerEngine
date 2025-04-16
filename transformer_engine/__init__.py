@@ -19,19 +19,4 @@ try:
 except (ImportError, StopIteration) as e:
     pass
 
-try:
-    from . import paddle
-except (ImportError, StopIteration) as e:
-    pass
-
-try:
-    import transformer_engine_jax
-except ImportError:
-    pass
-
-try:
-    import transformer_engine_paddle
-except ImportError:
-    pass
-
 __version__ = str(metadata.version("transformer_engine"))

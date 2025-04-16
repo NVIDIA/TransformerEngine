@@ -4,6 +4,6 @@
 
 """Tensor class with FP8 data"""
 
-from .tensor import Float8Tensor
+from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["Float8Tensor"]

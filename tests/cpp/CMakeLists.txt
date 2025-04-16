@@ -5,7 +5,11 @@
 cmake_minimum_required(VERSION 3.18)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 90)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
+  endif()
 endif()
 
 
@@ -22,7 +26,7 @@ enable_testing()
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
 if(NOT DEFINED TE_LIB_PATH)
-    execute_process(COMMAND bash -c "pip show transformer-engine | grep Location | cut -d ' ' -f 2 | tr -d '\n'"
+    execute_process(COMMAND bash -c "pip3 show transformer-engine | grep Location | cut -d ' ' -f 2 | tr -d '\n'"
                     OUTPUT_VARIABLE TE_LIB_PATH)
 endif()
 

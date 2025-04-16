@@ -5,8 +5,10 @@
 """Methods needed for distributed training (DP/TP)."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
@@ -17,11 +19,16 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import safely_set_viewless_tensor_data
+from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data
 from .constants import dist_group_type
-from .fp8 import FP8GlobalStateManager
-from .float8_tensor import Float8Tensor
-
+from .fp8 import FP8GlobalStateManager, fp8_autocast
+from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
+from .tensor.mxfp8_tensor import MXFP8Quantizer
+from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from .tensor.quantized_tensor import QuantizedTensor, Quantizer
+from .tensor._internal.float8_tensor_base import Float8TensorBase
+from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -323,11 +330,14 @@ class _CheckpointFunction(torch.autograd.Function):
         tensor_inputs = [arg if torch.is_tensor(arg) else None for arg in args]
         ctx.save_for_backward(*tensor_inputs)
 
+        fp8 = FP8GlobalStateManager.is_fp8_enabled()
         ctx.get_rng_state_tracker = get_rng_state_tracker
         ctx.tp_group = tp_group
         ctx.recompute_ctx = recompute_ctx
         ctx.torch_gpu_amp_ctx = torch_gpu_amp_ctx
         ctx.torch_cpu_amp_ctx = torch_cpu_amp_ctx
+        ctx.fp8 = fp8
+        ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
         ctx.kwargs = kwargs
 
         return outputs
@@ -370,6 +380,8 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
+        ), fp8_autocast(
+            enabled=ctx.fp8, fp8_recipe=ctx.fp8_recipe
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
@@ -393,6 +405,9 @@ class _CheckpointFunction(torch.autograd.Function):
                 "none of output has requires_grad=True, this checkpoint() is not necessary"
             )
 
+        # backward does not require entering autocast context because
+        # backward implementations already retrieve fp8 recipe and
+        # enablement from stored ctx.
         torch.autograd.backward(outputs_with_grad, args_with_grad)
         grads = tuple(
             inp.grad if isinstance(inp, torch.Tensor) else None for inp in detached_inputs
@@ -689,10 +704,15 @@ def checkpoint(
     # Preserve the torch autocast contexts from the forward pass during recompute phase.
     torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx = _get_active_autocast_contexts()
 
+    fp8 = FP8GlobalStateManager.is_fp8_enabled()
+    fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+
     def recompute_fn(*args, **kwargs):
         with torch.autograd.enable_grad(), (
             te_recompute_ctx
-        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx:
+        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, fp8_autocast(
+            enabled=fp8, fp8_recipe=fp8_recipe
+        ):
             function(*args, **kwargs)
 
     # Initialize a new checkpoint frame for each new forward pass.
@@ -814,89 +834,421 @@ class CudaRNGStatesTracker:
 
 
 def reduce_scatter_along_first_dim(
-    input_: torch.Tensor, tp_group: dist_group_type, async_op: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    inp: torch.Tensor, tp_group: dist_group_type, async_op: bool = False
+) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """Reduce-scatter the input tensor across model parallel group."""
     world_size = get_distributed_world_size(tp_group)
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
-        return input_, None
+        return inp, None
 
-    dim_size = list(input_.size())
+    dim_size = list(inp.size())
     assert (
         dim_size[0] % world_size == 0
     ), "First dimension of the tensor should be divisible by tensor parallel size"
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    output = torch.empty(dim_size, dtype=inp.dtype, device=torch.cuda.current_device())
     handle = torch.distributed.reduce_scatter_tensor(
-        output, input_.contiguous(), group=tp_group, async_op=async_op
+        output, inp.contiguous(), group=tp_group, async_op=async_op
     )
     return output, handle
 
 
+def _all_gather_fp8(
+    inp: torch.Tensor,
+    process_group: dist_group_type,
+    *,
+    async_op: bool = False,
+    quantizer: Optional[Quantizer] = None,
+    out_shape: Optional[list[int]] = None,
+) -> tuple[Float8TensorBase, Optional[torch.distributed.Work]]:
+    """All-gather FP8 tensor along first dimension."""
+    world_size = get_distributed_world_size(process_group)
+
+    # Check that quantizer is valid
+    if quantizer is not None and not isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+    ):
+        raise ValueError(f"Got non-FP8 quantizer ({quantizer.__class__.__name__})")
+
+    # Output tensor dims
+    if out_shape is None:
+        out_shape = list(inp.size())
+        out_shape[0] *= world_size
+
+    # Cast input tensor to FP8 if needed
+    # Note: We cannot directly all-gather the transposed FP8 tensor,
+    # so temporarily modify quantizer to avoid creating FP8 transpose.
+    if not isinstance(inp, Float8TensorBase):
+        if quantizer is None:
+            raise ValueError("Input tensor is not FP8 and no quantizer was provided")
+        init_rowwise_usage = quantizer.rowwise_usage
+        init_columnwise_usage = quantizer.columnwise_usage
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        inp = quantizer(inp)
+        quantizer.set_usage(
+            rowwise=init_rowwise_usage,
+            columnwise=init_columnwise_usage,
+        )
+
+    # Construct output tensor
+    out: Float8TensorBase
+    if quantizer is not None:
+        dtype = torch.float32
+        device = "cuda"
+        if isinstance(inp, Float8Tensor):
+            dtype = inp.dtype
+            device = inp.device
+        out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+    elif isinstance(inp, Float8Tensor):
+        out = inp.make_like(inp, shape=out_shape)
+        out._data = torch.empty_like(
+            out_shape,
+            dtype=torch.uint8,
+            device=inp.device,
+        )
+        out._transpose = None
+        out._transpose_invalid = True
+    else:
+        raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
+
+    # Assume scaling factors are identical across ranks
+    out._scale_inv = inp._scale_inv
+
+    # Perform communication
+    handle = torch.distributed.all_gather_into_tensor(
+        out._data,
+        inp._data.contiguous(),
+        group=process_group,
+        async_op=async_op,
+    )
+
+    # Make sure FP8 transpose is populated if needed
+    needs_transpose = (
+        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+    )
+    if needs_transpose:
+        if handle is not None:
+            handle.wait()
+            handle = None
+        out._create_transpose()
+
+    return out, handle
+
+
+def _all_gather_fp8_blockwise(
+    inp: torch.Tensor,
+    process_group: dist_group_type,
+    *,
+    async_op: bool = False,  # pylint: disable=unused-argument
+    quantizer: Optional[Quantizer] = None,
+    out_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
+    """
+    All-gather FP8 tensor along first dimension for blockwise quantization.
+
+    Returns: quantizer(gather(inp))
+
+    NOTE: The implementation is not sophisticated enough to honor async_op=True.
+    In some cases it falls back to synchronous gather and invokes the quantizer.
+    """
+
+    # Input tensor attributes
+    device: torch.device
+    dtype: torch.dtype
+    if isinstance(inp, torch.Tensor):
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, Float8BlockwiseQTensorBase):
+        if inp._rowwise_data is not None:
+            device = inp._rowwise_data.device
+        elif inp._columnwise_data is not None:
+            device = inp._columnwise_data.device
+        else:
+            raise ValueError("Got Float8BlockwiseQTensorBase input tensor without any data")
+        dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or Float8BlockwiseQTensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+    world_size = get_distributed_world_size(process_group)
+
+    # Check that quantizer is valid
+    if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
+        raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
+    if not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
+        raise NotImplementedError("Only 1D blockwise quantization is supported for allgather")
+
+    # Output tensor dims
+    if out_shape is None:
+        out_shape = list(inp.size())
+        out_shape[0] *= world_size
+
+    # Doing BF16 gather for now as baseline because it's simpler
+    if not isinstance(inp, Float8BlockwiseQTensorBase) and quantizer is not None:
+        out = torch.empty(
+            out_shape,
+            dtype=dtype,
+            device=device,
+            memory_format=torch.contiguous_format,
+        )
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
+        out = quantizer(out)
+        return out, None
+    # Implementation of fp8 gather needs to account for:
+    # * Getting columnwise data as a transpose of how it is stored for GEMMS.
+    # * Gathering non GEMM swizzled scales.
+    # * Refer to scaffold code when implementing at:
+    # https://github.com/kwyss-nvidia/TransformerEngine/commit/6659ee9dc84fb515d1d47699d8bfd20a72b76477
+    raise NotImplementedError("fp8 blockwise allgather not yet implemented")
+
+
+def _all_gather_mxfp8(
+    inp: torch.Tensor,
+    process_group: dist_group_type,
+    *,
+    async_op: bool = False,
+    quantizer: MXFP8Quantizer,
+    out_shape: Optional[list[int]] = None,
+) -> tuple[MXFP8TensorBase, Optional[torch.distributed.Work]]:
+    """All-gather MXFP8 tensor along first dimension."""
+
+    # Input tensor attributes
+    in_shape: Iterable[int]
+    device: torch.device
+    dtype: torch.dtype
+    if isinstance(inp, torch.Tensor):
+        in_shape = inp.size()
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, MXFP8TensorBase):
+        if inp._rowwise_data is not None:
+            in_shape = inp._rowwise_data.device.size()
+            device = inp._rowwise_data.device
+            dtype = inp._rowwise_data.dtype
+        elif inp._columnwise_data is not None:
+            in_shape = inp._columnwise_data.device.size()
+            device = inp._columnwise_data.device
+            dtype = inp._columnwise_data.dtype
+        else:
+            raise ValueError("Got MXFP8 input tensor without any data")
+        dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+
+    # Output tensor shape
+    world_size = get_distributed_world_size(process_group)
+    if out_shape is None:
+        out_shape = [in_shape[0] * world_size] + in_shape[1:]
+
+    # For cases where inp has dimensions that cannot be quantized,
+    # we gather in high precision followed by a cast to FP8.
+    if (
+        not isinstance(inp, MXFP8TensorBase)
+        and quantizer is not None
+        and not quantizer.is_quantizable(inp)
+    ):
+        out = torch.empty(
+            out_shape,
+            dtype=dtype,
+            device=device,
+            memory_format=torch.contiguous_format,
+        )
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
+        out = quantizer(out)
+        return out, None
+
+    # Cast input tensor to MXFP8 with required data
+    if not isinstance(inp, MXFP8TensorBase):
+        inp = quantizer(inp)
+    elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
+        quantizer.columnwise_usage and inp._columnwise_data is None
+    ):
+        warnings.warn(
+            "Input and quantizer do not have matching usages. "
+            "Dequantizing and requantizing to MXFP8."
+        )
+        inp = quantizer(inp.dequantize())
+
+    # Construct MXFP8 output tensor
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
+    # Coalesce NCCL collectives
+    with torch.distributed._coalescing_manager(
+        group=process_group,
+        device=device,
+        async_ops=async_op,
+    ) as coalescing_manager:
+
+        # Gather MXFP8 data for row-wise usage
+        if quantizer.rowwise_usage:
+
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._rowwise_scale_inv
+            out_scale_inv = out._rowwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1])
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_data,
+                inp._rowwise_data,
+                group=process_group,
+            )
+
+        # Gather MXFP8 data for column-wise usage
+        if quantizer.columnwise_usage:
+
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._columnwise_scale_inv
+            out_scale_inv = out._columnwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._columnwise_data,
+                inp._columnwise_data,
+                group=process_group,
+            )
+
+    handle = coalescing_manager if async_op else None
+    return out, handle
+
+
 def gather_along_first_dim(
-    input_: torch.Tensor,
+    inp: torch.Tensor,
     process_group: dist_group_type,
     async_op: bool = False,
-) -> tuple[torch.Tensor, Any]:
-    """All-gather tensors and concatenate along first dimension."""
+    quantizer: Optional[Quantizer] = None,
+) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
+    """
+    All-gather tensors and concatenate along first dimension.
+    """
 
     # Return immediately if no communication is required
     world_size = get_distributed_world_size(process_group)
     if world_size == 1:
-        return input_, None
+        if quantizer is not None and not isinstance(inp, QuantizedTensor):
+            inp = quantizer(inp)
+        return inp, None
 
-    # Allocate output tensor
-    output_shape = list(input_.size())
-    output_shape[0] *= world_size
-    if isinstance(input_, Float8Tensor):
-        output = Float8Tensor.make_like(
-            input_,
-            data=torch.empty(
-                output_shape,
-                dtype=torch.uint8,
-                device=input_.device,
-            ),
+    # Output tensor dims
+    out_shape = list(inp.size())
+    out_shape[0] *= world_size
+
+    # FP8 case: delayed scaling or current scaling
+    if isinstance(inp, Float8TensorBase) or isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+    ):
+        return _all_gather_fp8(
+            inp,
+            process_group,
+            async_op=async_op,
+            quantizer=quantizer,
+            out_shape=out_shape,
         )
-        src = input_._data.contiguous()
-        dst = output._data
-    else:
-        output = torch.empty(
-            output_shape,
-            dtype=input_.dtype,
-            device=input_.device,
+
+    # FP8 block scaling case, block length = 128
+    if isinstance(inp, Float8BlockwiseQTensorBase) or isinstance(quantizer, Float8BlockQuantizer):
+        return _all_gather_fp8_blockwise(
+            inp,
+            process_group,
+            async_op=async_op,
+            quantizer=quantizer,
+            out_shape=out_shape,
+        )
+
+    # MXFP8 case
+    if isinstance(inp, MXFP8TensorBase) or isinstance(quantizer, MXFP8Quantizer):
+        assert isinstance(quantizer, MXFP8Quantizer)
+        return _all_gather_mxfp8(
+            inp,
+            process_group,
+            async_op=async_op,
+            quantizer=quantizer,
+            out_shape=out_shape,
+        )
+
+    # High-precision communication for quantized tensors
+    if quantizer is not None:
+        warnings.warn(
+            "Attempting to all-gather an unsupported quantized tensor. "
+            "Falling back to high-precision all-gather."
+        )
+        if isinstance(inp, QuantizedTensor):
+            inp = inp.dequantize()
+        out = torch.empty(
+            out_shape,
+            dtype=inp.dtype,
+            device=inp.device,
             memory_format=torch.contiguous_format,
         )
-        src = input_.contiguous()
-        dst = output
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
+        out = quantizer(out)
+        return out, None
 
-    # Launch all-gather
+    # Dequantize quantized tensor if not supported
+    if isinstance(inp, QuantizedTensor):
+        warnings.warn(
+            "Attempting to all-gather an unsupported quantized tensor. "
+            "Falling back to high-precision all-gather."
+        )
+        inp = inp.dequantize()
+
+    # Communication for plain PyTorch tensors
+    out = torch.empty(
+        out_shape,
+        dtype=inp.dtype,
+        device=inp.device,
+        memory_format=torch.contiguous_format,
+    )
     handle = torch.distributed.all_gather_into_tensor(
-        dst,
-        src,
+        out,
+        inp.contiguous(),
         group=process_group,
         async_op=async_op,
     )
-    return output, handle
+    return out, handle
 
 
 def allreduce(
-    input_: torch.Tensor,
+    inp: torch.Tensor,
     tp_group: Optional[dist_group_type] = None,
     async_op: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, Optional[torch.distributed.Work]]:
     """All-reduce the input tensor across model parallel group."""
 
     # Bypass the function if we are using only 1 GPU.
     if get_distributed_world_size(tp_group) == 1:
-        return input_, None
+        return inp, None
 
     # All-reduce.
-    handle = torch.distributed.all_reduce(input_, group=tp_group, async_op=async_op)
+    handle = torch.distributed.all_reduce(inp, group=tp_group, async_op=async_op)
 
-    return input_, handle
+    return inp, handle
 
 
 def _fsdp_scatter_tensors(
@@ -907,12 +1259,13 @@ def _fsdp_scatter_tensors(
     if fsdp_group is not None:
         for t in tensors:
             if isinstance(t, torch.Tensor):
-                target = t._data if isinstance(t, Float8Tensor) else t
-                shapes.append(target.data.shape)
-                safely_set_viewless_tensor_data(
-                    target,
-                    split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True),
-                )
+                targets = t.get_data_tensors() if isinstance(t, QuantizedTensor) else [t]
+                for target in targets:
+                    shapes.append(target.data.shape)
+                    safely_set_viewless_tensor_data(
+                        target,
+                        split_tensor_into_1d_equal_chunks(target.data, fsdp_group, new_buffer=True),
+                    )
             else:
                 shapes.append(None)
     return shapes
@@ -928,10 +1281,11 @@ def _fsdp_gather_tensors(
         for s, t in zip(shapes, tensors):
             if isinstance(t, torch.Tensor):
                 assert s is not None, "Internal TE error."
-                target = t._data if isinstance(t, Float8Tensor) else t
-                safely_set_viewless_tensor_data(
-                    target, gather_split_1d_tensor(target.data, fsdp_group).view(s)
-                )
+                targets = t.get_data_tensors() if isinstance(t, QuantizedTensor) else [t]
+                for target in targets:
+                    safely_set_viewless_tensor_data(
+                        target, gather_split_1d_tensor(target.data, fsdp_group).view(s)
+                    )
 
 
 def _is_te_module(module):

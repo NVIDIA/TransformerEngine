@@ -18,13 +18,14 @@ from flax.linen.attention import combine_masks
 from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
+import pytest
 
 from transformer_engine.jax.attention import (
     AttnMaskType,
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
-from transformer_engine.jax.fp8 import DType as TEDType
+from transformer_engine.jax.quantize.helper import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -96,6 +97,62 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
+def parameterize_by_test_level(param_dict: dict, id_prefix: str = ""):
+    """
+    Takes an input dictionary of parameters keyed by test type "L0", etc.
+    Returns a list of pytest parameters to be used in a parameterized test for the current test type
+    """
+    DEFAULT_TEST_LEVEL = "L0"
+    test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", DEFAULT_TEST_LEVEL)
+    if test_level not in param_dict:
+        raise ValueError("Unsupported test level")
+    return values_to_named_params(param_dict[test_level], id_prefix)
+
+
+def value_to_test_name_str(value):
+    """Converts a value to how it should appear in a test name."""
+    if isinstance(value, tuple) or isinstance(value, list):
+        return "_".join([value_to_test_name_str(v) for v in value])
+
+    dtype_type = type(jnp.float32)
+    if isinstance(value, dtype_type):
+        return value.dtype
+
+    return str(value)
+
+
+def value_to_named_param(value, id_prefix: str = ""):
+    param_type = type(pytest.param(0))
+    if isinstance(value, param_type):
+        return value
+
+    x = pytest.param(value, id=f"{id_prefix}_{value_to_test_name_str(value)}")
+    return x
+
+
+def values_to_named_params(params, id_prefix: str = ""):
+    return [value_to_named_param(v, id_prefix=id_prefix) for v in params]
+
+
+def pytest_parametrize_wrapper(param_name, param_values):
+    """
+    A wrapper for pytest.mark.parametrize to allow for automatic
+    naming of tests based on the parameter values.
+    """
+    id_prefix = param_name
+    if isinstance(param_values, dict):
+        param_values = parameterize_by_test_level(param_values, id_prefix=param_name)
+    elif "," not in param_name:
+        param_values = values_to_named_params(param_values, id_prefix=id_prefix)
+
+    # Currently comma separated parameters in one parametrize call aren't supported for automatic naming
+    # and will just be passed through with default pytest names
+    def decorator(func):
+        return pytest.mark.parametrize(param_name, param_values)(func)
+
+    return decorator
+
+
 class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = True
@@ -110,7 +167,7 @@ class DotProductAttention(nn.Module):
 
     Args:
         dropout_rate: dropout rate
-        dtype: the dtype of the computation (default: float32)
+        dtype: the data type used to allocate the initial parameters (default: float32).
         float32_logits: bool, if True then compute logits in float32 to avoid
         numerical issues with bfloat16.
     """
@@ -140,6 +197,7 @@ class DotProductAttention(nn.Module):
         Returns:
             Output of shape `[batch, length, num_heads, v_depth_per_head]`.
         """
+        input_dtype = query.dtype
         assert key.ndim == query.ndim == value.ndim, "q, k, v must have same rank."
         batch_dim = 1 if self.transpose_batch_sequence else 0
         assert (
@@ -152,7 +210,7 @@ class DotProductAttention(nn.Module):
 
         if self.scale_attn_logits:
             head_dim = query.shape[-1]
-            depth_scaling = jnp.sqrt(head_dim).astype(self.dtype)
+            depth_scaling = jnp.sqrt(head_dim).astype(input_dtype)
             query = query / depth_scaling
 
         # Casting logits and softmax computation for float32 for model stability.
@@ -181,7 +239,7 @@ class DotProductAttention(nn.Module):
             attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
         # Normalize the attention weights across `kv_length` dimension.
-        attn_weights = jax_nn.softmax(attn_weights).astype(self.dtype)
+        attn_weights = jax_nn.softmax(attn_weights).astype(input_dtype)
 
         # Apply attention dropout.
         if not deterministic and self.dropout_rate > 0.0:
@@ -191,14 +249,19 @@ class DotProductAttention(nn.Module):
             dropout_shape = list(attn_weights.shape)
             dropout_rng = self.make_rng("dropout")
             keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-            multiplier = keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=self.dtype)
+            multiplier = keep.astype(input_dtype) / jnp.asarray(keep_prob, dtype=input_dtype)
             attn_weights = attn_weights * multiplier
 
         attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
+        # attn_weights = attn_weights.astype(input_dtype)
 
         # Take the linear combination of `value`.
         if self.transpose_batch_sequence:
             return jnp.einsum("bhgqk,kbhd->qbhgd", attn_weights, value).reshape(query.shape)
+
+        assert (
+            attn_weights.dtype == input_dtype
+        ), f"input.dtype={input_dtype}, output.dtype={attn_weights.dtype}"
 
         return jnp.einsum("bhgqk,bkhd->bqhgd", attn_weights, value).reshape(query.shape)
 
@@ -209,7 +272,7 @@ class DenseGeneral(nn.Module):
     Attributes:
     features: tuple with numbers of output features.
     axis: tuple with axes to apply the transformation on.
-    dtype: the dtype of the computation (default: float32).
+    dtype: the data type used to allocate the initial parameters (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add a bias to the output (default: False).
     bias_init: initializer function for the bias vector.
@@ -226,7 +289,9 @@ class DenseGeneral(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -239,35 +304,39 @@ class DenseGeneral(nn.Module):
         Returns:
         The transformed input.
         """
+        input_dtype = inputs.dtype
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
-        inputs = jnp.asarray(inputs, self.dtype)
         axis = _normalize_axes(axis, inputs.ndim)
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]), np.prod(features))
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, jnp.float32, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
         )
 
-        kernel = jnp.asarray(kernel, self.dtype)
+        kernel = jnp.asarray(kernel, input_dtype)
         kernel = jnp.reshape(kernel, kernel_shape)
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, self.features, jnp.float32, axes=self.bias_axes
+                "bias", self.bias_init, self.features, self.dtype, axes=self.bias_axes
             )
-            bias = bias.astype(self.dtype)
+            bias = bias.astype(input_dtype)
         else:
             bias = None
 
         contract_ind = tuple(range(0, len(axis)))
 
-        y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+        y = lax.dot_general(
+            inputs, kernel, ((axis, contract_ind), ((), ())), preferred_element_type=input_dtype
+        )
 
         if bias is not None:
             y += jnp.reshape(bias, (1,) * (y.ndim - 1) + (-1,))
+
+        assert y.dtype == inputs.dtype, f"input.dtype={inputs.dtype}, output.dtype={y.dtype}"
         return y
 
 
@@ -281,7 +350,7 @@ class MlpBlock(nn.Module):
       kernel_init: Kernel function, passed to the dense layers.
       deterministic: Whether the dropout layers should be deterministic.
       intermediate_dropout_rate: Dropout rate used after the intermediate layers.
-      dtype: Type for the dense layer.
+      dtype: the data type used to allocate the initial parameters (default: float32).
     """
 
     transpose_batch_sequence: bool
@@ -296,7 +365,9 @@ class MlpBlock(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -345,6 +416,7 @@ class MlpBlock(nn.Module):
         )(
             x, deterministic=deterministic
         )  # Broadcast along length.
+
         if self.transpose_batch_sequence:
             x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "mlp"))
         else:
@@ -358,6 +430,10 @@ class MlpBlock(nn.Module):
             bias_axes="embed",
             name="wo",
         )(x)
+
+        assert (
+            output.dtype == inputs.dtype
+        ), f"input.dtype={input.dtype}, output.dtype={output.dtype}"
         return output
 
 
@@ -381,7 +457,7 @@ def apply_rotary_pos_emb_alternate(
     second_part = second_half * cos + first_half * sin
     first_part = first_part.astype(inputs.dtype)
     second_part = second_part.astype(inputs.dtype)
-    return jnp.concatenate([first_part, second_part], axis=-1)
+    return jnp.concatenate([first_part, second_part], axis=-1).astype(inputs.dtype)
 
 
 def apply_rotary_pos_emb_consecutive(
@@ -415,7 +491,7 @@ def apply_rotary_pos_emb_consecutive(
     sign = jnp.sign(jnp.mod(jnp.arange(embedding_dim, dtype=jnp.int32), 2) - 0.5)
     outputs = inputs * cos + inputs_shifted * sin * sign
 
-    return outputs
+    return outputs.astype(inputs.dtype)
 
 
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
@@ -429,7 +505,7 @@ class MultiHeadAttention(nn.Module):
         should be divisible by the number of heads.
       num_gqa_groups: number of kv attention heads
       head_dim: dimension of each head.
-      dtype: the dtype of the computation.
+      dtype: the data type used to allocate the initial parameters (default: float32).
       dropout_rate: dropout rate
       kernel_init: initializer for the kernel of the Dense layers.
       float32_logits: bool, if True then compute logits in float32 to avoid
@@ -453,7 +529,9 @@ class MultiHeadAttention(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -547,6 +625,7 @@ class MultiHeadAttention(nn.Module):
 
         if self.fuse_qkv:
             if is_qkvpack:
+
                 qkv_proj = DenseGeneral(
                     axis=-1,
                     features=self.num_heads * self.head_dim * 3,
@@ -557,11 +636,13 @@ class MultiHeadAttention(nn.Module):
                     name="qkv",
                     dtype=self.dtype,
                 )(inputs_kv)
+
                 query, key, value = jnp.split(
                     qkv_proj,
                     [self.num_heads * self.head_dim, self.num_heads * self.head_dim * 2],
                     axis=-1,
                 )
+
             else:
                 query = q_projection(kernel_init=query_init, name="query")(inputs_q)
 
@@ -699,6 +780,7 @@ class MultiHeadAttention(nn.Module):
         # Convert the boolean attention mask to an attention bias.
         if mask is not None:
             # attention mask in the form of attention bias
+
             attention_bias = lax.select(
                 mask > 0,
                 jnp.full(mask.shape, 0.0).astype(self.dtype),
@@ -728,6 +810,7 @@ class MultiHeadAttention(nn.Module):
             x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "joined_kv"))
 
         # Back to the original inputs dimensions.
+
         out = DenseGeneral(
             features=inputs_q.shape[-1],  # output dim is set to the input dim.
             axis=-1,
@@ -738,6 +821,10 @@ class MultiHeadAttention(nn.Module):
             dtype=self.dtype,
             name="out",
         )(x)
+
+        assert (
+            inputs_q.dtype == inputs_kv.dtype == out.dtype
+        ), f"q.dtype={inputs_q.dtype}, kv.dtype={inputs_kv.dtype}, out.dtype={out.dtype}"
         return out
 
 
@@ -763,23 +850,22 @@ class LayerNorm(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Applies layer normalization on the input."""
 
-        x = jnp.asarray(x, jnp.float32)
+        input_dtype = x.dtype
         features = x.shape[-1]
 
         scale = nn_partitioning.param_with_axes(
-            "scale", self.scale_init, (features,), jnp.float32, axes=("embed",)
+            "scale", self.scale_init, (features,), self.dtype, axes=("embed",)
         )
-        scale = jnp.asarray(scale, self.dtype)
-
+        x_ = x.astype(jnp.float32)
         if self.layernorm_type == "layernorm":
-            mean = jnp.mean(x, axis=-1, keepdims=True)
-            var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
-            y = (x - mean) * lax.rsqrt(var + self.epsilon)
+            mean = jnp.mean(x_, axis=-1, keepdims=True)
+            var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+            y = (x_ - mean) * lax.rsqrt(var + self.epsilon)
 
             bias = nn_partitioning.param_with_axes(
-                "ln_bias", self.bias_init, (features,), jnp.float32, axes=("embed",)
+                "ln_bias", self.bias_init, (features,), self.dtype, axes=("embed",)
             )
-            bias = jnp.asarray(bias, self.dtype)
+            bias = jnp.asarray(bias, input_dtype)
 
             if not self.zero_centered_gamma:
                 z = y * scale + bias
@@ -788,11 +874,13 @@ class LayerNorm(nn.Module):
         else:
             assert self.layernorm_type == "rmsnorm"
             assert not self.zero_centered_gamma
-            mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-            y = x * lax.rsqrt(mean2 + self.epsilon)
+            mean2 = jnp.mean(lax.square(x_), axis=-1, keepdims=True)
+            y = x_ * lax.rsqrt(mean2 + self.epsilon)
             z = y * scale
+        z = z.astype(input_dtype)
 
-        return jnp.asarray(z, self.dtype)
+        assert z.dtype == x.dtype, f"output_dtype={z.dtype}, input_dtype={x.dtype}"
+        return z
 
 
 class RelativePositionBiases(nn.Module):
@@ -805,7 +893,7 @@ class RelativePositionBiases(nn.Module):
         distance bucket.
       num_heads: Number of heads in the attention layer. Each head will get a
         different relative position weighting.
-      dtype: Type of arrays through this module.
+      dtype: the data type used to allocate the initial parameters (default: float32).
       embedding_init: initializer for relative embedding table.
     """
 
@@ -1069,9 +1157,11 @@ class EncoderLayer(nn.Module):
             fuse_wi=self.fuse_mlp_wi,
             name="mlp",
         )(y, deterministic=deterministic)
+
         y = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=self.hidden_dropout_dims)(
             y, deterministic=deterministic
         )
+
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
             y = nn.Dropout(rate=self.drop_path, broadcast_dims=drop_path_shape)(
@@ -1087,6 +1177,8 @@ class EncoderLayer(nn.Module):
                 dtype=self.dtype,
                 name="output_layernorm",
             )(y)
+
+        assert y.dtype == inputs.dtype, f"output_dtype={y.dtype}, input_dtype={inputs.dtype}"
         return y
 
 
@@ -1293,6 +1385,7 @@ class DecoderLayer(nn.Module):
                 name="output_layernorm",
             )(z)
 
+        assert z.dtype == inputs.dtype, f"output_dtype={z.dtype}, input_dtype={inputs.dtype}"
         return z
 
 
@@ -1387,17 +1480,25 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 def dtype_tols(
     dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
 ) -> Dict[str, float]:
     """Expected numerical tolerance for a data type.
 
     Args:
       dtype: data type.
       reference_value: reference value (default: 1).
+      rtol: override for relative tolerance estimate
+      atol: override for absolute tolerance estimate
 
     Returns:
       Dictionary with "rtol" and "atol" as keys
 
     """
+
+    # Return immediately if tolerances are fully specified
+    if rtol is not None and atol is not None:
+        return {"rtol": rtol, "atol": atol}
 
     # Convert to JAX dtype if needed
     if isinstance(dtype, TEDType):
@@ -1416,7 +1517,11 @@ def dtype_tols(
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):
-        return dict(rtol=0, atol=0)
+        if rtol is None:
+            rtol = 0.0
+        if atol is None:
+            atol = 0.0
+        return {"rtol": rtol, "atol": atol}
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
@@ -1429,10 +1534,11 @@ def dtype_tols(
         spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
         spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
         ulp = max(spacing_high.item(), spacing_low.item())
-    return dict(
-        rtol=eps_relaxed,
-        atol=max(ulp, eps_relaxed),
-    )
+    if rtol is None:
+        rtol = eps_relaxed
+    if atol is None:
+        atol = max(ulp, eps_relaxed)
+    return {"rtol": rtol, "atol": atol}
 
 
 def sync_params_values(dst, src, transformations, sep="/"):

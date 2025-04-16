@@ -12,10 +12,10 @@ import torch
 
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention import (
-    InferenceParams,
     MultiheadAttention,
-    check_set_window_size,
 )
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.dot_product_attention.utils import check_set_window_size
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -267,11 +267,11 @@ class TransformerLayer(torch.nn.Module):
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
-        ub_bulk_wgrad: bool = True,
-        ub_bulk_dgrad: bool = True,
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
         ub_overlap_rs_dgrad: bool = False,
+        ub_bulk_dgrad: bool = True,
+        ub_bulk_wgrad: bool = True,
         bias: bool = True,
         activation: str = "gelu",
         normalization: str = "LayerNorm",
@@ -546,6 +546,7 @@ class TransformerLayer(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
+        pad_between_seqs: Optional[bool] = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -637,6 +638,9 @@ class TransformerLayer(torch.nn.Module):
         inference_params: InferenceParams, default = None
                          Inference parameters that are passed to the main model in order
                          to efficiently calculate and store the context during inference.
+        pad_between_seqs: Optional[bool], default = `None`
+            If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
+            If true, there are padding tokens between individual sequences in a packed batch.
         """
 
         if self_attn_mask_type is None:
@@ -697,6 +701,7 @@ class TransformerLayer(torch.nn.Module):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             fast_zero_fill=fast_zero_fill,
+            pad_between_seqs=pad_between_seqs,
         )
 
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:

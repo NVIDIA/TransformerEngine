@@ -6,7 +6,9 @@ import os
 import jax
 import pytest
 
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
+
+import transformer_engine.jax
+from transformer_engine_jax import get_device_compute_capability
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -27,9 +29,6 @@ def enable_fused_attn_after_hopper():
     """
     if get_device_compute_capability(0) >= 90:
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
     yield
     if "NVTE_FUSED_ATTN" in os.environ:
         del os.environ["NVTE_FUSED_ATTN"]
-    if "NVTE_ALLOW_NONDETERMINISTIC_ALGO" in os.environ:
-        del os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"]

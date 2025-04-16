@@ -2,10 +2,7 @@
 extension-pkg-whitelist=flash_attn_2_cuda,
                         torch,
                         transformer_engine_torch,
-                        transformer_engine_paddle,
                         transformer_engine_jax
-
-extension-pkg-allow-list=transformer_engine.transformer_engine_jax
 
 disable=too-many-locals,
         too-few-public-methods,

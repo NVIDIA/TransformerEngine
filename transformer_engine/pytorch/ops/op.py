@@ -13,13 +13,16 @@ from typing import Any, Optional
 
 import torch
 
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import (
-    DelayedScaling,
+from transformer_engine.common.recipe import Recipe
+from ..fp8 import (
+    MXFP8BlockScalingRecipeState,
+    DelayedScalingRecipeState,
+    Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
-    get_default_fp8_recipe,
+    RecipeState,
+    fp8_autocast,
 )
-from ._common import canonicalize_device
+from ..tensor import Quantizer
 
 
 @dataclasses.dataclass
@@ -174,132 +177,158 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def __init__(self) -> None:
         super().__init__()
 
-        # FP8 metadata objects
+        # Objects for quantization
+        self._quantizers: Optional[dict[str, list[Quantizer]]] = None
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
 
     @property
     def is_fused_op(self) -> bool:
         return False
 
-    def num_fp8_scales(
+    def num_quantizers(
         self,
         mode: str,  # pylint: disable=unused-argument
     ) -> int:
-        """Number of FP8 scaling factors
+        """Number of quantizers
+
+        Matches number of quantized tensors used in operation.
 
         Parameters
         ----------
-        mode: {"input", "param", "grad_output"}
-            Type of FP8 scaling factor
+        mode: {"forward", "backward"}
+            Quantizer type
 
         """
         return 0
 
-    def _make_fp8_metas(self) -> dict[str, Optional[dict[str, Any]]]:
-        """Construct FP8 metadata"""
+    def _reset_quantization_recipe_state(
+        self,
+        *,
+        recipe: Optional[Recipe] = None,
+    ) -> None:
+        """Construct state for quantization recipe"""
 
-        # Shared objects for FP8 metadata
-        dtype = torch.float32
-        device = canonicalize_device(None)
-        recipe = get_default_fp8_recipe()
+        # Quantization recipe
+        if recipe is None:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
 
-        def _make_meta(
-            num_scales: int,
-            is_forward: bool,
-        ) -> Optional[dict[str, Any]]:
-            """Construct FP8 metadata for one tensor type"""
-            if num_scales == 0:
-                return None
-            key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
-            meta = tex.FP8TensorMeta()
-            meta.scale = torch.ones(num_scales, dtype=dtype, device=device)
-            meta.scale_inv = torch.ones(num_scales, dtype=dtype, device=device)
-            meta.amax_history = torch.zeros(
-                (recipe.amax_history_len, num_scales),
-                dtype=dtype,
-                device=device,
+        # Quantization recipe state for forward and backward pass
+        self._fp8_metas = {"forward": None, "backward": None}
+        self._quantizers = {"forward": [], "backward": []}
+        for mode in ("forward", "backward"):
+            num_quantizers = self.num_quantizers(mode)
+            if num_quantizers == 0:
+                continue
+
+            if recipe.float8_block_scaling():
+                raise NotImplementedError(
+                    "Fusible operations do not support FP8 block scaling recipe"
+                )
+
+            # Construct quantization recipe state
+            recipe_state = RecipeState.create(
+                recipe,
+                mode=mode,
+                num_quantizers=num_quantizers,
             )
-            return {
-                key: meta,
+            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                forward=(mode == "forward"),
+            )
+            self._fp8_metas[mode] = {
+                fp8_meta_key: recipe_state,
                 "recipe": recipe,
-                "fp8_group": None,
+                "fp8_group": FP8GlobalStateManager.get_fp8_group(),
             }
 
-        # Construct FP8 metadata for all tensor types
-        return {
-            "input": _make_meta(self.num_fp8_scales("input"), True),
-            "param": _make_meta(self.num_fp8_scales("param"), True),
-            "grad_output": _make_meta(self.num_fp8_scales("grad_output"), False),
-        }
+            # Construct builder class for quantized tensors
+            self._quantizers[mode] = recipe_state.make_quantizers()
 
-    @classmethod
-    def _maybe_update_fp8_meta(
-        cls,
-        fp8_meta: Optional[dict[str, Any]],
+    def _update_quantization_recipe_state(
+        self,
         *,
-        fp8_recipe: Optional[DelayedScaling] = None,
+        recipe: Optional[Recipe] = None,
     ) -> None:
-        if fp8_meta is None:
+        """Make sure quantizer state matches quantization recipe"""
+
+        # Quantization recipe
+        if recipe is None:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+
+        # Reset quantization state if needed
+        if self._fp8_metas is None or self._quantizers is None:
+            self._reset_quantization_recipe_state(recipe=recipe)
             return
-
-        # Update FP8 recipe
-        if fp8_recipe is None:
-            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        fp8_meta["recipe"] = fp8_recipe
-
-        # Update FP8 communication group
-        fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
-
-        # Adjust amax history length if needed
-        amax_history_len = fp8_recipe.amax_history_len
-        for is_forward in (True, False):
-            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
-            if fp8_meta_key not in fp8_meta:
+        for mode in ("forward", "backward"):
+            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                forward=(mode == "forward"),
+            )
+            if self._fp8_metas[mode] is None or fp8_meta_key not in self._fp8_metas[mode]:
                 continue
-            meta = fp8_meta[fp8_meta_key]
-            curr_len = meta.amax_history.size(0)
+            recipe_state = self._fp8_metas[mode][fp8_meta_key]
+            need_to_reset_recipe_state = (
+                (recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState))
+                or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
+                or (
+                    recipe.float8_block_scaling()
+                    and not isinstance(recipe_state, Float8BlockScalingRecipeState)
+                )
+            )
+            if need_to_reset_recipe_state:
+                self._reset_quantization_recipe_state(recipe=recipe)
+                return
 
-            # Nothing to be done if amax history is already correct
-            if curr_len == amax_history_len:
+        # Quantization recipe state for forward and backward pass
+        for mode in ("forward", "backward"):
+            num_quantizers = self.num_quantizers(mode)
+            if num_quantizers == 0:
                 continue
 
-            # Reallocate amax history
-            with torch.no_grad():
-                if curr_len > amax_history_len:
-                    meta.amax_history = meta.amax_history[:amax_history_len].clone()
-                else:
-                    meta.amax_history = torch.nn.functional.pad(
-                        meta.amax_history,
-                        pad=(0, 0, 0, amax_history_len - curr_len),
-                    )
+            # Update FP8 metadata
+            fp8_meta = self._fp8_metas[mode]
+            fp8_meta["recipe"] = recipe
+            fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
-            # Update global buffers for amax reductions
-            buffer_info_key = FP8GlobalStateManager.get_buffer_info()
-            if buffer_info_key in fp8_meta:
-                fwd_pos, fwd_key, bwd_pos, bwd_key = fp8_meta[buffer_info_key]
-                for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
-                    assert (
-                        buffer_key in FP8GlobalStateManager.global_amax_history_buffer
-                    ), "TE internal error during amax history change."
-                    FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = fp8_meta[
-                        fp8_meta_key
-                    ].amax_history[0]
-                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = fp8_meta[
-                        fp8_meta_key
-                    ].amax_history
+            # Get recipe state
+            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                forward=(mode == "forward"),
+            )
+            recipe_state = fp8_meta[fp8_meta_key]
 
-    def get_fp8_meta(self, mode: str) -> Optional[dict[str, Any]]:
-        """FP8 metadata
+            # Reallocate amax history if needed
+            if not recipe.delayed():
+                continue
+
+            current_length = recipe_state.amax_history.size(0)
+            target_length = recipe.amax_history_len
+            if current_length != target_length:
+                with torch.no_grad():
+                    if target_length < current_length:
+                        recipe_state.amax_history = recipe_state.amax_history[
+                            :target_length
+                        ].clone()
+                    else:
+                        recipe_state.amax_history = torch.nn.functional.pad(
+                            recipe_state.amax_history,
+                            pad=(0, 0, 0, target_length - current_length),
+                        )
+                self._quantizers[mode] = recipe_state.make_quantizers()
+
+    def get_quantizer(
+        self,
+        mode: str,
+        index: int,
+    ) -> Quantizer:
+        """Get builder class for quantized tensor
 
         Parameters
         ----------
-        mode: {"input", "param", "grad_output"}
-            Type of FP8 scaling factor
+        mode: {"forward", "backward"}
+            Quantizer type
 
         """
-        if self._fp8_metas is None:
-            self._fp8_metas = self._make_fp8_metas()
-        return self._fp8_metas[mode]
+        if self._quantizers is None:
+            self._reset_quantization_recipe_state()
+        return self._quantizers[mode][index]
 
     @torch.no_grad()
     def _save_fp8_metas(self) -> Optional[dict[str, Any]]:
@@ -321,7 +350,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     continue
                 out[mode][fp8_meta_key] = (
                     fp8_meta[fp8_meta_key].scale.clone(),
-                    fp8_meta[fp8_meta_key].scale_inv.clone(),
                     fp8_meta[fp8_meta_key].amax_history.clone(),
                 )
         return out
@@ -346,16 +374,15 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 assert (
                     fp8_meta_key in self._fp8_metas[mode]
                 ), f"Found an unexpected key ({mode=}, {fp8_meta_key=}) in saved FP8 metadata"
-                scale, scale_inv, amax_history = tensors
+                scale, amax_history = tensors
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
-                self._fp8_metas[mode][fp8_meta_key].scale_inv.copy_(scale_inv)
                 self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
 
     def pre_forward(
         self,
         *,
         fp8_enabled: Optional[bool] = None,
-        fp8_recipe: Optional[DelayedScaling] = None,
+        fp8_recipe: Optional[Recipe] = None,
     ) -> None:
         """Preprocessing before forward pass"""
 
@@ -363,28 +390,15 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         if fp8_enabled is None:
             fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         if fp8_enabled:
-
-            # Construct FP8 metadata if needed
-            if self._fp8_metas is None:
-                self._fp8_metas = self._make_fp8_metas()
-
-            # Make sure FP8 metadata matches FP8 autocast context
-            for fp8_meta in self._fp8_metas.values():
-                self._maybe_update_fp8_meta(fp8_meta, fp8_recipe=fp8_recipe)
-
-            # Register FP8 metadata for amax and scale update
+            self._update_quantization_recipe_state(recipe=fp8_recipe)
             if not FP8GlobalStateManager.fp8_graph_capturing():
-                if self.num_fp8_scales("input"):
+                if self.num_quantizers("forward"):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                        self.get_fp8_meta("input"),
+                        self._fp8_metas["forward"],
                     )
-                if self.num_fp8_scales("param"):
+                if self.num_quantizers("backward"):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                        self.get_fp8_meta("param"),
-                    )
-                if self.num_fp8_scales("grad_output"):
-                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                        self.get_fp8_meta("grad_output"),
+                        self._fp8_metas["backward"],
                     )
 
     @abc.abstractmethod
@@ -506,7 +520,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def get_extra_state(self) -> torch.Tensor:
         """Serialize extra state
 
-        Contains metadata for FP8 casting.
+        Contains metadata for quantization recipe.
 
         """
 
@@ -527,13 +541,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # See: https://github.com/NVIDIA/TransformerEngine/pull/351
         # See: https://github.com/NVIDIA/TransformerEngine/pull/363
 
-        # Return immediately if op has no FP8 state
-        has_fp8_state = any(
-            self.num_fp8_scales(mode) > 0 for mode in ("input", "param", "grad_output")
-        )
-        if not has_fp8_state:
-            return torch.Tensor()
-
         def to_cpu(src: torch.Tensor) -> torch.Tensor:
             """Helper function to make CPU copy of tensor
 
@@ -545,28 +552,27 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             dst.copy_(src, non_blocking=True)
             return dst
 
-        # Store FP8 state
+        # Store quantizer state if needed
         state = {}
-        for mode in ("input", "param", "grad_output"):
+        for mode in ("forward", "backward"):
 
-            # Get state for a given FP8 tensor
-            if self.num_fp8_scales(mode) == 0:
-                state[mode] = None
+            # Skip if op has no quantizer state
+            if self._fp8_metas is None or self._fp8_metas[mode] is None:
                 continue
-            fp8_meta = self.get_fp8_meta(mode)
-            if fp8_meta is None:
-                continue
+
+            # Quantizer state
+            fp8_meta = self._fp8_metas[mode]
             state[mode] = {}
+            state[mode]["recipe"] = fp8_meta["recipe"]
 
-            # Store tensors
-            if "scaling_fwd" in fp8_meta:
-                state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
-                state[mode]["scale_inv_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale_inv)
-                state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
-            if "scaling_bwd" in fp8_meta:
-                state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
-                state[mode]["scale_inv_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale_inv)
-                state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
+            # Copy tensors to CPU and store
+            if state[mode]["recipe"].delayed():
+                if mode == "forward":
+                    state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
+                    state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
+                if mode == "backward":
+                    state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
+                    state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
 
             # Store other picklable items
             extra = {}
@@ -591,7 +597,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         # Deserialize state from byte tensor
         state = pickle.loads(state.detach().numpy(force=True).tobytes())
-        if state is None:
+        if state is None or len(state) == 0:
             return
 
         def copy_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
@@ -605,39 +611,37 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 dst.data = torch.empty(src.size(), dtype=dst.dtype, device=dst.device)
             dst.copy_(src, non_blocking=True)
 
-        # Load FP8 state
-        for mode in ("input", "param", "grad_output"):
+        # Load quantizer state if needed
+        for mode in ("forward", "backward"):
 
-            # Get state for a given FP8 tensor
+            # Skip if checkpoint has no quantizer state
             if mode not in state:
                 continue
-            if self.num_fp8_scales(mode) == 0:
-                continue
-            fp8_meta = self.get_fp8_meta(mode)
-            if fp8_meta is None:
-                continue
 
-            # Load extra state
+            # Get op's quantizer state, initializing if needed
+            if self._fp8_metas is None or self._fp8_metas[mode] is None:
+                with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
+                    self._reset_quantization_recipe_state()
+            fp8_meta = self._fp8_metas[mode]
+
+            # Load extra items
+            fp8_meta["recipe"] = state[mode]["recipe"]
             fp8_meta.update(state[mode]["extra_fp8_variables"])
-            if "amax_history_fwd" in state[mode]:
-                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_fwd"].size(0)
-            elif "amax_history_bwd" in state[mode]:
-                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_bwd"].size(0)
             if "global_fp8_buffer_pos_fwd_recompute" in fp8_meta:
                 del fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
             # Load tensors
-            fp8_meta = self.get_fp8_meta(mode)
-            if "scaling_fwd" in fp8_meta:
-                fp8_meta_fwd = fp8_meta["scaling_fwd"]
-                copy_tensor(state[mode]["scale_fwd"], fp8_meta_fwd.scale)
-                copy_tensor(state[mode]["scale_inv_fwd"], fp8_meta_fwd.scale_inv)
-                copy_tensor(state[mode]["amax_history_fwd"], fp8_meta_fwd.amax_history)
-            if "scaling_bwd" in fp8_meta:
-                fp8_meta_bwd = fp8_meta["scaling_bwd"]
-                copy_tensor(state[mode]["scale_bwd"], fp8_meta_bwd.scale)
-                copy_tensor(state[mode]["scale_inv_bwd"], fp8_meta_bwd.scale_inv)
-                copy_tensor(state[mode]["amax_history_bwd"], fp8_meta_bwd.amax_history)
+            if state[mode]["recipe"].delayed():
+                if mode == "forward":
+                    copy_tensor(state[mode]["scale_fwd"], fp8_meta["scaling_fwd"].scale)
+                    copy_tensor(
+                        state[mode]["amax_history_fwd"], fp8_meta["scaling_fwd"].amax_history
+                    )
+                if mode == "backward":
+                    copy_tensor(state[mode]["scale_bwd"], fp8_meta["scaling_bwd"].scale)
+                    copy_tensor(
+                        state[mode]["amax_history_bwd"], fp8_meta["scaling_bwd"].amax_history
+                    )
 
         # Finish CPU-GPU memory transfers
         torch.cuda.synchronize()

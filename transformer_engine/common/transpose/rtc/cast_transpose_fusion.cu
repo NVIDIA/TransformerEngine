@@ -22,7 +22,9 @@ constexpr size_t WARPS_PER_TILE = __WARPS_PER_TILE__;
 constexpr size_t BLOCK_SIZE = __BLOCK_SIZE__;
 constexpr bool IS_DBIAS = __IS_DBIAS__;
 constexpr bool IS_DACT = __IS_DACT__;
-constexpr size_t DACT_TYPE = __DACTIVATION_TYPE__;
+constexpr bool IS_ACT = __IS_ACT__;
+static_assert(!(IS_DACT && IS_ACT), "forward and backward activation are mutually exclusive");
+constexpr size_t ACT_TYPE = __ACTIVATION_TYPE__;
 
 constexpr size_t NVEC_IN = LOAD_SIZE / sizeof(IType);
 constexpr size_t NVEC_OUT = STORE_SIZE / sizeof(OType);
@@ -33,14 +35,20 @@ using OVec = Vec<OType, NVEC_OUT>;
 using Param = CTDBiasDActParam<IType, IType2, OType, CType>;
 
 using OP = CType (*)(const CType, const Empty &);
-constexpr OP Activation[] = {
+constexpr OP ActivationList[] = {
     nullptr,                  // 0
-    &dsigmoid<CType, CType>,  // 1
-    &dgelu<CType, CType>,     // 2
-    &dqgelu<CType, CType>,    // 3
-    &dsilu<CType, CType>,     // 4
-    &drelu<CType, CType>,     // 5
-    &dsrelu<CType, CType>     // 6
+    &sigmoid<CType, CType>,   // 1
+    &dsigmoid<CType, CType>,  // 2
+    &gelu<CType, CType>,      // 3
+    &dgelu<CType, CType>,     // 4
+    &qgelu<CType, CType>,     // 5
+    &dqgelu<CType, CType>,    // 6
+    &silu<CType, CType>,      // 7
+    &dsilu<CType, CType>,     // 8
+    &relu<CType, CType>,      // 9
+    &drelu<CType, CType>,     // 10
+    &srelu<CType, CType>,     // 11
+    &dsrelu<CType, CType>     // 12
 };
 
 }  // namespace
@@ -175,7 +183,10 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         if constexpr (IS_DACT) {
           in_cast_fp32[j].data.elt[k] =
               static_cast<CType>(in[current_in ^ 1][j].data.elt[k]) *
-              Activation[DACT_TYPE](act_in[current_in ^ 1][j].data.elt[k], {});
+              ActivationList[ACT_TYPE](act_in[current_in ^ 1][j].data.elt[k], {});
+        } else if constexpr (IS_ACT) {
+          in_cast_fp32[j].data.elt[k] =
+              ActivationList[ACT_TYPE](in[current_in ^ 1][j].data.elt[k], {});
         } else {
           in_cast_fp32[j].data.elt[k] = static_cast<CType>(in[current_in ^ 1][j].data.elt[k]);
         }

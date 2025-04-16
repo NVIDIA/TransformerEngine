@@ -69,7 +69,7 @@ void performTest() {
   const size_t num_tensors = tensor_dims.size();
 
   // Buffers for Transformer Engine implementation
-  std::vector<Tensor> input_list, output_c_list, output_t_list;
+  std::vector<Tensor> input_list, output_list;
 
   // Buffers for reference implementation
   std::vector<std::vector<InputType>> ref_input_list;
@@ -81,25 +81,23 @@ void performTest() {
   for (size_t tensor_id = 0; tensor_id < num_tensors; ++tensor_id) {
     const size_t height = tensor_dims[tensor_id].first;
     const size_t width = tensor_dims[tensor_id].second;
-    input_list.emplace_back(Tensor({ height, width }, itype));
-    output_c_list.emplace_back(Tensor({ height, width }, otype));
-    output_t_list.emplace_back(Tensor({ width, height }, otype));
+    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), { height, width }, itype));
+    output_list.emplace_back(Tensor("output_" + std::to_string(tensor_id),
+                                    { height, width }, otype, true, true));
 
     auto& input = input_list.back();
-    auto& output_c = output_c_list.back();
-    auto& output_t = output_t_list.back();
+    auto& output = output_list.back();
     fillUniform(&input);
-    setRandomScale(&output_c);
-    output_t.shareFP8Meta(output_c);
+    setRandomScale(&output);
 
     ref_input_list.emplace_back(height*width);
     ref_output_c_list.emplace_back(height*width);
     ref_output_t_list.emplace_back(width*height);
 
-    std::copy(input.cpu_dptr<InputType>(),
-              input.cpu_dptr<InputType>() + height * width,
+    std::copy(input.rowwise_cpu_dptr<InputType>(),
+              input.rowwise_cpu_dptr<InputType>() + height * width,
               ref_input_list.back().begin());
-    ref_scale_list[tensor_id] = output_c.scale();
+    ref_scale_list[tensor_id] = output.scale();
     ref_height_list[tensor_id] = height;
     ref_width_list[tensor_id] = width;
   }
@@ -115,8 +113,7 @@ void performTest() {
   };
   nvte_multi_cast_transpose(num_tensors,
                             make_nvte_vector(input_list).data(),
-                            make_nvte_vector(output_c_list).data(),
-                            make_nvte_vector(output_t_list).data(),
+                            make_nvte_vector(output_list).data(),
                             0);
 
   // Reference implementation
@@ -136,23 +133,23 @@ void performTest() {
     if (isFp8Type(otype)) {
       auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
       compareResults("amax",
-                     output_c_list[tensor_id].amax(),
+                     output_list[tensor_id].amax(),
                      ref_amax_list[tensor_id],
                      atol_amax, rtol_amax);
       compareResults("scale_inv",
-                     output_c_list[tensor_id].scale_inv(),
-                     1.f / output_c_list[tensor_id].scale(),
+                     output_list[tensor_id].rowwise_scale_inv(),
+                     1.f / output_list[tensor_id].scale(),
                      atol_amax, rtol_amax);
     }
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c",
-                   output_c_list[tensor_id],
+                   output_list[tensor_id],
                    ref_output_c_list[tensor_id].data(),
-                   atol, rtol);
+                   true, atol, rtol);
     compareResults("output_t",
-                   output_t_list[tensor_id],
+                   output_list[tensor_id],
                    ref_output_t_list[tensor_id].data(),
-                   atol, rtol);
+                   false, atol, rtol);
   }
 }
 

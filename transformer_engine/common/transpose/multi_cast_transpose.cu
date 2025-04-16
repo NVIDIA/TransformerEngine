@@ -195,42 +195,44 @@ __global__ void __launch_bounds__(threads_per_block)
 
 }  // namespace
 
-void multi_cast_transpose(const std::vector<Tensor*> input_list,
-                          std::vector<Tensor*> cast_output_list,
-                          std::vector<Tensor*> transposed_output_list, cudaStream_t stream) {
+void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Tensor*> output_list,
+                          cudaStream_t stream) {
   // Check that number of tensors is valid
-  NVTE_CHECK(cast_output_list.size() == input_list.size(),
-             "Number of input and C output tensors must match");
-  NVTE_CHECK(transposed_output_list.size() == input_list.size(),
-             "Number of input and T output tensors must match");
+  NVTE_CHECK(output_list.size() == input_list.size(),
+             "Number of input and output tensors must match");
   if (input_list.empty()) {
     return;
   }
 
   // Check that tensor properties are valid
   DType itype = input_list[0]->data.dtype;
-  DType otype = cast_output_list[0]->data.dtype;
+  DType otype = output_list[0]->dtype();
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     const auto& input = *input_list[tensor_id];
-    const auto& cast_output = *cast_output_list[tensor_id];
-    const auto& transposed_output = *transposed_output_list[tensor_id];
+    const auto& output = *output_list[tensor_id];
     CheckInputTensor(input, "multi_cast_transpose_input_" + std::to_string(tensor_id));
-    CheckInputTensor(cast_output, "multi_cast_output_" + std::to_string(tensor_id));
-    CheckInputTensor(transposed_output, "multi_transpose_output_" + std::to_string(tensor_id));
+    CheckInputTensor(output, "multi_cast_transpose_output_" + std::to_string(tensor_id));
+    //std::cout << *static_cast<char*>(output.data.dptr) << std::endl;
+    NVTE_CHECK(output.has_data() && output.has_columnwise_data(),
+               "Both rowwise and columnwise output data needs to be allocated.");
 
     NVTE_CHECK(input.data.dtype == itype, "Input tensor types do not match.");
-    NVTE_CHECK(cast_output.data.dtype == otype, "C output tensor types do not match.");
-    NVTE_CHECK(transposed_output.data.dtype == otype, "T output tensor types do not match.");
+    NVTE_CHECK(output.data.dtype == otype, "C output tensor types do not match.");
+    NVTE_CHECK(output.data.dtype == otype, "T output tensor types do not match.");
 
-    NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions.");
-    NVTE_CHECK(cast_output.data.shape == input.data.shape,
-               "C output tensor shape does not match input tensor.");
-    NVTE_CHECK(transposed_output.data.shape.size() == 2,
-               "T output tensor shape does not match input tensor.");
-    NVTE_CHECK(transposed_output.data.shape[0] == input.data.shape[1],
-               "T output tensor shape does not match input tensor.");
-    NVTE_CHECK(transposed_output.data.shape[1] == input.data.shape[0],
-               "T output tensor shape does not match input tensor.");
+    NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions, but shape is ",
+               input.data.shape);
+    NVTE_CHECK(output.data.shape == input.data.shape, "C output tensor shape ", output.data.shape,
+               "does not match input tensor shape ", input.data.shape);
+    NVTE_CHECK(output.columnwise_data.shape.size() == 2, "T output tensor shape ",
+               output.columnwise_data.shape, "does not match input tensor shape ",
+               input.data.shape);
+    NVTE_CHECK(output.columnwise_data.shape[0] == input.data.shape[1], "T output tensor shape ",
+               output.columnwise_data.shape, "does not match input tensor shape ",
+               input.data.shape);
+    NVTE_CHECK(output.columnwise_data.shape[1] == input.data.shape[0], "T output tensor shape ",
+               output.columnwise_data.shape, "does not match input tensor shape ",
+               input.data.shape);
   }
 
   // Input matrices are divided into tiles
@@ -287,11 +289,11 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     // Add tensor to kernel argument struct
     const int pos = kernel_args.num_tensors;
     kernel_args.input_list[pos] = const_cast<void*>(input_list[tensor_id]->data.dptr);
-    kernel_args.output_c_list[pos] = cast_output_list[tensor_id]->data.dptr;
-    kernel_args.output_t_list[pos] = transposed_output_list[tensor_id]->data.dptr;
-    kernel_args.scale_list[pos] = cast_output_list[tensor_id]->scale.dptr;
-    kernel_args.amax_list[pos] = cast_output_list[tensor_id]->amax.dptr;
-    kernel_args.scale_inv_list[pos] = cast_output_list[tensor_id]->scale_inv.dptr;
+    kernel_args.output_c_list[pos] = output_list[tensor_id]->data.dptr;
+    kernel_args.output_t_list[pos] = output_list[tensor_id]->columnwise_data.dptr;
+    kernel_args.scale_list[pos] = output_list[tensor_id]->scale.dptr;
+    kernel_args.amax_list[pos] = output_list[tensor_id]->amax.dptr;
+    kernel_args.scale_inv_list[pos] = output_list[tensor_id]->scale_inv.dptr;
     kernel_args.num_rows_list[pos] = num_rows;
     kernel_args.row_length_list[pos] = row_length;
     kernel_args.block_range[pos + 1] = kernel_args.block_range[pos] + num_tiles;
@@ -327,15 +329,13 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
 }  // namespace transformer_engine
 
 void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
-                               NVTETensor* cast_output_list, NVTETensor* transposed_output_list,
-                               cudaStream_t stream) {
+                               NVTETensor* output_list, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_cast_transpose);
   using namespace transformer_engine;
-  std::vector<Tensor*> input_list_, cast_output_list_, transposed_output_list_;
+  std::vector<Tensor*> input_list_, output_list_;
   for (size_t i = 0; i < num_tensors; ++i) {
     input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
-    cast_output_list_.push_back(reinterpret_cast<Tensor*>(cast_output_list[i]));
-    transposed_output_list_.push_back(reinterpret_cast<Tensor*>(transposed_output_list[i]));
+    output_list_.push_back(reinterpret_cast<Tensor*>(output_list[i]));
   }
-  multi_cast_transpose(input_list_, cast_output_list_, transposed_output_list_, stream);
+  multi_cast_transpose(input_list_, output_list_, stream);
 }

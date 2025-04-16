@@ -16,10 +16,28 @@ with enum in transformer_engine.h
 """
 TE_DType = {
     torch.uint8: tex.DType.kByte,
+    torch.float8_e4m3fn: tex.DType.kFloat8E4M3,
+    torch.float8_e5m2: tex.DType.kFloat8E5M2,
     torch.int32: tex.DType.kInt32,
     torch.float32: tex.DType.kFloat32,
     torch.half: tex.DType.kFloat16,
     torch.bfloat16: tex.DType.kBFloat16,
+}
+
+"""
+This is a map: int -> torch.dtype
+Used for resolving cuda extension types to torch.
+Has one to one mapping with enum in
+transformer_engine.h
+"""
+TE_DType_To_Torch = {
+    tex.DType.kByte: torch.uint8,
+    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+    tex.DType.kFloat8E5M2: torch.float8_e5m2,
+    tex.DType.kInt32: torch.int32,
+    tex.DType.kFloat32: torch.float32,
+    tex.DType.kFloat16: torch.half,
+    tex.DType.kBFloat16: torch.bfloat16,
 }
 
 AttnMaskTypes = (
@@ -52,6 +70,16 @@ QKVLayouts = (
     "thd_t2hd",
     "thd_th2d",
     "thd_thd_thd",
+    "sbhd_bshd_bshd",
+    "bshd_sbhd_sbhd",
+    "thd_bshd_bshd",
+    "thd_sbhd_sbhd",
+    "paged_kv_bshd_bshd_bshd",
+    "paged_kv_bshd_sbhd_sbhd",
+    "paged_kv_sbhd_bshd_bshd",
+    "paged_kv_sbhd_sbhd_sbhd",
+    "paged_kv_thd_bshd_bshd",
+    "paged_kv_thd_sbhd_sbhd",
 )
 
 LayerTypes = ("encoder", "decoder")
@@ -59,3 +87,5 @@ LayerTypes = ("encoder", "decoder")
 GemmParallelModes = ("row", "column", None)
 
 dist_group_type = torch.distributed.ProcessGroup
+
+MXFP8_BLOCK_SCALING_SIZE = 32
