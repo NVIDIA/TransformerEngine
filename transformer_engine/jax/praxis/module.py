@@ -9,16 +9,22 @@ from functools import partial
 from typing import Callable, Iterable, Sequence, Tuple, Union
 
 from praxis import pax_fiddle
-from praxis.base_layer import init_var
-from praxis.base_layer import BaseLayer, WeightInit, WeightHParams, WeightHParamsCollection
+from praxis.base_layer import (
+    BaseLayer,
+    WeightHParams,
+    WeightHParamsCollection,
+    WeightInit,
+    init_var,
+)
 from praxis.layers import flax_adapter
 from praxis.pytypes import JTensor
 
-from ..fp8 import FP8Helper
-from ..flax.module import DenseGeneral, LayerNormDenseGeneral
+from ..flax.module import DenseGeneral
 from ..flax.module import LayerNorm as flax_LayerNorm
+from ..flax.module import LayerNormDenseGeneral
 from ..flax.module import LayerNormMLP as flax_LayerNormMLP
 from ..flax.module import Softmax
+from ..fp8 import FP8Helper
 from ..softmax import SoftmaxType
 
 

@@ -5,14 +5,15 @@
 """Mixin class holding data specific for Float8BlockwiseQTensor"""
 
 from __future__ import annotations
+
 import math
-from typing import Optional, Dict, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
+
 import torch
 
 from transformer_engine_torch import DType as TE_DType
 
 from ...constants import TE_DType_To_Torch
-
 from ..quantized_tensor import Quantizer
 
 

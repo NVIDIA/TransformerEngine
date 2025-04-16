@@ -4,17 +4,19 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable
+
 import warnings
+from typing import Iterable, Optional, Tuple
 
 import torch
-import transformer_engine_torch as tex
 
+import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+
+from ..constants import dist_group_type
 from ..utils import canonicalize_process_group, devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
-from ..constants import dist_group_type
 
 aten = torch.ops.aten
 

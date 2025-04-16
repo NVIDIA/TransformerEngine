@@ -2,8 +2,18 @@
 #
 # See LICENSE for license information.
 """Praxis related Modules"""
-from .module import FusedSoftmax, LayerNorm
-from .module import LayerNormLinear, LayerNormMLP, Linear, TransformerEngineBaseLayer
-from .transformer import DotProductAttention, MultiHeadAttention
-from .transformer import RelativePositionBiases, TransformerLayer
 from ..flax.transformer import TransformerLayerType
+from .module import (
+    FusedSoftmax,
+    LayerNorm,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
+    TransformerEngineBaseLayer,
+)
+from .transformer import (
+    DotProductAttention,
+    MultiHeadAttention,
+    RelativePositionBiases,
+    TransformerLayer,
+)

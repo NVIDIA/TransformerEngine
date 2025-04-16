@@ -4,22 +4,22 @@
 """
 Praxis Modules related Transformer
 """
+import warnings
 from dataclasses import field
 from functools import partial
 from typing import Optional, Sequence, Tuple
-import warnings
 
 from praxis import pax_fiddle
 from praxis.base_layer import WeightInit
 from praxis.pytypes import JTensor
 
-from .module import TransformerEngineBaseLayer
-from ..flax.transformer import TransformerLayerType
+from ..attention import AttnBiasType, AttnMaskType
 from ..flax.transformer import DotProductAttention as flax_DotProductAttention
 from ..flax.transformer import MultiHeadAttention as flax_MultiHeadAttention
 from ..flax.transformer import RelativePositionBiases as flax_RelativePositionBiases
 from ..flax.transformer import TransformerLayer as flax_TransformerLayer
-from ..attention import AttnBiasType, AttnMaskType
+from ..flax.transformer import TransformerLayerType
+from .module import TransformerEngineBaseLayer
 
 
 class RelativePositionBiases(TransformerEngineBaseLayer):

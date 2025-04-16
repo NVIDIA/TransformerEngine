@@ -2,9 +2,11 @@
 #
 # See LICENSE for license information.
 import math
+from typing import Callable, Tuple, Union
+
 import pytest
 import torch
-from typing import Callable, Tuple, Union
+
 from transformer_engine.pytorch.dot_product_attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,

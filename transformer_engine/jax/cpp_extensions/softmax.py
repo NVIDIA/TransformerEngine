@@ -2,20 +2,20 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for softmax"""
-from abc import abstractmethod
-from functools import partial, reduce
 import operator
 import warnings
-from packaging import version
+from abc import abstractmethod
+from functools import partial, reduce
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
-from jax.sharding import PartitionSpec, NamedSharding
+from jax.sharding import NamedSharding, PartitionSpec
+from packaging import version
 
-from .base import BasePrimitive, register_primitive
-from .misc import get_padded_spec, check_valid_batch_dims
 from ..softmax import SoftmaxType
+from .base import BasePrimitive, register_primitive
+from .misc import check_valid_batch_dims, get_padded_spec
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports

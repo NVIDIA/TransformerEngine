@@ -9,6 +9,7 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
@@ -16,8 +17,6 @@ from transformer_engine.pytorch.fp8 import (
     get_default_fp8_recipe,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-import transformer_engine.pytorch.ops as te_ops
-import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

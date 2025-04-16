@@ -10,20 +10,15 @@ import os
 import sys
 
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 
-from transformer_engine.common.recipe import (
-    DelayedScaling,
-    Float8CurrentScaling,
-    Format,
-    Recipe,
-)
 import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Format, Recipe
 from transformer_engine.pytorch.tensor import QuantizedTensor, cast_master_weights_to_fp8
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
+    Float8Tensor,
 )
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 

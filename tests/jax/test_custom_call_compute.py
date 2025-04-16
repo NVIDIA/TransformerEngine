@@ -2,40 +2,34 @@
 #
 # See LICENSE for license information.
 
+import operator
+from functools import reduce
+
 import jax
 import jax.numpy as jnp
 import pytest
 from jax import jit, value_and_grad
-from functools import reduce
-import operator
+from utils import assert_allclose, assert_tree_like_allclose, pytest_parametrize_wrapper
 
-from utils import (
-    assert_allclose,
-    assert_tree_like_allclose,
-    pytest_parametrize_wrapper,
-)
-from transformer_engine.jax.layernorm import layernorm
-from transformer_engine.jax.layernorm_mlp import layernorm_mlp
-
+from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.activation import activation
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
 from transformer_engine.jax.cpp_extensions.normalization import _jax_layernorm, _jax_rmsnorm
-from transformer_engine.jax.cpp_extensions.quantization import (
-    _jax_quantize,
-    _jax_quantize_dbias,
-)
-from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.cpp_extensions.quantization import _jax_quantize, _jax_quantize_dbias
+from transformer_engine.jax.dense import dense, grouped_dense
+from transformer_engine.jax.layernorm import layernorm
+from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 from transformer_engine.jax.quantize import (
     DelayedScaleQuantizer,
-    ScaledTensor,
-    ScalingMode,
-    QuantizerFactory,
     QuantizeLayout,
+    QuantizerFactory,
+    ScaledTensor,
+    ScaledTensor1x,
+    ScaledTensor2x,
+    ScalingMode,
+    helper,
 )
-from transformer_engine.jax.quantize import helper
-from transformer_engine.jax.activation import activation
-from transformer_engine.jax.dense import dense, grouped_dense
-from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
 GEMM_CASES = [
     (256, 256, 512),

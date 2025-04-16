@@ -8,9 +8,9 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 from types import MethodType
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -18,27 +18,27 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
-from ._common import _ParameterInitMeta
+from ..constants import dist_group_type
+from ..distributed import (
+    _fsdp_gather_tensors,
+    gather_along_first_dim,
+    in_fp8_activation_recompute_phase,
+    is_fp8_activation_recompute_enabled,
+)
 from ..fp8 import (
-    MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
-    Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
+    MXFP8BlockScalingRecipeState,
     RecipeState,
 )
-from ..distributed import (
-    gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
-    _fsdp_gather_tensors,
-)
-from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ._common import _ParameterInitMeta
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
