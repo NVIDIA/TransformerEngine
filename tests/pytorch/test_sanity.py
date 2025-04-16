@@ -42,10 +42,14 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
+from transformer_engine.pytorch.distributed import checkpoint
 from test_numerics import reset_rng_states, dtype_tols
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
@@ -103,32 +107,18 @@ model_configs = {
 }
 
 fp8_recipes = [
-    None,  # Handles non-FP8 case
-    recipe.MXFP8BlockScaling(),
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3),
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
+    None,  # Test non-FP8
+    recipe.MXFP8BlockScaling(),  # Test default
+    recipe.Float8CurrentScaling(),  # Test default
+    recipe.Float8BlockScaling(),  # Test default
+    recipe.DelayedScaling(),  # Test default
+    recipe.DelayedScaling(  # Test most_recent algo
         amax_history_len=16,
         amax_compute_algo="most_recent",
     ),
-    recipe.DelayedScaling(
-        margin=0,
+    recipe.DelayedScaling(  # Test custom amax and scale compute algo
         fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
-        amax_compute_algo="max",
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         amax_compute_algo=custom_amax_compute,
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         scaling_factor_compute_algo=custom_amax_to_scale,
     ),
 ]
@@ -454,6 +444,8 @@ def test_sanity_layernorm_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -485,6 +477,8 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -517,6 +511,8 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -558,8 +554,10 @@ def test_sanity_grouped_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
-        if fp8_recipe.mxfp8():
-            pytest.skip("Grouped linear does not support MXFP8")
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -603,6 +601,8 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -653,6 +653,8 @@ def test_sanity_gpt(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -720,6 +722,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, 
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -779,6 +783,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, no
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -836,6 +842,8 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -871,6 +879,8 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -909,6 +919,8 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -950,6 +962,8 @@ def test_sanity_gradient_accumulation_fusion(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
@@ -992,8 +1006,12 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+            pytest.skip(reason_for_no_fp8_block_scaling)
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if fp8_recipe.float8_block_scaling():
+            pytest.skip("cuda graph not supported for float8_block_scaling recipe")
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -1268,3 +1286,31 @@ def test_fp8_model_init_high_precision_init_val():
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
+
+
+def test_sanity_checkpointing_on_callables():
+    """Test that TE checkpointing works correctly on callable modules."""
+
+    # torch.autograf.function
+    class MyFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inp):
+            return inp
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            return grad_output
+
+    module = MyFunction.apply
+    inp = torch.randn(10, 10, device="cuda", requires_grad=True)
+
+    out_checkpoint = checkpoint(module, inp)
+    out_checkpoint.sum().backward()
+    grad_checkpoint = inp.grad
+
+    out_standard = module(inp)
+    out_standard.sum().backward()
+    grad_standard = inp.grad
+
+    # Assert that gradients are the same
+    torch.testing.assert_close(grad_checkpoint, grad_standard)

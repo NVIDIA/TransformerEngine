@@ -38,7 +38,9 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
 
 
-def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, group):
+def cast_master_weights_to_fp8(
+    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+):
     r"""Helper function to cast master weights to FP8 primary weights.
 
     This is intended for use with ZeRO/FSDP. Each rank has a shard of
@@ -55,14 +57,23 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
                      should be updated.
     group          : The distributed group to do amax reduction. Typically it's the data parallel
                      group.
+    fsdp_shard_model_weights : list of FSDP shard model weights. If None, it means that the model weights are
+                             not sharded. Otherwise, it means that the model weights are sharded and we get
+                             target model weights data storage using the FSDP shard model weights.
 
     """
 
     delayed_scaling_params = []
     current_scaling_params = []
 
-    for model_weight, master_weight, start_offset in zip(
-        model_weights, master_weights, start_offsets
+    if fsdp_shard_model_weights is None:
+        use_fsdp_shard_model_weights = False
+        fsdp_shard_model_weights = [None] * len(model_weights)
+    else:
+        use_fsdp_shard_model_weights = True
+
+    for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
+        model_weights, master_weights, start_offsets, fsdp_shard_model_weights
     ):
         # Clear `_high_precision_init_val` of model_weight automatically.
         # - Master weights are initialized from model weights, if we use fp8 primary weights to
@@ -88,9 +99,13 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
 
         quantizer = model_weight._get_quantizer()
         if isinstance(quantizer, Float8Quantizer):
-            delayed_scaling_params.append((model_weight, master_weight, start_offset))
+            delayed_scaling_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
         elif isinstance(quantizer, Float8CurrentScalingQuantizer):
-            current_scaling_params.append((model_weight, master_weight, start_offset))
+            current_scaling_params.append(
+                (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
         elif isinstance(quantizer, MXFP8Quantizer):
             raise NotImplementedError(
                 "cast_master_weights_to_fp8 for MXFP8BlockScaling is not supported yet"
@@ -101,12 +116,16 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
             )
 
     if len(delayed_scaling_params) > 0:
-        _cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, group)
+        _cast_master_weights_to_fp8_delayed_scaling(
+            delayed_scaling_params, group, use_fsdp_shard_model_weights
+        )
     if len(current_scaling_params) > 0:
-        _cast_master_weights_to_fp8_current_scaling(current_scaling_params, group)
+        _cast_master_weights_to_fp8_current_scaling(
+            current_scaling_params, group, use_fsdp_shard_model_weights
+        )
 
 
-def _cast_master_weights_to_fp8_delayed_scaling(params, group):
+def _cast_master_weights_to_fp8_delayed_scaling(params, group, use_fsdp_shard_model_weights=False):
     r"""Helper function to cast master weights to FP8 primary weights for delayed scaling.
 
     Parameters
@@ -115,13 +134,14 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group):
              indicating the starting index of the master weight in the model weight.
     group  : The distributed group to do amax reduction. Typically it's the data parallel
              group.
+    use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
 
     # Collect amaxes to do reduce-max among dp group.
     # Collect scales and scale_invs to update scale_invs of the fp8 weights.
     amaxes, scales, scale_invs = [], [], []
 
-    for model_weight, master_weight, start_offset in params:
+    for model_weight, master_weight, start_offset, shard_model_weight_raw in params:
         # Reset transpose cache for all model weights.
         # We cannot create transpose cache here because users (like megatron) may want to overlap
         # the all-gather of model weights and forward process, so the model weight is not updated
@@ -147,7 +167,8 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group):
 
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
-        shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
+        if not use_fsdp_shard_model_weights:
+            shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
         shard_model_weight_fp8 = quantizer.create_tensor_from_data(
             shard_model_weight_raw.view(1, -1),
             model_weight.dtype,
@@ -186,7 +207,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group):
         )
 
 
-def _cast_master_weights_to_fp8_current_scaling(params, group):
+def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_model_weights=False):
     r"""Helper function to cast master weights to FP8 primary weights for current scaling.
 
     Parameters
@@ -195,6 +216,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
              indicating the starting index of the master weight in the model weight.
     group  : The distributed group to do amax reduction. Typically it's the data parallel
              group.
+    use_fsdp_shard_model_weights : bool, if True, it means that the model weights are sharded.
     """
 
     # Parameter attributes
@@ -219,7 +241,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
     #         amaxes in a contiguous buffer. If the master weight is None, the corresponding amax
     #         will be set to 0.
     # ---------------------------------------------------------------------------------------------
-    for (model_weight, master_weight, _), amax in zip(params, amaxes):
+    for (model_weight, master_weight, _, _), amax in zip(params, amaxes):
 
         # Make sure all the model weights have the same numerical options.
         quantizer = model_weight._get_quantizer()
@@ -260,7 +282,9 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
     # ---------------------------------------------------------------------------------------------
     # Step 4: Cast master weights to FP8.
     # ---------------------------------------------------------------------------------------------
-    for (model_weight, master_weight, start_offset), scale in zip(params, scales):
+    for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
+        params, scales
+    ):
         # Reset transpose cache for all model weights.
         # We cannot create transpose cache here because users (like megatron) may want to overlap
         # the all-gather of model weights and forward process, so the model weight is not updated
@@ -274,10 +298,18 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
 
         # Cast master weight to FP8
         end_offset = start_offset + master_weight.numel()
-        model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
+        if not use_fsdp_shard_model_weights:
+            model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
         quantizer = Float8Quantizer(
             scale=scale,
             amax=torch.Tensor(),
             fp8_dtype=model_weight._fp8_dtype,
         )
+        if use_fsdp_shard_model_weights and not isinstance(model_weight_fragment, Float8Tensor):
+            # NOTE: The fsdp shard model weight may be a unit8 tensor instead of
+            # a float8 tensor. We should handle this situation properly.
+            model_weight_fragment = quantizer.create_tensor_from_data(
+                model_weight_fragment.view(-1),
+                model_weight.dtype,
+            )
         quantizer.update_quantized(master_weight, model_weight_fragment)

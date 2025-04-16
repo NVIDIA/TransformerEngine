@@ -80,6 +80,7 @@ import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
+from .cpu_offload import set_offloading_param
 
 
 # Setup Attention Logging
@@ -616,7 +617,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
@@ -1359,16 +1360,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
-                if use_fused_attention:
-                    # [b, np, sq, 1] -> [b, np, sq] or
-                    # [t, np, 1] -> [t, np]
-                    softmax_lse_per_step[i - 1].squeeze_(-1)
-                    if softmax_lse_in_packed_format:
-                        softmax_lse_per_step[i - 1] = (
-                            softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
-                        )
-
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                    if use_fused_attention:
+                        # [b, np, sq, 1] -> [b, np, sq] or
+                        # [t, np, 1] -> [t, np]
+                        softmax_lse_per_step[i - 1].squeeze_(-1)
+                        if softmax_lse_in_packed_format:
+                            softmax_lse_per_step[i - 1] = (
+                                softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
+                            )
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
@@ -1582,7 +1582,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
             restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
@@ -4342,7 +4342,7 @@ class FlashAttention(torch.nn.Module):
                 tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
                 for tensor in tensor_list:
                     if tensor is not None:
-                        tensor.activation_offloading = True
+                        set_offloading_param(tensor, "activation_offloading", True)
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
@@ -4744,12 +4744,14 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 tensor_list = [q, k, v, out_save]
 
-            tensor_list.extend(aux_ctx_tensors)
-
             qkv_layout = "sbhd_sbhd_sbhd"
             for tensor in tensor_list:
                 if tensor is not None:
-                    tensor.activation_offloading = True
+                    set_offloading_param(tensor, "activation_offloading", True)
+
+            for tensor in aux_ctx_tensors:
+                if tensor is not None:
+                    set_offloading_param(tensor, "activation_offloading", True)
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8

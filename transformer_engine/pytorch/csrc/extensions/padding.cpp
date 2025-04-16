@@ -17,7 +17,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
   NVTE_CHECK(input.dim() == 2, "Dimension of input must equal 2.");
   NVTE_CHECK(output.dim() == 2, "Dimension of output must equal  2.");
 
-  const int num_tensors = input_row_list.size();
+  const auto num_tensors = input_row_list.size();
   // Extract properties from PyTorch tensors
   std::vector<void*> input_dptr_list, output_dptr_list;
   std::vector<std::vector<size_t>> input_shape_list, output_shape_list;

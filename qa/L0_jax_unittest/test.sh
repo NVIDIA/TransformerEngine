@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+set -x
+
 function error_exit() {
     echo "Error: $1"
     exit 1
@@ -20,16 +22,15 @@ pip3 install "nltk>=3.8.2" || error_exit "Failed to install nltk"
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 : ${TE_PATH:=/opt/transformerengine}
 
-python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax -k 'not distributed' --ignore=$TE_PATH/tests/jax/test_praxis_layers.py || test_fail "test_praxis_layers.py"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax -k 'not distributed' --ignore=$TE_PATH/tests/jax/test_helper.py || test_fail "tests/jax/*not_distributed_*"
 
 # Test without custom calls
 NVTE_CUSTOM_CALLS_RE="" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/tests/jax/test_custom_call_compute.py || test_fail "test_custom_call_compute.py"
 
 pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/mnist || test_fail "mnist"
+
 pip3 install -r $TE_PATH/examples/jax/encoder/requirements.txt || error_exit "Failed to install encoder requirements"
-
-python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/mnist || test_fail "test_mnist.py"
-
 # Make encoder tests to have run-to-run deterministic to have the stable CI results
 export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_deterministic_ops"
 python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/encoder/test_single_gpu_encoder.py || test_fail "test_single_gpu_encoder.py"
