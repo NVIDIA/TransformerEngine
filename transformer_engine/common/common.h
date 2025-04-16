@@ -27,6 +27,8 @@
 #include "./util/cuda_driver.h"
 #include "./util/logging.h"
 
+wantonly break the code
+
 namespace transformer_engine {
 
 std::string to_string(const DType type);
