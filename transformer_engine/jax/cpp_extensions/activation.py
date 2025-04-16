@@ -10,6 +10,7 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
 
 import transformer_engine_jax
@@ -405,6 +406,54 @@ class ActLuPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        act_enum,
+        act_len,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del out_dtype, act_enum, act_len, scale_dtype, scale_shapes, is_outer, mesh, result_types
+
+        x_rank = len(value_types[0].shape)
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            x_rank - 1, unique_var="i", flatten_axis=-2
+        )
+        x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
+        out = (*x_axes[:-2], x_axes[-1])
+        scale_inv = scale_rules.rowwise_rule
+        colwise_scale_inv = scale_rules.colwise_rule
+
+        if is_2x:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+                colwise_out = tuple(
+                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-2)
+                )
+            else:
+                colwise_out = out
+        else:
+            colwise_out = ("j",)
+            colwise_scale_inv = ("k",)
+
+        # amax is always a unit tensor.
+        amax = ("l",)
+
+        return SdyShardingRule(
+            (
+                x_axes,
+                "…1",
+            ),
+            (out, colwise_out, scale_inv, colwise_scale_inv, amax),
+            **scale_rules.factor_sizes,
+        )
 
 
 register_primitive(ActLuPrimitive)
@@ -818,6 +867,46 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             return out, colwise_out, scale_inv, colwise_scale_inv, global_updated_amax, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_dbias,
+        act_enum,
+        act_len,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del out_dtype, scale_dtype, scale_shapes, act_enum, act_len, is_outer, mesh, result_types
+
+        x_rank = len(value_types[1].shape)
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            x_rank, unique_var="i", flatten_axis=-2
+        )
+        x_axes = scale_rules.input_spec
+        out = x_axes
+        if is_2x:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+                colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
+            else:
+                colwise_out = tuple(x_axes)
+        else:
+            colwise_out = ("j",)
+
+        dbias = x_axes[-2:] if is_dbias else ("k",)
+        amax = ("…4",)
+
+        return SdyShardingRule(
+            (("…0",), tuple(x_axes), ("…2",)),
+            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
+            **scale_rules.factor_sizes,
+        )
 
 
 register_primitive(DActLuDBiasQuantizePrimitive)
