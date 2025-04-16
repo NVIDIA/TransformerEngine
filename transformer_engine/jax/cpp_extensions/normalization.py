@@ -76,12 +76,13 @@ def is_norm_fwd_cudnn_enabled(scaling_mode: ScalingMode) -> bool:
 
 @cache
 def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bool:
-    """Retrieves whether CuDNN norm should compute `gamma += 1.0` for zero-centered gamma
+    """Retrieves whether norm should compute `gamma += 1.0` for zero-centered gamma
     in weight dtype as opposed to compute dtype."""
     if not is_norm_fwd_cudnn_enabled(scaling_mode):
         # If CuDNN is not enabled, we use the TE backend which uses the compute dtype not weight dtype
+        # Remove this when TE supports gamma += 1.0 in weight dtype
         return False
-    return int(os.getenv("NVTE_CUDNN_NORM_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
+    return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
 
 
 class NormFwdPrimitive(BasePrimitive):

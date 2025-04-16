@@ -27,7 +27,7 @@ namespace {
 
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
-                 NormType norm_type, bool use_cudnn, const bool cudnn_zero_centered_gamma_in_weight_dtype) {
+                 NormType norm_type, bool use_cudnn, const bool zero_centered_gamma_in_weight_dtype) {
   if (sizeof(InputType) < sizeof(OutputType)) {
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
     return;
@@ -76,15 +76,22 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
+  if ((!use_cudnn || !zero_centered_gamma) && zero_centered_gamma_in_weight_dtype) {
+    // Skip duplicate tests when zero_centered_gamma_in_weight_dtype is true and won't affect the implementation
+    GTEST_SKIP() << "Zero-centered gamma in weight dtype is only supported with cuDNN backend";
+  }
+
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);
-  }
 
-  if (cudnn_zero_centered_gamma_in_weight_dtype) {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(true);
-  } else {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(false);
+
+    // Zero-centered gamma in weight dtype only supported by CuDNN backend currently
+    if (zero_centered_gamma_in_weight_dtype) {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(true);
+    } else {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+    }
   }
 
   // Forward kernel
@@ -132,10 +139,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(false);
     nvte_enable_cudnn_norm_bwd(false);
-  }
 
-  if (cudnn_zero_centered_gamma_in_weight_dtype) {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(false);
+    // Zero-centered gamma in weight dtype only supported by CuDNN backend currently
+    if (zero_centered_gamma_in_weight_dtype) {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+    }
   }
 
   // Reference implementations
@@ -157,7 +165,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      ref_scale,
                      zero_centered_gamma,
                      use_cudnn,
-                     cudnn_zero_centered_gamma_in_weight_dtype);
+                     zero_centered_gamma_in_weight_dtype);
   compute_ref_backward(norm_type, dz.rowwise_cpu_dptr<WeightType>(),
                        input.rowwise_cpu_dptr<InputType>(),
                        mu.rowwise_cpu_dptr<float>(), rsigma.rowwise_cpu_dptr<float>(),
@@ -165,7 +173,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(),
                        N, H, zero_centered_gamma,
                        use_cudnn,
-                       cudnn_zero_centered_gamma_in_weight_dtype);
+                       zero_centered_gamma_in_weight_dtype);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();

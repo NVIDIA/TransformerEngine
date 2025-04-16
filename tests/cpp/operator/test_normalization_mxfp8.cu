@@ -102,7 +102,7 @@ void dequantize_2x(Tensor& input, Tensor& output, bool is_training)
 }
 
 template <typename InputType, typename OutputType>
-void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool cudnn_zero_centered_gamma_in_weight_dtype) {
+void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type, bool is_training, const bool zero_centered_gamma_in_weight_dtype) {
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
@@ -129,10 +129,10 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   fillUniform(&gamma);
   fillUniform(&beta);
 
-  if (cudnn_zero_centered_gamma_in_weight_dtype) {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(true);
+  if (zero_centered_gamma_in_weight_dtype) {
+    nvte_enable_zero_centered_gamma_in_weight_dtype(true);
   } else {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(false);
+    nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
 
   // Forward kernel
@@ -160,8 +160,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      0);
   }
 
-  if (cudnn_zero_centered_gamma_in_weight_dtype) {
-    nvte_enable_cudnn_norm_zero_centered_gamma_in_weight_dtype(false);
+  if (zero_centered_gamma_in_weight_dtype) {
+    nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
 
   Tensor dequantized_output("dequantized_output", { N, H }, DType::kFloat32, true, true);
@@ -198,7 +198,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      1.f, // scale
                      zero_centered_gamma,
                      true, // CuDNN is the only MXFP8 backend currently
-                     cudnn_zero_centered_gamma_in_weight_dtype);
+                     zero_centered_gamma_in_weight_dtype);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -258,11 +258,11 @@ TEST_P(MxNormTestSuite, TestMxNorm) {
   const auto size = std::get<3>(GetParam());
   const bool zero_centered_gamma = std::get<4>(GetParam());
   const bool is_training = std::get<5>(GetParam());
-  const bool cudnn_zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
+  const bool zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, cudnn_zero_centered_gamma_in_weight_dtype);
+      performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, is_training, zero_centered_gamma_in_weight_dtype);
     );
   );
 }

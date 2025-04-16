@@ -63,6 +63,8 @@ inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const
 
   using compute_t = float;
 
+  // Zero-centered gamma in weight dtype is only supported in CuDNN backend currently
+  // Remove the use_cudnn check here when it is supported by both backends.
   const bool zero_centered_gamma_in_weight_dtype = use_cudnn && cudnn_zero_centered_gamma_in_weight_dtype;
 
   if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
