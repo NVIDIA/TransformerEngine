@@ -119,7 +119,7 @@ class Float8BlockwiseQTensorBase:
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
         else:
-            assert self._columnwise_data is not None, "No data to dequantize"
+            assert self._columnwise_data is not None and not self._columnwise_invalid, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             transpose_output = True
@@ -182,7 +182,7 @@ class Float8BlockwiseQTensorBase:
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
         else:
-            assert self._columnwise_data is not None, "No data to dequantize"
+            assert self._columnwise_data is not None and not self._columnwise_invalid, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             transpose_output = True
