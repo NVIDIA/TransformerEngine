@@ -45,7 +45,7 @@ from transformer_engine.pytorch.constants import (
     dist_group_type,
     TE_DType,
 )
-from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
+from transformer_engine.pytorch.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.distributed import (
     get_distributed_world_size,
     checkpoint,
