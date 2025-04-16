@@ -603,7 +603,7 @@ bool is_supported_by_CC_100();
 extern "C" {
 #endif
 
-bool nvte_is_supported_nontn_fp8_gemm();
+bool nvte_is_non_tn_fp8_gemm_supported();
 
 #ifdef __cplusplus
 }  // extern "C"

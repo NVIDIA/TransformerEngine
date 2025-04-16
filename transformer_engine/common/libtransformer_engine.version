@@ -21,7 +21,7 @@
 			*nvshmemi_init_thread*
 		};
 		extern "C" {
-            nvte_is_supported_nontn_fp8_gemm*;
+            nvte_is_non_tn_fp8_gemm_supported*;
         };
 	local: *;
 };
