@@ -225,6 +225,52 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
+def flash_attn_fwd_out_correction_init(
+    out_init_step: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_lse_init_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Merge partial outputs of the first step in Attention with context parallelism"""
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_init_step - softmax_lse).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
+    out_corrected = out_init_step * softmax_lse_corrected_exp
+    return out_corrected.to(out_init_step.dtype)
+
+
+@jit_fuser
+def flash_attn_fwd_out_correction(
+    out: torch.Tensor,
+    out_per_step: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_lse_per_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Merge partial outputs of each step in Attention with context parallelism"""
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
+    out_corrected = out_per_step * softmax_lse_corrected_exp
+    out.add_(out_corrected)
+
+
+@jit_fuser
+def flash_attn_fwd_second_half_out_correction(
+    out: torch.Tensor,
+    out_per_step: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_lse_per_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Merge second half of partial outputs of each step in Attention with context parallelism"""
+    out_ = out.select(seq_dim, 1)
+    softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, -1)[..., 1, :]
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse_).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
+    out_corrected = out_per_step * softmax_lse_corrected_exp
+    out_.add_(out_corrected)
+
+
+@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
@@ -1356,6 +1402,56 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
 
+        # out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
+        # for i in range(cp_size):
+        #     if i <= rank or not causal:
+        #         if qkv_format in ["bshd", "sbhd"]:
+        #             if i == 0:
+        #                 out = flash_attn_fwd_out_correction_init(
+        #                     out_per_step[0],
+        #                     softmax_lse,
+        #                     softmax_lse_per_step[0],
+        #                     seq_dim,
+        #                 )
+        #                 out = out.view(q.shape)
+        #             else:
+        #                 flash_attn_fwd_out_correction(
+        #                     out.view(*out_per_step[i].shape),
+        #                     out_per_step[i],
+        #                     softmax_lse,
+        #                     softmax_lse_per_step[i],
+        #                     seq_dim,
+        #                 )
+        #         elif qkv_format == "thd":
+        #             tex.thd_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 cu_seqlens_q_padded,
+        #                 False,
+        #                 softmax_lse_in_packed_format,
+        #             )
+        #     else:
+        #         if qkv_format in ["bshd", "sbhd"]:
+        #             flash_attn_fwd_second_half_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 seq_dim,
+        #             )
+        #         elif qkv_format == "thd":
+        #             tex.thd_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 cu_seqlens_q_padded,
+        #                 True,
+        #                 softmax_lse_in_packed_format,
+        #             )
+
         out = tex.fused_out_correction(
             out_per_step,
             softmax_lse,
@@ -1367,6 +1463,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             causal,
             softmax_lse_in_packed_format,
         )
+
+        # print("out shape:",out.shape)
+        # print("out_myversion shape:",out_myversion.shape)
+        # print("valid: ",cu_seqlens_q_padded)
+        # mismatch_mask = ~torch.isclose(out, out_myversion, rtol=1e-5, atol=1e-8)
+        # mismatch_indices = torch.where(mismatch_mask)
+        # for idx in zip(*mismatch_indices):
+        #     idx_tuple = tuple(idx)
+        #     print(f"位置 {idx_tuple}: out={out[idx_tuple]}, out_myversion={out_myversion[idx_tuple]}")
 
         kv = p2p_comm_buffers[-1]
         if isinstance(batch_dim, int):

@@ -196,22 +196,18 @@ struct TensorList {
 
 // describe QKV output tensor format for simplified computation.
 struct QKVIndexCalculatorBase {
-  int batch_size, seq_len, num_heads, dim_per_head;
-  int *cu_seqlens;
+  int batch_size_, seq_len_, num_heads_, dim_per_head_, num_total_tokens_;
+  int *half_cu_seqlens_;
 
-  __forceinline__ __device__ QKVIndexCalculatorBase(int BatchSize, int SeqLen, int NumHeads,
-                                                    int DimPerHead, int *CuSeqlens)
-      : batch_size(BatchSize),
-        seq_len(SeqLen),
-        num_heads(NumHeads),
-        dim_per_head(DimPerHead),
-        cu_seqlens(CuSeqlens) {}
-
-  // Computes full out tensor offset from token_id and head indices.
-  __forceinline__ __device__ int compute_full_tensor_offset(int token_id, int head_id) {
-    int offset = (token_id * num_heads + head_id) * dim_per_head;
-    return offset;
-  }
+  __forceinline__ __device__ QKVIndexCalculatorBase(int batch_size, int seq_len, int num_heads,
+                                                    int dim_per_head, int num_total_tokens,
+                                                    int *half_cu_seqlens)
+      : batch_size_(batch_size),
+        seq_len_(seq_len),
+        num_heads_(num_heads),
+        dim_per_head_(dim_per_head),
+        num_total_tokens_(num_total_tokens),
+        half_cu_seqlens_(half_cu_seqlens) {}
 };
 
 template <NVTE_QKV_Format format>
@@ -219,122 +215,142 @@ struct QKVIndexCalculator;
 
 template <>
 struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_SBHD> : QKVIndexCalculatorBase {
-  __forceinline__ __device__ QKVIndexCalculator(int BatchSize, int SeqLen, int NumHeads,
-                                                int DimPerHead, int *CuSeqlens)
-      : QKVIndexCalculatorBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
+  __forceinline__ __device__ QKVIndexCalculator(int batch_size, int seq_len, int num_heads,
+                                                int dim_per_head, int num_total_tokens,
+                                                int *half_cu_seqlens)
+      : QKVIndexCalculatorBase(batch_size, seq_len, num_heads, dim_per_head, num_total_tokens,
+                               half_cu_seqlens) {}
 
-  __forceinline__ __device__ int compute_seq_id(int token_id) { return token_id % batch_size; }
-
-  __forceinline__ __device__ int compute_local_token_id(int token_id, int seq_id) {
-    return token_id / batch_size;
+  // We design the thread's lowest-level traversal to follow the sequence dimension (since LSE is in BHS or HT format). This ensures coalesced memory access when reading the LSE tensor. Consequently, the SBHD layout's computation logic for seq_id and token_id remains identical to BSHD - both patterns make the underlying threads expand along the sequence dimension. This design preserves computational correctness while optimizing memory performance.
+  __forceinline__ __device__ int compute_seq_id(int flat_token_id) {
+    int half_seq_len = seq_len_ / 2;
+    return flat_token_id / half_seq_len;
   }
 
-  // Checks if the token is in the second half of the sequence.
-  __forceinline__ __device__ bool is_second_half(int local_token_id, int seq_id) {
-    return local_token_id >= seq_len / 2;
+  // When blockIdx.z == 1, the computation processes the second half of the sequence. Therefore, we need to apply an address offset equal to half of the seq_len_ length.
+  __forceinline__ __device__ int compute_token_id(int flat_token_id, int seq_id) {
+    int half_seq_len = seq_len_ / 2;
+    return flat_token_id % half_seq_len + blockIdx.z * half_seq_len;
   }
 
-  // Computes half out tensor offset from sequence, local token, and head indices.
-  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int half_seq_len = seq_len / 2;
-    int half_local_token_id = local_token_id - half_seq_len;
-    int offset = half_local_token_id * batch_size * num_heads + seq_id * num_heads + head_id;
-    offset *= dim_per_head;
+  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
+    int offset = token_id * batch_size_ * num_heads_ + seq_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
+    return offset;
+  }
+
+  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
+    int half_seq_len = seq_len_ / 2;
+    int half_token_id = token_id - half_seq_len;
+    int offset = half_token_id * batch_size_ * num_heads_ + seq_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
     return offset;
   }
 };
 
-// describe lse tensor format for simplified computation.
 template <>
 struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_BSHD> : QKVIndexCalculatorBase {
-  __forceinline__ __device__ QKVIndexCalculator(int BatchSize, int SeqLen, int NumHeads,
-                                                int DimPerHead, int *CuSeqlens)
-      : QKVIndexCalculatorBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
+  __forceinline__ __device__ QKVIndexCalculator(int batch_size, int seq_len, int num_heads,
+                                                int dim_per_head, int num_total_tokens,
+                                                int *half_cu_seqlens)
+      : QKVIndexCalculatorBase(batch_size, seq_len, num_heads, dim_per_head, num_total_tokens,
+                               half_cu_seqlens) {}
 
-  __forceinline__ __device__ int compute_seq_id(int token_id) { return token_id / seq_len; }
-
-  __forceinline__ __device__ int compute_local_token_id(int token_id, int seq_id) {
-    return token_id % seq_len;
+  __forceinline__ __device__ int compute_seq_id(int flat_token_id) {
+    int half_seq_len = seq_len_ / 2;
+    return flat_token_id / half_seq_len;
   }
 
-  __forceinline__ __device__ bool is_second_half(int local_token_id, int seq_id) {
-    return local_token_id >= seq_len / 2;
+  __forceinline__ __device__ int compute_token_id(int flat_token_id, int seq_id) {
+    int half_seq_len = seq_len_ / 2;
+    return flat_token_id % half_seq_len + blockIdx.z * half_seq_len;
   }
 
-  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int half_seq_len = seq_len / 2;
-    int half_local_token_id = local_token_id - half_seq_len;
-    int offset = seq_id * half_seq_len * num_heads + half_local_token_id * num_heads + head_id;
-    offset *= dim_per_head;
+  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
+    int offset = seq_id * seq_len_ * num_heads_ + token_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
+    return offset;
+  }
+
+  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
+    int half_seq_len = seq_len_ / 2;
+    int half_token_id = token_id - half_seq_len;
+    int offset = seq_id * half_seq_len * num_heads_ + half_token_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
     return offset;
   }
 };
 
 template <>
 struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_THD> : QKVIndexCalculatorBase {
-  __forceinline__ __device__ QKVIndexCalculator(int BatchSize, int SeqLen, int NumHeads,
-                                                int DimPerHead, int *CuSeqlens)
-      : QKVIndexCalculatorBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
+  __forceinline__ __device__ QKVIndexCalculator(int batch_size, int seq_len, int num_heads,
+                                                int dim_per_head, int num_total_tokens,
+                                                int *half_cu_seqlens)
+      : QKVIndexCalculatorBase(batch_size, seq_len, num_heads, dim_per_head, num_total_tokens,
+                               half_cu_seqlens) {}
 
-  __forceinline__ __device__ int compute_seq_id(int token_id) {
-    return binary_search(token_id, cu_seqlens, batch_size + 1);
+  __forceinline__ __device__ int compute_seq_id(int flat_token_id) {
+    return binary_search(flat_token_id, half_cu_seqlens_, batch_size_ + 1);
   }
 
-  __forceinline__ __device__ int compute_local_token_id(int token_id, int seq_id) {
-    return token_id - cu_seqlens[seq_id];
+  __forceinline__ __device__ int compute_token_id(int flat_token_id, int seq_id) {
+    bool is_padding = (flat_token_id >= half_cu_seqlens_[batch_size_]);
+    int half_seq_len = is_padding ? (num_total_tokens_ / 2 - half_cu_seqlens_[batch_size_])
+                                  : (half_cu_seqlens_[seq_id + 1] - half_cu_seqlens_[seq_id]);
+
+    return flat_token_id - half_cu_seqlens_[seq_id] + blockIdx.z * half_seq_len;
   }
 
-  __forceinline__ __device__ bool is_second_half(int local_token_id, int seq_id) {
-    return local_token_id >= (cu_seqlens[seq_id + 1] - cu_seqlens[seq_id]) / 2;
-  }
-
-  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int token_id = cu_seqlens[seq_id] + local_token_id;
-    int half_token_id = token_id - cu_seqlens[seq_id + 1] / 2;
-    int offset = half_token_id * num_heads + head_id;
+  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
+    int flat_token_id = half_cu_seqlens[seq_id] * 2 + token_id;
+    int offset = flat_token_id * num_heads + head_id;
     offset *= dim_per_head;
+    return offset;
+  }
+
+  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
+    int token_id = half_cu_seqlens_[seq_id] * 2 + token_id;
+    int half_token_id = token_id - half_cu_seqlens_[seq_id + 1];
+    int offset = half_token_id * num_heads_ + head_id;
+    offset *= dim_per_head_;
     return offset;
   }
 };
 
+// describe lse tensor format for simplified computation.
 struct LseIndexCalculatorBase {
-  int batch_size, seq_len, num_heads, num_total_tokens;
-  int *cu_seqlens;
+  int batch_size_, seq_len_, num_heads_, num_total_tokens_;
+  int *cu_seqlens_;
 
-  __forceinline__ __device__ LseIndexCalculatorBase(int BatchSize, int SeqLen, int NumHeads,
-                                                    int NumTotalTokens, int *CuSeqlens)
-      : batch_size(BatchSize),
-        seq_len(SeqLen),
-        num_heads(NumHeads),
-        num_total_tokens(NumTotalTokens),
-        cu_seqlens(CuSeqlens) {}
+  __forceinline__ __device__ LseIndexCalculatorBase(int batch_size, int seq_len, int num_heads,
+                                                    int num_total_tokens, int *half_cu_seqlens)
+      : batch_size_(batch_size),
+        seq_len_(seq_len),
+        num_heads_(num_heads),
+        num_total_tokens_(num_total_tokens),
+        half_cu_seqlens_(half_cu_seqlens) {}
 };
 
 template <NVTE_QKV_Format out_format, bool softmax_lse_in_packed_format>
 struct LseIndexCalculator : LseIndexCalculatorBase {
   /// When the pack format is not employed, the shape of lse is BHS
-  __forceinline__ __device__ LseIndexCalculator(int BatchSize, int SeqLen, int NumHeads,
-                                                int NumTotalTokens, int *CuSeqlens)
-      : LseIndexCalculatorBase(BatchSize, SeqLen, NumHeads, NumTotalTokens, CuSeqlens) {}
+  __forceinline__ __device__ LseIndexCalculator(int batch_size, int seq_len, int num_heads,
+                                                int num_total_tokens, int *half_cu_seqlens)
+      : LseIndexCalculatorBase(batch_size, seq_len, num_heads, num_total_tokens, half_cu_seqlens) {}
 
-  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int offset = seq_id * num_heads * seq_len + head_id * seq_len + local_token_id;
+  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
+    int offset = seq_id * num_heads_ * seq_len_ + head_id * seq_len_ + token_id;
     return offset;
   }
-  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int half_seq_len = seq_len / 2;
-    int half_local_token_id;
+  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
+    int half_seq_len = seq_len_ / 2;
+    int half_token_id;
     if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
-      half_local_token_id = local_token_id - (cu_seqlens[seq_id + 1] - cu_seqlens[seq_id]) / 2;
+      half_token_id = token_id - (cu_seqlens_[seq_id + 1] - cu_seqlens_[seq_id]);
     } else {
-      half_local_token_id = local_token_id - half_seq_len;
+      half_token_id = token_id - half_seq_len;
     }
-    int offset = seq_id * num_heads * half_seq_len + head_id * half_seq_len + half_local_token_id;
+    int offset = seq_id * num_heads_ * half_seq_len + head_id * half_seq_len + half_token_id;
     return offset;
   }
 };
@@ -346,38 +362,49 @@ struct LseIndexCalculator<NVTE_QKV_Format::NVTE_THD, true> : LseIndexCalculatorB
                                                 int NumTotalTokens, int *CuSeqlens)
       : LseIndexCalculatorBase(BatchSize, SeqLen, NumHeads, NumTotalTokens, CuSeqlens) {}
 
-  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int token_id = local_token_id + cu_seqlens[seq_id];
-    int offset = head_id * num_total_tokens + token_id;
+  __forceinline__ __device__ int compute_full_tensor_offset(int seq_id, int token_id, int head_id) {
+    int flat_token_id = token_id + cu_seqlens_[seq_id] * 2;
+    int offset = head_id * num_total_tokens_ + flat_token_id;
     return offset;
   }
-  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int local_token_id,
-                                                            int head_id) {
-    int token_id = local_token_id + cu_seqlens[seq_id];
-    int half_token_id = token_id - cu_seqlens[seq_id + 1] / 2;
-    int num_half_total_tokens = num_total_tokens / 2;
+  __forceinline__ __device__ int compute_half_tensor_offset(int seq_id, int token_id, int head_id) {
+    int token_id = token_id + cu_seqlens_[seq_id] * 2;
+    int half_token_id = token_id - cu_seqlens_[seq_id + 1];
+    int num_half_total_tokens = num_total_tokens_ / 2;
     int offset = head_id * num_half_total_tokens + half_token_id;
     return offset;
   }
 };
 
 template <typename dtype, int tile_size, bool causal, NVTE_QKV_Format out_format,
-          bool softmax_lse_in_packed_format, int max_tensors>
+          bool softmax_lse_in_packed_format, int max_tensors, int block>
 __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> tensors, float *lse,
                                             int *cu_seqlens, int batch, int num_heads,
                                             int dim_per_head, int lse_seqlen, int num_total_tokens,
                                             int cp_size, int rank, int start) {
   extern __shared__ int cu_seqlens_s[];
+
+  constexpr int num_lse_per_block = block / tile_size;
+
+  // Preload all lse elements needed by this block into shared memory, must first determine the memory addresses of LSE elements.
+  __shared__ int lse_half_idx[num_lse_per_block];
+  __shared__ int lse_full_idx[num_lse_per_block];
+
+  // Cache lse values in shared memory
+  __shared__ float lse_temp[num_lse_per_block];
+
+  // Cache lse_per_step values in shared memory
+  __shared__ float lse_temp_per_step[num_lse_per_block * max_tensors];
+
   int full_compute_tensor_end;
   int num_total_valid_tokens;  // Number of total tokens actually involved in the computation
 
   if constexpr (out_format == NVTE_QKV_Format::NVTE_THD) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
-      cu_seqlens_s[i] = cu_seqlens[i];
+      cu_seqlens_s[i] = cu_seqlens[i] / 2;
     }
     __syncthreads();
-    num_total_valid_tokens = cu_seqlens_s[batch];
+    num_total_valid_tokens = cu_seqlens_s[batch] * 2;
   } else if constexpr (out_format == NVTE_QKV_Format::NVTE_SBHD ||
                        out_format == NVTE_QKV_Format::NVTE_BSHD) {
     num_total_valid_tokens = lse_seqlen * batch;
@@ -392,7 +419,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
   // It's necessary to handle out and lse differently because their formats maybe different.
   QKVIndexCalculator<out_format> out_calculator(batch, lse_seqlen, num_heads, dim_per_head,
-                                                cu_seqlens_s);
+                                                cu_seqlens_s, num_total_tokens);
   LseIndexCalculator<out_format, softmax_lse_in_packed_format> lse_calculator(
       batch, lse_seqlen, num_heads, num_total_tokens, cu_seqlens_s);
 
@@ -401,21 +428,35 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
   int num_tiles = (blockDim.x * gridDim.x) / tile_size;
   int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
 
-  for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
+  for (int token_id = tile_id; token_id < num_total_tokens / 2; token_id += num_tiles) {
     int seq_id = out_calculator.compute_seq_id(token_id);
     int local_token_id = out_calculator.compute_local_token_id(token_id, seq_id);
     int head_id = blockIdx.y;
 
-    size_t idx_out_full = out_calculator.compute_full_tensor_offset(token_id, head_id);
-    size_t idx_out_half =
-        out_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+    size_t idx_out_full =
+        out_calculator.compute_full_tensor_offset(seq_id, local_token_id, head_id);
     size_t idx_lse_full =
         lse_calculator.compute_full_tensor_offset(seq_id, local_token_id, head_id);
-    size_t idx_lse_half =
-        lse_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+
+    size_t idx_out_half, idx_lse_half;
+
+    // start and end define the range of tensors to compute.
+    int end = full_compute_tensor_end;
+    bool is_second_half = (blockIdx.z == 1);
+    if (start + tensors.num_tensors_this_launch > full_compute_tensor_end && is_second_half) {
+      // If the half part needs to be computed, end must be reassigned.
+      end = start + tensors.num_tensors_this_launch;
+      idx_out_half = out_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+      idx_lse_half = lse_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+    }
+
+    if (lane_id == 0) {
+      lse_half_idx[threadIdx.x / tile_size] = idx_lse_half;
+      lse_full_idx[threadIdx.x / tile_size] = idx_lse_full;
+    }
 
     dtype *cur_out = out + idx_out_full;
-    if (token_id >= num_total_valid_tokens) {
+    if (token_id >= num_total_valid_tokens / 2) {
       // padding zeros
       for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
         float4 data = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -424,15 +465,25 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
       continue;
     }
 
-    // start and end define the range of tensors to compute.
-    int end = full_compute_tensor_end;
-    bool is_second_half = out_calculator.is_second_half(local_token_id, seq_id);
-    if (start + tensors.num_tensors_this_launch > full_compute_tensor_end && is_second_half) {
-      // If the half part needs to be computed, end must be reassigned.
-      end = start + tensors.num_tensors_this_launch;
+    __syncthreads();
+
+    /// load lse and lse_per_step into shared memory
+    for (int i = threadIdx.x; i < num_lse_per_block; i += blockDim.x) {
+      lse_temp[i] = lse[lse_full_idx[i]];
     }
 
-    float lse_temp = lse[idx_lse_full];
+    for (int i = threadIdx.x; i < (end - start) * num_lse_per_block; i += blockDim.x) {
+      int tensor_id = start + threadIdx.x / num_lse_per_block;
+      if (causal && is_second_half && tensor_id > rank) {
+        lse_temp_per_step[i] = reinterpret_cast<float *>(
+            tensors.addresses_lse[tensor_id])[lse_half_idx[i % num_lse_per_block]];
+      } else {
+        lse_temp_per_step[i] = reinterpret_cast<float *>(
+            tensors.addresses_lse[tensor_id])[lse_full_idx[i % num_lse_per_block]];
+      }
+    }
+
+    __syncthreads();
 
     for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
       float4 data;
@@ -457,13 +508,68 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
         dtype *cur_out_per_step = reinterpret_cast<dtype *>(tensors.addresses_out[i]) + idx_out;
         float4 data_per_step = reinterpret_cast<float4 *>(cur_out_per_step)[j];
         float lse_corrected_exp =
-            exp(reinterpret_cast<float *>(tensors.addresses_lse[i])[idx_lse] - lse_temp);
+            exp(lse_temp_per_step[(i - start) * num_lse_per_block + threadIdx.x / tile_size] -
+                lse_temp[threadIdx.x / tile_size]);
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
           p[k] += (p_per_step[k] == 0 ? 0 : p_per_step[k] * lse_corrected_exp);
         }
       }
       reinterpret_cast<float4 *>(cur_out)[j] = data;
+    }
+  }
+}
+
+template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
+__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
+                                          float *lse_per_step, int *cu_seqlens, int batch,
+                                          int num_heads, int dim_per_head, int lse_seqlen,
+                                          int lse_per_step_seqlen) {
+  extern __shared__ int cu_seqlens_s[];
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
+  }
+  __syncthreads();
+
+  int tile_id = (blockIdx.x * blockDim.x + threadIdx.x) / tile_size;
+  int lane_id = threadIdx.x % tile_size;
+  int num_tiles = (blockDim.x * gridDim.x) / tile_size;
+  int num_total_tokens = cu_seqlens_s[batch];
+  int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
+
+  for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
+    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
+    for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
+      size_t idx, idx_per_step;
+
+      if constexpr (lse_packed) {
+        idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
+        idx_per_step = head_id * lse_per_step_seqlen + token_id;
+      } else {
+        size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
+        int col = token_id - cu_seqlens_s[seq_id];
+        int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+        idx = row * lse_seqlen + col + seq_len * only_second_half;
+        idx_per_step = row * lse_per_step_seqlen + col;
+      }
+      float lse_corrected_exp = exp(lse_per_step[idx_per_step] - lse[idx]);
+
+      idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
+      idx = (idx * num_heads + head_id) * dim_per_head;
+      idx_per_step = (static_cast<size_t>(token_id) * num_heads + head_id) * dim_per_head;
+      dtype *cur_out = out + idx;
+      dtype *cur_out_per_step = out_per_step + idx_per_step;
+
+      for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
+        float4 data_per_step = reinterpret_cast<float4 *>(cur_out_per_step)[j];
+        float4 data = reinterpret_cast<float4 *>(cur_out)[j];
+        dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
+        dtype *p = reinterpret_cast<dtype *>(&data);
+        for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
+          p[k] += (p_per_step[k] == 0 ? 0 : p_per_step[k] * lse_corrected_exp);
+        }
+        reinterpret_cast<float4 *>(cur_out)[j] = data;
+      }
     }
   }
 }

@@ -309,6 +309,10 @@ at::Tensor fused_out_correction(std::vector<at::Tensor> &out_per_step, const at:
                                 const py::object &cu_seqlens, std::string qkv_format, int cp_size,
                                 int rank, bool causal, bool softmax_lse_in_packed_format);
 
+void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
+                        const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
+                        bool only_second_half, bool lse_packed);
+
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/
