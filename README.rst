@@ -197,13 +197,13 @@ To install the latest stable version with pip:
 .. code-block:: bash
 
     # For PyTorch integration
-    pip install transformer_engine[pytorch]
+    pip install --no-build-isolation transformer_engine[pytorch]
     
     # For JAX integration
-    pip install transformer_engine[jax]
+    pip install --no-build-isolation transformer_engine[jax]
     
     # For both frameworks
-    pip install transformer_engine[pytorch,jax]
+    pip install --no-build-isolation transformer_engine[pytorch,jax]
 
 Alternatively, install directly from the GitHub repository:
 
