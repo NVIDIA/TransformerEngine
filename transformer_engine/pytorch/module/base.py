@@ -420,6 +420,11 @@ def fill_userbuffers_buffer_for_all_gather(
     quantizer: Optional[Quantizer],
     process_group,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fill local shard of Userbuffers buffer with data for all-gather
+
+    Returns the full tensor and the local shard.
+
+    """
 
     # Tensor dimensions
     local_shape = local_tensor.size()
