@@ -13,8 +13,6 @@ import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-from .tensor.quantized_tensor import QuantizedTensor
-
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
@@ -33,7 +31,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     for t in tensors:
         if t is not None:
-            if isinstance(t, QuantizedTensor):
+            if hasattr(t, "clear"):
                 t.clear()
             else:
                 t.data = torch.Tensor()
