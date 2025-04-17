@@ -5,12 +5,12 @@
  ************************************************************************/
 
 #include <transformer_engine/transformer_engine.h>
-#include "common/util/cuda_runtime.h"
 
 #include <cstring>
 #include <iostream>
 
 #include "common.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 
