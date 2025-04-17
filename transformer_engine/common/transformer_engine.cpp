@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <transformer_engine/transformer_engine.h>
+#include "common/util/cuda_runtime.h"
 
 #include <cstring>
 #include <iostream>
@@ -473,4 +474,14 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
   if (config != nullptr) {
     delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
+}
+
+int nvte_is_non_tn_fp8_gemm_supported() {
+  int deviceComputeCapability =
+      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+
+  // Note: this is temporary restriction and should be lifted in the future.
+  // (remove the note once it's done.)
+  return (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
+         deviceComputeCapability >= 130;
 }

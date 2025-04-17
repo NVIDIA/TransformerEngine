@@ -20,8 +20,5 @@
 			*nvshmem_wait_on_stream*;
 			*nvshmemi_init_thread*
 		};
-		extern "C" {
-            nvte_is_non_tn_fp8_gemm_supported*;
-        };
 	local: *;
 };

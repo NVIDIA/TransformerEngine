@@ -599,14 +599,4 @@ bool is_supported_by_CC_100();
 
 }  // namespace transformer_engine
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-bool nvte_is_non_tn_fp8_gemm_supported();
-
-#ifdef __cplusplus
-}  // extern "C"
-#endif
-
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_
