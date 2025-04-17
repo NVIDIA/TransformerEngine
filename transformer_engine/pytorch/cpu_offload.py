@@ -471,7 +471,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                             self.reload_double_buffer[0].append(torch.empty_like(b) if self.double_buffering else None)
                     else:
                         self.reload_double_buffer[0].append(torch.empty_like(buf) if self.double_buffering else None)
-                self.double_buffer_created = True
 
             self.bulk_offload_group(current_group)
 
