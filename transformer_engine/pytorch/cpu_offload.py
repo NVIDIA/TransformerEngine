@@ -323,8 +323,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.layer_window_map = {}
 
         # Data structures fo double buffered reloading
-        self.reload_double_buffer = [[], []]
         self.double_buffering = double_buffering
+        self.reload_double_buffer = [[], []]
+        self.double_buffer_created = False
 
         # Logic to make offloading load balance across computation
         # for optimal CPU/GPU interconnect usage
@@ -461,14 +462,16 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # the first compute completion
         if current_group == 0:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
-
-            # Creating the first copy of double buffer for tensors that are offloaded
-            for tensor_tag, buf in self.tensor_tag_to_buf.items():
-                if isinstance(buf, list):
-                    for b in buf:
-                        self.reload_double_buffer[0].append(torch.empty_like(b) if self.double_buffering else None)
-                else:
-                    self.reload_double_buffer[0].append(torch.empty_like(buf) if self.double_buffering else None)
+            
+            if not self.double_buffer_created:
+                # Creating the first copy of double buffer for tensors that are offloaded
+                for tensor_tag, buf in self.tensor_tag_to_buf.items():
+                    if isinstance(buf, list):
+                        for b in buf:
+                            self.reload_double_buffer[0].append(torch.empty_like(b) if self.double_buffering else None)
+                    else:
+                        self.reload_double_buffer[0].append(torch.empty_like(buf) if self.double_buffering else None)
+                self.double_buffer_created = True
 
             self.bulk_offload_group(current_group)
 
@@ -492,10 +495,12 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Increment the offload group count to keep track
             self.offloaded_group_count += 1
 
-        # Creating second copy of double buffer for tensors that are offloaded
-        if current_group == (self.num_layers - 1):
-            for buf in self.reload_double_buffer[0]:
-                self.reload_double_buffer[1].append(torch.empty_like(buf) if self.double_buffering else None)
+        if not self.double_buffer_created:
+            # Creating second copy of double buffer for tensors that are offloaded
+            if current_group == (self.num_layers - 1):
+                for buf in self.reload_double_buffer[0]:
+                    self.reload_double_buffer[1].append(torch.empty_like(buf) if self.double_buffering else None)
+            self.double_buffer_created = True
 
     def on_group_commit_forward(self):
         """This function will cause host device synchronization"""
