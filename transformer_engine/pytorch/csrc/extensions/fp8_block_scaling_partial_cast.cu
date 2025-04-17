@@ -14,9 +14,11 @@ constexpr int kThreadsPerBlock = 256;
 
 template <typename IType>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    compute_partial_amax_kernel(const IType *input, float *amax_ptr, const size_t amax_stride_h,
-                                const size_t amax_stride_w, const size_t h, const size_t w,
-                                const size_t start_offset, const size_t len) {
+    fp8_block_scaling_compute_partial_amax_kernel(const IType *input, float *amax_ptr,
+                                                  const size_t amax_stride_h,
+                                                  const size_t amax_stride_w, const size_t h,
+                                                  const size_t w, const size_t start_offset,
+                                                  const size_t len) {
   constexpr int kThreadsPerWarp = 32;
   constexpr int kLoopsPerRow = kTileDim / kThreadsPerWarp;
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
@@ -70,9 +72,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 template <typename IType, typename OType, bool kWidthAligned>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    partial_cast_kernel(const IType *input, OType *output, const float *scale_ptr,
-                        const size_t scale_stride_h, const size_t scale_stride_w, const size_t h,
-                        const size_t w, const size_t start_offset, const size_t len) {
+    fp8_block_scaling_partial_cast_kernel(const IType *input, OType *output, const float *scale_ptr,
+                                          const size_t scale_stride_h, const size_t scale_stride_w,
+                                          const size_t h, const size_t w, const size_t start_offset,
+                                          const size_t len) {
   using transformer_engine::Vec;
 
   static_assert(sizeof(OType) == 1);
@@ -142,8 +145,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 }
 
-void compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, size_t w,
-                          size_t start_offset, size_t block_len) {
+void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h,
+                                            size_t w, size_t start_offset, size_t block_len) {
   TORCH_CHECK(block_len == 128, "Currently only support block_len = 128");
   TORCH_CHECK(amax.dim() == 2, "amax must be a 2D tensor");
   TORCH_CHECK(amax.scalar_type() == at::ScalarType::Float, "amax must be a float tensor");
@@ -168,15 +171,15 @@ void compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, s
   auto stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_FLOAT_HALF_AND_BFLOAT(tensor.scalar_type(), 0, "compute_partial_amax",
-                                 compute_partial_amax_kernel<scalar_t_0>
+                                 fp8_block_scaling_compute_partial_amax_kernel<scalar_t_0>
                                  <<<grid, kThreadsPerBlock, 0, stream>>>(
                                      tensor.data_ptr<scalar_t_0>(), amax.data_ptr<float>(),
                                      amax_stride_h, amax_stride_w, h, w, start_offset, len);)
 }
 
-void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale, size_t h,
-                  size_t w, size_t start_offset, size_t block_len,
-                  const transformer_engine::DType out_dtype) {
+void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
+                                    size_t h, size_t w, size_t start_offset, size_t block_len,
+                                    const transformer_engine::DType out_dtype) {
   TORCH_CHECK(block_len == 128, "Currently only support block_len = 128");
   TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
   TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
@@ -210,7 +213,7 @@ void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale
           out_dtype, fp8_type,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               w % kTileDim == 0, kWidthAligned,
-              partial_cast_kernel<scalar_t_0, fp8_type, kWidthAligned>
+              fp8_block_scaling_partial_cast_kernel<scalar_t_0, fp8_type, kWidthAligned>
               <<<grid, kThreadsPerBlock, 0, stream>>>(inp.data_ptr<scalar_t_0>(),
                                                       reinterpret_cast<fp8_type *>(out.data_ptr()),
                                                       scale.data_ptr<float>(), scale_stride_h,

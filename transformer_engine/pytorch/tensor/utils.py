@@ -391,7 +391,9 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         if master_weight is not None:
             assert len(model_weight.shape) == 2
             h, w = model_weight.shape
-            tex.compute_partial_amax(master_weight, amax, h, w, start_offset, block_len)
+            tex.fp8_block_scaling_compute_partial_amax(
+                master_weight, amax, h, w, start_offset, block_len
+            )
 
     # ---------------------------------------------------------------------------------------------
     # Step 2: Perform all-reduce on packed_amaxes to get the global amax.
@@ -439,6 +441,6 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
             model_weight_fragment = model_weight._rowwise_data.reshape(-1)[start_offset:end_offset]
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
-        tex.partial_cast(
+        tex.fp8_block_scaling_partial_cast(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
