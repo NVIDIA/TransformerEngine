@@ -26,6 +26,7 @@ from .misc import (
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     NamedSharding,
+    get_cudnn_version,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
@@ -35,6 +36,7 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
+from .quantization import _quantize_dbias_impl
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -85,6 +87,10 @@ def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bo
     return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
 
 
+# CuDNN version must be at least this to use MXFP8 fused normalization otherwise unfused norm and quantize will be used
+FUSED_MXFP8_NORM_CUDNN_MIN_VERSION = (9, 10, 0)
+
+
 class NormFwdPrimitive(BasePrimitive):
     """
     Layer Normalization Forward FP8 Primitive
@@ -121,6 +127,14 @@ class NormFwdPrimitive(BasePrimitive):
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
+
+        assert (
+            scaling_mode != ScalingMode.MXFP8_1D_SCALING.value
+            or get_cudnn_version() >= FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+        ), (
+            "MXFP8 Fused Normalization is only supported in CuDNN version"
+            f" {FUSED_MXFP8_NORM_CUDNN_MIN_VERSION} or higher"
+        )
 
         mu_rsigama_dtype = jnp.float32
 
@@ -913,6 +927,16 @@ def layernorm_fwd(
         )
         return output, mu, rsigma
 
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, mu, rsigma = layernorm_fwd(
+            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
+        )
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, mu, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
     if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
@@ -1094,6 +1118,14 @@ def rmsnorm_fwd(
             is_outer=True,
         )
         return output, rsigma
+
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None)
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, rsigma
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
