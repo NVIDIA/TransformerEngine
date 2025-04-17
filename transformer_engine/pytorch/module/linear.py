@@ -64,7 +64,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 
@@ -309,11 +309,8 @@ class _Linear(torch.autograd.Function):
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
-            if cpu_offloading:
-                set_offloading_param(weight, "weight_offloading", True)
-                set_offloading_param(weightmat, "weight_offloading", True)
-                if saved_inputmat is not None:
-                    set_offloading_param(saved_inputmat, "activation_offloading", True)
+            if cpu_offloading and saved_inputmat is not None:
+                mark_activation_offload(saved_inputmat)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
