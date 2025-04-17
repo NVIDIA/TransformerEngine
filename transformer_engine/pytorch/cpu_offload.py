@@ -499,7 +499,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             if current_group == (self.num_layers - 1):
                 for buf in self.reload_double_buffer[0]:
                     self.reload_double_buffer[1].append(torch.empty_like(buf) if self.double_buffering else None)
-            self.double_buffer_created = True
+                self.double_buffer_created = True
 
     def on_group_commit_forward(self):
         """This function will cause host device synchronization"""
