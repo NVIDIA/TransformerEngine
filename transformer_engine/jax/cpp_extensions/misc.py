@@ -19,7 +19,7 @@ from jax.interpreters.mlir import dtype_to_ir_type
 import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..quantize import ScalingMode, ScaledTensorFactory, QuantizeLayout
+from ..quantize import ScaledTensorFactory, QuantizeLayout
 
 TEDType = transformer_engine_jax.DType
 
