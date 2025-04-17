@@ -1000,6 +1000,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
+                   Type of symmetric memory all-reduce to use during the forward pass.
+                   This can help in latency bound communication situations.
+                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   is used.
     """
 
     def __init__(

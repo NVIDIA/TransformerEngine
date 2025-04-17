@@ -1310,6 +1310,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
+    symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
+                   Type of symmetric memory all-reduce to use during the forward pass.
+                   This can help in latency bound communication situations.
+                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   is used.
     """
 
     def __init__(
