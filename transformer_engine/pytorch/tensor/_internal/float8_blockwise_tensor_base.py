@@ -33,7 +33,6 @@ class Float8BlockwiseQTensorBase:
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
-    _columnwise_invalid: bool
 
     def __new__(
         cls,
@@ -55,7 +54,6 @@ class Float8BlockwiseQTensorBase:
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
-        instance._columnwise_invalid = columnwise_data is None or columnwise_scale_inv is None
 
         return instance
 
@@ -119,9 +117,7 @@ class Float8BlockwiseQTensorBase:
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
         else:
-            assert (
-                self._columnwise_data is not None and not self._columnwise_invalid
-            ), "No data to dequantize"
+            assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             transpose_output = True
@@ -184,9 +180,7 @@ class Float8BlockwiseQTensorBase:
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
         else:
-            assert (
-                self._columnwise_data is not None and not self._columnwise_invalid
-            ), "No data to dequantize"
+            assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             transpose_output = True
@@ -270,8 +264,6 @@ class Float8BlockwiseQTensorBase:
         h = min(self._columnwise_scale_inv.shape[0], columnwise_scale_inv.shape[0])
         w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
         self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
-
-        self._columnwise_invalid = False
 
     def __repr__(self):
         if self._rowwise_data is not None:

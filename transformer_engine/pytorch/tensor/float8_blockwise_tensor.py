@@ -319,7 +319,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         if rowwise_usage is None:
             rowwise_usage = self._rowwise_data is not None
         if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None and not self._columnwise_invalid
+            columnwise_usage = self._columnwise_data is not None
         assert (
             columnwise_usage or rowwise_usage
         ), "Must retain some data either columnwise or rowwise"
@@ -333,7 +333,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                     and self._rowwise_scale_inv is not None
                     and self._columnwise_data is not None
                     and self._columnwise_scale_inv is not None
-                    and not self._columnwise_invalid
                 ), "Cannot update to rowwise and columnwise usage."
             else:
                 # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
@@ -344,7 +343,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 if (
                     self._columnwise_data is None
                     or self._columnwise_scale_inv is None
-                    or self._columnwise_invalid
                 ):
                     self._create_columnwise()
             return
@@ -360,7 +358,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             assert (
                 self._columnwise_data is not None
                 and self._columnwise_scale_inv is not None
-                and not self._columnwise_invalid
             ), "Cannot update to columnwise usage."
             self._rowwise_data = None
             self._rowwise_scale_inv = None
@@ -368,21 +365,13 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
         return
 
-    def _reset_columnwise(self) -> None:
-        """
-        Set columnwise data and columnwise scale inv as invalid.
-        Should only be called when _is_2D_scaled == True.
-        """
-        assert self._is_2D_scaled, "Cannot reset columnwise data when not using 2D scaling."
-        self._columnwise_invalid = True
-
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         rowwise_data = None
         if self._rowwise_data is not None:
             rowwise_data = self._rowwise_data.detach().clone()
         columnwise_data = None
-        if self._columnwise_data is not None and not self._columnwise_invalid:
+        if self._columnwise_data is not None:
             columnwise_data = self._columnwise_data.detach().clone()
         return _IdentityFunc.apply(
             self,
@@ -441,7 +430,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             and self._rowwise_data.is_contiguous(memory_format=memory_format)
             and (
                 (self._columnwise_data is None)
-                or (self._columnwise_invalid)
                 or (self._columnwise_data.is_contiguous(memory_format=memory_format))
             )
         ):
@@ -523,7 +511,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
-            dst._columnwise_invalid = src._columnwise_invalid
 
         # Check that tensor dimensions match
         if (
@@ -614,7 +601,7 @@ class _ViewFunc(torch.autograd.Function):
         new_columnwise_data = None
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.view(*shape)
-        if tensor._columnwise_data is not None and not tensor._columnwise_invalid:
+        if tensor._columnwise_data is not None:
             columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
@@ -642,7 +629,7 @@ class _ViewFunc(torch.autograd.Function):
             new_data = (
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
-            if grad._columnwise_data is not None and not grad._columnwise_invalid:
+            if grad._columnwise_data is not None:
                 columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
                 new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             else:
@@ -720,7 +707,7 @@ class _ReshapeFunc(torch.autograd.Function):
         new_columnwise_data = None
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.reshape(*shape)
-        if tensor._columnwise_data is not None and not tensor._columnwise_invalid:
+        if tensor._columnwise_data is not None:
             columnwise_shape = [shape[-1]] + list(shape[:-1])
             new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
@@ -749,7 +736,7 @@ class _ReshapeFunc(torch.autograd.Function):
             new_columnwise_data = None
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
-            if grad._columnwise_data is not None and not grad._columnwise_invalid:
+            if grad._columnwise_data is not None:
                 columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
                 new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
             dgrad = Float8BlockwiseQTensor(

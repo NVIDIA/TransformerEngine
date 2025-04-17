@@ -424,11 +424,11 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
         params, scales
     ):
-        # Reset transpose cache for all model weights.
-        # We cannot create transpose cache here because users (like megatron) may want to overlap
+        # Clear columnwise data for all model weights.
+        # We cannot create columnwise data here because users (like megatron) may want to overlap
         # the all-gather of model weights and forward process, so the model weight is not updated
-        # currently.
-        model_weight._reset_columnwise()
+        # at this moment.
+        model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
