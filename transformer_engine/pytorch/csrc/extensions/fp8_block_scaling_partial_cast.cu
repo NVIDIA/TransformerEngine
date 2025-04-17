@@ -117,7 +117,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     bool other_skip_store = __shfl_down_sync(0xFFFFFFFF, skip_store, delta);
     skip_store = skip_store && other_skip_store;
   }
-  // skip_store = __reduce_and_sync(0xffffffff, skip_store);
+  skip_store = __shfl_sync(0xFFFFFFFF, skip_store, 0);
   if (skip_store) {
     return;
   }
