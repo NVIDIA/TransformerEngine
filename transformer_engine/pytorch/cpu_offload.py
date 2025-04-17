@@ -462,6 +462,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         if current_group == 0:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
 
+            # Creating the first copy of double buffer for tensors that are offloaded
             for tensor_tag, buf in self.tensor_tag_to_buf.items():
                 if isinstance(buf, list):
                     for b in buf:
@@ -491,6 +492,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Increment the offload group count to keep track
             self.offloaded_group_count += 1
 
+        # Creating second copy of double buffer for tensors that are offloaded
         if current_group == (self.num_layers - 1):
             for buf in self.reload_double_buffer[0]:
                 self.reload_double_buffer[1].append(torch.empty_like(buf) if self.double_buffering else None)
@@ -515,7 +517,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
                     if isinstance(state, tuple):
-                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(state, self.reload_double_buffer[double_buffer_idx][buffer_idx])
+                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(state, True, self.reload_double_buffer[double_buffer_idx][buffer_idx])
                         buffer_idx = buffer_idx + 1
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
                     elif isinstance(state, list):
@@ -523,7 +525,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         for state_tuple in state:
                             if isinstance(state_tuple, tuple):
                                 tensor_list.append(
-                                    SynchronizedGroupOffloadHandler.reload(state_tuple, self.reload_double_buffer[double_buffer_idx][buffer_idx])
+                                    SynchronizedGroupOffloadHandler.reload(state_tuple, True, self.reload_double_buffer[double_buffer_idx][buffer_idx])
                                 )
                                 buffer_idx = buffer_idx + 1
                             else:
