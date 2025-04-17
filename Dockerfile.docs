@@ -4,15 +4,16 @@ FROM ${BASE_IMAGE_NAME}
 ARG GIT_SHA=00000000
 ENV GIT_SHA=${GIT_SHA}
 
-RUN pip install sphinx==8.1.3 \
-                sphinx_rtd_theme==3.0.1 \
-                nbsphinx==0.9.5 \
-                IPython \
-                ipython_genutils==0.2.0 \
-                breathe==4.35.0 \
-                ipywidgets==8.0.2 \
-                sphinx-autoapi==3.3.2 \
-                astroid==3.3.2
+RUN pip3 install \
+    sphinx==8.1.3 \
+    sphinx_rtd_theme==3.0.1 \
+    nbsphinx==0.9.5 \
+    IPython \
+    ipython_genutils==0.2.0 \
+    breathe==4.35.0 \
+    ipywidgets==8.0.2 \
+    sphinx-autoapi==3.3.2 \
+    astroid==3.3.2
 RUN apt-get update && apt-get install -y pandoc graphviz doxygen && \
     rm -rf /var/lib/apt/lists/*
 

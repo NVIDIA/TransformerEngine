@@ -22,9 +22,17 @@ COPY --from=transformerengine . .
 ENV PIP_CONSTRAINT=
 
 # Install dependencies for building
-# Note: pybind11 is not a strict dependency since it may be installed
-# outside of Python, e.g. installed via apt.
-RUN pip install ninja pybind11
+# Note: PIP_BREAK_SYSTEM_PACKAGES is required because otherwise Ubuntu
+# 23+ only allows pip install within venv.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" == "core" ]] \
+  && apt-get update \
+  && apt-get install -y git python3 python3-pip \
+  && pip3 install cmake==3.21.0 nvidia-cudnn-cu12 \
+  || [[ ! "${FRAMEWORK}" == "core" ]]
+EOF
+RUN pip3 install ninja pybind11
 
 # Install google logging lib for paddle ci as a hotfix.
 # TODO (ksivamai): fix in TE build
@@ -38,9 +46,12 @@ RUN <<"EOF" bash -e
   && export MAX_JOBS=4 \
   || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
 
-  NVTE_FRAMEWORK=${FRAMEWORK} \
+  [[ "${FRAMEWORK}" == "core" ]] \
+  && export NVTE_FRAMEWORK=none \
+  || export NVTE_FRAMEWORK=${FRAMEWORK}
+
   NVTE_BUILD_THREADS_PER_JOB=4 \
-  pip install --verbose --verbose --no-build-isolation .[test]
+  pip3 install --verbose --verbose --no-build-isolation .[test]
 
   rm -rf transformer_engine.egg-info dist build
 EOF
