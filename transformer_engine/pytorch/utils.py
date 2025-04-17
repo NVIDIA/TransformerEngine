@@ -11,6 +11,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 from .tensor.quantized_tensor import QuantizedTensor
 
@@ -329,6 +330,19 @@ def round_up_to_nearest_multiple(value, multiple):
     return ((value + multiple - 1) // multiple) * multiple
 
 
+def needs_quantized_gemm(obj, rowwise=True):
+    """Used to check if obj will need quantized gemm or normal gemm."""
+    if isinstance(obj, DebugQuantizedTensor):
+        return type(obj.get_tensor(not rowwise)) not in [  # pylint: disable=unidiomatic-typecheck
+            torch.Tensor,
+            torch.nn.Parameter,
+        ]
+    return type(obj) not in [
+        torch.Tensor,
+        torch.nn.Parameter,
+    ]  # pylint: disable=unidiomatic-typecheck
+
+
 @functools.lru_cache(maxsize=None)
 def _nvtx_enabled() -> bool:
     """Check if NVTX range profiling is enabled"""
@@ -386,3 +400,16 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
 
     # Pop NVTX range
     torch.cuda.nvtx.range_pop()
+
+
+def canonicalize_process_group(
+    group: Optional[torch.distributed.ProcessGroup],
+) -> torch.distributed.ProcessGroup:
+    """Convert to PyTorch process group
+
+    If `None`, returns default process group.
+
+    """
+    if group is None:
+        return torch.distributed.distributed_c10d._get_default_group()
+    return group

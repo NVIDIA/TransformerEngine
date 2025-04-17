@@ -28,6 +28,9 @@ PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -61,9 +64,31 @@ void init_mxfp8_extension() {
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
+void init_float8blockwise_extension() {
+  if (Float8BlockwiseQTensorBasePythonClass) return;
+  auto fp8_module =
+      py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
+  auto fp8_base_module = py::module_::import(
+      "transformer_engine.pytorch.tensor._internal.float8_blockwise_tensor_base");
+  Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
+  Float8BlockwiseQTensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorBase"));
+  Float8BlockwiseQTensorPythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockwiseQTensor"));
+
+  NVTE_CHECK(Float8BlockwiseQuantizerClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+  NVTE_CHECK(Float8BlockwiseQTensorBasePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+  NVTE_CHECK(Float8BlockwiseQTensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+}
+
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
+  init_float8blockwise_extension();
 }
 
 }  // namespace transformer_engine::pytorch
@@ -76,6 +101,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -170,35 +196,40 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
         py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
-        py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
+  m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
+        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
+        py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
-  m.def("fused_attn_fwd", &fused_attn_fwd,
-        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
-  m.def("fused_attn_bwd", &fused_attn_bwd,
-        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O", py::arg("input"),
-        py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
+  m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
+        py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
+  m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
         py::call_guard<py::gil_scoped_release>());
+
+  // attention kernels
+  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_attn_fwd", &fused_attn_fwd,
+        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
+  m.def("fused_attn_bwd", &fused_attn_bwd,
+        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
+  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
+  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD");
+  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD");
+
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format",
         py::call_guard<py::gil_scoped_release>());
 
   // Misc
@@ -225,6 +256,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
+        py::call_guard<py::gil_scoped_release>());
+
+  // nvshmem functions
+  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend,
+        "Initialize nvshmem backend with Pytorch distributed process groups",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor,
+        "Create a tensor in NVSHMEM shared memory", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_send_on_current_stream", &nvshmem_api::nvshmem_send_on_current_stream,
+        "Asynchronously send tensor data to a remote PE using NVSHMEM on the current CUDA stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_wait_on_current_stream", &nvshmem_api::nvshmem_wait_on_current_stream,
+        "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "
+        "stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize,
+        "Clean up and finalize the NVSHMEM communication backend and free associated resources",
         py::call_guard<py::gil_scoped_release>());
 
   // multi-tensor functions
@@ -259,6 +307,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
         "Fused SGD optimizer for list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
+        "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

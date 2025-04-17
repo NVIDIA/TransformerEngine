@@ -39,6 +39,8 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
+bool& use_zero_centered_gamma_in_weight_dtype();
+
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
@@ -207,11 +209,14 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
     _ndim_scale_block = 1;
   }
 
-  _scalar_dptr = std::make_unique<char[]>(typeToSize(wtype));
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
+  const auto gamma_dtype = use_zero_centered_gamma_in_weight_dtype() ? wtype : ctype;
 
-  _handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  _scalar_dptr = std::make_unique<char[]>(typeToSize(gamma_dtype));
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      gamma_dtype, cpp_dtype,
+      *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
+
+  _handle = cudnnExecutionPlanManager::Instance().GetHandle();
 
   _graph.set_io_data_type(get_cudnn_fe_dtype(itype))
       .set_intermediate_data_type(get_cudnn_fe_dtype(ctype))
@@ -239,13 +244,13 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                                        .set_name("one")
                                        .set_dim({1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(get_cudnn_fe_dtype(wtype))
+                                       .set_data_type(get_cudnn_fe_dtype(gamma_dtype))
                                        .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
     _gamma = _graph.pointwise(_gamma_zero, _scalar_offset, centered_options);
-    _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(wtype));
+    _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(gamma_dtype));
   } else {
     _gamma = _gamma_zero;
   }
@@ -503,6 +508,13 @@ bool& _cudnn_norm_bwd_flag() {
 bool use_cudnn_norm_fwd() { return _cudnn_norm_fwd_flag(); }
 bool use_cudnn_norm_bwd() { return _cudnn_norm_bwd_flag(); }
 
+bool& _zero_centered_gamma_in_weight_dtype() {
+  static bool flag = transformer_engine::getenv<bool>("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE");
+  return flag;
+}
+
+bool& use_zero_centered_gamma_in_weight_dtype() { return _zero_centered_gamma_in_weight_dtype(); }
+
 }  //  namespace normalization
 }  // namespace transformer_engine
 
@@ -514,4 +526,9 @@ void nvte_enable_cudnn_norm_fwd(bool enable) {
 void nvte_enable_cudnn_norm_bwd(bool enable) {
   NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
   transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
+}
+
+void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
+  NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
+  transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
 }

@@ -23,6 +23,7 @@ from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer, QuantizedTensor
 from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
@@ -412,7 +413,6 @@ class BasicLinear(BasicOperation):
         x = None
         x_async = None
         with_x_all_gather = tensor_parallel_mode == "column" and sequence_parallel
-        own_quantized_x_local = False
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
@@ -428,7 +428,6 @@ class BasicLinear(BasicOperation):
             else:
                 if not isinstance(x_local, QuantizedTensor):
                     x_local = input_quantizer(x_local)
-                    own_quantized_x_local = True
                 x = x_local
         else:
             if isinstance(x_local, QuantizedTensor):
@@ -483,6 +482,12 @@ class BasicLinear(BasicOperation):
                 "Attempting to generate MXFP8 output tensor, "
                 "but GEMM with MXFP8 output is not supported"
             )
+        if isinstance(output_quantizer, Float8BlockQuantizer):
+            raise RuntimeError(
+                "Attempting to generate Float8BlockQuantized output tensor, "
+                "but GEMM with Float8BlockQuantized output is not supported"
+            )
+
         if output_quantizer is not None:
             output_quantizer.set_usage(rowwise=True, columnwise=False)
 
@@ -521,15 +526,15 @@ class BasicLinear(BasicOperation):
             else:
                 torch.distributed.all_reduce(y, group=tensor_parallel_group)
 
-        # Configure input tensor for backward pass
-        if own_quantized_x_local:
-            x_local.update_usage(rowwise_usage=False)
-
         # Detach input tensor if needed
         # Note: PyTorch autograd produces esoteric errors if we save
         # input tensor as context for backward pass.
         if x_local is input:
             x_local = x_local.detach()
+
+        # Configure input tensor for backward pass
+        if with_quantized_compute and isinstance(x_local, QuantizedTensor):
+            x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         return y, x_local, w
 
@@ -682,7 +687,9 @@ class BasicLinear(BasicOperation):
                         quantizer=input_quantizer,
                     )
                 else:
-                    if not isinstance(x_local, QuantizedTensor):
+                    if isinstance(x_local, QuantizedTensor):
+                        x_local.update_usage(columnwise_usage=True)
+                    else:
                         x_local = input_quantizer(x_local)
                     x = x_local
             else:
@@ -709,15 +716,19 @@ class BasicLinear(BasicOperation):
                 raise ValueError("Weight tensor is required to compute input grad")
             w = weight
             w_is_quantized = isinstance(w, QuantizedTensor)
-            if with_quantized_compute and not w_is_quantized:
-                if weight_quantizer is None:
-                    raise ValueError("Missing quantizer for weight tensor")
-                weight_quantizer.set_usage(columnwise=True)
-                w = weight_quantizer(w)
-            elif not with_quantized_compute and w_is_quantized:
-                w = w.dequantize()
-            if not with_quantized_compute and w.dtype != dtype:
-                w = w.to(dtype=dtype)
+            if with_quantized_compute:
+                if w_is_quantized:
+                    w.update_usage(columnwise_usage=True)
+                else:
+                    if weight_quantizer is None:
+                        raise ValueError("Missing quantizer for weight tensor")
+                    weight_quantizer.set_usage(columnwise=True)
+                    w = weight_quantizer(w)
+            else:
+                if w_is_quantized:
+                    w = w.dequantize(dtype=dtype)
+                elif w.dtype != dtype:
+                    w = w.to(dtype=dtype)
 
             # Synchronize tensor-parallel communication
             _wait_async(dy_async)
@@ -870,8 +881,8 @@ class BasicLinear(BasicOperation):
             # Configure quantizers
             # Note: We cache the quantized input for backward pass,
             # but discard the quantized weights.
-            input_quantizer.set_usage(columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(columnwise=False)
+            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Get autocast dtype if needed
         dtype = None
