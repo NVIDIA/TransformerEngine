@@ -61,8 +61,10 @@ may also be set:
 | `GH_BRANCH`     | `main`        | GitHub branch                                             |
 | `GH_PR`         |               | GitHub PR number (overrides `GH_BRANCH`)                  |
 | `GL_MR`         |               | GitLab MR number (overrides `GH_BRANCH`)                  |
+| `CORE_IMAGE`    |               | Base Docker container for core build                      |
 | `PYTORCH_IMAGE` | Nightly build | Base Docker container for PyTorch build                   |
-| `JAX_IMAGE`     | Nightly build | Base Docker container for JAX build                       |
+| `JAX_IMAGE`     |               | Base Docker container for JAX build                       |
+| `BUILD_CORE`    | `1`           | Enable core build and tests                               |
 | `BUILD_PYTORCH` | `1`           | Enable PyTorch build and tests                            |
 | `BUILD_JAX`     | `1`           | Enable JAX build and tests                                |
 | `RUN_L0_TESTS`  | `1`           | Run L0 tests automatically (otherwise run tests manually) |

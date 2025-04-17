@@ -7,9 +7,12 @@ variables:
     DATADIR: /mnt/nvdl/datasets
 
     # framework containers
+    CORE_IMAGE:
+      description: Base Docker container for core build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:12.9-devel-ubuntu24.04--main-amd64  # Last build with main branch
     PYTORCH_IMAGE:
       description: Base Docker container for PyTorch build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel  # Last build with main branch (nightly build)
     JAX_IMAGE:
       description: Base Docker container for JAX build
       value: ghcr.io/nvidia/jax:jax-2025-04-12
@@ -22,6 +25,9 @@ variables:
       description: GitHub PR number (overrides GH_BRANCH)
     GL_MR:
       description: GitLab MR number (overrides GH_BRANCH)
+    BUILD_CORE:
+      description: Enable core build and tests
+      value: 1
     BUILD_PYTORCH:
       description: Enable PyTorch build and tests
       value: 1
@@ -78,7 +84,7 @@ stages:
     - echo "machine ${CI_REGISTRY/:5005/} login gitlab-ci-token password ${CI_JOB_TOKEN}" > "${ENROOT_CONFIG_PATH}/.credentials"
 
 before_script:
-    - export FRAMEWORK=${FRAMEWORK:-pytorch}                                                       && echo "${FRAMEWORK}"
+    - export FRAMEWORK=${FRAMEWORK:-core}                                                          && echo "${FRAMEWORK}"
     - export PYVER=3.8   && echo "${PYVER}"
     - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
     - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
@@ -186,9 +192,11 @@ before_script:
             --form "variables[GIT_SHA]=${GIT_SHA}" \
             --form "variables[GH_PR]=${GH_PR}" \
             --form "variables[GL_MR]=${GL_MR}" \
+            --form "variables[CORE_IMAGE]=${CORE_IMAGE}" \
             --form "variables[PYTORCH_IMAGE]=${PYTORCH_IMAGE}" \
             --form "variables[JAX_IMAGE]=${JAX_IMAGE}" \
             --form "variables[TAG_ROOT]=${TAG_ROOT}" \
+            --form "variables[BUILD_CORE]=${BUILD_CORE}" \
             --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
             --form "variables[BUILD_JAX]=${BUILD_JAX}" \
             --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
@@ -228,7 +236,7 @@ create_branch:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     script:
     - !reference [.setup-docker ]
     - echo ${JOB_START_STRING}
@@ -247,12 +255,22 @@ create_branch:
       when: never
     - if: $CI_COMMIT_TAG
       when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
     - when: on_success
       allow_failure: false
+
+core-py3-base:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $CORE_IMAGE
+      FRAMEWORK: core
+    extends:
+    - .base_template
 
 pytorch-py3-base:
     stage: build base
@@ -275,7 +293,7 @@ jax-py3-base:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     script:
     - !reference [.setup-docker ]
     - bash docker-build.sh --pyver=${PYVER}
@@ -289,12 +307,22 @@ jax-py3-base:
       when: never
     - if: $CI_COMMIT_TAG
       when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
     - when: on_success
       allow_failure: false
+
+core-py3-devel:
+    stage: build devel
+    variables:
+      FRAMEWORK: core
+    needs: [ core-py3-base ]
+    extends:
+    - .devel_template
 
 pytorch-py3-devel:
     stage: build devel
@@ -318,7 +346,7 @@ jax-py3-devel:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     dependencies: []
     script:
     - !reference [.setup-docker ]
@@ -333,11 +361,21 @@ jax-py3-devel:
       when: never
     - if: $CI_COMMIT_TAG
       when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
     - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
+
+core-py3-stage:
+    stage: build stage
+    variables:
+      FRAMEWORK: core
+    needs: [ core-py3-base, core-py3-devel ]
+    extends:
+    - .stage_template
 
 pytorch-py3-stage:
     stage: build stage
@@ -360,7 +398,7 @@ jax-py3-stage:
     variables:
       TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
       TEST_SCRIPT: "./test.sh"
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     script:
     - !reference [.setup-docker ]
     - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
@@ -401,14 +439,14 @@ jax-py3-stage:
       when: always
     tags:
     - must_specify_runner
-    needs: [ pytorch-py3-devel ]
+    needs: [ core-py3-devel ]
 
 .test_on_cluster_template: &TEST_ON_CLUSTER_TEMPLATE
     environment: "${CI_JOB_NAME}"
     variables:
       TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
       TEST_SCRIPT: "./test.sh"
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     script:
     - !reference [.setup-enroot ]
     - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
@@ -443,7 +481,7 @@ jax-py3-stage:
       when: always
     tags:
     - must_specify_runner
-    needs: [ pytorch-py3-devel ]
+    needs: [ core-py3-devel ]
 
 .docs_template: &DOCS_BUILD
     stage: test
@@ -451,7 +489,7 @@ jax-py3-stage:
       GIT_STRATEGY: fetch
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
-      FRAMEWORK: pytorch
+      FRAMEWORK: core
     script:
     - !reference [.setup-docker ]
     - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
@@ -488,11 +526,13 @@ jax-py3-stage:
       expire_in: 1 month
     tags:
     - 1GPU
-    needs: [ pytorch-py3-devel ]
+    needs: [ core-py3-devel ]
     rules:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
     - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
       when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
@@ -572,6 +612,8 @@ upload_logs:
       when: never
     - if: $CI_COMMIT_TAG
       when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
@@ -595,6 +637,8 @@ upload_logs:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
     - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
       when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
@@ -620,6 +664,8 @@ upload_logs:
       when: never
     - if: $CI_COMMIT_TAG
       when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
@@ -643,6 +689,8 @@ upload_logs:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
     - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
       when: never
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
@@ -745,7 +793,7 @@ upload_logs:
 ##
 ##   L0_mytest:
 ##      variables:
-##        FRAMEWORK: pytorch
+##        FRAMEWORK: core
 ##        TEST_WORK_DIR: "/some/other/path"
 ##        TEST_SCRIPT: "./test.sh"
 ##      extends:
@@ -755,8 +803,8 @@ upload_logs:
 
 L0_license:
     variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      FRAMEWORK: core
+    needs: [ core-py3-devel ]
     extends:
     - .L0_test
     tags:
@@ -779,6 +827,46 @@ L0_jax_lint:
     - .L0_test
     tags:
     - 1GPU
+
+L0_pytorch_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_jax_wheel--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_cppunittest--A100_1GPU:
+    variables:
+      FRAMEWORK: core
+    needs: [ core-py3-devel ]
+    extends:
+    - .L0_test
+    - .A100_1GPU
+
+L0_cppunittest--H100_1GPU:
+    variables:
+      FRAMEWORK: core
+    needs: [ core-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_cppunittest--B200_1GPU:
+    variables:
+      FRAMEWORK: core
+    needs: [ core-py3-devel ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
 
 L0_pytorch_unittest--A100_1GPU:
     variables:
@@ -948,49 +1036,9 @@ L1_jax_distributed_unittest--B200_8GPU:
     - .L1_test_on_cluster
     - .B200_8GPU
 
-L0_cppunittest--A100_1GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test
-    - .A100_1GPU
-
-L0_cppunittest--H100_1GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test
-    - .H100_1GPU
-
-L0_cppunittest--B200_1GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test_on_cluster
-    - .B200_1GPU
-
-L0_pytorch_wheel--L40_1GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test
-    - .L40_1GPU
-
-L0_jax_wheel--L40_1GPU:
-    variables:
-      FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
-    extends:
-    - .L0_test
-    - .L40_1GPU
-
 docs:
     variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      FRAMEWORK: core
+    needs: [ core-py3-devel ]
     extends:
     - .docs_template
