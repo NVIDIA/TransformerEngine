@@ -420,6 +420,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             *wgrad_list,
             *grad_biases,
         )
