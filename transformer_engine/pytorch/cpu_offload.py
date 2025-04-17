@@ -260,10 +260,12 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         if copy_buffer is None:
             return cpu_backup.to(dev, non_blocking=non_blocking)
         else:
-            assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
+            assert (
+                cpu_backup.size() == copy_buffer.size()
+            ), "Can't copy two buffers of different sizes!"
 
             copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
-            
+
             return copy_buffer
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs):
@@ -306,7 +308,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         num_offload_group,  # must be <= actual number of groups (number of commits)
         num_model_group,
         tensor_need_offloading_checker=(lambda t: True),
-        double_buffering = True,
+        double_buffering=True,
         debug=False,
     ) -> None:
         super().__init__(
@@ -466,15 +468,19 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # the first compute completion
         if current_group == 0:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
-            
+
             if not self.double_buffer_created:
                 # Creating the first copy of double buffer for tensors that are offloaded
                 for tensor_tag, buf in self.tensor_tag_to_buf.items():
                     if isinstance(buf, list):
                         for b in buf:
-                            self.reload_double_buffer[0].append(torch.empty_like(b) if self.double_buffering else None)
+                            self.reload_double_buffer[0].append(
+                                torch.empty_like(b) if self.double_buffering else None
+                            )
                     else:
-                        self.reload_double_buffer[0].append(torch.empty_like(buf) if self.double_buffering else None)
+                        self.reload_double_buffer[0].append(
+                            torch.empty_like(buf) if self.double_buffering else None
+                        )
 
             self.bulk_offload_group(current_group)
 
@@ -509,7 +515,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Creating second copy of double buffer for tensors that are offloaded
             if current_group == (self.num_layers - 1):
                 for buf in self.reload_double_buffer[0]:
-                    self.reload_double_buffer[1].append(torch.empty_like(buf) if self.double_buffering else None)
+                    self.reload_double_buffer[1].append(
+                        torch.empty_like(buf) if self.double_buffering else None
+                    )
                 self.double_buffer_created = True
 
     def on_group_commit_forward(self):
@@ -532,7 +540,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
                     if isinstance(state, tuple):
-                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(state, True, self.reload_double_buffer[double_buffer_idx][buffer_idx])
+                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(
+                            state, True, self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                        )
                         buffer_idx = buffer_idx + 1
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
                     elif isinstance(state, list):
@@ -540,7 +550,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         for state_tuple in state:
                             if isinstance(state_tuple, tuple):
                                 tensor_list.append(
-                                    SynchronizedGroupOffloadHandler.reload(state_tuple, True, self.reload_double_buffer[double_buffer_idx][buffer_idx])
+                                    SynchronizedGroupOffloadHandler.reload(
+                                        state_tuple,
+                                        True,
+                                        self.reload_double_buffer[double_buffer_idx][buffer_idx],
+                                    )
                                 )
                                 buffer_idx = buffer_idx + 1
                             else:
