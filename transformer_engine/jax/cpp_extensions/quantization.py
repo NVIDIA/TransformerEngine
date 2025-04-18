@@ -486,7 +486,9 @@ class DBiasQuantizePrimitive(BasePrimitive):
         del out_dtype, scale_dtype, is_outer, mesh, result_types
 
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var="DBiasQuantizePrimitive_i", flatten_axis=flatten_axis
+            len(value_types[0].shape),
+            unique_var="DBiasQuantizePrimitive_i",
+            flatten_axis=flatten_axis,
         )
 
         x_axes = scale_rules.input_spec
