@@ -9,6 +9,7 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
+import functools
 import torch
 from torch.nn import init
 
@@ -52,7 +53,7 @@ from ..distributed import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, _fix_gathered_fp8_transpose
+from ._common import apply_normalization, noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -91,6 +92,7 @@ class _LayerNormLinear(torch.autograd.Function):
         is_first_microbatch: Union[bool, None],
         fp8: bool,
         fp8_calibration: bool,
+        wgrad_store: WeightGradStore,
         fuse_wgrad_accumulation: bool,
         input_quantizer: Optional[Quantizer],
         weight_quantizer: Optional[Quantizer],
@@ -438,6 +440,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+            ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
         # Row Parallel Linear
@@ -752,15 +755,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                wgrad, grad_bias_, *_, rs_out = general_gemm(
-                    ln_out_total,
-                    grad_output,
-                    get_workspace(),
-                    layout="NT",
-                    grad=True,
+                general_gemm_wgrad = functools.partial(
+                    general_gemm,
                     out_dtype=(
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
+                    workspace=get_workspace(),
+                    layout="NT",
+                    grad=True,
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
                     use_split_accumulator=use_split_accumulator,
@@ -771,6 +773,20 @@ class _LayerNormLinear(torch.autograd.Function):
                     extra_output=rs_out,
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
+
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
+                    ctx.wgrad_store.put([ln_out_total, grad_output], general_gemm_wgrad)
+                else:
+                    wgrad, grad_bias_, _, rs_out = general_gemm_wgrad(ln_out_total, grad_output)
+
+                    if grad_bias is None:
+                        grad_bias = grad_bias_
+                    del grad_bias_
+
+                    # Deallocate input tensor
+                    if not ctx.return_layernorm_output:
+                        # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
+                        clear_tensor_data(ln_out_total)
                 nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                 if ctx.ub_bulk_wgrad:
@@ -779,16 +795,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(None, local_chunk=True)
 
-                if grad_bias is None:
-                    grad_bias = grad_bias_
-                del grad_bias_
+            # Don't return grad bias if not needed
+            if not ctx.use_bias:
+                grad_bias = None
 
-                # Deallocate input tensor
-                if not ctx.return_layernorm_output:
-                    # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
-                    clear_tensor_data(ln_out_total)
-
-            # Make sure all tensor-parallel communication is finished
+            # Synchronize tensor parallel communication
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
@@ -870,6 +881,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # is_first_microbatch
             None,  # fp8
             None,  # fp8_calibration
+            None,  # wgrad_store
             None,  # fuse_wgrad_accumulation
             None,  # input_quantizer
             None,  # weight_quantizer
@@ -992,6 +1004,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    delay_wgrad_compute : bool, default = `False`
+                         Whether or not to delay weight gradient computation. If set to `True`,
+                         it's the user's responsibility to call `module.backward_dw` to compute
+                         weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
@@ -1026,6 +1042,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
+        delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
     ) -> None:
@@ -1045,6 +1062,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
 
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -1423,6 +1441,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
+                self.wgrad_store,
                 self.fuse_wgrad_accumulation,
                 input_quantizer,
                 weight_quantizer,
