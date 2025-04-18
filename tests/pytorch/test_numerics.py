@@ -1236,7 +1236,9 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
             te_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True)
-    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, delay_wgrad_compute=False)
+    te_outputs_ref = _test_granular_accuracy(
+        te_linear_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1480,7 +1482,9 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
             ln_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, delay_wgrad_compute=True)
-    te_outputs_ref = _test_granular_accuracy(ln_linear_ref, bs, dtype, config, delay_wgrad_compute=False)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_linear_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1610,17 +1614,15 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
             ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
             ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
         if fuse_wgrad_accumulation:
-            ln_mlp.fc1_weight.main_grad = torch.rand_like(
-                ln_mlp.fc1_weight, dtype=torch.float32
-            )
+            ln_mlp.fc1_weight.main_grad = torch.rand_like(ln_mlp.fc1_weight, dtype=torch.float32)
             ln_mlp_ref.fc1_weight.main_grad = ln_mlp.fc1_weight.main_grad.clone()
-            ln_mlp.fc2_weight.main_grad = torch.rand_like(
-                ln_mlp.fc2_weight, dtype=torch.float32
-            )
+            ln_mlp.fc2_weight.main_grad = torch.rand_like(ln_mlp.fc2_weight, dtype=torch.float32)
             ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=True)
-    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1628,7 +1630,15 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
 
 
 def _test_grouped_linear_accuracy(
-    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, delay_wgrad_compute=False
+    block,
+    num_gemms,
+    bs,
+    dtype,
+    config,
+    recipe,
+    fp8,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute=False,
 ):
     reset_rng_states()
     if fp8:
@@ -1772,7 +1782,15 @@ def test_grouped_linear_accuracy(
         delay_wgrad_compute,
     )
     outputs = _test_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, delay_wgrad_compute
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
     )
 
     # Shoule be bit-wise match

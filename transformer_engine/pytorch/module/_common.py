@@ -235,7 +235,9 @@ class WeightGradStore:
         """
         if delay_wgrad_compute:
             self.context = queue.Queue()
-            assert ub_bulk_wgrad is False, "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
+            assert (
+                ub_bulk_wgrad is False
+            ), "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
             self.enabled = delay_wgrad_compute
         else:
             self.context = None

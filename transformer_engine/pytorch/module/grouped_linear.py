@@ -396,7 +396,9 @@ class _GroupedLinear(torch.autograd.Function):
                 wgrad_list = [None] * ctx.num_gemms
 
             if not ctx.use_bias or (
-                ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute() and not ctx.fp8
+                ctx.wgrad_store is not None
+                and ctx.wgrad_store.delay_wgrad_compute()
+                and not ctx.fp8
             ):
                 grad_biases = [None] * ctx.num_gemms
 
