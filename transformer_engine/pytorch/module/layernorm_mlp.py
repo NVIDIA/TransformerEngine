@@ -42,7 +42,7 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     requires_grad,
-    non_tn_fp8_gemm_supported,
+    is_non_tn_fp8_gemm_supported,
     needs_quantized_gemm,
 )
 from ..distributed import (
@@ -1006,7 +1006,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             # All-gather executed on columnwise data and result is in rowwise data,
                             # so we need to fix the interleaving before WGRAD.
                             ln_out_total = _fix_gathered_fp8_transpose(ln_out_total, ctx.tp_size)
-                        elif not non_tn_fp8_gemm_supported():
+                        elif not is_non_tn_fp8_gemm_supported():
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.
                             ln_out_total._create_transpose()

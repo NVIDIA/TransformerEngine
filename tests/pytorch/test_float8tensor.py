@@ -18,7 +18,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
-from transformer_engine.pytorch.utils import non_tn_fp8_gemm_supported
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -400,7 +400,7 @@ class TestCurrentScalingFloat8Tensor:
         """Check numerical error when casting to FP8"""
 
         # Skip invalid configurations
-        if non_tn_fp8_gemm_supported() and return_transpose:
+        if is_non_tn_fp8_gemm_supported() and return_transpose:
             pytest.skip("FP8 transpose is neither needed nor supported on current system")
 
         # Initialize random high precision data

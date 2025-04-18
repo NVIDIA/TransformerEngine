@@ -11,7 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..utils import canonicalize_process_group, devices_match, non_tn_fp8_gemm_supported
+from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..constants import dist_group_type
@@ -432,7 +432,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         has_data_transpose = self._transpose is not None and not self._transpose_invalid
         needs_data = has_data
         needs_data_transpose = has_data_transpose
-        if non_tn_fp8_gemm_supported():
+        if is_non_tn_fp8_gemm_supported():
             if rowwise_usage is not None and rowwise_usage:
                 needs_data = True
             if columnwise_usage is not None and columnwise_usage:
