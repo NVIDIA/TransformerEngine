@@ -15,6 +15,7 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch import torch_version
 from .base import (
     get_workspace,
     get_ub,
@@ -41,6 +42,7 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
+    symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     in_fp8_activation_recompute_phase,
@@ -63,7 +65,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
     general_gemm,
@@ -120,6 +122,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        symmetric_ar_type: str,
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -355,15 +358,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
-                if fp8 and weightmat is not None:
-                    set_offloading_param(weightmat, "weight_offloading", True)
-                set_offloading_param(ln_weight, "weight_offloading", True)
-                set_offloading_param(weight, "weight_offloading", True)
-
-                set_offloading_param(inputmat, "activation_offloading", True)
-                set_offloading_param(mu, "activation_offloading", True)
-                set_offloading_param(rsigma, "activation_offloading", True)
-                set_offloading_param(ln_out, "activation_offloading", True)
+                mark_activation_offload(inputmat, mu, rsigma, ln_out)
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -453,7 +448,10 @@ class _LayerNormLinear(torch.autograd.Function):
             if sequence_parallel:
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
-                out, _ = allreduce(out, tp_group)
+                if symmetric_ar_type is not None:
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                else:
+                    out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
@@ -904,6 +902,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # debug
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # symmetric_ar_type
         )
 
 
@@ -993,6 +992,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
+                   Type of symmetric memory all-reduce to use during the forward pass.
+                   This can help in latency bound communication situations.
+                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   is used.
     """
 
     def __init__(
@@ -1022,6 +1026,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
+        symmetric_ar_type: Optional[str] = None,
         name: str = None,
     ) -> None:
         super().__init__()
@@ -1038,6 +1043,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output = return_layernorm_output
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
+        self.symmetric_ar_type = symmetric_ar_type
 
         self.name = name
         if TEDebugState.debug_enabled:
@@ -1106,6 +1112,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
+
+        if self.symmetric_ar_type is not None:
+            assert torch_version() >= (
+                2,
+                7,
+                0,
+            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(
@@ -1441,6 +1454,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.symmetric_ar_type,
                 debug,
             )
             out = fwd_fn(*args)

@@ -3,9 +3,11 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+
 #include "extensions.h"
 #include "kv_cache.cuh"
 #include "thd_utils.cuh"
+#include "transformer_engine/transformer_engine.h"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -90,11 +92,11 @@ std::vector<py::object> fused_attn_fwd(
     NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
-    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
-    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded,
+    const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
+    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
   TensorWrapper te_Q, te_K, te_V, te_O, te_S;
@@ -280,8 +282,8 @@ std::vector<py::object> fused_attn_bwd(
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer) {
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
@@ -449,13 +451,13 @@ std::vector<py::object> fused_attn_bwd(
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
-    auto temp_vec = std::vector<size_t>(tmp.begin(), tmp.end());
-    const NVTEShape temp_shape = {temp_vec.data(), temp_vec.size()};
+    const std::vector<int64_t> &signed_shape = Aux_CTX_Tensors[i].sizes().vec();
+    const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
+
     NVTEBasicTensor temp_data = {
         Aux_CTX_Tensors[i].data_ptr(),
         static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
-        temp_shape};
+        nvte_make_shape(tmp.data(), tmp.size())};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 

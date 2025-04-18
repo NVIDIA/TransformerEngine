@@ -112,8 +112,8 @@ struct scale_inv_meta {
   size_t type_size;
 };
 
-NVTEShape convertShape(const std::vector<size_t>& shape) {
-  return {shape.data(), shape.size()};
+NVTEShape convertShape(const std::vector<size_t>& s) {
+  return nvte_make_shape(s.data(), s.size());
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
@@ -240,7 +240,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape{nullptr, 0};
+  NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -257,8 +257,7 @@ Tensor::Tensor(const std::string& name,
   }
 
   if (columnwise) {
-    columnwise_shape.data = columnwise_shape_vec.data();
-    columnwise_shape.ndim = columnwise_shape_vec.size();
+    columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
   }
 
   tensor_ = TensorWrapper(scaling_mode);
