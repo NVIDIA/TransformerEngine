@@ -3,12 +3,13 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#include "utils.h"
+
 #include <cuda_runtime_api.h>
 
 #include <cassert>
 
 #include "common/util/cuda_runtime.h"
-#include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
