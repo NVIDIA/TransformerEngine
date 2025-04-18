@@ -4,8 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cub/cub.cuh>
-
 #include "extensions.h"
 
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
@@ -28,9 +26,8 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                      torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
     size_t temp_storage_bytes = 0;
-    int *temp_ptr = nullptr;
-    cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, temp_ptr, temp_ptr, temp_ptr,
-                                    temp_ptr, max_expanded_token_num);
+    nvte_device_radix_sort_pairs(nullptr, temp_storage_bytes, nullptr, nullptr,
+                                 nullptr, nullptr, max_expanded_token_num);
     at::Tensor temp_storage = torch::empty(
         temp_storage_bytes, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
 
@@ -40,17 +37,17 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     workspace.push_back(temp_storage);
   }
 
-  int *indices_ptr = reinterpret_cast<int *>(getDataPtr(indices, 0));
-  int *sorted_indices_ptr = reinterpret_cast<int *>(getDataPtr(workspace[0], 0));
-  int *row_id_ptr = reinterpret_cast<int *>(getDataPtr(workspace[1], 0));
-  int *sorted_row_id_ptr = reinterpret_cast<int *>(getDataPtr(workspace[2], 0));
+  void *indices_ptr = getDataPtr(indices, 0);
+  void *sorted_indices_ptr = getDataPtr(workspace[0], 0);
+  void *row_id_ptr = getDataPtr(workspace[1], 0);
+  void *sorted_row_id_ptr = getDataPtr(workspace[2], 0);
 
   void *d_temp_storage = getDataPtr(workspace[3], 0);
   size_t temp_storage_bytes = std::numeric_limits<size_t>::max();
 
-  cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, indices_ptr,
-                                  sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
-                                  num_tokens * topK);
+  nvte_device_radix_sort_pairs(d_temp_storage, temp_storage_bytes, indices_ptr,
+                               sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
+                               num_tokens * topK);
 
   // Output buffer alloc
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;
