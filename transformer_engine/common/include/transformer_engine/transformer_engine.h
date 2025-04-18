@@ -42,6 +42,8 @@ struct NVTEShape {
   const size_t *data;
   /*! \brief Number of dimensions. */
   size_t ndim;
+  /*! \brief Copy of data. Num dims limited to permit fixed struct size.*/
+  size_t owned_data[14];
 };
 
 /*! \struct NVTEBasicTensor
@@ -133,6 +135,15 @@ void *nvte_tensor_data(const NVTETensor tensor);
  *  \return A raw pointer to tensor's columnwise data.
  */
 void *nvte_tensor_columnwise_data(const NVTETensor tensor);
+
+/*! \brief Construct a shape from an array of dimension sizes.
+ *
+ *  \param[data] Pointer to start of shape array.
+ *  \param[data] Number of dimensions (must be <= 14)
+ *
+ *  \return A shape. The shape will own its own copy of the data.
+ */
+NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
 
 /*! \brief Get a tensor's data shape.
  *
@@ -417,8 +428,9 @@ class TensorWrapper {
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
                 float *scale_inv_dptr = nullptr, const std::vector<size_t> &scale_inv_shape = {1},
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
-      : TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype, amax_dptr, scale_dptr,
-                      scale_inv_dptr, NVTEShape{scale_inv_shape.data(), scale_inv_shape.size()},
+      : TensorWrapper(dptr, nvte_make_shape(shape.data(), shape.size()), dtype, amax_dptr,
+                      scale_dptr, scale_inv_dptr,
+                      nvte_make_shape(scale_inv_shape.data(), scale_inv_shape.size()),
                       scaling_mode) {}
 
   /*! \brief Constructs new empty TensorWrapper.
@@ -534,7 +546,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_shape(tensor_);
   }
 
@@ -543,7 +557,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape columnwise_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_columnwise_shape(tensor_);
   }
 
@@ -656,7 +672,9 @@ class TensorWrapper {
    *  \return scale_inv_shape of this TensorWrapper.
    */
   const NVTEShape scale_inv_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
 
@@ -672,12 +690,20 @@ class TensorWrapper {
   void zero_(cudaStream_t stream) { nvte_zero_tensor(tensor_, stream); }
 
   static constexpr size_t defaultData = 1;
-  static constexpr NVTEShape defaultShape = {&defaultData, 1};
+  static constexpr NVTEShape defaultShape = {
+      &defaultData, 1, {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 
  private:
-  NVTEShape convertShape(const NVTEShape &s) { return s; }
+  NVTEShape convertShape(const NVTEShape &s) {
+    NVTEShape ret = s;
+    // Move the ownership rather than pointing to the parent shape.
+    ret.data = ret.owned_data;
+    return ret;
+  }
 
-  NVTEShape convertShape(const std::vector<size_t> &s) { return {s.data(), s.size()}; }
+  NVTEShape convertShape(const std::vector<size_t> &s) {
+    return nvte_make_shape(s.data(), s.size());
+  }
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;

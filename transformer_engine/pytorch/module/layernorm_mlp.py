@@ -16,6 +16,7 @@ from torch.nn import init
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch import torch_version
 from .base import (
     get_workspace,
     _ub_communicators,
@@ -47,6 +48,7 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
+    symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     use_reentrant_activation_recompute,
@@ -191,6 +193,7 @@ class _LayerNormMLP(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        symmetric_ar_type: str,
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
@@ -590,7 +593,12 @@ class _LayerNormMLP(torch.autograd.Function):
         elif set_parallel_mode and sequence_parallel:
             fc2_out, _ = reduce_scatter_along_first_dim(fc2_out, tp_group)
         elif set_parallel_mode and tensor_parallel:
-            fc2_out, _ = allreduce(fc2_out, tp_group)
+            if symmetric_ar_type is not None:
+                fc2_out, _ = symmetric_all_reduce(
+                    fc2_out, tp_group, all_reduce_type=symmetric_ar_type
+                )
+            else:
+                fc2_out, _ = allreduce(fc2_out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
@@ -1190,6 +1198,7 @@ class _LayerNormMLP(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # symmetric_ar_type
             None,  # debug
         )
 
@@ -1287,6 +1296,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
+    symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
+                   Type of symmetric memory all-reduce to use during the forward pass.
+                   This can help in latency bound communication situations.
+                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   is used.
     """
 
     def __init__(
@@ -1319,6 +1333,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
+        symmetric_ar_type: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -1337,6 +1352,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
         self.set_parallel_mode = set_parallel_mode
         self.zero_centered_gamma = zero_centered_gamma
+        self.symmetric_ar_type = symmetric_ar_type
 
         # GEMM-GELU fusion is currently only supported with split GEMM-AG overlap
         self.gemm_gelu_fusion = (
@@ -1375,6 +1391,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = (
             ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
+
+        if self.symmetric_ar_type is not None:
+            assert torch_version() >= (
+                2,
+                7,
+                0,
+            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -1651,6 +1674,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.symmetric_ar_type,
                 debug,
             )
             out = fwd_fn(*args)
