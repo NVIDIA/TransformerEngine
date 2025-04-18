@@ -4,9 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
-#define TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_
-
 #include <pybind11/pybind11.h>
 #include <transformer_engine/fused_attn.h>
 
@@ -24,12 +21,6 @@ namespace jax {
 int GetCudaRuntimeVersion();
 size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
-
-void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
-                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
-                           cudaStream_t stream);
-
-uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 
 class cudaDevicePropertiesManager {
  public:
@@ -63,28 +54,5 @@ class cudaDevicePropertiesManager {
   cudaDeviceProp prop_;
 };
 
-class FusedAttnOffsetManager {
- public:
-  static FusedAttnOffsetManager &Instance() {
-    static thread_local FusedAttnOffsetManager instance;
-    return instance;
-  }
-
-  size_t GetAndUpdateOffset(size_t increment) {
-    size_t ret = offset_;
-    offset_ += increment;
-    return ret;
-  }
-
-  FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
-  void operator=(FusedAttnOffsetManager const &) = delete;
-
- private:
-  FusedAttnOffsetManager() {}
-  size_t offset_ = 0;
-};
-
 }  // namespace jax
 }  // namespace transformer_engine
-
-#endif  // TRANSFORMER_ENGINE_JAX_CSRC_UTILS_H_

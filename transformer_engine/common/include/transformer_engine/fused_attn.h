@@ -580,6 +580,31 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool deterministic, NVTETensor workspace,
                          cudaStream_t stream);
 
+/*!  \brief Update the RNG state with the seed and calculated offset.
+ *
+ *  \param[in]     rng_state_dst             RNG state to store seed and offset.
+ *  \param[in]     seed                      Seed for RNG state.
+ *  \param[in]     q_max_seqlen              Max sequence length used for computing for Q.
+ *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
+ *  \param[in]     kv_max_seqlen             Max sequence length used for computing for K and V.
+ *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
+ *  \param[in]     backend                   Fused attention backend.
+ *  \param[in]     stream                    CUDA stream used for this operation.
+ */
+void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
+                                   size_t q_max_seqlen, size_t kv_max_seqlen,
+                                   NVTE_Fused_Attn_Backend backend, cudaStream_t stream);
+
+/*!  \brief Get KV format for a given QKV layout.
+ *
+ *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     workspace                Workspace tensor.
+ *  \param[in]     len                      batch_size x sequence_length.
+ *  \param[in]     stream                   CUDA stream used for this operation.
+ */
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+                                       cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
