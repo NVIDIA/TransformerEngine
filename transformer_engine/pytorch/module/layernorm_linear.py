@@ -1005,7 +1005,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
     delay_wgrad_compute : bool, default = `False`
-                         Whether to delay weight gradient computation
+                         Whether or not to delay weight gradient computation. If set to `True`,
+                         it's the user's responsibility to call `module.backward_dw` to compute
+                         weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
