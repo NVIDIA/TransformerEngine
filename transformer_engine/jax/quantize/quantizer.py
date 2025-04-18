@@ -36,7 +36,9 @@ __all__ = [
 ]
 
 
-def compute_scale_from_amax(amax: jnp.ndarray, q_dtype: jnp.dtype) -> jnp.ndarray:
+def compute_scale_from_amax(
+    amax: jnp.ndarray, q_dtype: jnp.dtype, scale: Optional[jnp.ndarray] = None
+) -> jnp.ndarray:
     """Compute scale from amax value.
 
     Args:
@@ -47,7 +49,8 @@ def compute_scale_from_amax(amax: jnp.ndarray, q_dtype: jnp.dtype) -> jnp.ndarra
         Scale value
     """
     fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
-    scale = jnp.ones((1,))
+    if scale is None:
+        scale = jnp.ones((1,))
     sf = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
@@ -401,7 +404,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         else:
             amax = amax_history[0:1]
 
-        return compute_scale_from_amax(amax, q_dtype)
+        return compute_scale_from_amax(amax, q_dtype, scale=scale)
 
     @staticmethod
     @jax.jit
