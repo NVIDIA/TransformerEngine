@@ -1174,8 +1174,6 @@ def quantize_dact_dbias(
         )
         return out, dbias
 
-    out_shape = x.shape
-
     (
         rowwise_casted_output,
         colwise_casted_output,
