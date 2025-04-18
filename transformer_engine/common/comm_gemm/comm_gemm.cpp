@@ -275,6 +275,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
                    const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
                    bool transb, bool grad, bool accumulate, int comm_sm_count,
                    cudaStream_t main_stream) {
+  for (auto t : {a, b, d}) {
+    NVTE_CHECK(is_tensor_scaling(t->scaling_mode), "Unsupported scaling mode");
+  }
+
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
 
   init_matrices_fn(ctx, m, n, k, a, b, d, bias, pre_act_out, transa, transb);
@@ -289,6 +293,35 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
       sizeof trans_b));
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
       ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_ALGO_TYPE, &algo, sizeof algo));
+
+  const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
+  if (is_fp8_dtype(a->dtype())) {
+    NVTE_CHECK(a->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_MODE, &scale_mode,
+        sizeof scale_mode));
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
+        &a->scale_inv.dptr, sizeof(void*)));
+  }
+  if (is_fp8_dtype(b->dtype())) {
+    NVTE_CHECK(b->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_MODE, &scale_mode,
+        sizeof scale_mode));
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_POINTER,
+        &b->scale_inv.dptr, sizeof(void*)));
+  }
+  if (is_fp8_dtype(d->dtype())) {
+    NVTE_CHECK(d->scale.dptr, "Scaling must be set for FP8 dtype");
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_D_SCALE_MODE, &scale_mode,
+        sizeof scale_mode));
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_D_SCALE_POINTER,
+        &d->scale.dptr, sizeof(void*)));
+  }
 
   NVTE_CHECK_CUBLASMP(cublasMpStreamSet(ctx->cublas_mp.get(), main_stream));
 
@@ -312,10 +345,10 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
                   1,
                   ctx->b_desc.get(),
                   &beta,
-                  d->data.dptr,
+                  accumulate ? d->data.dptr : nullptr,
                   1,
                   1,
-                  ctx->d_desc.get(),
+                  accumulate ? ctx->d_desc.get() : nullptr,
                   d->data.dptr,
                   1,
                   1,
