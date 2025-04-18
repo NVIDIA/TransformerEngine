@@ -1328,7 +1328,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
     delay_wgrad_compute : bool, default = `False`
-                         Whether to delay weight gradient computation
+                         Whether or not to delay weight gradient computation. If set to `True`,
+                         it's the user's responsibility to call `module.backward_dw` to compute
+                         weight gradients.
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
