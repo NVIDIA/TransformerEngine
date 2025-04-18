@@ -23,6 +23,7 @@ from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
 )
+from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     DelayedScaleQuantizer,
@@ -395,7 +396,12 @@ class TestNorm:
             )
             ref_mu = None
 
-        assert_bitwise_scaled_tensors(output, ref_out)
+        if get_cudnn_version() < (9, 10, 0):
+            # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
+            # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
+            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+        else:
+            assert_bitwise_scaled_tensors(output, ref_out)
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
             assert_allclose(mu, ref_mu, dtype=inp_dtype)
