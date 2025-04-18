@@ -234,12 +234,12 @@ def _apply_rotary_pos_emb_base(
     # because context parallelism isn't used during inference.
     if start_positions is not None:
         max_offset = torch.max(start_positions)
-        assert(
+        assert (
             max_offset + cur_seq_len <= max_seq_len
         ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
-        
+
         # Stack staggered rope embeddings along the batch dimension
-        freqs = torch.concatenate([freqs[i:i+cur_seq_len] for i in start_positions], dim=1)
+        freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
 
         # Note that from this point, `freqs` has a shape `(s,b,1,d)`. But since
         # this case is specific for `start_positions not None` and `cp_size > 1`
@@ -335,8 +335,8 @@ def apply_rotary_pos_emb(
     cp_rank: int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
-    
-    # Note: `start_positions` is used only during inference and context 
+
+    # Note: `start_positions` is used only during inference and context
     # parallelism to our best knowledge isn't used during inference. Therefore,
     # we add this error to make sure we don't end up in an unexpected state.
     assert not (

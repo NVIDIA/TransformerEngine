@@ -183,6 +183,7 @@ def test_fused_rope_thd(
         torch.testing.assert_close(output_fused, output_unfused)
         torch.testing.assert_close(grad_fused, grad_unfused)
 
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096])
 @pytest.mark.parametrize("hidden_size", [128, 256])
@@ -195,11 +196,11 @@ def test_fused_rope_staggered_inputs(
     dtype: torch.dtype,
     tensor_format: str,
     loss_func: Callable,
-    start_positions: bool, 
+    start_positions: bool,
     seq_length: int,
     hidden_size: int,
     rotary_percent: float,
-    margin: int
+    margin: int,
 ) -> None:
     if margin == 0 and start_positions == True:
         # If sequence to encode has the same lesngth as length of encoding
@@ -234,7 +235,11 @@ def test_fused_rope_staggered_inputs(
     # The fused kernel computes in float32 internally, so we force the unfused func to use float32
     # for more accurate comparison
     output_unfused = apply_rotary_pos_emb(
-        t.float(), rope_emb, start_positions=start_positions, tensor_format=tensor_format, fused=False
+        t.float(),
+        rope_emb,
+        start_positions=start_positions,
+        tensor_format=tensor_format,
+        fused=False,
     ).to(dtype)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
@@ -243,13 +248,17 @@ def test_fused_rope_staggered_inputs(
 
     # Apply RoPE with start_positions (fused)
     output_fused = apply_rotary_pos_emb(
-        t, rope_emb, start_positions=start_positions, tensor_format=tensor_format, fused=True,
+        t,
+        rope_emb,
+        start_positions=start_positions,
+        tensor_format=tensor_format,
+        fused=True,
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
     grad_fused = t.grad.detach().clone()
     t.grad = None
-    
+
     torch.testing.assert_close(output_fused, output_unfused)
     torch.testing.assert_close(grad_fused, grad_unfused)
     assert output_fused.is_contiguous()
