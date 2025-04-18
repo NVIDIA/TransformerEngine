@@ -59,8 +59,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         6,
         7,
         8,
-        9,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, scale_shapes, is_dbias, is_outer
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -74,14 +73,12 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
         """
         te_dbias_quantize_p abstract
         """
-        del scale_shapes
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
@@ -172,14 +169,13 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
         """
         te_dbias_quantize_p lowering rules
         """
-        del out_dtype, scale_dtype, scale_shapes, is_outer
+        del out_dtype, scale_dtype, is_outer
         x_aval, scale_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
@@ -202,7 +198,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
@@ -227,7 +222,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
             q_layout=q_layout,
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
-            scale_shapes=scale_shapes,
             is_dbias=is_dbias,
             is_outer=False,
         )
@@ -260,7 +254,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
@@ -284,7 +277,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 q_layout=q_layout,
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
             ),
             out_bdims,
@@ -297,14 +289,13 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del (out_dtype, result_infos, scale_dtype, scale_shapes, is_outer)  # Unused.
+        del (out_dtype, result_infos, scale_dtype, is_outer)  # Unused.
 
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
@@ -370,7 +361,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
@@ -453,7 +443,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 q_layout=q_layout,
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
                 is_outer=True,
             )
@@ -488,14 +477,13 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
+        del out_dtype, scale_dtype, is_outer, mesh, result_types
 
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             len(value_types[0].shape), unique_var="DBiasQuantizePrimitive_i", flatten_axis=flatten_axis
@@ -647,7 +635,6 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout.value,
         flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape, flatten_axis=flatten_axis),
         is_dbias=is_dbias,
         is_outer=True,
     )
