@@ -121,7 +121,7 @@ class ActLuPrimitive(BasePrimitive):
         )
 
         assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
-            "Current tensor scaling is not supported for fused activation and quantization. Please"
+            "Current tensor scaling is not yet supported for fused activation and quantization. Please"
             " do activation in higher-precision then quantize with current tensor scaling."
         )
 
@@ -523,10 +523,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
-            if scaling_mode in (
-                ScalingMode.DELAYED_TENSOR_SCALING.value,
-                ScalingMode.CURRENT_TENSOR_SCALING.value,
-            ):
+            if scaling_mode.is_tensor_scaling():
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
                 colwise_out_shape = out_shape

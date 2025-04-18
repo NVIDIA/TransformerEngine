@@ -100,10 +100,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=flatten_axis)
 
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode in (
-                ScalingMode.DELAYED_TENSOR_SCALING.value,
-                ScalingMode.CURRENT_TENSOR_SCALING.value,
-            ):
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
                 colwise_out_shape = out_shape
@@ -317,10 +314,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode in (
-                ScalingMode.DELAYED_TENSOR_SCALING.value,
-                ScalingMode.CURRENT_TENSOR_SCALING.value,
-            ):
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -393,10 +387,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode in (
-                ScalingMode.DELAYED_TENSOR_SCALING.value,
-                ScalingMode.CURRENT_TENSOR_SCALING.value,
-            ):
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -515,7 +506,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         out = x_axes
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes

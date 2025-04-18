@@ -177,10 +177,7 @@ def _jax_gemm_tensor_scaling_fp8(
     lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
 ):
     """FP8 GEMM for XLA pattern match"""
-    assert rhs.scaling_mode in (
-        ScalingMode.DELAYED_TENSOR_SCALING,
-        ScalingMode.CURRENT_TENSOR_SCALING,
-    ), "rhs does not have delayed tensor scaling mode"
+    assert rhs.scaling_mode.is_tensor_scaling(), "rhs does not have tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
@@ -272,10 +269,7 @@ def _jax_gemm(
 
     def _jax_gemm_fp8_impl(lhs, rhs):
 
-        if lhs.scaling_mode in (
-            ScalingMode.DELAYED_TENSOR_SCALING,
-            ScalingMode.CURRENT_TENSOR_SCALING,
-        ):
+        if lhs.scaling_mode.is_tensor_scaling():
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums)
 
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
@@ -382,10 +376,7 @@ def grouped_gemm(
             rhs_shape = rhs.data.shape
             out_dtype = lhs.dq_dtype
             # For ScaledTensors and DELAYED_TENSOR_SCALING, need to handle internal data_layout
-            if lhs.scaling_mode in (
-                ScalingMode.DELAYED_TENSOR_SCALING,
-                ScalingMode.CURRENT_TENSOR_SCALING,
-            ):
+            if lhs.scaling_mode.is_tensor_scaling():
                 assert not (
                     lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
                 ), "FP8 GEMM does not support E5M2 * E5M2"
@@ -413,10 +404,7 @@ def grouped_gemm(
         if scaling_mode == ScalingMode.NO_SCALING:
             lhs_3d = _shape_normalization(lhs, lhs_dn)
             rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode in (
-            ScalingMode.DELAYED_TENSOR_SCALING,
-            ScalingMode.CURRENT_TENSOR_SCALING,
-        ):
+        elif scaling_mode.is_tensor_scaling():
             lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
             rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:

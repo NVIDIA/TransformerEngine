@@ -348,6 +348,14 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.455 and actual[1] > 0.79
 
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.455 and actual[1] > 0.79
+
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
