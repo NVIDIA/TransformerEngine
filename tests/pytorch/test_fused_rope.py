@@ -263,12 +263,13 @@ def test_fused_rope_non_thd_staggered_inputs(
     torch.testing.assert_close(grad_fused, grad_unfused)
     assert output_fused.is_contiguous()
 
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("rotary_percent", [1.0])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 # cp_size is restricted to `1` deliberately
-@pytest.mark.parametrize("cp_size", [1]) 
+@pytest.mark.parametrize("cp_size", [1])
 @pytest.mark.parametrize("margin", [10])
 @pytest.mark.parametrize("start_positions", [True, False])
 def test_fused_rope_thd_staggered_inputs(
@@ -277,17 +278,17 @@ def test_fused_rope_thd_staggered_inputs(
     rotary_percent: float,
     loss_func: Callable,
     cp_size: int,
-    margin: int, 
+    margin: int,
     start_positions: bool,
 ) -> None:
     if margin == 0 and start_positions == True:
-        # This makes sure that the `start_positions` offsets being applied 
+        # This makes sure that the `start_positions` offsets being applied
         # are with the maximum length of the rope embeddings.
         pytest.skip("Skipping test with margin=0 and start_positions=True")
 
     if start_positions == True and cp_size > 1:
-        # Note: `start_positions` is used only during inference and context 
-        # parallelism to our best knowledge isn't used during inference. This 
+        # Note: `start_positions` is used only during inference and context
+        # parallelism to our best knowledge isn't used during inference. This
         # path hasn't been tested and so skipping it.
         pytest.skip("Skipping test with cp_size>1 and start_positions=True")
 
@@ -326,8 +327,8 @@ def test_fused_rope_thd_staggered_inputs(
         tensor_format="thd",
         fused=False,
         cu_seqlens=cu_seqlens,
-        cp_size=cp_size, # cp_size is restricted to `1` deliberately
-        cp_rank=0
+        cp_size=cp_size,  # cp_size is restricted to `1` deliberately
+        cp_rank=0,
     ).to(dtype)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
@@ -342,8 +343,8 @@ def test_fused_rope_thd_staggered_inputs(
         fused=True,
         tensor_format="thd",
         cu_seqlens=cu_seqlens,
-        cp_size=cp_size, # cp_size is restricted to `1` deliberately
-        cp_rank=0
+        cp_size=cp_size,  # cp_size is restricted to `1` deliberately
+        cp_rank=0,
     )
     loss_fused = loss_func(output_fused)
     loss_fused.backward()
