@@ -8,7 +8,6 @@ import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Tuple
-from packaging.version import Version as PkgVersion
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -389,7 +388,14 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
     torch.cuda.nvtx.range_pop()
 
 
-@functools.lru_cache(maxsize=None)
-def torch_version() -> tuple[int, ...]:
-    """Get PyTorch version"""
-    return PkgVersion(str(torch.__version__)).release
+def canonicalize_process_group(
+    group: Optional[torch.distributed.ProcessGroup],
+) -> torch.distributed.ProcessGroup:
+    """Convert to PyTorch process group
+
+    If `None`, returns default process group.
+
+    """
+    if group is None:
+        return torch.distributed.distributed_c10d._get_default_group()
+    return group

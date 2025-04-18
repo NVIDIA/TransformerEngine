@@ -64,6 +64,12 @@ def setup_common_extension() -> CMakeExtension:
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
@@ -103,8 +109,10 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "torchvision", "prettytable"])
+            install_reqs.extend(["torch>=2.1"])
+            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
+            # install_reqs.append("triton")
+            test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
             # test_reqs.extend(["numpy", "praxis"])

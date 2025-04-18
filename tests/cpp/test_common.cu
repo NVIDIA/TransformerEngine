@@ -83,9 +83,11 @@ size_t product(const NVTEShape &shape, size_t begin, size_t end) {
     }
     return ret;
 }
+
 size_t product(const NVTEShape &shape) {
   return product(shape, 0, shape.ndim);
 }
+
 size_t product(const std::vector<size_t> shape, size_t begin, size_t end) {
     size_t ret = 1;
     NVTE_CHECK(end <= shape.size());
@@ -101,10 +103,6 @@ size_t product(const std::vector<size_t>& shape) {
 
 size_t DIVUP(const size_t &x, const size_t &y){
   return (((x) + ((y)-1)) / (y));
-}
-
-inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
 
 struct scale_inv_meta {
@@ -197,6 +195,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
+  NVTEShape columnwise_shape{nullptr, 0};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
@@ -211,7 +210,11 @@ Tensor::Tensor(const std::string& name,
       columnwise_shape_vec.emplace_back(shape.data[i]);
     }
   }
-  const NVTEShape columnwise_shape{columnwise_shape_vec.data(), columnwise_shape_vec.size()};
+
+  if (columnwise) {
+    columnwise_shape.data = columnwise_shape_vec.data();
+    columnwise_shape.ndim = columnwise_shape_vec.size();
+  }
 
   tensor_ = TensorWrapper(scaling_mode);
 
@@ -233,7 +236,7 @@ Tensor::Tensor(const std::string& name,
   tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
 
   if (isFp8Type(type)) {
-    if (is_tensor_scaling(scaling_mode)) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
       cudaMemset(amax, 0, sizeof(float));
       cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
@@ -296,11 +299,13 @@ void Tensor::to_cpu() const {
                cudaMemcpyDeviceToHost);
   }
   if (isFp8Type(dtype())) {
-    if (is_tensor_scaling(tensor_.scaling_mode())) {
-      cudaMemcpy(amax_cpu_data_.get(),
-                 tensor_.amax(),
-                 sizeof(float),
-                 cudaMemcpyDeviceToHost);
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+      if (tensor_.amax() != nullptr){
+        cudaMemcpy(amax_cpu_data_.get(),
+                  tensor_.amax(),
+                  sizeof(float),
+                  cudaMemcpyDeviceToHost);
+      }
       cudaMemcpy(scale_cpu_data_.get(),
                  tensor_.scale(),
                  sizeof(float),
@@ -336,9 +341,11 @@ void Tensor::from_cpu() const {
                cpu_data_columnwise_.get(), size, cudaMemcpyHostToDevice);
   }
   if (isFp8Type(dtype())) {
-    if (is_tensor_scaling(tensor_.scaling_mode())) {
-      cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
-                 cudaMemcpyHostToDevice);
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+      if (tensor_.amax() != nullptr){
+        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
+                  cudaMemcpyHostToDevice);
+      }
       cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
                  cudaMemcpyHostToDevice);
     }
@@ -361,7 +368,7 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-  if (is_tensor_scaling(tensor_.scaling_mode())) {
+  if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }

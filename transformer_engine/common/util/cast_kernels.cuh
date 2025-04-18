@@ -261,7 +261,13 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
               }
             }
             in_compute[j] = elt;
-            if (!out_of_bounds) {
+
+            if constexpr (IS_ACT || IS_DACT) {
+              if (!out_of_bounds) {
+                thread_amax = fmaxf(thread_amax, fabsf(elt));
+              }
+            } else {
+              // If no activation, elt is 0 so we can safely do this
               thread_amax = fmaxf(thread_amax, fabsf(elt));
             }
           }
@@ -320,7 +326,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             }
           }
           in_compute[i] = elt;
-          if (!out_of_bounds) {
+          if constexpr (IS_ACT || IS_DACT) {
+            if (!out_of_bounds) {
+              amax = fmaxf(amax, fabsf(elt));
+            }
+          } else {
+            // If no activation, elt is 0 so we can safely do this
             amax = fmaxf(amax, fabsf(elt));
           }
         }
@@ -1043,8 +1054,7 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
-          if (!is_fp8_dtype(output->data.dtype) ||
-              is_delayed_tensor_scaling(output->scaling_mode)) {
+          if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
             VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(input.data.dptr),
@@ -1068,8 +1078,7 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
       input->data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
-          if (!is_fp8_dtype(output->data.dtype) ||
-              is_delayed_tensor_scaling(output->scaling_mode)) {
+          if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
             VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(grad.data.dptr),
@@ -1153,14 +1162,22 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              cudaStream_t stream) {
-  if (!is_delayed_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
-    NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) +
+  if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+    // zhongboz: should we just ignore IS_ACT here?
+    NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
                " on GPU with compute capability < 10.0.");
   }
-  if (!IS_DACT) {
-    CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
-  } else {
-    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      if (!IS_DACT) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      } else {
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      }
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 

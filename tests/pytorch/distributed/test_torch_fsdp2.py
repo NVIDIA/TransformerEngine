@@ -6,8 +6,8 @@ import os
 import pytest
 import subprocess
 from pathlib import Path
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import torch_version
 
 import torch
 

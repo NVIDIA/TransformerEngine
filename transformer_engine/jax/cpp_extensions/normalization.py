@@ -2,10 +2,11 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
-from functools import partial, reduce, cache
 import operator
 import os
 import warnings
+from functools import partial, reduce, cache
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +14,6 @@ from jax import dtypes
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
 
 import transformer_engine_jax
 
@@ -29,6 +29,11 @@ from .misc import (
 )
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [

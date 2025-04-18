@@ -5,6 +5,7 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
+import math
 from typing import Any, Dict, Optional, Tuple
 import torch
 
@@ -98,12 +99,7 @@ class Float8TensorBase:
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
-        """Prepare the tensor base for saving for backward
-
-        After calling this, the tensor instance does not hold any
-        data.
-
-        """
+        """Prepare the tensor base for saving for backward"""
         tensors = [self._data, self._transpose]
         return tensors, self
 
@@ -125,7 +121,10 @@ class Float8TensorBase:
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
-        return self._data.size(*args, **kwargs)
+        if self._data is not None:
+            return self._data.size(*args, **kwargs)
+        size = self._transpose.size(*args, **kwargs)
+        return torch.Size([size[-1], math.prod(size[:-1])])
 
     def __repr__(self):
         return (
@@ -135,3 +134,11 @@ class Float8TensorBase:
             f"data={self.dequantize()}"
             ")"
         )
+
+    def _create_transpose(self):
+        """Update FP8 transpose cache"""
+        data = self._data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
+        self._transpose_invalid = False

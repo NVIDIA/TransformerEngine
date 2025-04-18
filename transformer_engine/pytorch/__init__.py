@@ -7,14 +7,25 @@
 # pylint: disable=wrong-import-position,wrong-import-order
 
 import logging
+import functools
+import sys
 import importlib
 import importlib.util
-import sys
-import torch
 from importlib.metadata import version
+from packaging.version import Version as PkgVersion
+
+import torch
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+
+_logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
 
 
 def _load_library():
@@ -34,15 +45,15 @@ def _load_library():
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
             f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
-            " transformer-engine[pytorch]==VERSION'"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            "'pip3 install transformer-engine[pytorch]==VERSION'"
         )
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
-                "Could not find package %s. Install transformer-engine using 'pip"
-                " install transformer-engine[pytorch]==VERSION'",
+            _logger.info(
+                "Could not find package %s. Install transformer-engine using "
+                "'pip3 install transformer-engine[pytorch]==VERSION'",
                 module_name,
             )
 
@@ -64,6 +75,9 @@ def _load_library():
     spec.loader.exec_module(solib)
 
 
+assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
+
+
 _load_library()
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
@@ -75,8 +89,8 @@ from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,
@@ -93,6 +107,7 @@ from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
+from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

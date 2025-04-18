@@ -3,12 +3,9 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
-#include "common/common.h"
-#include "common/fused_attn/thd_utils.h"
 #include "extensions.h"
-
-using namespace transformer_engine::fused_attn;
+#include "kv_cache.cuh"
+#include "thd_utils.cuh"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -94,8 +91,9 @@ std::vector<py::object> fused_attn_fwd(
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
     const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
@@ -130,6 +128,7 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
+  TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     auto h = q_shape[q_shape.size() - 2];
@@ -174,6 +173,19 @@ std::vector<py::object> fused_attn_fwd(
         cu_seqlens_kv_padded.value().data_ptr(), cu_seqlens_kv_padded_shape, DType::kInt32);
   }
 
+  if ((page_table_k.has_value()) && (page_table_v.has_value())) {
+    auto page_table_k_sizes = page_table_k.value().sizes().vec();
+    std::vector<size_t> page_table_k_shape{page_table_k_sizes.begin(), page_table_k_sizes.end()};
+    auto page_table_v_sizes = page_table_v.value().sizes().vec();
+    std::vector<size_t> page_table_v_shape{page_table_v_sizes.begin(), page_table_v_sizes.end()};
+    te_page_table_k =
+        makeTransformerEngineTensor(page_table_k.value().data_ptr(), page_table_k_shape,
+                                    DType::kInt32, nullptr, nullptr, nullptr);
+    te_page_table_v =
+        makeTransformerEngineTensor(page_table_v.value().data_ptr(), page_table_v_shape,
+                                    DType::kInt32, nullptr, nullptr, nullptr);
+  }
+
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
@@ -191,13 +203,13 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
-                      te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                      te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
-                      attn_mask_type, window_size[0], window_size[1], workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  nvte_fused_attn_fwd(
+      te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
+      &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+      te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
+      te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1],
+      workspace.data(), at::cuda::getCurrentCUDAStream());
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
@@ -208,38 +220,50 @@ std::vector<py::object> fused_attn_fwd(
   std::vector<py::object> output_tensors;
   output_tensors.push_back(o_python);
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
     at::Tensor output_tensor;
     if (nvte_aux_tensor_pack.size >= 2) {
       if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
         if (i < nvte_aux_tensor_pack.size - 2) {
-          output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+          NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+          output_tensor = allocateSpace(
+              nvte_shape_to_vector(temp_shape),
+              static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
         } else if (i == nvte_aux_tensor_pack.size - 2) {
           output_tensor = rng_state;
         } else if (i == nvte_aux_tensor_pack.size - 1) {
           output_tensor = Bias.value();
         }
       } else {
-        output_tensor = (i < nvte_aux_tensor_pack.size - 1)
-                            ? allocateSpace(tensor->data.shape, tensor->data.dtype, false)
-                            : rng_state;
+        NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+        output_tensor =
+            (i < nvte_aux_tensor_pack.size - 1)
+                ? allocateSpace(
+                      nvte_shape_to_vector(temp_shape),
+                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false)
+                : rng_state;
       }
     } else {
-      output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+      NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+      output_tensor = allocateSpace(
+          nvte_shape_to_vector(temp_shape),
+          static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
     }
     output_tensors.push_back(py::cast(output_tensor));
-    tensor->data.dptr = output_tensor.data_ptr();
+    NVTEBasicTensor temp_data = {output_tensor.data_ptr(),
+                                 nvte_tensor_type(nvte_aux_tensor_pack.tensors[i]),
+                                 nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])};
+    nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
   // execute the kernel
-  nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
-                      te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                      te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
-                      attn_mask_type, window_size[0], window_size[1], workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  nvte_fused_attn_fwd(
+      te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
+      &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+      te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
+      te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1],
+      workspace.data(), at::cuda::getCurrentCUDAStream());
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -425,11 +449,14 @@ std::vector<py::object> fused_attn_bwd(
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
-    tensor->data.dptr = Aux_CTX_Tensors[i].data_ptr();
     std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
-    tensor->data.shape = std::vector<size_t>(tmp.begin(), tmp.end());
-    tensor->data.dtype = GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type());
+    auto temp_vec = std::vector<size_t>(tmp.begin(), tmp.end());
+    const NVTEShape temp_shape = {temp_vec.data(), temp_vec.size()};
+    NVTEBasicTensor temp_data = {
+        Aux_CTX_Tensors[i].data_ptr(),
+        static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
+        temp_shape};
+    nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
   // create dBias the same shape as Bias
@@ -662,8 +689,8 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
     grid_y *= tensor.size(i);
   }
   dim3 grid = {grid_x, grid_y};
-  thd_read_half_tensor_kernel<<<grid, block, sizeof(int) * (batch + 1),
-                                at::cuda::getCurrentCUDAStream()>>>(
+  transformer_engine::fused_attn::thd_read_half_tensor_kernel<<<
+      grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
       half.data_ptr(), tensor.data_ptr(), cu_seqlens.data_ptr<int>(), batch, hidden_size_in_bytes,
       half_idx, tensor.size(seq_dim));
 
@@ -713,13 +740,14 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
+
   if (lse_packed) {
-    thd_lse_kernel<double, true, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<double, true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<double, false, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<double, false, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
@@ -764,13 +792,14 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
+
   if (lse_packed) {
-    thd_lse_kernel<float, true, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<float, true, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<float, false, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<float, false, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
@@ -829,13 +858,13 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   dim3 grid = {grid_x, (unsigned int)num_heads};
 
   if (lse_packed) {
-    thd_out_correction_kernel<dtype, only_second_half, tile, true>
+    transformer_engine::fused_attn::thd_out_correction_kernel<dtype, only_second_half, tile, true>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
             dim_per_head, lse_seqlen, lse_per_step_seqlen);
   } else {
-    thd_out_correction_kernel<dtype, only_second_half, tile, false>
+    transformer_engine::fused_attn::thd_out_correction_kernel<dtype, only_second_half, tile, false>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
@@ -925,7 +954,8 @@ static void thd_grad_correction_helper(at::Tensor grad, const at::Tensor &grad_p
   }
   dim3 grid = {grid_x, grid_y};
 
-  thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx, 32>
+  transformer_engine::fused_attn::thd_grad_correction_kernel<dtype, Functor_0, Functor_1,
+                                                             functor_idx, 32>
       <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
           grad.data_ptr<dtype>(), grad_per_step.data_ptr<dtype>(), cu_seqlens.data_ptr<int>(),
           batch, hidden_size, total_tokens);
@@ -992,9 +1022,180 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
   constexpr unsigned int block = 256;
   unsigned int grid = (output.size(0) + block - 1) / block;
-  thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1),
-                                 at::cuda::getCurrentCUDAStream()>>>(
+  transformer_engine::fused_attn::thd_partition_indices_kernel<<<
+      grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
       output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size, rank);
 
   return output;
+}
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
+                                  int b, int max_seq_len, int h, int d) {
+  transformer_engine::fused_attn::
+      convert_thd_to_bshd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
+          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()), cu_seqlens.data_ptr<int>(),
+          b, max_seq_len, h, d);
+}
+
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len) {
+  int h = tensor.size(1);
+  int d = tensor.size(2);
+  std::vector<int64_t> shape = {b, max_seq_len, h, d};
+  at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
+  if (new_tensor.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (new_tensor.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (new_tensor.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (new_tensor.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (new_tensor.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
+  return new_tensor;
+}
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void convert_bshd_to_thd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
+                                  int b, int max_seq_len, int h, int d) {
+  transformer_engine::fused_attn::
+      convert_bshd_to_thd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
+          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()), cu_seqlens.data_ptr<int>(),
+          b, max_seq_len, h, d);
+}
+
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) {
+  int b = tensor.size(0);
+  int max_seq_len = tensor.size(1);
+  int h = tensor.size(2);
+  int d = tensor.size(3);
+  std::vector<int64_t> shape = {t, h, d};
+  at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
+  if (tensor.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (tensor.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (tensor.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (tensor.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else if (tensor.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
+  return new_tensor;
+}
+
+/***************************************************************************************************
+ * KV Cache: Copy new KV tokens to the KV cache
+ *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *      in current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
+ *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
+ *      Set is_non_paged = True/False to indicate as such.
+ *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
+ *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
+ *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
+ *      preserved for the next layer in the same iteration.
+ *   5. Only supports same page_table for k_cache and v_cache
+ *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
+ *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void copy_to_kv_cache_launcher(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache,
+                               at::Tensor v_cache, at::Tensor page_table, at::Tensor cu_new_lens,
+                               at::Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
+                               int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
+                               int max_pages_per_seq, bool is_non_paged) {
+  if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr && k_cache.data_ptr() != nullptr &&
+      v_cache.data_ptr() != nullptr) {
+    if (is_non_paged) {
+      transformer_engine::fused_attn::
+          reindex_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+              reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
+              reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()),
+              page_table.data_ptr<int>(), cu_new_lens.data_ptr<int>(),
+              cu_cached_lens.data_ptr<int>(), h_kv, d_k, d_v, b, max_seq_len);
+    }
+    transformer_engine::fused_attn::
+        copy_to_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            reinterpret_cast<scalar_t *>(new_k.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(new_v.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()), page_table.data_ptr<int>(),
+            cu_new_lens.data_ptr<int>(), cu_cached_lens.data_ptr<int>(), qkv_format, h_kv, d_k, d_v,
+            b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
+  }
+}
+
+void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
+                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                      NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged) {
+  int h_kv = new_k.size(-2);
+  int d_k = new_k.size(-1);
+  int d_v = new_v.size(-1);
+  NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
+                 new_k.scalar_type() == new_v.scalar_type() &&
+                 new_k.scalar_type() == k_cache.scalar_type(),
+             "new_k, new_v, k_cache and v_cache must be of the same data type.");
+  NVTE_CHECK(qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
+                 qkv_format == NVTE_QKV_Format::NVTE_THD,
+             "qkv_format must be {BSHD, SBHD, THD}.");
+  if (k_cache.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+
+  } else if (k_cache.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
 }

@@ -15,6 +15,8 @@ from importlib.metadata import version
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
+_logger = logging.getLogger(__name__)
+
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
@@ -33,15 +35,15 @@ def _load_library():
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
             f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
-            " transformer-engine[jax]==VERSION'"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            "'pip3 install transformer-engine[jax]==VERSION'"
         )
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
-                "Could not find package %s. Install transformer-engine using 'pip"
-                " install transformer-engine[jax]==VERSION'",
+            _logger.info(
+                "Could not find package %s. Install transformer-engine using "
+                "'pip3 install transformer-engine[jax]==VERSION'",
                 module_name,
             )
 

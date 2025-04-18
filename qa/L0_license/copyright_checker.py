@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding: utf-8
 
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -12,7 +12,7 @@ import json
 import datetime
 
 if len(sys.argv) < 2:
-    print("Usage: python copyright_checker.py <path>")
+    print("Usage: python3 copyright_checker.py <path>")
 
 path = sys.argv[1]
 
