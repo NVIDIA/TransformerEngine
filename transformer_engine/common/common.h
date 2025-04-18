@@ -78,8 +78,8 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
-    const NVTEShape shape = {this->shape.data(), this->shape.size()};
-    return {dptr, static_cast<NVTEDType>(dtype), shape};
+    return {dptr, static_cast<NVTEDType>(dtype),
+            nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
   int numel() const {
@@ -98,11 +98,6 @@ struct Tensor {
   SimpleTensor scale;
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
-
- private:
-  // Used as an allocation for nvte_tensor_shape
-  // if the shape has to be inferred from columnwise data.
-  mutable std::vector<size_t> rowwise_shape_cache;
 
  public:
   NVTEScalingMode scaling_mode;
@@ -192,22 +187,6 @@ struct Tensor {
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
         return {};
     }
-  }
-
-  const std::vector<size_t> &rowwise_shape_ref() const {
-    auto shape_queried = shape();
-    // This method is primarily designed for nvte_shape.
-    // An unfortunate consequence of unconditionally assigning
-    // values to rowwise_shape_cache without a check is that
-    // repeated calls to rowwise_shape_ref are likely to
-    // invalidate the data pointers from previous calls.
-    // If the shape has changed, then invalidating is necessary
-    // in at least some cases, but we want to keep the data
-    // valid otherwise.
-    if (rowwise_shape_cache != shape_queried) {
-      rowwise_shape_cache = std::move(shape_queried);
-    }
-    return rowwise_shape_cache;
   }
 
   /*! Matrix height after tensor is flattened to 2D

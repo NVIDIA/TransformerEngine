@@ -13,6 +13,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
+from transformer_engine.pytorch import torch_version
 from .base import (
     get_workspace,
     get_ub,
@@ -40,6 +41,7 @@ from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
     allreduce,
+    symmetric_all_reduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     is_fp8_activation_recompute_enabled,
@@ -66,7 +68,6 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
-
 
 __all__ = ["Linear"]
 
@@ -112,6 +113,7 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
+        symmetric_ar_type: str,
         debug: Optional[bool] = False,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -390,7 +392,10 @@ class _Linear(torch.autograd.Function):
             if sequence_parallel:
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
-                out, _ = allreduce(out, tp_group)
+                if symmetric_ar_type is not None:
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                else:
+                    out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
         out = out.view(-1, *inp_shape[1:-1], out_features)
@@ -790,6 +795,7 @@ class _Linear(torch.autograd.Function):
             None,  # fsdp_group
             None,  # module
             None,  # skip_fp8_weight_update
+            None,  # symmetric_ar_type
             None,  # debug
         )
 
@@ -863,7 +869,11 @@ class Linear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
-
+    symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
+                   Type of symmetric memory all-reduce to use during the forward pass.
+                   This can help in latency bound communication situations.
+                   Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
+                   is used.
     """
 
     def __init__(
@@ -890,6 +900,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
         split_bw: bool = False,
+        symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -903,6 +914,7 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+        self.symmetric_ar_type = symmetric_ar_type
         self.name = name
 
         if TEDebugState.debug_enabled:
@@ -973,6 +985,13 @@ class Linear(TransformerEngineBaseModule):
         ):
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
+
+        if self.symmetric_ar_type is not None:
+            assert torch_version() >= (
+                2,
+                7,
+                0,
+            ), "Torch version must be at least 2.7 to use symmetric memory"
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -1260,6 +1279,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fsdp_group,
                 self,
                 skip_fp8_weight_update,
+                self.symmetric_ar_type,
                 debug,
             )
             out = linear_fn(*args)
