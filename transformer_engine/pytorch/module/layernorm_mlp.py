@@ -843,8 +843,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([act_out, grad_output], general_gemm_fc2_wgrad)
                     fc2_wgrad = None
-                    # if fc2_bias is not None and fc2_bias_grad is None:
-                    # fc2_bias_grad = None
                 else:
                     fc2_wgrad, fc2_bias_grad_, *_ = general_gemm_fc2_wgrad(
                         act_out,
@@ -1048,7 +1046,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     layout="NT",
                     quantization_params=ctx.fc1_grad_weight_quantizer,
                     grad=fuse_gemm_and_bias_fc1_wgrad,
-                    bias=(fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None),
+                    bias=fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     out=origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     ub=ub_obj_fc1_wgrad,
@@ -1059,7 +1057,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([ln_out_total, dact], general_gemm_fc1_wgrad)
                     fc1_wgrad = None
-                    # (fc1_wgrad_outputs), _ = ctx.wgrad_store.pop()
                     if fuse_gemm_and_bias_fc1_wgrad:
                         fc1_bias_grad = None
                 else:
