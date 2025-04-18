@@ -85,6 +85,7 @@ class Dequantizer:
 
     funcs = {
         ScalingMode.DELAYED_TENSOR_SCALING: _dq_func_tensor_scaling,
+        ScalingMode.CURRENT_TENSOR_SCALING: _dq_func_tensor_scaling,
         ScalingMode.MXFP8_1D_SCALING: _dq_func_block_scaling,
     }
 

@@ -120,6 +120,11 @@ class ActLuPrimitive(BasePrimitive):
             f" {x_aval.shape} and act_len {act_len}"
         )
 
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused activation and quantization. Please"
+            " do activation in higher-precision then quantize with current tensor scaling."
+        )
+
         out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
 
@@ -500,6 +505,12 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             f" {x_aval.shape} and act_len {act_len}"
         )
         assert scale_aval.dtype == jnp.float32
+
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused dact and quantization. Please do"
+            " dact in higher-precision then quantize with current tensor scaling."
+        )
+
         ir_hidden_size = dz_aval.shape[-1]
         gi_hidden_size = act_len * x_aval.shape[-1]
         assert act_len * ir_hidden_size == gi_hidden_size
@@ -512,7 +523,10 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if scaling_mode in (
+                ScalingMode.DELAYED_TENSOR_SCALING.value,
+                ScalingMode.CURRENT_TENSOR_SCALING.value,
+            ):
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
                 colwise_out_shape = out_shape
@@ -717,6 +731,10 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         del scale_dtype, scale_shapes, act_len, is_outer
         x_spec = get_padded_spec(arg_infos[1])
         scale_spec = get_padded_spec(arg_infos[2])
+
+        assert (
+            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
+        ), "Partitioned current tensor scaling is not yet supported."
 
         out_sharding = NamedSharding(
             mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
@@ -1026,6 +1044,16 @@ def act_lu(
         out = out.reshape(output_shape)
         return out
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out = act_lu(
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out
+
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
@@ -1101,8 +1129,12 @@ def quantize_dact_dbias(
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
-        out = dact_lu(dz, x, activation_type, quantizer=None)
-        return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
+        out = dact_lu(
+            dz.astype(jnp.float32), x.astype(jnp.float32), activation_type, quantizer=None
+        )
+        return _quantize_dbias_impl(
+            out, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+        )
 
     is_gated = act_len == 2
     # TE/common does not support DelayedScaling2x for gated-act yet
@@ -1145,6 +1177,19 @@ def quantize_dact_dbias(
             dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
         return output.astype(x.dtype), dbias
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out = dact_lu(
+            dz=dz.astype(jnp.float32),
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            quantizer=None,
+        )
+        out, dbias = _quantize_dbias_impl(
+            out, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
+        )
+        return out, dbias
+
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
@@ -1184,7 +1229,7 @@ def quantize_dact_dbias(
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

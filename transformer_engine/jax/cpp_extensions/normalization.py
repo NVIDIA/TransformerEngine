@@ -27,6 +27,7 @@ from .misc import (
     te_dtype_to_jax_dtype,
     NamedSharding,
 )
+from .quantization import _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -122,10 +123,19 @@ class NormFwdPrimitive(BasePrimitive):
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused norm and quantization. Please do"
+            " norm in higher-precision then quantize with current tensor scaling."
+        )
+
         mu_rsigama_dtype = jnp.float32
 
         if norm_type == NVTE_Norm_Type.LayerNorm:
             assert gamma_aval.size == beta_aval.size
+            assert gamma_aval.dtype == beta_aval.dtype, (
+                f"gamma and beta should have the same dtype, but got {gamma_aval.dtype} and "
+                f"{beta_aval.dtype}"
+            )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
@@ -913,9 +923,25 @@ def layernorm_fwd(
         )
         return output, mu, rsigma
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, mu, rsigma = layernorm_fwd(
+            x=x.astype(jnp.float32),
+            gamma=gamma.astype(jnp.float32),
+            beta=beta.astype(jnp.float32),
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, mu, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -943,7 +969,10 @@ def layernorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
@@ -1095,9 +1124,24 @@ def rmsnorm_fwd(
         )
         return output, rsigma
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, rsigma = rmsnorm_fwd(
+            x=x.astype(jnp.float32),
+            gamma=gamma.astype(jnp.float32),
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -1125,7 +1169,10 @@ def rmsnorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )

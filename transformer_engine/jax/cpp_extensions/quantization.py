@@ -94,7 +94,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=flatten_axis)
 
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if scaling_mode in (
+                ScalingMode.DELAYED_TENSOR_SCALING.value,
+                ScalingMode.CURRENT_TENSOR_SCALING.value,
+            ):
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
                 colwise_out_shape = out_shape
@@ -299,6 +302,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del (out_dtype, result_infos, scale_dtype, scale_shapes, is_outer)  # Unused.
+
+        assert (
+            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
+        ), "Current tensor scaling is not yet supported for multi-GPU partitioning."
+
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -371,6 +379,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del result_infos, is_outer
+
+        assert (
+            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
+        ), "Current tensor scaling is not yet supported for multi-GPU partitioning."
+
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -635,7 +648,7 @@ def _quantize_dbias_impl(
         is_outer=True,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)
