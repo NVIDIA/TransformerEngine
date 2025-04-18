@@ -78,8 +78,8 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
-    const NVTEShape shape = {this->shape.data(), this->shape.size()};
-    return {dptr, static_cast<NVTEDType>(dtype), shape};
+    return {dptr, static_cast<NVTEDType>(dtype),
+            nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
   int numel() const {
@@ -98,11 +98,6 @@ struct Tensor {
   SimpleTensor scale;
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
-
- private:
-  // Used as an allocation for nvte_tensor_shape
-  // if the shape has to be inferred from columnwise data.
-  mutable std::vector<size_t> rowwise_shape_cache;
 
  public:
   NVTEScalingMode scaling_mode;
@@ -192,11 +187,6 @@ struct Tensor {
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
         return {};
     }
-  }
-
-  const std::vector<size_t> &rowwise_shape_ref() const {
-    rowwise_shape_cache = shape();
-    return rowwise_shape_cache;
   }
 
   /*! Matrix height after tensor is flattened to 2D

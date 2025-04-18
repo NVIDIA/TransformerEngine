@@ -12,6 +12,7 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 
@@ -61,6 +62,27 @@ def get_forward_sm_margin():
 def get_backward_sm_margin():
     """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def is_norm_fwd_cudnn_enabled(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether CuDNN norm fwd is enabled."""
+    # MXFP8_1D_SCALING always uses CuDNN currently
+    return (
+        int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0")) == 1
+        or scaling_mode == ScalingMode.MXFP8_1D_SCALING
+    )
+
+
+@cache
+def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether norm should compute `gamma += 1.0` for zero-centered gamma
+    in weight dtype as opposed to compute dtype."""
+    if not is_norm_fwd_cudnn_enabled(scaling_mode):
+        # If CuDNN is not enabled, we use the TE backend which uses the compute dtype not weight dtype
+        # Remove this when TE supports gamma += 1.0 in weight dtype
+        return False
+    return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
 
 
 class NormFwdPrimitive(BasePrimitive):
@@ -519,6 +541,57 @@ class NormFwdPrimitive(BasePrimitive):
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del (
+            zero_centered_gamma,
+            epsilon,
+            out_dtype,
+            scale_dtype,
+            scale_shapes,
+            is_outer,
+            mesh,
+            result_types,
+        )
+
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            len(value_types[0].shape), unique_var="i", flatten_axis=-1
+        )
+        x_axes = scale_rules.input_spec
+
+        out = x_axes[:-1] + ("k",)
+        colwise_out = out if is_2x else ("…4",)
+        rsigma = x_axes[:-1]
+        mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = ("…6",)
+
+        return SdyShardingRule(
+            (x_axes, ("…1",), ("…2",), ("…3",)),
+            (
+                out,
+                colwise_out,
+                scale_rules.rowwise_rule,
+                scale_rules.colwise_rule,
+                amax,
+                mu,
+                rsigma,
+            ),
+            **scale_rules.factor_sizes,
+        )
+
 
 register_primitive(NormFwdPrimitive)
 
@@ -722,6 +795,11 @@ class NormBwdPrimitive(BasePrimitive):
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "...0, ...1 i, ...2, ...3, ...4 -> ...1 j, k, l"
+
 
 register_primitive(NormBwdPrimitive)
 
@@ -731,6 +809,10 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     JAX native layernorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     mean = jnp.mean(x_, axis=-1, keepdims=True)
     var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
@@ -752,6 +834,10 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     JAX native rmsnorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
     normed_input = x_ * rsigma
