@@ -122,7 +122,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     return;
   }
 
-  // Store casted data into output
+  // Store the casted data into the output.
+  // Note that this store operation might write "out-of-bounds", but it is intentional:
+  //   1. The "out-of-bounds" here only crosses the boundary of the "local shard" (i.e., the region
+  //      from start_offset to end_offset), not the boundary of the entire output memory. Therefore,
+  //      this out-of-bounds write will not cause illegal memory access.
+  //   2. We assume that the subsequent all-gather operation happens in-place, so any parts that
+  //      should not be updated here will be overwritten by the all-gather.
+  // This tricky approach allows us to avoid checking whether each output index falls within
+  // [start, end), resulting in a significant performance improvement.
   Vec<OType, kNumOutputElemsPerBank> vec_output;
   for (int i = 0; i < kRowsPerWarp; ++i) {
     const int row_in_smem = threadIdx.x / kThreadsPerWarp * kRowsPerWarp + i;
