@@ -37,5 +37,7 @@ def get_fp8_recipe_from_name_string(name: str):
             return recipe.DelayedScaling()
         case "MXFP8BlockScaling":
             return recipe.MXFP8BlockScaling()
+        case "Float8CurrentScaling":
+            return recipe.Float8CurrentScaling()
         case _:
             raise ValueError(f"Invalid fp8_recipe, got {name}")

@@ -4,6 +4,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
@@ -18,7 +19,11 @@ from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
-from transformer_engine.jax.cpp_extensions.normalization import _jax_layernorm, _jax_rmsnorm
+from transformer_engine.jax.cpp_extensions.normalization import (
+    _jax_layernorm,
+    _jax_rmsnorm,
+    is_norm_zero_centered_gamma_in_weight_dtype,
+)
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
@@ -54,6 +59,7 @@ supported_scaling_modes = []
 """ Find supported scaling modes"""
 if is_fp8_supported:
     supported_scaling_modes.append(ScalingMode.DELAYED_TENSOR_SCALING)
+    supported_scaling_modes.append(ScalingMode.CURRENT_TENSOR_SCALING)
 if is_mxfp8_supported:
     supported_scaling_modes.append(ScalingMode.MXFP8_1D_SCALING)
 
@@ -71,8 +77,14 @@ def is_shape_supported_by_mxfp8(input_shape):
 
 def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
+        assert a.scale_inv.dtype == b.scale_inv.dtype
+        if a.scale_inv.dtype == jnp.float8_e8m0fnu:
+            # Compare MXFP8 scales as uint8
+            assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+        else:
+            assert_allclose(a.scale_inv, b.scale_inv)
         assert_allclose(a.data, b.data)
-        assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
         assert_bitwise_scaled_tensors(a.rowwise_tensor, b.rowwise_tensor)
         assert_bitwise_scaled_tensors(a.colwise_tensor, b.colwise_tensor)
@@ -159,7 +171,12 @@ class TestActivation:
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    def test_act_grad_with_delayed_scaling_fp8(self, random_inputs, activation_type, output_type):
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_act_grad_with_tensor_scaling_fp8(
+        self, random_inputs, activation_type, output_type, scaling_mode
+    ):
         x = random_inputs
         x = jnp.expand_dims(x, axis=-2)
         x = jnp.repeat(x, len(activation_type), axis=-2)
@@ -170,7 +187,7 @@ class TestActivation:
         )
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
@@ -188,8 +205,11 @@ class TestActivation:
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_act_forward_with_delayed_scaling_fp8(
-        self, random_inputs, activation_type, output_type, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_act_forward_with_tensor_scaling_fp8(
+        self, random_inputs, activation_type, output_type, q_layout, scaling_mode
     ):
         x = random_inputs
         x = jnp.expand_dims(x, axis=-2)
@@ -198,7 +218,7 @@ class TestActivation:
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
             n_quantizers=2,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_dtype=output_type,
             q_layout=q_layout,
         )
@@ -335,8 +355,20 @@ class TestNorm:
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_norm_grad_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_norm_grad_with_tensor_scaling_fp8(
+        self,
+        n,
+        hidden,
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        inp_dtype,
+        out_dtype,
+        q_layout,
+        scaling_mode,
     ):
         """
         Test transformer_engine.jax.layernorm.layernorm
@@ -345,9 +377,7 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
-            q_dtype=out_dtype,
-            q_layout=q_layout,
+            scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -395,7 +425,12 @@ class TestNorm:
             )
             ref_mu = None
 
-        assert_bitwise_scaled_tensors(output, ref_out)
+        if is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
+            # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
+            # for zero-centered gamma always
+            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+        else:
+            assert_bitwise_scaled_tensors(output, ref_out)
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
             assert_allclose(mu, ref_mu, dtype=inp_dtype)
@@ -406,8 +441,20 @@ class TestNorm:
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_norm_forward_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_norm_forward_with_tensor_scaling_fp8(
+        self,
+        n,
+        hidden,
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        inp_dtype,
+        out_dtype,
+        q_layout,
+        scaling_mode,
     ):
         if norm_type == "rmsnorm" and zero_centered_gamma is True:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
@@ -420,7 +467,7 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_layout=q_layout,
         )
 
@@ -630,16 +677,19 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
     @pytest_parametrize_wrapper(
-        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_quantize_dact_dbias_delayed_scaling(
-        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_quantize_dact_dbias_tensor_scaling(
+        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout, scaling_mode
     ):
         self._test_quantize_dact_dbias(
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             activation_type=activation_type,
             is_dbias=is_dbias,
             q_layout=q_layout,
@@ -830,7 +880,10 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        ):
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -916,7 +969,10 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        ):
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
