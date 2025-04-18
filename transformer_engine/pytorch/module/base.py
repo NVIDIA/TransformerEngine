@@ -1145,7 +1145,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.split_bw():
+        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
             return
         with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()

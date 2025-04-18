@@ -345,7 +345,7 @@ class _GroupedLinear(torch.autograd.Function):
                     accumulate=accumulate_wgrad_into_param_main_grad,
                 )
                 # WGRAD
-                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
@@ -392,11 +392,11 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-            if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
+            if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                 wgrad_list = [None] * ctx.num_gemms
 
             if not ctx.use_bias or (
-                ctx.wgrad_store is not None and ctx.wgrad_store.split_bw() and not ctx.fp8
+                ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute() and not ctx.fp8
             ):
                 grad_biases = [None] * ctx.num_gemms
 
@@ -469,6 +469,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    delay_wgrad_compute : bool, default = `False`
+                         Whether to delay weight gradient computation
 
     Note: GroupedLinear doesn't really handle the TP communications inside. The `tp_size` and
           `parallel_mode` are used to determine the shapes of weights and biases.
@@ -495,7 +497,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
-        split_bw: bool = False,
+        delay_wgrad_compute: bool = False,
     ) -> None:
         super().__init__()
 
@@ -516,7 +518,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self.wgrad_store = WeightGradStore(split_bw)
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute)
 
         self._offsets = {"input": 0, "weight": 1, "output": 2, "grad_output": 0, "grad_input": 1}
         self._num_fp8_tensors_per_gemm = {
@@ -749,7 +751,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.split_bw():
+        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()

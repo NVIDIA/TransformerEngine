@@ -479,7 +479,7 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     _loss_backward(output_single_node, output_distributed)
 
     # Compute delayed weight gradient
-    if "split_bw" in kwargs:
+    if "delay_wgrad_compute" in kwargs:
         _loss_backward_dw(model_single_node, model_distributed)
 
     # Validate outputs and gradients
@@ -503,7 +503,7 @@ def test_linear():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
-        {"split_bw": True},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column", "row"]:
@@ -656,7 +656,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     _loss_backward(output_single_node, output_distributed)
 
     # Compute delayed weight gradient
-    if "split_bw" in kwargs:
+    if "delay_wgrad_compute" in kwargs:
         _loss_backward_dw(model_single_node, model_distributed)
 
     # Validate outputs and gradients
@@ -681,7 +681,7 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
-        {"split_bw": True},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:
@@ -761,7 +761,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
-    if "split_bw" in kwargs:
+    if "delay_wgrad_compute" in kwargs:
         _loss_backward_dw(model_single_node, model_distributed)
 
     # Validate outputs and gradients
@@ -789,7 +789,7 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
-        {"split_bw": True},
+        {"delay_wgrad_compute": True},
     ]
 
     for kwargs in kwargs_list:

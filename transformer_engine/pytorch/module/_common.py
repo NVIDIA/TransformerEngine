@@ -225,22 +225,23 @@ class WeightGradStore:
     This class enables split backward propagation for better memory efficiency.
     """
 
-    def __init__(self, split_bw=False, ub_bulk_wgrad=False):
+    def __init__(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
         """
         Initialize the WeightGradStore.
 
         Args:
-            split_bw (bool): Whether to enable split backward propagation
+            delay_wgrad_compute (bool): Whether to delay weight gradient computation
+            ub_bulk_wgrad (bool): Whether to enable bulk weight gradient computation
         """
-        if split_bw:
+        if delay_wgrad_compute:
             self.context = queue.Queue()
-            assert ub_bulk_wgrad is False, "ub_bulk_wgrad is not supported when enabling split_bw"
-            self.enabled = split_bw
+            assert ub_bulk_wgrad is False, "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
+            self.enabled = delay_wgrad_compute
         else:
             self.context = None
             self.enabled = False
 
-    def split_bw(self):
+    def delay_wgrad_compute(self):
         """
         Get the current split backward propagation status.
 
@@ -249,11 +250,11 @@ class WeightGradStore:
         """
         return self.enabled
 
-    def enable_split_bw(self):
+    def enable_delay_wgrad_compute(self):
         """Enable split backward propagation."""
         self.enabled = True
 
-    def disable_split_bw(self):
+    def disable_delay_wgrad_compute(self):
         """Disable split backward propagation."""
         self.enabled = False
 
@@ -265,7 +266,7 @@ class WeightGradStore:
             tensor_list (list): List of tensors needed for computation
             func (callable): Function to be executed with the tensors
         """
-        assert self.enabled is True, "split_bw is not enabled"
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
         self.context.put([tensor_list, func])
 
     def pop(self):
@@ -273,7 +274,7 @@ class WeightGradStore:
         Execute the stored computation with the stored tensors.
         Raises an exception if the queue is empty.
         """
-        assert self.enabled is True, "split_bw is not enabled"
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
             return func(*tensor_list), tensor_list
@@ -287,6 +288,6 @@ class WeightGradStore:
         Assert that the queue is empty.
         Used for debugging and ensuring proper cleanup.
         """
-        assert self.enabled is True, "split_bw is not enabled"
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"

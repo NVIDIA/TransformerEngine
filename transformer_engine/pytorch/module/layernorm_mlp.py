@@ -840,7 +840,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
-                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([act_out, grad_output], general_gemm_fc2_wgrad)
                     fc2_wgrad = None
                     # if fc2_bias is not None and fc2_bias_grad is None:
@@ -862,7 +862,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                         fc2_bias_grad = fc2_bias_grad_
                     del fc2_bias_grad_
-            if ctx.wgrad_store is not None and not ctx.wgrad_store.split_bw():
+            if ctx.wgrad_store is not None and not ctx.wgrad_store.delay_wgrad_compute():
                 clear_tensor_data(act_out)
 
             # bias computation
@@ -1056,7 +1056,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     extra_output=fc1_dgrad_rs_out,
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
-                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([ln_out_total, dact], general_gemm_fc1_wgrad)
                     fc1_wgrad = None
                     # (fc1_wgrad_outputs), _ = ctx.wgrad_store.pop()
@@ -1327,6 +1327,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                      batch size per training step. Needed for JIT Warmup, a technique where jit
                      fused functions are warmed up before training to ensure same kernels are
                      used for forward propogation and activation recompute phase.
+    delay_wgrad_compute : bool, default = `False`
+                         Whether to delay weight gradient computation
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
@@ -1364,7 +1366,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
-        split_bw: bool = False,
+        delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -1397,7 +1399,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
-        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1876,7 +1878,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.split_bw():
+        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
             return
         with torch.cuda.nvtx.range("_LayerNormMLP_wgrad"):
             (fc2_wgrad, fc2_bias_grad_, *_), tensor_list_fc2 = self.wgrad_store.pop()

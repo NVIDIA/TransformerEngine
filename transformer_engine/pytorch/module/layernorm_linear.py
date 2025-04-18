@@ -774,7 +774,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
 
-                if ctx.wgrad_store is not None and ctx.wgrad_store.split_bw():
+                if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([ln_out_total, grad_output], general_gemm_wgrad)
                 else:
                     wgrad, grad_bias_, _, rs_out = general_gemm_wgrad(ln_out_total, grad_output)
@@ -1004,6 +1004,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                   it controls the type used to allocate the initial parameters. Useful when
                   the model is trained with lower precision and the original FP32 parameters
                   would not fit in GPU memory.
+    delay_wgrad_compute : bool, default = `False`
+                         Whether to delay weight gradient computation
     symmetric_ar_type : {None, 'multimem_all_reduce', 'two_shot', 'one_shot'}, default = None
                    Type of symmetric memory all-reduce to use during the forward pass.
                    This can help in latency bound communication situations.
@@ -1038,7 +1040,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
-        split_bw: bool = False,
+        delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: str = None,
     ) -> None:
@@ -1058,7 +1060,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.symmetric_ar_type = symmetric_ar_type
 
-        self.wgrad_store = WeightGradStore(split_bw, ub_bulk_wgrad)
+        self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers

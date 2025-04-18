@@ -1036,7 +1036,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
+def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
@@ -1052,7 +1052,7 @@ def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
         out = out[0]
     loss = out.sum()
     loss.backward()
-    if split_bw:
+    if delay_wgrad_compute:
         block.backward_dw()
 
     torch.cuda.synchronize()
@@ -1202,7 +1202,7 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulation):
+def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
     config = model_configs[model]
 
     te_linear_ref = Linear(
@@ -1211,7 +1211,7 @@ def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulatio
         bias=bias,
         params_dtype=dtype,
         device="cuda",
-        split_bw=False,
+        delay_wgrad_compute=False,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
@@ -1221,7 +1221,7 @@ def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulatio
         bias=bias,
         params_dtype=dtype,
         device="cuda",
-        split_bw=True,
+        delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
@@ -1235,8 +1235,8 @@ def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulatio
             weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
             te_linear_ref.weight.main_grad = weight.main_grad.clone()
 
-    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, split_bw=True)
-    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, split_bw=False)
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, delay_wgrad_compute=False)
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1435,7 +1435,7 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-def test_layernorm_linear_accuracy_split_bw(
+def test_layernorm_linear_accuracy_delay_wgrad_compute(
     dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
@@ -1449,7 +1449,7 @@ def test_layernorm_linear_accuracy_split_bw(
         params_dtype=dtype,
         zero_centered_gamma=zero_centered_gamma,
         device="cuda",
-        split_bw=False,
+        delay_wgrad_compute=False,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
@@ -1462,7 +1462,7 @@ def test_layernorm_linear_accuracy_split_bw(
         params_dtype=dtype,
         zero_centered_gamma=zero_centered_gamma,
         device="cuda",
-        split_bw=True,
+        delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
@@ -1479,8 +1479,8 @@ def test_layernorm_linear_accuracy_split_bw(
             weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
             ln_linear_ref.weight.main_grad = weight.main_grad.clone()
 
-    te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, split_bw=True)
-    te_outputs_ref = _test_granular_accuracy(ln_linear_ref, bs, dtype, config, split_bw=False)
+    te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(ln_linear_ref, bs, dtype, config, delay_wgrad_compute=False)
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1570,12 +1570,12 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
-def test_layernorm_mlp_accuracy_split_bw(
+def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
 
-    ln_mlp_split_bw = LayerNormMLP(
+    ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
@@ -1583,7 +1583,7 @@ def test_layernorm_mlp_accuracy_split_bw(
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
-        split_bw=True,
+        delay_wgrad_compute=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
@@ -1595,32 +1595,32 @@ def test_layernorm_mlp_accuracy_split_bw(
         normalization=normalization,
         params_dtype=dtype,
         device="cuda",
-        split_bw=False,
+        delay_wgrad_compute=False,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     ).eval()
 
     # Share params
     with torch.no_grad():
-        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp_split_bw.layer_norm_weight.clone())
+        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
         if normalization != "RMSNorm":
-            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp_split_bw.layer_norm_bias.clone())
-        ln_mlp_ref.fc1_weight = Parameter(ln_mlp_split_bw.fc1_weight.clone())
-        ln_mlp_ref.fc2_weight = Parameter(ln_mlp_split_bw.fc2_weight.clone())
+            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
         if bias:
-            ln_mlp_ref.fc1_bias = Parameter(ln_mlp_split_bw.fc1_bias.clone())
-            ln_mlp_ref.fc2_bias = Parameter(ln_mlp_split_bw.fc2_bias.clone())
+            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
         if fuse_wgrad_accumulation:
-            ln_mlp_split_bw.fc1_weight.main_grad = torch.rand_like(
-                ln_mlp_split_bw.fc1_weight, dtype=torch.float32
+            ln_mlp.fc1_weight.main_grad = torch.rand_like(
+                ln_mlp.fc1_weight, dtype=torch.float32
             )
-            ln_mlp_ref.fc1_weight.main_grad = ln_mlp_split_bw.fc1_weight.main_grad.clone()
-            ln_mlp_split_bw.fc2_weight.main_grad = torch.rand_like(
-                ln_mlp_split_bw.fc2_weight, dtype=torch.float32
+            ln_mlp_ref.fc1_weight.main_grad = ln_mlp.fc1_weight.main_grad.clone()
+            ln_mlp.fc2_weight.main_grad = torch.rand_like(
+                ln_mlp.fc2_weight, dtype=torch.float32
             )
-            ln_mlp_ref.fc2_weight.main_grad = ln_mlp_split_bw.fc2_weight.main_grad.clone()
+            ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
 
-    te_outputs = _test_granular_accuracy(ln_mlp_split_bw, bs, dtype, config, split_bw=True)
-    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, split_bw=False)
+    te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False)
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1628,7 +1628,7 @@ def test_layernorm_mlp_accuracy_split_bw(
 
 
 def _test_grouped_linear_accuracy(
-    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw=False
+    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, delay_wgrad_compute=False
 ):
     reset_rng_states()
     if fp8:
@@ -1670,7 +1670,7 @@ def _test_grouped_linear_accuracy(
             )
     loss = out.sum()
     loss.backward()
-    if split_bw:
+    if delay_wgrad_compute:
         if isinstance(block, GroupedLinear):
             block.backward_dw()
         else:
@@ -1697,7 +1697,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("split_bw", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
@@ -1707,7 +1707,7 @@ def test_grouped_linear_accuracy(
     fp8_model_params,
     fuse_wgrad_accumulation,
     bias,
-    split_bw,
+    delay_wgrad_compute,
     parallel_mode=None,
 ):
     fp8 = recipe is not None
@@ -1732,7 +1732,7 @@ def test_grouped_linear_accuracy(
             parallel_mode=parallel_mode,
             device="cuda",
             fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-            split_bw=split_bw,
+            delay_wgrad_compute=delay_wgrad_compute,
         ).eval()
         sequential_linear = torch.nn.ModuleList(
             [
@@ -1769,10 +1769,10 @@ def test_grouped_linear_accuracy(
         recipe,
         fp8,
         fuse_wgrad_accumulation,
-        split_bw,
+        delay_wgrad_compute,
     )
     outputs = _test_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, delay_wgrad_compute
     )
 
     # Shoule be bit-wise match
@@ -1792,7 +1792,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fp8_model_params=True,
         fuse_wgrad_accumulation=True,
         bias=True,
-        split_bw=False,
+        delay_wgrad_compute=False,
     )
 
 
