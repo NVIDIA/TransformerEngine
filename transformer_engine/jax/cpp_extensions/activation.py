@@ -119,8 +119,8 @@ class ActLuPrimitive(BasePrimitive):
         )
 
         assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
-            "Current tensor scaling is not yet supported for fused activation and quantization. Please"
-            " do activation in higher-precision then quantize with current tensor scaling."
+            "Current tensor scaling is not yet supported for fused activation and quantization."
+            " Please do activation in higher-precision then quantize with current tensor scaling."
         )
 
         out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
