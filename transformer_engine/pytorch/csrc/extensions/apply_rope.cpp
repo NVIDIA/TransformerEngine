@@ -55,7 +55,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
     nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                            start_positions_cu.data() output_cu.data(), qkv_format, interleaved,
+                            start_positions_cu.data(), output_cu.data(), qkv_format, interleaved,
                             cp_size, cp_rank, max_s, b, h, d, d2, stride_t, /*stride_b=*/0,
                             stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 

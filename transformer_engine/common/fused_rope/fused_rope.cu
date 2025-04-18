@@ -24,7 +24,7 @@ __device__ void fused_rope_block_forward(const scalar_t *src, const float *freqs
 #pragma unroll
   for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
     float v_cos, v_sin;
-    sincosf(freqs[s_id * freqs_stride_s + blockIdx.y * freqs_stride_b + d_id], &v_sin, &v_cos);
+    sincosf(freqs[s_id * d2 + d_id], &v_sin, &v_cos);
 #pragma unroll
     for (int h_id = threadIdx.y; h_id < h; h_id += blockDim.y) {
       int offset_src = offset_block + h_id * stride_h + d_id * stride_d;
@@ -67,7 +67,6 @@ __device__ void fused_rope_block_backward(const scalar_t *src, const float *freq
                                           const int h, const int d, const int d2,
                                           const int stride_h, const int stride_d,
                                           const int o_stride_h, const int o_stride_d) {
-  int b_id = blockIdx.y;
 #pragma unroll
   for (int d_id = threadIdx.x; d_id < d2; d_id += blockDim.x) {
     float v_cos = cosf(freqs[s_id * d2 + d_id]);
@@ -150,7 +149,7 @@ __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seq
           cur_seqlens * cp_size - (cp_rank + 1) * cur_seqlens / 2 + s_id - cur_seqlens / 2;
     }
   } else {
-    int begin_offset = (start_positions == 0) ? 0 : start_positions[b_id];
+    int begin_offset = (start_positions == nullptr) ? 0 : start_positions[b_id];
     s_id_for_freqs = s_id + begin_offset;
   }
 
@@ -192,7 +191,7 @@ __global__ void fused_rope_backward_kernel(
           cur_seqlens * cp_size - (cp_rank + 1) * cur_seqlens / 2 + s_id - cur_seqlens / 2;
     }
   } else {
-    int begin_offset = (start_positions == 0) ? 0 : start_positions[b_id];
+    int begin_offset = (start_positions == nullptr) ? 0 : start_positions[b_id];
     s_id_for_freqs = s_id + begin_offset;
   }
 
