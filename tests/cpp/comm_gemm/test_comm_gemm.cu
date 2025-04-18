@@ -10,6 +10,8 @@
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include "common.h"
 
@@ -53,14 +55,25 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
   ~CommGemmTest() { nvte_comm_gemm_ctx_destroy(ctx_); }
 
   template <typename T>
-  transformer_engine::Tensor MakeDeviceTensor(size_t m, size_t n, transformer_engine::DType dtype,
-                                              cudaStream_t stream) {
+  transformer_engine::Tensor MakeDeviceTensor(size_t m, size_t n, transformer_engine::DType dtype) {
     void* dptr{};
-    NVTE_CHECK_CUDA(cudaMallocAsync(&dptr, m * n * sizeof(T), stream));
-    NVTE_CHECK_CUDA(cudaMemsetAsync(dptr, 0, m * n * sizeof(T), stream));
+    NVTE_CHECK_CUDA(cudaMalloc(&dptr, m * n * sizeof(T)));
+    NVTE_CHECK_CUDA(cudaMemset(dptr, 0, m * n * sizeof(T)));
 
     transformer_engine::Tensor ret;
     ret.data = {dptr, {n, m}, dtype};
+    if (is_fp8_dtype(dtype)) {
+      float one = 1.0;
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.scale.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.scale.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.scale_inv.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.scale_inv.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.columnwise_scale_inv.dptr, sizeof one));
+      NVTE_CHECK_CUDA(
+          cudaMemcpy(ret.columnwise_scale_inv.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.amax.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.amax.dptr, &one, sizeof one, cudaMemcpyDefault));
+    }
     return ret;
   }
 
@@ -80,16 +93,27 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
   template <typename T>
   transformer_engine::Tensor MakeDeviceTensorFromData(const std::vector<T>& data, size_t mstart,
                                                       size_t nstart, size_t msize, size_t nsize,
-                                                      size_t ld, transformer_engine::DType dtype,
-                                                      cudaStream_t stream) {
+                                                      size_t ld, transformer_engine::DType dtype) {
     auto values = CopyLocalMatrix(data, mstart, nstart, msize, nsize, ld);
     void* dptr{};
-    NVTE_CHECK_CUDA(cudaMallocAsync(&dptr, values.size() * sizeof values[0], stream));
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(dptr, values.data(), values.size() * sizeof values[0],
-                                    cudaMemcpyDefault, stream));
+    NVTE_CHECK_CUDA(cudaMalloc(&dptr, values.size() * sizeof values[0]));
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(dptr, values.data(), values.size() * sizeof values[0], cudaMemcpyDefault));
 
     transformer_engine::Tensor ret;
     ret.data = {dptr, {nsize, msize}, dtype};
+    if (is_fp8_dtype(dtype)) {
+      float one = 1.0;
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.scale.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.scale.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.scale_inv.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.scale_inv.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.columnwise_scale_inv.dptr, sizeof one));
+      NVTE_CHECK_CUDA(
+          cudaMemcpy(ret.columnwise_scale_inv.dptr, &one, sizeof one, cudaMemcpyDefault));
+      NVTE_CHECK_CUDA(cudaMalloc(&ret.amax.dptr, sizeof one));
+      NVTE_CHECK_CUDA(cudaMemcpy(ret.amax.dptr, &one, sizeof one, cudaMemcpyDefault));
+    }
     return ret;
   }
 
@@ -115,7 +139,6 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
                         bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                         cudaStream_t stream) = 0;
 
-
   template <typename T>
   void Run(bool transa, bool transb, size_t m, size_t n, size_t k,
            transformer_engine::DType dtype) {
@@ -126,28 +149,26 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     std::uniform_real_distribution<double> dist(0.0, 1.0);
 
     std::vector<T> adata(m * k);
-    std::generate(adata.begin(), adata.end(), [&rng, &dist] { return dist(rng); });
+    std::generate(adata.begin(), adata.end(), [&rng, &dist] { return static_cast<T>(dist(rng)); });
     std::vector<T> bdata(k * n);
-    std::generate(bdata.begin(), bdata.end(), [&rng, &dist] { return dist(rng); });
+    std::generate(bdata.begin(), bdata.end(), [&rng, &dist] { return static_cast<T>(dist(rng)); });
 
-    auto ga = transa ? MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype, stream)
-                     : MakeDeviceTensorFromData<T>(adata, 0, 0, m, k, m, dtype, stream);
-    auto gb = transb ? MakeDeviceTensorFromData<T>(bdata, 0, 0, n, k, n, dtype, stream)
-                     : MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype, stream);
-    auto gd = MakeDeviceTensor<T>(m, n, dtype, stream);
+    auto ga = transa ? MakeDeviceTensorFromData<T>(adata, 0, 0, k, m, k, dtype)
+                     : MakeDeviceTensorFromData<T>(adata, 0, 0, m, k, m, dtype);
+    auto gb = transb ? MakeDeviceTensorFromData<T>(bdata, 0, 0, n, k, n, dtype)
+                     : MakeDeviceTensorFromData<T>(bdata, 0, 0, k, n, k, dtype);
+    auto gd = MakeDeviceTensor<T>(m, n, dtype);
 
     auto dims = DistributeTensors(m, n, k);
-    auto a = transa
-                 ? MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
-                                               dims.a_rows_num, dims.a_cols_num, k, dtype, stream)
-                 : MakeDeviceTensorFromData<T>(adata, dims.a_cols_start, dims.a_rows_start,
-                                               dims.a_cols_num, dims.a_rows_num, m, dtype, stream);
-    auto b = transb
-                 ? MakeDeviceTensorFromData<T>(bdata, dims.b_cols_start, dims.b_rows_start,
-                                               dims.b_cols_num, dims.b_rows_num, n, dtype, stream)
-                 : MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
-                                               dims.b_rows_num, dims.b_cols_num, k, dtype, stream);
-    auto d = MakeDeviceTensor<T>(dims.d_rows_num, dims.d_cols_num, dtype, stream);
+    auto a = transa ? MakeDeviceTensorFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
+                                                  dims.a_rows_num, dims.a_cols_num, k, dtype)
+                    : MakeDeviceTensorFromData<T>(adata, dims.a_cols_start, dims.a_rows_start,
+                                                  dims.a_cols_num, dims.a_rows_num, m, dtype);
+    auto b = transb ? MakeDeviceTensorFromData<T>(bdata, dims.b_cols_start, dims.b_rows_start,
+                                                  dims.b_cols_num, dims.b_rows_num, n, dtype)
+                    : MakeDeviceTensorFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                                  dims.b_rows_num, dims.b_cols_num, k, dtype);
+    auto d = MakeDeviceTensor<T>(dims.d_rows_num, dims.d_cols_num, dtype);
 
     transformer_engine::Tensor bias;
     transformer_engine::Tensor pre_act_out;
@@ -155,20 +176,18 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     bool accumulate = false;
     CommGemm(m, n, k, &a, &b, &d, &bias, &pre_act_out, transa, transb, grad, accumulate,
              0 /*comm_sm_count*/, stream);
-    auto workspace =
-        MakeDeviceTensor<uint8_t>(1, 32 << 20, transformer_engine::DType::kByte, stream);
+    auto workspace = MakeDeviceTensor<uint8_t>(1, 32 << 20, transformer_engine::DType::kByte);
     nvte_cublas_gemm(&ga, &gb, &gd, &bias, &pre_act_out, transa, transb, grad, &workspace,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
-
-    std::vector<T> out(dims.d_rows_num * dims.d_cols_num);
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(out.data(), d.data.dptr, out.size() * sizeof out[0],
-                                    cudaMemcpyDefault, stream));
-    std::vector<T> out_golden_global(m * n);
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(out_golden_global.data(), gd.data.dptr,
-                                    out_golden_global.size() * sizeof out_golden_global[0],
-                                    cudaMemcpyDefault, stream));
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+    std::vector<T> out(dims.d_rows_num * dims.d_cols_num);
+    NVTE_CHECK_CUDA(
+        cudaMemcpy(out.data(), d.data.dptr, out.size() * sizeof out[0], cudaMemcpyDefault));
+    std::vector<T> out_golden_global(m * n);
+    NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.data.dptr,
+                               out_golden_global.size() * sizeof out_golden_global[0],
+                               cudaMemcpyDefault));
 
     auto out_golden = CopyLocalMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
                                       dims.d_rows_num, dims.d_cols_num, m);
@@ -177,7 +196,7 @@ class CommGemmTest : public ::testing::TestWithParam<Params> {
     const double dtype_epsilon = 1e-3;
     const auto atol = dtype_epsilon * k;
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(out[i], out_golden[i], atol);
+      EXPECT_NEAR(static_cast<double>(out[i]), static_cast<double>(out_golden[i]), atol);
     }
   }
 
@@ -290,32 +309,44 @@ struct GemmArTest : public CommGemmTest {
 
 TEST_P(AgGemmTest, AgGemm) {
   auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
-                                       { Run<DType>(transa, transb, m, n, k, dtype); });
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, dtype); });
 }
 
 TEST_P(GemmRsTest, GemmRs) {
   auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
-                                       { Run<DType>(transa, transb, m, n, k, dtype); });
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, dtype); });
 }
 
 TEST_P(GemmArTest, GemmAr) {
   auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, DType,
-                                       { Run<DType>(transa, transb, m, n, k, dtype); });
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, dtype); });
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AgGemm, AgGemmTest,
-    testing::Values(Params{transformer_engine::DType::kFloat16, false, false, 8, 4, 2},
-                    Params{transformer_engine::DType::kFloat16, false, true, 8, 4, 2},
-                    Params{transformer_engine::DType::kFloat16, true, false, 8, 4, 2}));
+using transformer_engine::DType;
+
+std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
+  const auto [dtype, transa, transb, m, n, k] = info.param;
+  std::ostringstream ss;
+  ss << to_string(dtype) << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x"
+     << n << "x" << k;
+  return ss.str();
+}
+
+INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemmTest,
+                         testing::Values(Params{DType::kFloat8E4M3, false, false, 256, 128, 64},
+                                         Params{DType::kFloat8E4M3, false, true, 256, 128, 64},
+                                         Params{DType::kFloat8E4M3, true, false, 256, 128, 64}),
+                         &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRsTest,
-                         testing::Values(Params{transformer_engine::DType::kFloat16, true, false, 2,
-                                                4, 8}));
+                         testing::Values(Params{transformer_engine::DType::kFloat8E4M3, true, false,
+                                                64, 128, 256}),
+                         &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(GemmAr, GemmArTest,
                          testing::Values(Params{transformer_engine::DType::kFloat16, true, false,
-                                                64, 64 * 4, 64 * 4}));
+                                                64, 64 * 4, 64 * 4}),
+                         &ParamSuffix);
