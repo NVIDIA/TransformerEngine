@@ -98,7 +98,7 @@ class NormFwdPrimitive(BasePrimitive):
 
     name = "te_norm_forward_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12)
+    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11)
     inner_primitive = None
     outer_primitive = None
 
@@ -116,13 +116,11 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
         LayerNorm fwd inner primitive abstract
         """
-        del scale_shapes
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -238,13 +236,12 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
         LayerNorm fwd lowering rules
         """
-        del out_dtype, scale_dtype, scale_shapes, is_outer
+        del out_dtype, scale_dtype, is_outer
         x_aval, scale_aval, gamma_aval, beta_aval = ctx.avals_in
 
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -287,7 +284,6 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
@@ -316,7 +312,6 @@ class NormFwdPrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             is_2x=is_2x,
             scale_dtype=scale_dtype,
-            scale_shapes=scale_shapes,
             is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -352,7 +347,6 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
@@ -386,7 +380,6 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
             ),
             out_bdims,
         )
@@ -400,14 +393,13 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
         del zero_centered_gamma, epsilon, out_dtype, result_infos
-        del scale_dtype, scale_shapes, is_outer
+        del scale_dtype, is_outer
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_spec = (*x_spec[:-1], None)
@@ -459,7 +451,6 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         arg_infos,
@@ -544,7 +535,6 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_outer=True,
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
@@ -573,7 +563,6 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         value_types,
@@ -584,7 +573,6 @@ class NormFwdPrimitive(BasePrimitive):
             epsilon,
             out_dtype,
             scale_dtype,
-            scale_shapes,
             is_outer,
             mesh,
             result_types,
@@ -931,7 +919,6 @@ def layernorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
-            scale_shapes=((1,), (1,)),
             is_outer=True,
         )
         return output, mu, rsigma
@@ -983,7 +970,6 @@ def layernorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape),
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1136,7 +1122,6 @@ def rmsnorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
-            scale_shapes=((), ()),
             is_outer=True,
         )
         return output, rsigma
@@ -1185,7 +1170,6 @@ def rmsnorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape),
         is_outer=True,
     )
     quantizer.update(updated_amax)
