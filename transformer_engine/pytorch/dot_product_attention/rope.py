@@ -230,7 +230,7 @@ def _apply_rotary_pos_emb_base(
 
     # In case `start_positions` are provided, create a staggered `freqs` tensor
     # offset by the values in `start_positions`.
-    # Note: `start_positions` usage with cp_size > 1 hasn't been fully tested
+    # Note: `start_positions` usage with cp_size > 1 hasn't been tested
     # because context parallelism isn't used during inference.
     if start_positions is not None:
         max_offset = torch.max(start_positions)
@@ -356,15 +356,23 @@ def apply_rotary_pos_emb(
     if tensor_format == "thd":
         cu_seqlens = cu_seqlens // cp_size
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+
+        # The following code essentially splits the `thd` tensor into corresponding
+        # `s1hd` tensors (for each sequence) and applies rotary embedding to 
+        # those sequences individually.
+        # Note that if `start_positions` is not `None`, then for each sequence,
+        # it's corresponding rope offset is also supplied from `start_positions`
+        # individually.
         return torch.cat(
-            [
+             [
                 _apply_rotary_pos_emb_base(
                     x.unsqueeze(1),
                     _get_freqs_on_this_cp_rank(freqs, x.size(0), cp_size, cp_rank),
-                    start_positions,
+                    start_positions = start_positions[idx:idx+1] if start_positions is not None else None,
+                    tensor_format="thd",
                     interleaved=interleaved,
                 )
-                for x in torch.split(t, seqlens)
+                for idx, x in enumerate(torch.split(t, seqlens))
             ]
         ).squeeze(1)
 
