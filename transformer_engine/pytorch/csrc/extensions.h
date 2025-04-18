@@ -264,6 +264,15 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype, float margin);
 
+// Note that the start_offset is the logical offset along the tensor dimension.
+// The offset in bytes is start_offset * sizeof(tensor.dtype)
+void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h,
+                                            size_t w, size_t start_offset, size_t block_len);
+
+void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
+                                    size_t h, size_t w, size_t start_offset, size_t block_len,
+                                    const transformer_engine::DType out_dtype);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
