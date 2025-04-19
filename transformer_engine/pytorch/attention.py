@@ -628,10 +628,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_q_half, cu_seqlens_kv_half = None, None
         if qkv_format in ["bshd", "sbhd"]:
             seq_dim = qkv_format.index("s")
+            batch_dim = qkv_format.index("b")
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
             cu_seqlens_q_padded, cu_seqlens_kv_padded = None, None
             if use_fused_attention:
-                batch_dim = qkv_format.index("b")
                 cu_seqlens_q, cu_seqlens_q_half = _get_cu_seqlens_info_with_cp(
                     q.shape[batch_dim], max_seqlen_q, cp_size, cu_seqlens_q
                 )
@@ -1374,8 +1374,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
-                        if qkv_format == "thd":
-                            out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
                         flash_attn_fwd_softmax_lse_correction(
                             softmax_lse, softmax_lse_per_step[i - 1]
@@ -1404,62 +1402,81 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
         softmax_lse = softmax_lse.to(torch.float)
-        for i in range(cp_size):
-            if i <= rank or not causal:
-                if qkv_format in ["bshd", "sbhd"]:
-                    if i == 0:
-                        out = flash_attn_fwd_out_correction_init(
-                            out_per_step[0],
-                            softmax_lse,
-                            softmax_lse_per_step[0],
-                            seq_dim,
-                        )
-                        out = out.view(q.shape)
-                    else:
-                        flash_attn_fwd_out_correction(
-                            out.view(*out_per_step[i].shape),
-                            out_per_step[i],
-                            softmax_lse,
-                            softmax_lse_per_step[i],
-                            seq_dim,
-                        )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        False,
-                        softmax_lse_in_packed_format,
-                    )
-            else:
-                if qkv_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_second_half_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        seq_dim,
-                    )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        True,
-                        softmax_lse_in_packed_format,
-                    )
+
+        # out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
+        # for i in range(cp_size):
+        #     if i <= rank or not causal:
+        #         if qkv_format in ["bshd", "sbhd"]:
+        #             if i == 0:
+        #                 out = flash_attn_fwd_out_correction_init(
+        #                     out_per_step[0],
+        #                     softmax_lse,
+        #                     softmax_lse_per_step[0],
+        #                     seq_dim,
+        #                 )
+        #                 out = out.view(q.shape)
+        #             else:
+        #                 flash_attn_fwd_out_correction(
+        #                     out.view(*out_per_step[i].shape),
+        #                     out_per_step[i],
+        #                     softmax_lse,
+        #                     softmax_lse_per_step[i],
+        #                     seq_dim,
+        #                 )
+        #         elif qkv_format == "thd":
+        #             tex.thd_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 cu_seqlens_q_padded,
+        #                 False,
+        #                 softmax_lse_in_packed_format,
+        #             )
+        #     else:
+        #         if qkv_format in ["bshd", "sbhd"]:
+        #             flash_attn_fwd_second_half_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 seq_dim,
+        #             )
+        #         elif qkv_format == "thd":
+        #             tex.thd_out_correction(
+        #                 out,
+        #                 out_per_step[i],
+        #                 softmax_lse,
+        #                 softmax_lse_per_step[i],
+        #                 cu_seqlens_q_padded,
+        #                 True,
+        #                 softmax_lse_in_packed_format,
+        #             )
+
+        out = tex.fused_out_correction(
+            out_per_step,
+            softmax_lse,
+            softmax_lse_per_step,
+            cu_seqlens_q_padded,
+            qkv_format,
+            cp_size,
+            rank,
+            causal,
+            softmax_lse_in_packed_format,
+        )
+
+        # print("out shape:",out.shape)
+        # print("out_myversion shape:",out_myversion.shape)
+        # print("valid: ",cu_seqlens_q_padded)
+        # mismatch_mask = ~torch.isclose(out, out_myversion, rtol=1e-5, atol=1e-8)
+        # mismatch_indices = torch.where(mismatch_mask)
+        # for idx in zip(*mismatch_indices):
+        #     idx_tuple = tuple(idx)
+        #     print(f"位置 {idx_tuple}: out={out[idx_tuple]}, out_myversion={out_myversion[idx_tuple]}")
 
         kv = p2p_comm_buffers[-1]
-        if qkv_format == "bshd":
-            out = out.view(out.shape[0], -1, *out.shape[-2:])
-            ctx.batch_size = out.shape[0]
-        elif qkv_format == "sbhd":
-            out = out.view(-1, *out.shape[-3:])
-            ctx.batch_size = out.shape[1]
+        if isinstance(batch_dim, int):
+            ctx.batch_size = out.shape[batch_dim]
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
