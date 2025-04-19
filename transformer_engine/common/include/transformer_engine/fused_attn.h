@@ -11,8 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_FP8_H_
 
-#include <cstdint>
-
+#include "stdint.h"
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
