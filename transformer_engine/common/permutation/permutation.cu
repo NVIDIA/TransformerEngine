@@ -370,7 +370,7 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
                               num_cols, stream););
 }
 
-void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t temp_storage_bytes,
+void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t &temp_storage_bytes,
                                   NVTETensor indices, NVTETensor sorted_indices, NVTETensor row_id,
                                   NVTETensor sorted_row_id, int64_t max_expanded_token_num) {
   NVTE_API_CALL(nvte_device_radix_sort_pairs);

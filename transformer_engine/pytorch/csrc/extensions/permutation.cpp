@@ -26,8 +26,8 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                      torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
     size_t temp_storage_bytes = 0;
-    nvte_device_radix_sort_pairs(nullptr, temp_storage_bytes, nullptr, nullptr,
-                                 nullptr, nullptr, max_expanded_token_num);
+    nvte_device_radix_sort_pairs(nullptr, temp_storage_bytes, nullptr, nullptr, nullptr, nullptr,
+                                 max_expanded_token_num);
     at::Tensor temp_storage = torch::empty(
         temp_storage_bytes, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
 
@@ -45,9 +45,8 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   void *d_temp_storage = getDataPtr(workspace[3], 0);
   size_t temp_storage_bytes = std::numeric_limits<size_t>::max();
 
-  nvte_device_radix_sort_pairs(d_temp_storage, temp_storage_bytes, indices_ptr,
-                               sorted_indices_ptr, row_id_ptr, sorted_row_id_ptr,
-                               num_tokens * topK);
+  nvte_device_radix_sort_pairs(d_temp_storage, temp_storage_bytes, indices_ptr, sorted_indices_ptr,
+                               row_id_ptr, sorted_row_id_ptr, num_tokens * topK);
 
   // Output buffer alloc
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;

@@ -18,7 +18,7 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
                     const NVTETensor prob, const int num_rows, const int topK, const int num_cols,
                     cudaStream_t stream = nullptr);
 
-void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t temp_storage_bytes,
+void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t &temp_storage_bytes,
                                   NVTETensor indices, NVTETensor sorted_indices, NVTETensor row_id,
                                   NVTETensor sorted_row_id, int64_t max_expanded_token_num);
 
