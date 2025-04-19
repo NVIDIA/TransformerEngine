@@ -46,10 +46,11 @@ enum class FP8BlockwiseColumnwiseOption {
   NONE,
   // Columnwise data transposed from original shape.
   // Scales in GEMM format corresponding to GEMM ingesting transposed column data.
-  COLUMNWISE_TRANSPOSE
+  COLUMNWISE_TRANSPOSE,
   // TODO: FP8 all gather requires some changes.
   // 1. The transpose gets in the way of the all gather.
   // 2. Compact scales are better for gathering than the GEMM format.
+  COLUMNWISE
 };
 
 void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor &scale_inv,

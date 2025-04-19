@@ -302,6 +302,13 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
+  /*! Columnwise transpose option for FP8 blockwise scaling recipe.
+    If true, the columnwise scaling will be transposed.
+    If false, the columnwise scaling will not be transposed.
+    However, the columnwise usage means whether any columnwise tensor
+    get allocated, which is independent of this option.
+  */
+  kNVTEQuantizationConfigFp8ColumnwiseTranspose = 3,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -772,6 +779,12 @@ class QuantizationConfigWrapper {
   void set_noop_tensor(NVTETensor noop_tensor) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
                                            sizeof(NVTETensor));
+  }
+
+  /*! \brief Set columnwise option */
+  void set_fp8_columnwise_transpose(bool columnwise_transpose) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigFp8ColumnwiseTranspose,
+                                           &columnwise_transpose, sizeof(bool));
   }
 
  private:

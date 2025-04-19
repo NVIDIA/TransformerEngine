@@ -81,6 +81,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+    quant_config.set_fp8_columnwise_transpose(my_quantizer_bw->columnwise_transpose);
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
