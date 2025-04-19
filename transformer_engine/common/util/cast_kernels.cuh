@@ -1286,9 +1286,12 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
                                                      ? FP8BlockwiseRowwiseOption::ROWWISE
                                                      : FP8BlockwiseRowwiseOption::NONE;
-      FP8BlockwiseColumnwiseOption columnwise_option =
-          output_tensor->has_columnwise_data() ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
-                                               : FP8BlockwiseColumnwiseOption::NONE;
+      FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
+      if (output_tensor->has_columnwise_data()) {
+        bool columnwise_transpose = quant_config_cpp ? quant_config_cpp->fp8_columnwise_transpose : true;
+        columnwise_option = columnwise_transpose ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
+                                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE;
+      }
       quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
                                           output_tensor->columnwise_scale_inv, output_tensor->data,
                                           output_tensor->columnwise_data, epsilon, rowwise_option,

@@ -261,6 +261,8 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
+  this->columnwise_transpose = quantizer.attr("columnwise_transpose").cast<bool>();
+  this->compact_scales = quantizer.attr("compact_scales").cast<bool>();
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
@@ -332,13 +334,18 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape. Shape ",
                columnwise_shape, " torch shape: ", torch_columnwise_shape);
     if (torch_shape.size() > 0) {
-      torch_columnwise_shape.reserve(torch_shape.size());
-      columnwise_shape.reserve(shape.size());
-      torch_columnwise_shape.push_back(torch_shape[torch_shape.size() - 1]);
-      columnwise_shape.push_back(shape[shape.size() - 1]);
-      for (size_t i = 0; i < torch_shape.size() - 1; ++i) {
-        torch_columnwise_shape.push_back(torch_shape[i]);
-        columnwise_shape.push_back(shape[i]);
+      if (columnwise_transpose) {
+        torch_columnwise_shape.reserve(torch_shape.size());
+        columnwise_shape.reserve(shape.size());
+        torch_columnwise_shape.push_back(torch_shape[torch_shape.size() - 1]);
+        columnwise_shape.push_back(shape[shape.size() - 1]);
+        for (size_t i = 0; i < torch_shape.size() - 1; ++i) {
+          torch_columnwise_shape.push_back(torch_shape[i]);
+          columnwise_shape.push_back(shape[i]);
+        }
+      } else {
+        torch_columnwise_shape = torch_shape;
+        columnwise_shape = shape;
       }
     }
     size_t sinv0 = 0;
@@ -348,7 +355,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
       sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
-      sinv1 = roundup(k_dim, 4);
+      sinv1 = compact_scales ? k_dim : roundup(k_dim, 4);
+      if (!columnwise_transpose) {
+        std::swap(sinv0, sinv1);
+      }
     } else {
       NVTE_CHECK(false,
                  "Unsupported block_scaling_dim in create_tensor columnwise."
