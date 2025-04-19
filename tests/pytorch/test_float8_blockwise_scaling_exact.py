@@ -88,68 +88,40 @@ def initialize_for_many_scales(
     return result
 
 
-# @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-# @pytest.mark.parametrize(
-#     "M, N",
-#     [
-#         # full tile cases
-#         (128, 128),
-#         (256, 256),
-#         (256, 1024),
-#         (1024, 256),
-#         # Padding required cases
-#         (256, 272),
-#         (303, 300),
-#         (305, 256),
-#         # Some larger tiles.
-#         (2000, 2000),
-#         (2048, 2000),
-#         (2000, 1024),
-#         (2048, 1024),
-#     ],
-# )
-# @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-# @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-# @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
-# @pytest.mark.parametrize(
-#     "columnwise_transpose", [True, False], ids=["columnwise", "columnwise_transpose"]
-# )
-# @pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
-# @pytest.mark.parametrize("tile_size", [(1, 128)], ids=["1DTile"])
-
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
     [
+        # full tile cases
+        (128, 128),
+        (256, 256),
         (256, 1024),
+        (1024, 256),
+        # Padding required cases
+        (256, 272),
+        (303, 300),
+        (305, 256),
+        # Some larger tiles.
+        (2000, 2000),
+        (2048, 2000),
+        (2000, 1024),
+        (2048, 1024),
     ],
 )
-# @pytest.mark.parametrize(
-#     "M, N",
-#     [
-#         (303, 300),
-#     ],
-# )
-@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
-@pytest.mark.parametrize(
-    "columnwise_transpose", [False], ids=["columnwise"]
-)
 @pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
-@pytest.mark.parametrize("tile_size", [(1, 128)], ids=["1DTile"])
 def test_quantization_1D_block_tiling_with_columnwise_transpose(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     quant_dtype: torch.dtype,
     eps: float,
-    columnwise_transpose: bool,
     pow_2_scales: bool,
-    tile_size: Tuple[int, int],
 ) -> None:
     te_dtype = TE_DType[quant_dtype]
-    assert tile_size == (1, 128), "Only 1D tile is supported for this test"
+    tile_size = (1, 128)
     # This test runs a comparison of the ref class versus the class using
     # CUDA kernels to quantize. They should quantize identically for pixels
     # that are not DC values in the scale factor shape.
@@ -161,7 +133,7 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
         amax_epsilon=eps,
         force_pow_2_scales=pow_2_scales,
         block_scaling_dim=1,
-        columnwise_transpose=columnwise_transpose,
+        columnwise_transpose=False,
         compact_scales=True,
     )
 
@@ -174,9 +146,9 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
     # Input
     x = initialize_for_many_scales((M, N), tile_size, dtype=x_dtype, device=device)
 
-    # x_fp8_sut = sut_quantizer.make_empty((M, N), dtype=x_dtype, device=device, requires_grad=False)
-    # x_fp8_sut = sut_quantizer.update_quantized(x, x_fp8_sut)
-    x_fp8_sut = sut_quantizer(x)
+    x_fp8_sut = sut_quantizer.make_empty((M, N), dtype=x_dtype, device=device, requires_grad=False)
+    x_fp8_sut = sut_quantizer.update_quantized(x, x_fp8_sut)
+    x_fp8_sut_cpp_alloc = sut_quantizer(x)
 
     assert x_fp8_sut._rowwise_data is not None
     qx: torch.Tensor = x_fp8_sut._rowwise_data.view(dtype=quant_dtype)
@@ -210,39 +182,23 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
     # TODO: workaround for testing columnwise without transpose
     qx_t_ref = qx_t_ref.transpose(-1, -2).contiguous()
 
-    print(sx_t_ref.shape)
-    print(sx_t.shape)
-    print(sx_t_ref)
-    print(sx_t)
-
     # Check
     torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
-    # Zero out values that are don't care values
-    # Scale format has padding.
-    # scale_mask = torch.ones(
-    #     (math.ceil(M / tile_size[0]), math.ceil(N / tile_size[1])), device=sx.device
-    # )
-    # scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
-    #     QuantizeResult(qx, scale_mask, None, None), tile_size
-    # ).scale
-    # sx = sx * scale_mask
     torch.testing.assert_close(sx, sx_ref, atol=0.0, rtol=0.0)
-
     assert qx_t is not None
     qx_t = qx_t.view(dtype=quant_dtype)
     assert qx_t_ref is not None
     assert sx_t is not None
     assert sx_t_ref is not None
-    # scale_mask = torch.ones(
-    #     (math.ceil(N / tile_size[0]), math.ceil(M / tile_size[1])),
-    #     device=sx_t.device,
-    # )
-    # scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
-    #     QuantizeResult(qx_t, scale_mask, None, None), tile_size
-    # ).scale
-    # sx_t = sx_t * scale_mask
     torch.testing.assert_close(qx_t.float(), qx_t_ref.float(), atol=0.0, rtol=0.0)
     torch.testing.assert_close(sx_t, sx_t_ref, atol=0.0, rtol=0.0)
+
+    # check that the C++ and Python allocators are equivalent
+    torch.testing.assert_close(x_fp8_sut._rowwise_data, x_fp8_sut_cpp_alloc._rowwise_data, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(x_fp8_sut._rowwise_scale_inv, x_fp8_sut_cpp_alloc._rowwise_scale_inv, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(x_fp8_sut._columnwise_data, x_fp8_sut_cpp_alloc._columnwise_data, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(x_fp8_sut._columnwise_scale_inv, x_fp8_sut_cpp_alloc._columnwise_scale_inv, atol=0.0, rtol=0.0)
+
 
 def check_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
