@@ -4,7 +4,6 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -102,6 +101,7 @@ struct Params {
   size_t m;
   size_t n;
   size_t k;
+  double tol;
 };
 
 class CommGemmFixure : public ::testing::TestWithParam<Params> {
@@ -138,7 +138,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                         cudaStream_t stream) = 0;
 
   template <typename T>
-  void Run(bool transa, bool transb, size_t m, size_t n, size_t k) {
+  void Run(bool transa, bool transb, size_t m, size_t n, size_t k, double tol) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
@@ -189,11 +189,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     auto out_golden = CopyMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
                                  dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
-    // TODO: use cuda::std::numeric_limits<T>::epsilon(), when it's not broken.
-    const double dtype_epsilon = 1e-3;
-    const auto atol = dtype_epsilon * k;
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(static_cast<double>(out[i]), static_cast<double>(out_golden[i]), atol);
+      EXPECT_NEAR(static_cast<double>(out[i]), static_cast<double>(out_golden[i]), tol * k);
     }
   }
 
@@ -305,22 +302,25 @@ struct GemmAr : public CommGemmFixure {
 };
 
 TEST_P(AgGemm, Gemm) {
-  auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType, { Run<DType>(transa, transb, m, n, k); });
+  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, tol); });
 }
 
 TEST_P(GemmRs, Gemm) {
-  auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType, { Run<DType>(transa, transb, m, n, k); });
+  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, tol); });
 }
 
 TEST_P(GemmAr, Gemm) {
-  auto [dtype, transa, transb, m, n, k] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType, { Run<DType>(transa, transb, m, n, k); });
+  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
+                                        { Run<DType>(transa, transb, m, n, k, tol); });
 }
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
-  const auto [dtype, transa, transb, m, n, k] = info.param;
+  const auto [dtype, transa, transb, m, n, k, _tol] = info.param;
   std::ostringstream ss;
   ss << to_string(dtype) << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x"
      << n << "x" << k;
@@ -328,15 +328,34 @@ std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
 }
 
 INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
-                         testing::Values(Params{DType::kFloat8E4M3, false, false, 256, 128, 64},
-                                         Params{DType::kFloat8E4M3, false, true, 256, 128, 64},
-                                         Params{DType::kFloat8E4M3, true, false, 256, 128, 64}),
+                         testing::Values(Params{DType::kFloat16, false, false, 256, 128, 64, 1e-9},
+                                         Params{DType::kFloat16, false, true, 256, 128, 64, 1e-9},
+                                         Params{DType::kFloat16, true, false, 256, 128, 64, 1e-9},
+                                         Params{DType::kBFloat16, false, false, 256, 128, 64, 1e-9},
+                                         Params{DType::kBFloat16, false, true, 256, 128, 64, 1e-9},
+                                         Params{DType::kBFloat16, true, false, 256, 128, 64, 1e-9},
+                                         Params{DType::kFloat8E4M3, true, false, 256, 128, 64,
+                                                1e-4}),
                          &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
-                         testing::Values(Params{DType::kFloat8E4M3, true, false, 64, 128, 256}),
+                         testing::Values(Params{DType::kFloat16, false, false, 256, 128, 64, 1e-3},
+                                         Params{DType::kFloat16, false, true, 256, 128, 64, 5e-1},
+                                         Params{DType::kFloat16, true, false, 256, 128, 64, 1e-3},
+                                         Params{DType::kBFloat16, false, false, 256, 128, 64, 5e-3},
+                                         Params{DType::kBFloat16, false, true, 256, 128, 64, 5e-1},
+                                         Params{DType::kBFloat16, true, false, 256, 128, 64, 5e-3},
+                                         Params{DType::kFloat8E4M3, true, false, 64, 128, 256,
+                                                5e-2}),
                          &ParamSuffix);
 
-INSTANTIATE_TEST_SUITE_P(GemmAr, GemmAr,
-                         testing::Values(Params{DType::kFloat16, true, false, 64, 64 * 4, 64 * 4}),
-                         &ParamSuffix);
+INSTANTIATE_TEST_SUITE_P(
+    GemmAr, GemmAr,
+    testing::Values(Params{DType::kFloat16, false, false, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat16, false, true, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat16, true, false, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, false, false, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, false, true, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, true, false, 64, 64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat8E4M3, true, false, 64, 64 * 4, 64 * 4, 1e-4}),
+    &ParamSuffix);
