@@ -314,7 +314,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
-      sinv1 = roundup(m_dim, 4);
+      sinv1 = compact_scales ? m_dim : roundup(m_dim, 4);
     } else {
       NVTE_CHECK(false,
                  "Unsupported block_scaling_dim in create_tensor rowwise."

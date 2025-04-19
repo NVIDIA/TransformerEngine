@@ -144,7 +144,7 @@ class Float8BlockQuantizer(Quantizer):
         if columnwise:
             outer = math.ceil(M / self.block_len)
             inner = round_up_to_nearest_multiple(K, 4) if not self.compact_scales else K
-            return (outer, inner)
+            return (outer, inner) if self.columnwise_transpose else (inner, outer)
         outer = math.ceil(K / self.block_len)
         inner = round_up_to_nearest_multiple(M, 4) if not self.compact_scales else M
         return (outer, inner)

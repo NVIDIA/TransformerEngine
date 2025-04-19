@@ -551,13 +551,19 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
     NVTE_CHECK(output_t.shape.size() == input.shape.size(),
                "output_t must have same number of dimensions as input.");
 
-    // TODO: implement correct NVCHECK here
-    // if (output_t.shape.size() > 0) {
-    //   NVTE_CHECK(output_t.shape[0] == row_length, "Wrong dimension 0 of output_t.");
-    //   for (size_t i = 1; i < output_t.shape.size(); ++i) {
-    //     NVTE_CHECK(output_t.shape.at(i) == input.shape.at(i - 1), "Wrong dimension in output_t");
-    //   }
-    // }
+    if (output_t.shape.size() > 0) {
+      if (columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE) {
+        NVTE_CHECK(output_t.shape[0] == row_length, "Wrong dimension 0 of output_t.");
+        for (size_t i = 1; i < output_t.shape.size(); ++i) {
+          NVTE_CHECK(output_t.shape.at(i) == input.shape.at(i - 1), "Wrong dimension in output_t");
+        }
+      } else {
+        NVTE_CHECK(columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE,
+                   "Unexpected columnwise option enum value");
+        NVTE_CHECK(output_t.shape[0] == input.shape[0], "Wrong dimension 0 of output_t.");
+        NVTE_CHECK(input.shape == output_t.shape, "Input and output_t must have the same shape for columnwise non-transpose case.");
+      }
+    }
 
     NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
 
