@@ -323,6 +323,12 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
         &d->scale.dptr, sizeof(void*)));
   }
 
+  if (comm_sm_count) {
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_COMMUNICATION_SM_COUNT,
+        &comm_sm_count, sizeof comm_sm_count));
+  }
+
   NVTE_CHECK_CUBLASMP(cublasMpStreamSet(ctx->cublas_mp.get(), main_stream));
 
   size_t wrksp_size_device{};
