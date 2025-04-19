@@ -1356,6 +1356,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 if not use_flash_attn_3:
                                     rng_states[i] = fa_outputs[3]
 
+                if i != len(p2p_comm_buffers) - 1:
+                    p2p_comm_buffers[i] = None
+                kv_inputs[i % 2] = None
+
             if i > 0:
                 # wait until fwd restuls correction of last step is done
                 if i > 1:
