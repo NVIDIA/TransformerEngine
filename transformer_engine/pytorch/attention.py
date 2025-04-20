@@ -46,7 +46,6 @@ from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_p
 from transformer_engine.pytorch.dot_product_attention.context_parallel import attn_forward_func_with_cp
 
 from transformer_engine.pytorch.dot_product_attention.backends import UnfusedDotProductAttention, FusedAttention, FlashAttention
-from .cpu_offload import mark_activation_offload
 
 
 # Setup Attention Logging

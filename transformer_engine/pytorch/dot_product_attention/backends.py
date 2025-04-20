@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import torch
 import transformer_engine_torch as tex
-
+from .cpu_offload import mark_activation_offload
 from transformer_engine.pytorch.utils import SplitAlongDim, get_device_compute_capability, combine_tensors, split_tensor_along_dim
 from transformer_engine.pytorch.utils import attention_mask_func
 from transformer_engine.pytorch.tensor.quantized_tensor import (
@@ -769,13 +769,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 tensor_list = [q, k, v, out_save]
 
             qkv_layout = "sbhd_sbhd_sbhd"
-            for tensor in tensor_list:
-                if tensor is not None:
-                    set_offloading_param(tensor, "activation_offloading", True)
-
-            for tensor in aux_ctx_tensors:
-                if tensor is not None:
-                    set_offloading_param(tensor, "activation_offloading", True)
+            mark_activation_offload(*tensor_list)
+            mark_activation_offload(*aux_ctx_tensors)
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
@@ -1317,10 +1312,9 @@ class FlashAttention(torch.nn.Module):
             from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, set_offloading_param
 
             if CPUOffloadEnabled:
-                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
-                for tensor in tensor_list:
-                    if tensor is not None:
-                        set_offloading_param(tensor, "activation_offloading", True)
+                mark_activation_offload(
+                    query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
+                )
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
