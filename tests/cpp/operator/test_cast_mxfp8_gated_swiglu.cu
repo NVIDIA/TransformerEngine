@@ -39,7 +39,7 @@ void compute_ref(const IType* grad,
     float amax = 0;
     #pragma omp parallel reduction(max: amax) proc_bind(spread)
     {
-        // Buffers to cache intermediate computations 
+        // Buffers to cache intermediate computations
         std::vector<float> cache_buffer_act(tile_size_Y * tile_size_X);
         std::vector<float> cache_buffer_gate(tile_size_Y * tile_size_X);
         float thread_amax = 0.0f;
@@ -51,7 +51,7 @@ void compute_ref(const IType* grad,
             const size_t tile_offset_X = tile_X * tile_size_X;
 
             const size_t stride = cols * 2;
-            
+
             const size_t i_min = tile_offset_Y;
             const size_t i_max = std::min(rows, tile_offset_Y + tile_size_Y);
             const size_t j_min = tile_offset_X;
@@ -64,13 +64,13 @@ void compute_ref(const IType* grad,
                     float gate_elt = static_cast<float>(input[i * stride + cols + j]);
 
                     const int cached_idx = (i - i_min) * tile_size_X + (j - j_min);
-        
+
                     if constexpr (IS_DGATED) {
                         const float x = silu_elt;
                         const float s = sigmoid(x);
                         const float act_x = x * s;
                         const float dact_x = x * s * (1 - s) + s;
-        
+
                         const float grad_elt = static_cast<float>(grad[i * cols + j]);
                         const float after_dsilu = dact_x * grad_elt * gate_elt;
                         const float after_dgate = act_x * grad_elt;
@@ -99,20 +99,20 @@ void compute_ref(const IType* grad,
                     }
                     const fp8e8m0 biased_exponent_act = float_to_e8m0(block_amax_act * Quantized_Limits<OType>::max_reciprocal());
                     const float scale_reciprocal_act = exp2f_rcp(biased_exponent_act);
-                    const int scale_idx_act = i * scales_stride_rowwise + tile_X; 
+                    const int scale_idx_act = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx_act] = biased_exponent_act;
 
                     float scale_reciprocal_gate;
                     if constexpr (IS_DGATED) {
                     const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
                     scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
-                    const int scale_idx_gate = scale_idx_act + (cols + 32 - 1) / 32; 
+                    const int scale_idx_gate = scale_idx_act + (cols + 32 - 1) / 32;
                     output_scales_rowwise[scale_idx_gate] = biased_exponent_gate;
                     }
                     for (size_t j = j_min; j < j_max; ++j) {
                         const int cached_idx = (i - i_min) * tile_size_X + (j - j_min);
                         const float after_act = cache_buffer_act[cached_idx] * scale_reciprocal_act;
-                        
+
                         if constexpr (IS_DGATED) {
                             const float after_gate = cache_buffer_gate[cached_idx] * scale_reciprocal_gate;
                             output_rowwise[i * stride + j] = static_cast<OType>(after_act);
@@ -137,20 +137,20 @@ void compute_ref(const IType* grad,
                     }
                     const fp8e8m0 biased_exponent_act = float_to_e8m0(block_amax_act * Quantized_Limits<OType>::max_reciprocal());
                     const float scale_reciprocal_act = exp2f_rcp(biased_exponent_act);
-                    const int scale_idx_act = tile_Y * scales_stride_colwise + j; 
+                    const int scale_idx_act = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx_act] = biased_exponent_act;
 
                     float scale_reciprocal_gate;
                     if constexpr (IS_DGATED) {
                     const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
-                    const int scale_idx_gate = scale_idx_act + cols; 
+                    const int scale_idx_gate = scale_idx_act + cols;
                     scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
                     output_scales_colwise[scale_idx_gate] = biased_exponent_gate;
                     }
                     for (size_t i = i_min; i < i_max; ++i) {
                         const int cached_idx = (i - i_min) * tile_size_X + (j - j_min);
                         const float after_act = cache_buffer_act[cached_idx] * scale_reciprocal_act;
-                        
+
                         if constexpr (IS_DGATED) {
                             const float after_gate = cache_buffer_gate[cached_idx] * scale_reciprocal_gate;
                             output_colwise[i * stride + j] = static_cast<OType>(after_act);
