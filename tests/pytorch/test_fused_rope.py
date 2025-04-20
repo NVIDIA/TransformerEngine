@@ -47,10 +47,10 @@ def test_fused_rope(
     start_positions: bool,
 ) -> None:
     if margin == 0 and start_positions == True:
-        # This makes sure that the `start_positions` offsets being applied 
+        # This makes sure that the `start_positions` offsets being applied
         # are with the maximum length of the rope embeddings.
         pytest.skip("Skipping test with margin=0 and start_positions=True")
-    
+
     if start_positions == True and cp_size > 1:
         # Note: `start_positions` is used only during inference and cp_size > 1
         # isn't used during inference, so skipping this path
