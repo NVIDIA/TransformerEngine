@@ -12,6 +12,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.utils import (
+    SplitAlongDim,
     divide,
     get_default_init_method,
 )
@@ -25,7 +26,7 @@ from transformer_engine.pytorch.distributed import (
     get_distributed_rank,
 )
 
-from transformer_engine.pytorch.attention import DotProductAttention, _SplitAlongDim
+from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
@@ -651,7 +652,7 @@ class MultiheadAttention(torch.nn.Module):
             # not qkv_weight_interleaved:
             #  [sq, b, (np/ng + 2), ng, hn]
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = _SplitAlongDim.apply(
+            query_layer, key_layer, value_layer = SplitAlongDim.apply(
                 mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
             )
 
@@ -695,7 +696,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
 
             # mixed_kv_layer --> 2 [sk, b, ng, hn]
-            key_layer, value_layer = _SplitAlongDim.apply(
+            key_layer, value_layer = SplitAlongDim.apply(
                 mixed_kv_layer,
                 split_dim,
                 mixed_kv_layer.shape[split_dim] // 2,

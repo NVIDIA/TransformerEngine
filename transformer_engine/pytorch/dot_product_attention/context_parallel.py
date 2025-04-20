@@ -9,6 +9,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.utils import (
+    combine_tensors,
     get_cudnn_version,
     nvtx_range_pop,
     nvtx_range_push,
@@ -2188,9 +2189,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
                 if ctx.qkv_format in ["bshd", "sbhd"]:
-                    #TODO: move to utils
-                    from transformer_engine.pytorch.attention import _combine_tensors
-                    dkv_ = _combine_tensors([dk_, dv_], -2)
+                    dkv_ = combine_tensors([dk_, dv_], -2)
                 elif ctx.qkv_format == "thd":
                     dkv_ = torch.cat(
                         (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0

@@ -28,13 +28,9 @@ from transformer_engine.pytorch.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
-from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    AttnBiasType,
-    AttnMaskType,
     FusedAttnBackend,
-    QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
 )
@@ -49,9 +45,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
-from transformer_engine_torch import NVTE_Fused_Attn_Backend
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
