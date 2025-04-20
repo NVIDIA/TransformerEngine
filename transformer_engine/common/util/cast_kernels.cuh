@@ -66,7 +66,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
-  constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && NO_ACTIVATIONS;
 
   using IType2 =
       std::conditional_t<std::is_same_v<IType, float>, float2,
@@ -80,7 +79,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       return;
     }
   }
-  constexpr size_t WARPS = THREADS_PER_CHUNK / THREADS_PER_WARP;
   constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
   constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
 
@@ -102,7 +100,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
   const int scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
 
-  const int warp_id = threadIdx.x / THREADS_PER_WARP;
   const int tid_Y_rowwise = threadIdx.x / THREADS_X;
   const int tid_X_rowwise = threadIdx.x % THREADS_X;
   const int tid_Y_colwise = 0;
@@ -114,11 +111,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_offset_X_colwise = tid_X_colwise;
 
   const int row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
-  const int col_base_rowwise = block_offset_X + thread_offset_X_rowwise;
   const int row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
   const int col_base_colwise = block_offset_X + thread_offset_X_colwise;
 
-  const bool col_out_of_bounds_rowwise = (col_base_rowwise >= cols);
   const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
   const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
@@ -127,10 +122,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
   // helps resolving bank conflicts in shmem
-  // const int bank_group = tid_Y_rowwise % (THREADS_PER_WARP / THREADS_X);
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
-  const int bank_lane = thread_lane % THREADS_PER_BANK;
 
   extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
