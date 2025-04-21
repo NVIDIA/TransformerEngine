@@ -283,7 +283,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const int cp_size, const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const at::Tensor &start_positions, const NVTE_QKV_Format qkv_format,
+                               const NVTE_QKV_Format qkv_format,
                                const bool interleaved, const c10::optional<at::Tensor> cu_seqlens,
                                const int cp_size, const int cp_rank);
 

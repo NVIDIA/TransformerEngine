@@ -159,7 +159,7 @@ __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seq
 
 template <typename scalar_t>
 __global__ void fused_rope_backward_kernel(
-    const scalar_t *src, const int *cu_seqlens, const float *freqs, const int *start_positions,
+    const scalar_t *src, const int *cu_seqlens, const float *freqs,
     scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int s,
     const int h, const int d, const int d2, const int stride_s_or_t, const int stride_b,
     const int stride_h, const int stride_d, const int o_stride_s_or_t, const int o_stride_b,
@@ -191,8 +191,7 @@ __global__ void fused_rope_backward_kernel(
           cur_seqlens * cp_size - (cp_rank + 1) * cur_seqlens / 2 + s_id - cur_seqlens / 2;
     }
   } else {
-    int begin_offset = (start_positions == nullptr) ? 0 : start_positions[b_id];
-    s_id_for_freqs = s_id + begin_offset;
+    s_id_for_freqs = s_id;
   }
 
   fused_rope_block_backward(src, freqs, dst, interleaved, s_id_for_freqs, offset_block,
@@ -235,8 +234,7 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
 template <typename scalar_t>
 
 void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_seqlens,
-                                  const float *freqs, const int *start_positions,
-                                  scalar_t *input_grads, const NVTE_QKV_Format qkv_format,
+                                  const float *freqs, scalar_t *input_grads, const NVTE_QKV_Format qkv_format,
                                   const bool interleaved, const int cp_size, const int cp_rank,
                                   const int s, const int b, const int h, const int d, const int d2,
                                   const int stride_s_or_t, const int stride_b, const int stride_h,
@@ -260,7 +258,7 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   const int o_stride_d = 1;
 
   fused_rope_backward_kernel<<<blocks, threads, 0, stream>>>(
-      output_grads, cu_seqlens, freqs, start_positions, input_grads, interleaved, cp_size, cp_rank,
+      output_grads, cu_seqlens, freqs, input_grads, interleaved, cp_size, cp_rank,
       s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b,
       o_stride_h, o_stride_d);
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -284,8 +282,7 @@ void fused_rope_forward(const Tensor &input, const Tensor &cu_seqlens, const Ten
 }
 
 void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, const Tensor &freqs,
-                         const Tensor &start_positions, Tensor *input_grads,
-                         const NVTE_QKV_Format qkv_format, const bool interleaved,
+                         Tensor *input_grads, const NVTE_QKV_Format qkv_format, const bool interleaved,
                          const int cp_size, const int cp_rank, const int s, const int b,
                          const int h, const int d, const int d2, const int stride_s_or_t,
                          const int stride_b, const int stride_h, const int stride_d,
@@ -295,7 +292,6 @@ void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, c
       fused_rope_backward_launcher(reinterpret_cast<const scalar_t *>(output_grads.data.dptr),
                                    reinterpret_cast<const int *>(cu_seqlens.data.dptr),
                                    reinterpret_cast<const float *>(freqs.data.dptr),
-                                   reinterpret_cast<const int *>(start_positions.data.dptr),
                                    reinterpret_cast<scalar_t *>(input_grads->data.dptr), qkv_format,
                                    interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s_or_t,
                                    stride_b, stride_h, stride_d, stream););
@@ -320,8 +316,7 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor cu_seqlens
 }
 
 void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu_seqlens,
-                              const NVTETensor freqs, const NVTETensor start_positions,
-                              NVTETensor input_grads, const NVTE_QKV_Format qkv_format,
+                              const NVTETensor freqs, NVTETensor input_grads, const NVTE_QKV_Format qkv_format,
                               const bool interleaved, const int cp_size, const int cp_rank,
                               const int s, const int b, const int h, const int d, const int d2,
                               const int stride_s_or_t, const int stride_b, const int stride_h,
@@ -331,7 +326,6 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
   fused_rope_backward(*reinterpret_cast<const Tensor *>(output_grads),
                       *reinterpret_cast<const Tensor *>(cu_seqlens),
                       *reinterpret_cast<const Tensor *>(freqs),
-                      *reinterpret_cast<const Tensor *>(start_positions),
                       reinterpret_cast<Tensor *>(input_grads), qkv_format, interleaved, cp_size,
                       cp_rank, s, b, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, stream);
 }
