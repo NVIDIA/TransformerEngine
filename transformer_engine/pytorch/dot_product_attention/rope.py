@@ -128,12 +128,6 @@ class FusedRoPEFunc(torch.autograd.Function):
     ) -> torch.Tensor:
         """Fused RoPE forward."""
 
-        if start_positions is None:
-            # Each sequence will start from positional encoding corresponding to 0.
-            # Otherwise sequence i will start from positional encoding
-            # corresponding to start_positions[i].
-            start_positions = torch.Tensor()
-
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         assert tensor_format in (
@@ -249,8 +243,10 @@ def _apply_rotary_pos_emb_base(
     ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
     freqs = freqs[:cur_seq_len]
 
+    # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
+    # [seq, b, 1, dim] -> [b, seq, 1, dim]
     if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+        freqs = freqs.transpose(0, 1) 
 
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
@@ -308,13 +304,15 @@ def apply_rotary_pos_emb(
     Support matrix:
     Fused/Unfused:
         Training:
-            qkv_formats:            "thd", "bshd"/"sbhd"
+            qkv_formats:            "thd", "bshd", "sbhd"
             context parallel:       yes
             start_positions:        no
+            interleaving:           yes
         Inference:
-            qkv_formats:            "thd", "bshd"/"sbhd"
+            qkv_formats:            "thd", "bshd", "sbhd"
             context parallelism:    no
             start_positions:        yes
+            interleaving:           yes
 
     Parameters
     ----------

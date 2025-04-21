@@ -7,8 +7,8 @@
 #include "extensions.h"
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const at::Tensor &start_positions, const NVTE_QKV_Format qkv_format,
-                              const bool interleaved, const c10::optional<at::Tensor> cu_seqlens,
+                              const std::optional<at::Tensor> start_positions, const NVTE_QKV_Format qkv_format,
+                              const bool interleaved, const std::optional<at::Tensor> cu_seqlens,
                               const int cp_size, const int cp_rank) {
   using namespace transformer_engine::pytorch;
 
@@ -25,7 +25,11 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   auto input_cu = makeTransformerEngineTensor(input);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto output_cu = makeTransformerEngineTensor(output);
-  auto start_positions_cu = makeTransformerEngineTensor(start_positions);
+
+  auto start_positions_cu = transformer_engine::TensorWrapper();  // empty cu_seqlens tensor
+  if (start_positions) {
+    start_positions_cu = makeTransformerEngineTensor(start_positions.value());
+  } 
 
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     TORCH_CHECK(input.dim() == 3, "expected 3D tensor");
@@ -98,7 +102,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
                                const NVTE_QKV_Format qkv_format, const bool interleaved, 
-                               const c10::optional<at::Tensor> cu_seqlens,
+                               const std::optional<at::Tensor> cu_seqlens,
                                const int cp_size, const int cp_rank) {
   using namespace transformer_engine::pytorch;
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");

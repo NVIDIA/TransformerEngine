@@ -232,7 +232,6 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
 }
 
 template <typename scalar_t>
-
 void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_seqlens,
                                   const float *freqs, scalar_t *input_grads, const NVTE_QKV_Format qkv_format,
                                   const bool interleaved, const int cp_size, const int cp_rank,
