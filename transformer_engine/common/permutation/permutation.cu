@@ -370,12 +370,12 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
                               num_cols, stream););
 }
 
-void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t &temp_storage_bytes,
-                                  NVTETensor indices, NVTETensor sorted_indices, NVTETensor row_id,
-                                  NVTETensor sorted_row_id, int64_t max_expanded_token_num) {
+void nvte_device_radix_sort_pairs(NVTETensor temp_storage, size_t *temp_storage_bytes,
+                                  NVTETensor keys_in, NVTETensor keys_out, NVTETensor values_in,
+                                  NVTETensor values_out, size_t num_items) {
   NVTE_API_CALL(nvte_device_radix_sort_pairs);
   cub::DeviceRadixSort::SortPairs(
-      temp_storage, temp_storage_bytes, reinterpret_cast<int *>(indices),
-      reinterpret_cast<int *>(sorted_indices), reinterpret_cast<int *>(row_id),
-      reinterpret_cast<int *>(sorted_row_id), max_expanded_token_num);
+      temp_storage, *temp_storage_bytes, reinterpret_cast<int *>(keys_in),
+      reinterpret_cast<int *>(keys_out), reinterpret_cast<int *>(values_in),
+      reinterpret_cast<int *>(values_out), num_items);
 }
