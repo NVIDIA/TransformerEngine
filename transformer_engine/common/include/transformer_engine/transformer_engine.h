@@ -332,6 +332,12 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
  */
 void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
 
+/*! \brief Check if non-TN FP8 Gemm is supported.
+ *
+ *  \return A flag which indicates whether non-TN FP8 Gemm is supported or not.
+ */
+int nvte_is_non_tn_fp8_gemm_supported();
+
 #ifdef __cplusplus
 }  // extern "C"
 
