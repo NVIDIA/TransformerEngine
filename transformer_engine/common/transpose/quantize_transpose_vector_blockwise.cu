@@ -129,13 +129,13 @@ Step 3 (if columnwise transpose is False): Skip Transpose, cast and store to out
     * so each thread will do warp shuffle 16 times to get the amax of each column
     * 16 elements are quantized and write to output_t at a time, for a total of 4 times
 +------16 elements-------+------16 elements-------+-----80 elements-----+------16 elements------+
-|           T0          |                       |                       |                       | 
-|           T1          |                       |                       |                       | 
-|           T2          |                       |                       |                       | 
-|           T3          |                       |                       |                       | 
-|           T4          |                       |                       |                       | 
-|           T5          |                       |                       |                       | 
-|           T6          |                       |                       |                       | 
+|           T0          |                       |                       |                       |
+|           T1          |                       |                       |                       |
+|           T2          |                       |                       |                       |
+|           T3          |                       |                       |                       |
+|           T4          |                       |                       |                       |
+|           T5          |                       |                       |                       |
+|           T6          |                       |                       |                       |
 |           T7          |                       |                       |                       |
 |           ...         |                       |                       |                       |
 |           T31         |                       |                       |                       |
@@ -421,17 +421,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     constexpr int num_smem_reads = kNVecOut / kNVecSMem;
     // c_stride will not be used here because we only have one iteration
     // constexpr int c_stride = thr_tile_col * kNumWarps / kNVecSMem;
-    constexpr int num_iterations = kTileDim / (kNumWarps * thr_tile_col); // should be only one iteration
-    static_assert(num_iterations == 1, "num_iterations should be 1 for columnwise non-transpose case");
+    constexpr int num_iterations =
+        kTileDim / (kNumWarps * thr_tile_col);  // should be only one iteration
+    static_assert(num_iterations == 1,
+                  "num_iterations should be 1 for columnwise non-transpose case");
     const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
     const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * thr_tile_row;    // Row in shared memory
-    int c_s = warp_idx * num_smem_reads;        // Column in shared memory
-    size_t r_g =
-        static_cast<size_t>(blockIdx.y) * kTileDim + r_s;     // Row in global memory
-    const size_t c_g = static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;  // Column in global memory
-    const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(thr_tile_col), row_length - c_g)
-                                          : 0;          // For not aligned case
+    const int r_s = thr_idx_in_warp * thr_tile_row;                 // Row in shared memory
+    int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
+    const size_t c_g =
+        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;  // Column in global memory
+    const size_t num_ele = c_g < row_length
+                               ? min(static_cast<size_t>(thr_tile_col), row_length - c_g)
+                               : 0;  // For not aligned case
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
       RegVec reg_vec[thr_tile_row];
@@ -483,12 +486,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
       // Step 3.6: Quantize
       for (int row_idx = 0; row_idx < thr_tile_row; ++row_idx) {
-        OType* output_g = &output_t[(r_g + row_idx) * row_length + c_g];  // Output address in global memory
+        OType* output_g =
+            &output_t[(r_g + row_idx) * row_length + c_g];  // Output address in global memory
         OVec output_vec;
-  #pragma unroll
+#pragma unroll
         for (int i = 0; i < thr_tile_col; ++i) {
-          output_vec.data.elt[i] =
-              static_cast<OType>(static_cast<CType>(reg_vec[row_idx].data.elt[i]) * thr_scale.data.elt[i]);
+          output_vec.data.elt[i] = static_cast<OType>(
+              static_cast<CType>(reg_vec[row_idx].data.elt[i]) * thr_scale.data.elt[i]);
         }
         // Step 3.7: Store output_t
         if constexpr (kAligned) {
@@ -561,7 +565,9 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
         NVTE_CHECK(columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE,
                    "Unexpected columnwise option enum value");
         NVTE_CHECK(output_t.shape[0] == input.shape[0], "Wrong dimension 0 of output_t.");
-        NVTE_CHECK(input.shape == output_t.shape, "Input and output_t must have the same shape for columnwise non-transpose case.");
+        NVTE_CHECK(
+            input.shape == output_t.shape,
+            "Input and output_t must have the same shape for columnwise non-transpose case.");
       }
     }
 

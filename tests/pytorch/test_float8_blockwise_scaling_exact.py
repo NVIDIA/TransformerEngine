@@ -173,7 +173,7 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
         qresult_ref.scale_t,
     )
 
-    # TODO: this is a workaround now to pass test, 
+    # TODO: this is a workaround now to pass test,
     # the kernel will automatically transpose the scale shapes
     # so we need to do the same here to match the reference
     sx_ref = sx_ref.transpose(-1, -2).contiguous()
@@ -194,10 +194,21 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
     torch.testing.assert_close(sx_t, sx_t_ref, atol=0.0, rtol=0.0)
 
     # check that the C++ and Python allocators are equivalent
-    torch.testing.assert_close(x_fp8_sut._rowwise_data, x_fp8_sut_cpp_alloc._rowwise_data, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_sut._rowwise_scale_inv, x_fp8_sut_cpp_alloc._rowwise_scale_inv, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_sut._columnwise_data, x_fp8_sut_cpp_alloc._columnwise_data, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_sut._columnwise_scale_inv, x_fp8_sut_cpp_alloc._columnwise_scale_inv, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        x_fp8_sut._rowwise_data, x_fp8_sut_cpp_alloc._rowwise_data, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_sut._rowwise_scale_inv, x_fp8_sut_cpp_alloc._rowwise_scale_inv, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_sut._columnwise_data, x_fp8_sut_cpp_alloc._columnwise_data, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_sut._columnwise_scale_inv,
+        x_fp8_sut_cpp_alloc._columnwise_scale_inv,
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def check_quantization_block_tiling_versus_reference(

@@ -255,10 +255,10 @@ struct QuantizationConfig {
   bool fp8_columnwise_transpose = true;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),       // force_pow_2_scales
-      sizeof(float),      // amax_epsilon
-      sizeof(NVTETensor), // noop_tensor,
-      sizeof(bool)        // fp8_columnwise_transpose
+      sizeof(bool),        // force_pow_2_scales
+      sizeof(float),       // amax_epsilon
+      sizeof(NVTETensor),  // noop_tensor,
+      sizeof(bool)         // fp8_columnwise_transpose
   };
 };
 
