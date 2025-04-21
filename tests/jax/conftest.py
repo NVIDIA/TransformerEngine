@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 """conftest for tests/jax"""
 import os
+
 import jax
 import pytest
-
 
 import transformer_engine.jax
 from transformer_engine_jax import get_device_compute_capability

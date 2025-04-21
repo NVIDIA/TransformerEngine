@@ -9,23 +9,23 @@ in JAX, including support for different scaling modes and datatypes.
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import Optional, Tuple, Dict, Union
+from typing import Dict, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
+from transformer_engine.common import recipe
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine_jax import (
+    DType,
+    get_cublasLt_version,
     get_cuda_version,
     get_device_compute_capability,
 )
-from transformer_engine.common import recipe
-from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
-from .scaling_modes import ScalingMode
 from .. import cpp_extensions as tex
+from .scaling_modes import ScalingMode
 
 __all__ = [
     "QuantizeConfig",

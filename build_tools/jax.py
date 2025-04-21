@@ -5,11 +5,11 @@
 """JAX related extensions."""
 import os
 from pathlib import Path
+from typing import List
 
 import setuptools
 
-from .utils import cuda_path, all_files_in_dir
-from typing import List
+from .utils import all_files_in_dir, cuda_path
 
 
 def xla_path() -> str:

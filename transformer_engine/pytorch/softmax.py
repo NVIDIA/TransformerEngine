@@ -4,11 +4,12 @@
 
 """Fused scaled masked softmax functions"""
 import os
-from typing import Callable, Tuple, Union, Optional
+from typing import Callable, Optional, Tuple, Union
+
 import torch
 from torch import nn
-import transformer_engine_torch as tex
 
+import transformer_engine_torch as tex
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128

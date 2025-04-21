@@ -5,7 +5,7 @@
 import pytest
 
 from transformer_engine.jax.flax import extend_logical_axis_rules
-from transformer_engine.jax.sharding import global_shard_guard, MeshResource
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 
 LOGICAL_RULES = [
     [(("a1", None), ("a2", "ma2")), False],

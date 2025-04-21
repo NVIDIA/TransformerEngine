@@ -4,30 +4,37 @@
 """JAX/TE custom ops for quantization"""
 import operator
 from functools import reduce
-from typing import Tuple, Optional
-from packaging import version
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.sharding import PartitionSpec
+from packaging import version
 
 import transformer_engine_jax
 
+from ..quantize import (
+    DelayedScaleQuantizer,
+    QuantizeLayout,
+    Quantizer,
+    ScaledTensor,
+    ScaledTensor2x,
+    ScaledTensorFactory,
+    ScalingMode,
+)
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from .base import BasePrimitive, register_primitive
 from .misc import (
-    get_padded_spec,
+    NamedSharding,
     check_valid_batch_dims,
-    te_dtype_to_jax_dtype,
+    get_padded_spec,
     jax_dtype_to_te_dtype,
     multidim_transpose,
     should_apply_1x_fused_dbias_war_for_arch_l_100,
-    NamedSharding,
+    te_dtype_to_jax_dtype,
 )
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor2x, ScaledTensor, ScaledTensorFactory
-from ..quantize import Quantizer, QuantizeLayout, DelayedScaleQuantizer, ScalingMode
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports

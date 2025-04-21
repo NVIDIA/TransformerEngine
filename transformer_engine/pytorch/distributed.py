@@ -5,31 +5,31 @@
 """Methods needed for distributed training (DP/TP)."""
 from __future__ import annotations
 
-from collections.abc import Iterable
-from contextlib import contextmanager, AbstractContextManager, ContextDecorator
-from functools import lru_cache
 import math
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
+from collections.abc import Iterable
+from contextlib import AbstractContextManager, ContextDecorator, contextmanager
+from functools import lru_cache
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.cuda import _lazy_call, _lazy_init
-from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
+from torch.utils.checkpoint import detach_variable, noop_context_fn
 
-from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data, needs_quantized_gemm
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
-from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
-from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from .tensor.quantized_tensor import QuantizedTensor, Quantizer
+from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from .tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer, Float8Tensor
+from .tensor.mxfp8_tensor import MXFP8Quantizer
+from .tensor.quantized_tensor import QuantizedTensor, Quantizer
+from .utils import needs_quantized_gemm, non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data
 
 try:
     import torch.distributed._symmetric_memory as symm_mem
@@ -559,9 +559,9 @@ def has_te_modules(network):
     """
     Check if there are any Transformer Engine modules in the network.
     """
+    from .attention import DotProductAttention, MultiheadAttention, UnfusedDotProductAttention
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [
@@ -1472,9 +1472,9 @@ def _is_te_module(module):
     Check if given module is a Transformer Engine module that requires the TE checkpoint
     implementation for activation recompute.
     """
+    from .attention import DotProductAttention, MultiheadAttention, UnfusedDotProductAttention
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [

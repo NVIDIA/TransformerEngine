@@ -13,8 +13,8 @@ The implementation supports various normalization types, activation functions,
 quantization, and distributed training through sharding constraints.
 """
 
-from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
+from typing import Callable, List, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -22,7 +22,7 @@ from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
-from .quantize import with_sharding_constraint_by_logical_axes, QuantizerSet, noop_quantizer_set
+from .quantize import QuantizerSet, noop_quantizer_set, with_sharding_constraint_by_logical_axes
 from .sharding import get_non_contracting_logical_axes
 
 

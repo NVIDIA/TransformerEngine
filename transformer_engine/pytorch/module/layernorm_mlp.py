@@ -3,82 +3,76 @@
 # See LICENSE for license information.
 
 """LayerNormMLP API"""
+import functools
 import os
 import warnings
-from typing import Callable, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
-import functools
+from typing import Callable, Optional, Tuple, Union
 
 import torch
-from torch.nn.parameter import Parameter
 from torch.nn import init
+from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
-
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-from .base import (
-    get_workspace,
-    _ub_communicators,
-    get_ub,
-    TransformerEngineBaseModule,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
+
+from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.utils import any_feature_enabled
+from ..constants import dist_group_type
+from ..cpp_extensions import general_gemm
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..distributed import (
+    _fsdp_scatter_tensors,
+    allreduce,
+    gather_along_first_dim,
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    reduce_scatter_along_first_dim,
+    set_tensor_model_parallel_attributes,
+    symmetric_all_reduce,
+    use_reentrant_activation_recompute,
 )
 from ..fp8 import FP8GlobalStateManager
+from ..graph import is_graph_capturing
 from ..jit import (
-    bias_gelu_fused,
     bgrad_dgelu_fused,
+    bias_gelu_fused,
+    no_torch_dynamo,
     set_jit_fusion_options,
     warmup_jit_bias_gelu_all_dtypes,
 )
-from ..utils import (
-    divide,
-    get_default_init_method,
-    init_method_constant,
-    cast_if_needed,
-    assert_dim_for_fp8_exec,
-    clear_tensor_data,
-    requires_grad,
-    non_tn_fp8_gemm_supported,
-    needs_quantized_gemm,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    symmetric_all_reduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    use_reentrant_activation_recompute,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-)
-from ..constants import dist_group_type
-from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
-    Float8Quantizer,
-    Float8Tensor,
-)
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer, Float8Tensor
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
-from ..cpp_extensions import (
-    general_gemm,
+from ..utils import (
+    assert_dim_for_fp8_exec,
+    cast_if_needed,
+    clear_tensor_data,
+    divide,
+    get_default_init_method,
+    init_method_constant,
+    needs_quantized_gemm,
+    non_tn_fp8_gemm_supported,
+    requires_grad,
 )
-from ...debug.pytorch.utils import any_feature_enabled
-from ...debug.pytorch.debug_state import TEDebugState
+from ._common import WeightGradStore, _fix_gathered_fp8_transpose, apply_normalization
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    _ub_communicators,
+    get_ub,
+    get_workspace,
+)
 
 __all__ = ["LayerNormMLP"]
 

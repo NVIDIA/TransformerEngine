@@ -5,17 +5,13 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    FusibleOperation,
-    OperationContext,
-)
 from transformer_engine.pytorch.ops.fused import (
     fuse_backward_linear_add,
     fuse_forward_linear_bias_activation,
@@ -23,6 +19,7 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_userbuffers_backward_linear,
     fuse_userbuffers_forward_linear,
 )
+from transformer_engine.pytorch.ops.op import BasicOperation, FusibleOperation, OperationContext
 
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
