@@ -80,7 +80,13 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  NVTE_INVALID_SCALING
+  /*! Tensor is split into NxN quantization tiles or 1xN quantization tiles,
+    which each yield a scale. The block_scaling_dim property of the quantizer
+    selects the granularity.
+   */
+  NVTE_BLOCK_SCALING_1D = 2,
+  NVTE_BLOCK_SCALING_2D = 3,
+  NVTE_INVALID_SCALING = 100
 };
 
 /*! \brief TE Tensor type
@@ -280,6 +286,12 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigForcePow2Scales = 0,
   /*! Small value to add to amax for numerical stability */
   kNVTEQuantizationConfigAmaxEpsilon = 1,
+  /*! Noop tensor (containing a scalar).
+   If the scalar element value = 1, quantization kernel will early exit.
+   This is a tensor because the flag must be on GPU in order to enable
+   conditional early even when captured in a static CUDA graph.
+  */
+  kNVTEQuantizationConfigNoopTensor = 2,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -320,6 +332,12 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
  */
 void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
 
+/*! \brief Check if non-TN FP8 Gemm is supported.
+ *
+ *  \return A flag which indicates whether non-TN FP8 Gemm is supported or not.
+ */
+int nvte_is_non_tn_fp8_gemm_supported();
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -345,6 +363,13 @@ enum class DType {
   kFloat8E8M0 = 8,
   kNumTypes
 };
+
+/*! \brief Check if TE datatype is FP8
+ *
+ * Return true if TE datatype is FP8
+ *  \param[in] DType      TE Datatype of interest
+ */
+bool is_fp8_dtype(const DType t);
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -709,6 +734,12 @@ class QuantizationConfigWrapper {
   void set_amax_epsilon(float amax_epsilon) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
                                            &amax_epsilon, sizeof(float));
+  }
+
+  /*! \brief Set noop tensor pointer */
+  void set_noop_tensor(NVTETensor noop_tensor) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
+                                           sizeof(NVTETensor));
   }
 
  private:

@@ -27,12 +27,14 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        dtype = torch_to_transformer_engine_dtype[dtype]
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
+            if tensor._data.numel() == 0:
+                return torch.empty_like(tensor._data, dtype=dtype)
             # Cast from FP8
-            return tex.dequantize(tensor, dtype)
+            return tex.dequantize(tensor, te_dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
@@ -134,3 +136,11 @@ class Float8TensorBase:
             f"data={self.dequantize()}"
             ")"
         )
+
+    def _create_transpose(self):
+        """Update FP8 transpose cache"""
+        data = self._data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
+        self._transpose_invalid = False

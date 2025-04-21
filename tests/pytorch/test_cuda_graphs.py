@@ -27,6 +27,9 @@ from transformer_engine.common import recipe
 
 # Check if FP8 is supported.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
@@ -54,6 +57,8 @@ model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
 fp8_recipes = [
     recipe.DelayedScaling(),
     recipe.MXFP8BlockScaling(),
+    recipe.Float8CurrentScaling(),
+    recipe.Float8BlockScaling(),
 ]
 
 # Supported data types
@@ -315,9 +320,13 @@ def test_make_graphed_callables(
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
+    if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
     if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
+    if fp8_recipe.float8_block_scaling() and module == "linear_op":
+        pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
     kwargs = dict(

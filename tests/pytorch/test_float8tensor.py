@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 import io
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
 import torch
@@ -18,7 +18,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
-from transformer_engine.pytorch.utils import non_tn_fp8_gemm_supported
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
@@ -157,6 +157,32 @@ class TestFloat8Tensor:
     @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
     def test_quantize_dequantize_dims(self, dims: DimsType) -> None:
         self._test_quantize_dequantize(dims=dims)
+
+    @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("noop", [True, False])
+    def test_quantize_dequantize_noop(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, noop: bool
+    ) -> None:
+        noop_tensor = torch.zeros(1, dtype=torch.float32, device="cuda")
+        if noop:
+            noop_tensor = torch.ones(1, dtype=torch.float32, device="cuda")
+        dims = 23
+        scale: float = 3.5
+
+        # Initialize random data
+        x_ref = 2 * torch.rand(_to_list(dims), dtype=dtype, device="cpu") - 1
+
+        # Cast to FP8 and back
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
+        # if noop, then when we input a different tensor, output should still be x_fp8_orig
+        x_ref_noop_test = 2 * x_ref.cuda()
+        x_fp8_orig = x_fp8.clone()
+        x_fp8.quantize_(x_ref_noop_test, noop_flag=noop_tensor)
+        if noop_tensor.item() == 1.0:
+            torch.testing.assert_close(x_fp8, x_fp8_orig, atol=0, rtol=0)
+        else:
+            torch.testing.assert_close(x_fp8, x_ref_noop_test, **_tols[fp8_dtype])
 
     def test_basic_ops(
         self,
@@ -374,7 +400,7 @@ class TestCurrentScalingFloat8Tensor:
         """Check numerical error when casting to FP8"""
 
         # Skip invalid configurations
-        if non_tn_fp8_gemm_supported() and return_transpose:
+        if is_non_tn_fp8_gemm_supported() and return_transpose:
             pytest.skip("FP8 transpose is neither needed nor supported on current system")
 
         # Initialize random high precision data

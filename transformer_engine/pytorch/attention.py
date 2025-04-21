@@ -19,6 +19,7 @@ from packaging.version import Version as PkgVersion
 import torch
 
 import transformer_engine_torch as tex
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
@@ -80,6 +81,7 @@ import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
+from .cpu_offload import mark_activation_offload
 
 
 # Setup Attention Logging
@@ -616,7 +618,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
@@ -1359,16 +1361,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
-                if use_fused_attention:
-                    # [b, np, sq, 1] -> [b, np, sq] or
-                    # [t, np, 1] -> [t, np]
-                    softmax_lse_per_step[i - 1].squeeze_(-1)
-                    if softmax_lse_in_packed_format:
-                        softmax_lse_per_step[i - 1] = (
-                            softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
-                        )
-
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
+                    if use_fused_attention:
+                        # [b, np, sq, 1] -> [b, np, sq] or
+                        # [t, np, 1] -> [t, np]
+                        softmax_lse_per_step[i - 1].squeeze_(-1)
+                        if softmax_lse_in_packed_format:
+                            softmax_lse_per_step[i - 1] = (
+                                softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
+                            )
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
@@ -1565,7 +1566,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
             restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
@@ -4322,10 +4323,9 @@ class FlashAttention(torch.nn.Module):
             from .cpu_offload import CPUOffloadEnabled
 
             if CPUOffloadEnabled:
-                tensor_list = [query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv]
-                for tensor in tensor_list:
-                    if tensor is not None:
-                        tensor.activation_offloading = True
+                mark_activation_offload(
+                    query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
+                )
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
@@ -4727,12 +4727,9 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 tensor_list = [q, k, v, out_save]
 
-            tensor_list.extend(aux_ctx_tensors)
-
             qkv_layout = "sbhd_sbhd_sbhd"
-            for tensor in tensor_list:
-                if tensor is not None:
-                    tensor.activation_offloading = True
+            mark_activation_offload(*tensor_list)
+            mark_activation_offload(*aux_ctx_tensors)
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
@@ -5130,6 +5127,16 @@ class FusedAttention(torch.nn.Module):
 
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
+
+        # cuDNN can work with 0-length sequences in the batch for both bshd/sbhd and thd formats
+        # however, for bshd/sbhd, q/k/v tensors need to have the same batch size as indicated by
+        # cu_seqlens, whereas thd does not have this requirement
+        # e.g. if q_format = bshd, and q.shape = [3, 1, 16, 64], we should have k.shape[0] =
+        # v.shape[0] = q.shape[0], and cu_seqlens_q.shape = cu_seqlens_kv.shape = [4]
+        if q_format in ["bshd", "sbhd"] or kv_format in ["bshd", "sbhd"]:
+            batch_size = query_layer.shape[0] if q_format == "bshd" else query_layer.shape[1]
+            cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+            cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
 
         page_table = None
         if inference_params is None:
@@ -6214,7 +6221,11 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
-                raise ValueError("No dot product attention support for the provided inputs!")
+                raise ValueError(
+                    "No dot product attention backend is available for the provided inputs. Please"
+                    " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
+                    " disabling all backends."
+                )
 
             # run attention
             if use_flash_attention:
@@ -6467,6 +6478,8 @@ class MultiheadAttention(torch.nn.Module):
             equal length. Please note that these formats do not reflect how
             tensors `query_layer`, `key_layer`, `value_layer` are laid out in memory.
             For that, please use `get_qkv_layout` to gain the layout information.
+    name: str, default = `None`
+        name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
@@ -6545,6 +6558,7 @@ class MultiheadAttention(torch.nn.Module):
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         qkv_format: str = "sbhd",
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -6596,6 +6610,8 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_q = self.hidden_size_per_attention_head * num_attention_heads
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
+        self.name = name
+
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
             "tp_group": tp_group,
@@ -6636,6 +6652,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
+                    name=name + ".layernorm_linear_qkv" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             else:
@@ -6647,6 +6664,7 @@ class MultiheadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
+                    name=name + ".linear_qkv" if name is not None else None,
                     **common_gemm_kwargs,
                 )
         elif self.attention_type == "cross":
@@ -6668,6 +6686,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
+                    name=name + ".layernorm_linear_q" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             else:
@@ -6678,6 +6697,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
+                    name=name + ".linear_q" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             self.key_value = Linear(
@@ -6688,6 +6708,7 @@ class MultiheadAttention(torch.nn.Module):
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key", "value") if not fuse_qkv_params else None,
+                name=name + ".linear_kv" if name is not None else None,
                 **common_gemm_kwargs,
             )
 
@@ -6717,6 +6738,7 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
+            name=name + ".proj" if name is not None else None,
             **common_gemm_kwargs,
         )
 
@@ -6906,6 +6928,9 @@ class MultiheadAttention(torch.nn.Module):
         assert (
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
+
+        if TEDebugState.debug_enabled:
+            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-value cache for inference
