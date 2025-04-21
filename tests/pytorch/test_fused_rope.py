@@ -209,7 +209,7 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         ).to(dtype)
         loss_unfused = loss_func(output_unfused)
-        
+
         if not isinstance(start_positions, torch.Tensor):
             loss_unfused.backward()
             grad_unfused = t.grad.detach().clone()
@@ -228,14 +228,14 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         )
         loss_fused = loss_func(output_fused)
-        
+
         if not isinstance(start_positions, torch.Tensor):
             loss_fused.backward()
             grad_fused = t.grad.detach().clone()
         t.grad = None
 
         torch.testing.assert_close(output_fused, output_unfused)
-        
+
         if not isinstance(start_positions, torch.Tensor):
             torch.testing.assert_close(grad_fused, grad_unfused)
 

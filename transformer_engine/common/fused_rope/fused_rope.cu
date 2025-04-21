@@ -159,11 +159,11 @@ __global__ void fused_rope_forward_kernel(const scalar_t *src, const int *cu_seq
 
 template <typename scalar_t>
 __global__ void fused_rope_backward_kernel(
-    const scalar_t *src, const int *cu_seqlens, const float *freqs,
-    scalar_t *dst, const bool interleaved, const int cp_size, const int cp_rank, const int s,
-    const int h, const int d, const int d2, const int stride_s_or_t, const int stride_b,
-    const int stride_h, const int stride_d, const int o_stride_s_or_t, const int o_stride_b,
-    const int o_stride_h, const int o_stride_d) {
+    const scalar_t *src, const int *cu_seqlens, const float *freqs, scalar_t *dst,
+    const bool interleaved, const int cp_size, const int cp_rank, const int s, const int h,
+    const int d, const int d2, const int stride_s_or_t, const int stride_b, const int stride_h,
+    const int stride_d, const int o_stride_s_or_t, const int o_stride_b, const int o_stride_h,
+    const int o_stride_d) {
   int s_id = blockIdx.x, b_id = blockIdx.y;
   int offset_block, offset_block_dst;
   int cur_seqlens;
@@ -234,11 +234,12 @@ void fused_rope_forward_launcher(const scalar_t *input, const int *cu_seqlens, c
 template <typename scalar_t>
 
 void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_seqlens,
-                                  const float *freqs, scalar_t *input_grads, const NVTE_QKV_Format qkv_format,
-                                  const bool interleaved, const int cp_size, const int cp_rank,
-                                  const int s, const int b, const int h, const int d, const int d2,
-                                  const int stride_s_or_t, const int stride_b, const int stride_h,
-                                  const int stride_d, cudaStream_t stream) {
+                                  const float *freqs, scalar_t *input_grads,
+                                  const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                  const int cp_size, const int cp_rank, const int s, const int b,
+                                  const int h, const int d, const int d2, const int stride_s_or_t,
+                                  const int stride_b, const int stride_h, const int stride_d,
+                                  cudaStream_t stream) {
   int warps_per_block = h < 16 ? 4 : 8;
   dim3 blocks(s, b);
   dim3 threads(THREADS_PER_WARP, warps_per_block);
@@ -258,9 +259,9 @@ void fused_rope_backward_launcher(const scalar_t *output_grads, const int *cu_se
   const int o_stride_d = 1;
 
   fused_rope_backward_kernel<<<blocks, threads, 0, stream>>>(
-      output_grads, cu_seqlens, freqs, input_grads, interleaved, cp_size, cp_rank,
-      s, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b,
-      o_stride_h, o_stride_d);
+      output_grads, cu_seqlens, freqs, input_grads, interleaved, cp_size, cp_rank, s, h, d, d2,
+      stride_s_or_t, stride_b, stride_h, stride_d, o_stride_s_or_t, o_stride_b, o_stride_h,
+      o_stride_d);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -282,11 +283,11 @@ void fused_rope_forward(const Tensor &input, const Tensor &cu_seqlens, const Ten
 }
 
 void fused_rope_backward(const Tensor &output_grads, const Tensor &cu_seqlens, const Tensor &freqs,
-                         Tensor *input_grads, const NVTE_QKV_Format qkv_format, const bool interleaved,
-                         const int cp_size, const int cp_rank, const int s, const int b,
-                         const int h, const int d, const int d2, const int stride_s_or_t,
-                         const int stride_b, const int stride_h, const int stride_d,
-                         cudaStream_t stream) {
+                         Tensor *input_grads, const NVTE_QKV_Format qkv_format,
+                         const bool interleaved, const int cp_size, const int cp_rank, const int s,
+                         const int b, const int h, const int d, const int d2,
+                         const int stride_s_or_t, const int stride_b, const int stride_h,
+                         const int stride_d, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       output_grads.data.dtype, scalar_t,
       fused_rope_backward_launcher(reinterpret_cast<const scalar_t *>(output_grads.data.dptr),
@@ -316,11 +317,12 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor cu_seqlens
 }
 
 void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu_seqlens,
-                              const NVTETensor freqs, NVTETensor input_grads, const NVTE_QKV_Format qkv_format,
-                              const bool interleaved, const int cp_size, const int cp_rank,
-                              const int s, const int b, const int h, const int d, const int d2,
-                              const int stride_s_or_t, const int stride_b, const int stride_h,
-                              const int stride_d, cudaStream_t stream) {
+                              const NVTETensor freqs, NVTETensor input_grads,
+                              const NVTE_QKV_Format qkv_format, const bool interleaved,
+                              const int cp_size, const int cp_rank, const int s, const int b,
+                              const int h, const int d, const int d2, const int stride_s_or_t,
+                              const int stride_b, const int stride_h, const int stride_d,
+                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_rope_backward);
   using namespace transformer_engine;
   fused_rope_backward(*reinterpret_cast<const Tensor *>(output_grads),
