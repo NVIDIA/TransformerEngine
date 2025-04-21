@@ -32,7 +32,7 @@ from ..utils import (
     init_method_constant,
     requires_grad,
     needs_quantized_gemm,
-    non_tn_fp8_gemm_supported,
+    is_non_tn_fp8_gemm_supported,
     assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
@@ -640,7 +640,7 @@ class _Linear(torch.autograd.Function):
                             inputmat_total = _fix_gathered_fp8_transpose(
                                 inputmat_total, ctx.tp_size
                             )
-                        elif not non_tn_fp8_gemm_supported():
+                        elif not is_non_tn_fp8_gemm_supported():
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.
                             inputmat_total._create_transpose()
