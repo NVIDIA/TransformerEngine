@@ -19,7 +19,11 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data, needs_quantized_gemm
+from .utils import (
+    is_non_tn_fp8_gemm_supported,
+    safely_set_viewless_tensor_data,
+    needs_quantized_gemm,
+)
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -938,7 +942,7 @@ def _all_gather_fp8(
 
     # Make sure FP8 transpose is populated if needed
     needs_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
     )
     if needs_transpose:
         if handle is not None:

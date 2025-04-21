@@ -13,8 +13,6 @@
 
 #include "transformer_engine/transformer_engine.h"
 
-bool non_tn_fp8_gemm_supported();
-
 /* Swizzle the scaling factor of the input tensor.
  *
  * The returned swizzled scaling factor tensor should be kept alive during the GEMM.
