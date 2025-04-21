@@ -431,7 +431,7 @@ _torch_dtype_to_np_typestr_dict = {
 
 def torch_dtype_to_np_typestr(dtype):
     ret = _torch_dtype_to_np_typestr_dict.get(dtype)
-    assert ret is not None, f'Unsupported dtype: {dtype}'
+    assert ret is not None, f"Unsupported dtype: {dtype}"
     return ret
 
 
@@ -493,8 +493,7 @@ class TensorWrapper:
         }
 
 
-def convert_to_torch_tensor(
-        tensor: Union[TensorWrapper, torch.Tensor]) -> torch.Tensor:
+def convert_to_torch_tensor(tensor: Union[TensorWrapper, torch.Tensor]) -> torch.Tensor:
     """
     This function is to convert the `TensorWrapper` to torch.Tensor.
     """
@@ -505,16 +504,18 @@ def convert_to_torch_tensor(
     new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
     new_ptr = new_tensor.data_ptr()
     if old_ptr != new_ptr:
-        raise RuntimeError(
-            "Data pointer mismatch after converting to torch.Tensor")
+        raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
     return new_tensor
 
 
 def make_weak_ref(x):
 
     if isinstance(x, torch.Tensor):
-        return convert_to_torch_tensor(
-            TensorWrapper(x.data_ptr(), x.dtype, x.shape)) if x.is_cuda else x
+        return (
+            convert_to_torch_tensor(TensorWrapper(x.data_ptr(), x.dtype, x.shape))
+            if x.is_cuda
+            else x
+        )
     elif isinstance(x, tuple):
         return tuple(make_weak_ref(i) for i in x)
     elif isinstance(x, list):

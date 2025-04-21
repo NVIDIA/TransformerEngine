@@ -137,12 +137,8 @@ def _make_graphed_callables(
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     if io_memory_reduction:
-        assert (
-            _order is not None
-        ), "`_order` must be provided when `io_memory_reduction` is True."
-        assert (
-            is_training
-        ), "`io_memory_reduction` is only available in training mode."
+        assert _order is not None, "`_order` must be provided when `io_memory_reduction` is True."
+        assert is_training, "`io_memory_reduction` is only available in training mode."
         assert isinstance(sample_args, list), "sample_args must be a list for io_memory_reduction."
         len_args = len(sample_args[0])
         for i in range(len(sample_args)):
@@ -150,7 +146,9 @@ def _make_graphed_callables(
                 sample_args[i]
             ), f"Arguments must have same length and shape for io_memory_reduction."
         len_kwargs = len(sample_kwargs[0])
-        assert isinstance(sample_kwargs, list), "sample_kwargs must be a list for io_memory_reduction."
+        assert isinstance(
+            sample_kwargs, list
+        ), "sample_kwargs must be a list for io_memory_reduction."
         for i in range(len(sample_kwargs)):
             assert len_kwargs == len(
                 sample_kwargs[i]
@@ -201,9 +199,7 @@ def _make_graphed_callables(
                         reuse_per_callable_fwd_idx = per_callable_fwd_idx_recorder[
                             reuse_fwd_idx * num_layers + l_no
                         ]
-                        sample_args[per_callable_fwd_idx] = sample_args[
-                            reuse_per_callable_fwd_idx
-                        ]
+                        sample_args[per_callable_fwd_idx] = sample_args[reuse_per_callable_fwd_idx]
                         sample_kwargs[per_callable_fwd_idx] = sample_kwargs[
                             reuse_per_callable_fwd_idx
                         ]
@@ -434,9 +430,15 @@ def _make_graphed_callables(
 
                     if io_memory_reduction:
                         # Weak ref the static outputs and static grad inputs.
-                        per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(static_outputs)
+                        per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
+                            static_outputs
+                        )
                         if previous_per_callable_bwd_idx is not None:
-                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = make_weak_ref(per_callable_static_grad_inputs[previous_per_callable_bwd_idx])
+                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
+                                make_weak_ref(
+                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
+                                )
+                            )
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
                         del static_outputs, static_grad_inputs, grad_inputs
 
