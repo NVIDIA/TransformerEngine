@@ -7,8 +7,9 @@ from __future__ import annotations
 import functools
 import math
 import os
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
+import numpy as np
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
@@ -413,3 +414,117 @@ def canonicalize_process_group(
     if group is None:
         return torch.distributed.distributed_c10d._get_default_group()
     return group
+
+
+_torch_dtype_to_np_typestr_dict = {
+    torch.float16: "<f2",
+    torch.float32: "<f4",
+    torch.int64: "<i8",
+    torch.int32: "<i4",
+    torch.int8: "|i1",
+    torch.float8_e4m3fn: "|i1",
+    torch.qint8: "|u1",
+    torch.bool: "|b1",
+    torch.bfloat16: "<f2",
+}
+
+
+def torch_dtype_to_np_typestr(dtype):
+    ret = _torch_dtype_to_np_typestr_dict.get(dtype)
+    assert ret is not None, f"Unsupported dtype: {dtype}"
+    return ret
+
+
+def volume(d: Sequence[int]):
+    return np.prod(d)
+
+
+class TensorWrapper:
+    """
+    A wrapper wraps raw data pointer to a tensor-like object. Could be compatibale with openai triton kernel and be converted to `torch.Tensor` with zero-copy overhead.
+    """
+
+    def __init__(
+        self,
+        data_ptr: int,
+        dtype: Union[torch.dtype, str, np.dtype],
+        shape: Sequence[int],
+    ):
+        self._data_ptr = data_ptr
+        self.dtype = dtype
+        self.shape = shape
+
+    def data_ptr(self):
+        return self._data_ptr
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def shape(self):
+        return getattr(self, "_shape", None)
+
+    @dtype.setter
+    def dtype(self, dtype: Union[torch.dtype, str, np.dtype]):
+        if isinstance(dtype, torch.dtype):
+            self._dtype = dtype
+        elif isinstance(dtype, str):
+            self._dtype = str_dtype_to_torch(dtype)
+        elif isinstance(dtype, np.dtype):
+            self._dtype = np_dtype_to_torch(dtype)
+        else:
+            raise TypeError(f"Unsupported dtype: {dtype}")
+
+    @shape.setter
+    def shape(self, shape: Sequence[int]):
+        self._shape = tuple(int(i) for i in shape)
+
+    def numel(self):
+        return volume(self.shape)
+
+    @property
+    def __cuda_array_interface__(self):
+        return {
+            "shape": self.shape,
+            "typestr": torch_dtype_to_np_typestr(self.dtype),
+            "data": (self.data_ptr() if self.numel() > 0 else 0, False),
+            "version": 3,
+        }
+
+
+def convert_to_torch_tensor(tensor: Union[TensorWrapper, torch.Tensor]) -> torch.Tensor:
+    """
+    This function is to convert the `TensorWrapper` to torch.Tensor.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return tensor
+
+    old_ptr = tensor.data_ptr()
+    new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
+    new_ptr = new_tensor.data_ptr()
+    if old_ptr != new_ptr:
+        raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
+    return new_tensor
+
+
+def make_weak_ref(x):
+
+    if isinstance(x, torch.Tensor):
+        return (
+            convert_to_torch_tensor(TensorWrapper(x.data_ptr(), x.dtype, x.shape))
+            if x.is_cuda
+            else x
+        )
+    elif isinstance(x, tuple):
+        return tuple(make_weak_ref(i) for i in x)
+    elif isinstance(x, list):
+        return [make_weak_ref(i) for i in x]
+    elif isinstance(x, dict):
+        return {k: make_weak_ref(v) for k, v in x.items()}
+    elif isinstance(x, (int, float, bool)):
+        return x
+    elif x is None:
+        return None
+    else:
+        raise TypeError(f"Invalid type {type(x)} to make weak ref")
