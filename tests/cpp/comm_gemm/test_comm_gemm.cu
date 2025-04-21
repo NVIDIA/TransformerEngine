@@ -95,7 +95,9 @@ struct TensorHolder {
 };
 
 struct Params {
-  DType dtype;
+  DType a_type;
+  DType b_type;
+  DType d_type;
   bool transa;
   bool transb;
   size_t m;
@@ -137,7 +139,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                         bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                         cudaStream_t stream) = 0;
 
-  template <typename T>
+  template <typename AType, typename BType, typename DType>
   void Run(bool transa, bool transb, size_t m, size_t n, size_t k, double tol) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -145,27 +147,29 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     std::mt19937 rng(12);
     std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-    std::vector<T> adata(m * k);
-    std::generate(adata.begin(), adata.end(), [&rng, &dist] { return static_cast<T>(dist(rng)); });
-    std::vector<T> bdata(k * n);
-    std::generate(bdata.begin(), bdata.end(), [&rng, &dist] { return static_cast<T>(dist(rng)); });
+    std::vector<AType> adata(m * k);
+    std::generate(adata.begin(), adata.end(),
+                  [&rng, &dist] { return static_cast<AType>(dist(rng)); });
+    std::vector<BType> bdata(k * n);
+    std::generate(bdata.begin(), bdata.end(),
+                  [&rng, &dist] { return static_cast<BType>(dist(rng)); });
 
-    auto ga = transa ? TensorHolder::MakeFromData<T>(adata, 0, 0, k, m, k)
-                     : TensorHolder::MakeFromData<T>(adata, 0, 0, m, k, m);
-    auto gb = transb ? TensorHolder::MakeFromData<T>(bdata, 0, 0, n, k, n)
-                     : TensorHolder::MakeFromData<T>(bdata, 0, 0, k, n, k);
-    auto gd = TensorHolder::Make<T>(m, n);
+    auto ga = transa ? TensorHolder::MakeFromData<AType>(adata, 0, 0, k, m, k)
+                     : TensorHolder::MakeFromData<AType>(adata, 0, 0, m, k, m);
+    auto gb = transb ? TensorHolder::MakeFromData<BType>(bdata, 0, 0, n, k, n)
+                     : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k);
+    auto gd = TensorHolder::Make<DType>(m, n);
 
     auto dims = DistributeTensors(m, n, k);
-    auto a = transa ? TensorHolder::MakeFromData<T>(adata, dims.a_rows_start, dims.a_cols_start,
-                                                    dims.a_rows_num, dims.a_cols_num, k)
-                    : TensorHolder::MakeFromData<T>(adata, dims.a_cols_start, dims.a_rows_start,
-                                                    dims.a_cols_num, dims.a_rows_num, m);
-    auto b = transb ? TensorHolder::MakeFromData<T>(bdata, dims.b_cols_start, dims.b_rows_start,
-                                                    dims.b_cols_num, dims.b_rows_num, n)
-                    : TensorHolder::MakeFromData<T>(bdata, dims.b_rows_start, dims.b_cols_start,
-                                                    dims.b_rows_num, dims.b_cols_num, k);
-    auto d = TensorHolder::Make<T>(dims.d_rows_num, dims.d_cols_num);
+    auto a = transa ? TensorHolder::MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
+                                                        dims.a_rows_num, dims.a_cols_num, k)
+                    : TensorHolder::MakeFromData<AType>(adata, dims.a_cols_start, dims.a_rows_start,
+                                                        dims.a_cols_num, dims.a_rows_num, m);
+    auto b = transb ? TensorHolder::MakeFromData<BType>(bdata, dims.b_cols_start, dims.b_rows_start,
+                                                        dims.b_cols_num, dims.b_rows_num, n)
+                    : TensorHolder::MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                                        dims.b_rows_num, dims.b_cols_num, k);
+    auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num);
 
     Tensor bias;
     Tensor pre_act_out;
@@ -178,10 +182,10 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
-    std::vector<T> out(dims.d_rows_num * dims.d_cols_num);
+    std::vector<DType> out(dims.d_rows_num * dims.d_cols_num);
     NVTE_CHECK_CUDA(
         cudaMemcpy(out.data(), d.t.data.dptr, out.size() * sizeof out[0], cudaMemcpyDefault));
-    std::vector<T> out_golden_global(m * n);
+    std::vector<DType> out_golden_global(m * n);
     NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.t.data.dptr,
                                out_golden_global.size() * sizeof out_golden_global[0],
                                cudaMemcpyDefault));
@@ -190,6 +194,10 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                  dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
+      // if (rand() % 100 < 3) {
+      //   std::cerr << "== at " << rank_ << ": " << i << ": " << static_cast<double>(out[i]) << " "
+      //             << static_cast<double>(out_golden[i]) << std::endl;
+      // }
       EXPECT_NEAR(static_cast<double>(out[i]), static_cast<double>(out_golden[i]), tol * k);
     }
   }
@@ -302,60 +310,89 @@ struct GemmAr : public CommGemmFixure {
 };
 
 TEST_P(AgGemm, Gemm) {
-  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
-                                        { Run<DType>(transa, transb, m, n, k, tol); });
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+      a_type, AType,
+      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
+            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
+          })})});
 }
 
 TEST_P(GemmRs, Gemm) {
-  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
-                                        { Run<DType>(transa, transb, m, n, k, tol); });
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+      a_type, AType,
+      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
+            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
+          })})});
 }
 
 TEST_P(GemmAr, Gemm) {
-  auto [dtype, transa, transb, m, n, k, tol] = GetParam();
-  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, DType,
-                                        { Run<DType>(transa, transb, m, n, k, tol); });
+  auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+      a_type, AType,
+      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
+            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
+          })})});
 }
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
-  const auto [dtype, transa, transb, m, n, k, _tol] = info.param;
+  const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
   std::ostringstream ss;
-  ss << to_string(dtype) << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x"
-     << n << "x" << k;
+  ss << to_string(a_type) << "_" << to_string(b_type) << "_" << to_string(d_type) << "_"
+     << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x" << n << "x" << k;
   return ss.str();
 }
 
-INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
-                         testing::Values(Params{DType::kFloat16, false, false, 256, 128, 64, 1e-9},
-                                         Params{DType::kFloat16, false, true, 256, 128, 64, 1e-9},
-                                         Params{DType::kFloat16, true, false, 256, 128, 64, 1e-9},
-                                         Params{DType::kBFloat16, false, false, 256, 128, 64, 1e-9},
-                                         Params{DType::kBFloat16, false, true, 256, 128, 64, 1e-9},
-                                         Params{DType::kBFloat16, true, false, 256, 128, 64, 1e-9},
-                                         Params{DType::kFloat8E4M3, true, false, 256, 128, 64,
-                                                1e-4}),
-                         &ParamSuffix);
+INSTANTIATE_TEST_SUITE_P(
+    AgGemm, AgGemm,
+    testing::Values(
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 256, 128, 64, 1e-9},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 256, 128, 64, 1e-9},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 256, 128, 64, 1e-9},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 256, 128, 64,
+               1e-9},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 256, 128, 64,
+               1e-9},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 256, 128, 64,
+               1e-9},
+        Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 256, 128,
+               64, 1e-4}),
+    &ParamSuffix);
 
-INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
-                         testing::Values(Params{DType::kFloat16, false, false, 256, 128, 64, 1e-3},
-                                         Params{DType::kFloat16, false, true, 256, 128, 64, 5e-1},
-                                         Params{DType::kFloat16, true, false, 256, 128, 64, 1e-3},
-                                         Params{DType::kBFloat16, false, false, 256, 128, 64, 5e-3},
-                                         Params{DType::kBFloat16, false, true, 256, 128, 64, 5e-1},
-                                         Params{DType::kBFloat16, true, false, 256, 128, 64, 5e-3},
-                                         Params{DType::kFloat8E4M3, true, false, 64, 128, 256,
-                                                5e-2}),
-                         &ParamSuffix);
+INSTANTIATE_TEST_SUITE_P(
+    GemmRs, GemmRs,
+    testing::Values(
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 256, 128, 64, 1e-3},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 256, 128, 64, 5e-1},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 256, 128, 64, 1e-3},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 256, 128, 64,
+               5e-3},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 256, 128, 64,
+               5e-1},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 256, 128, 64,
+               5e-3},
+        Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 64, 128,
+               256, 5e-2}),
+    &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(
     GemmAr, GemmAr,
-    testing::Values(Params{DType::kFloat16, false, false, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kFloat16, false, true, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kFloat16, true, false, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kBFloat16, false, false, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kBFloat16, false, true, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kBFloat16, true, false, 64, 64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kFloat8E4M3, true, false, 64, 64 * 4, 64 * 4, 1e-4}),
+    testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
+                           64 * 4, 64 * 4, 1e-4},
+                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false,
+                           64, 64 * 4, 64 * 4, 1e-4}),
     &ParamSuffix);
