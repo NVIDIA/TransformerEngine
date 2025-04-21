@@ -7,9 +7,11 @@ from contextlib import nullcontext
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
+import logging
+from packaging.version import Version as PkgVersion
+
 import torch
 import transformer_engine_torch as tex
-from .cpu_offload import mark_activation_offload
 from transformer_engine.pytorch.utils import SplitAlongDim, get_device_compute_capability, combine_tensors, split_tensor_along_dim
 from transformer_engine.pytorch.utils import attention_mask_func
 from transformer_engine.pytorch.tensor.quantized_tensor import (
@@ -40,7 +42,6 @@ from transformer_engine.pytorch.dot_product_attention.inference import Inference
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
-
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     """Make tensor contiguous if final stride is not 1."""
@@ -760,7 +761,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
-        from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, set_offloading_param
+        from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, mark_activation_offload
 
         if CPUOffloadEnabled:
             if ctx.fp8:
@@ -1075,6 +1076,8 @@ class FlashAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.logger = logging.getLogger("FlashAttention")
+        if attn_log._is_logging_setup is False:
+            attn_log.setup_logging()
         self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
             self.logger.addHandler(attn_log._stream_handler)
@@ -1309,7 +1312,7 @@ class FlashAttention(torch.nn.Module):
                     use_flash_attn_3=use_flash_attn_3,
                 )
         else:
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, set_offloading_param
+            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, mark_activation_offload
 
             if CPUOffloadEnabled:
                 mark_activation_offload(
@@ -1331,10 +1334,12 @@ class FlashAttention(torch.nn.Module):
                 #       |                         |     bshd/sbhd/thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
+                    from transformer_engine.pytorch.attention import flash_attn_func, flash_attn_func_v3
                     func = (
                         flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
                     )  # pylint: disable=possibly-used-before-assignment
                 else:
+                    from transformer_engine.pytorch.attention import flash_attn_varlen_func, flash_attn_varlen_func_v3, flash_attn_with_kvcache_v3
                     if not use_flash_attn_3:
                         func = flash_attn_varlen_func
                     elif inference_params is None:

@@ -63,6 +63,7 @@ class AttentionLogging:
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
     fa_logger = logging.getLogger(__name__)
+    _is_logging_setup = False
 
     @staticmethod
     def setup_logging():
@@ -77,6 +78,7 @@ class AttentionLogging:
         AttentionLogging.fa_logger.setLevel(AttentionLogging._log_level)
         if not AttentionLogging.fa_logger.hasHandlers():
             AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging._is_logging_setup = True
 
 
 @functools.lru_cache(maxsize=None)
