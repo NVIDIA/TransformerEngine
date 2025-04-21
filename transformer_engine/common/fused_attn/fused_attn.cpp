@@ -1006,3 +1006,18 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
 }
+
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+                                       cudaStream_t stream) {
+  NVTE_API_CALL(nvte_get_runtime_num_segments);
+  using namespace transformer_engine::fused_attn;
+  return GetRuntimeNumSegments(cu_seqlen, workspace, len, stream);
+}
+
+void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
+                                   size_t q_max_seqlen, size_t kv_max_seqlen,
+                                   NVTE_Fused_Attn_Backend backend, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_populate_rng_state_async);
+  using namespace transformer_engine::fused_attn;
+  PopulateRngStateAsync(rng_state_dst, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+}

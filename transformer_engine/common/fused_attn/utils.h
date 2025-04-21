@@ -150,6 +150,38 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
 
+class FusedAttnOffsetManager {
+ public:
+  static FusedAttnOffsetManager &Instance() {
+    static thread_local FusedAttnOffsetManager instance;
+    return instance;
+  }
+
+  size_t GetAndUpdateOffset(size_t increment) {
+    size_t ret = offset_;
+    offset_ += increment;
+    return ret;
+  }
+
+  FusedAttnOffsetManager(FusedAttnOffsetManager const &) = delete;
+  void operator=(FusedAttnOffsetManager const &) = delete;
+
+ private:
+  FusedAttnOffsetManager() {}
+  size_t offset_ = 0;
+};
+
+__global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,
+                                          int64_t offset);
+
+__global__ void get_runtime_num_segments_kernel(int32_t *cu_seqlen, size_t len, uint32_t *out);
+
+void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
+                           size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
+                           cudaStream_t stream);
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
+
 }  // namespace fused_attn
 }  // namespace transformer_engine
 

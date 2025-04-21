@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from functools import reduce
 from operator import mul as multiply_op
 
+import queue
 import torch
 
 from .. import cpp_extensions as tex
@@ -216,3 +217,79 @@ class _ParameterInitMeta:
         """Safeguard reference to the parameter's parent module and initialization function."""
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
+
+
+class WeightGradStore:
+    """
+    A class to manage weight gradient storage and computation in Transformer modules.
+    This class enables split backward propagation for better memory efficiency.
+    """
+
+    def __init__(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
+        """
+        Initialize the WeightGradStore.
+
+        Args:
+            delay_wgrad_compute (bool): Whether to delay weight gradient computation
+            ub_bulk_wgrad (bool): Whether to enable bulk weight gradient computation
+        """
+        if delay_wgrad_compute:
+            self.context = queue.Queue()
+            assert (
+                ub_bulk_wgrad is False
+            ), "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
+            self.enabled = delay_wgrad_compute
+        else:
+            self.context = None
+            self.enabled = False
+
+    def delay_wgrad_compute(self):
+        """
+        Get the current split backward propagation status.
+
+        Returns:
+            bool: True if split backward is enabled, False otherwise
+        """
+        return self.enabled
+
+    def enable_delay_wgrad_compute(self):
+        """Enable split backward propagation."""
+        self.enabled = True
+
+    def disable_delay_wgrad_compute(self):
+        """Disable split backward propagation."""
+        self.enabled = False
+
+    def put(self, tensor_list, func):
+        """
+        Store tensors and computation function for later execution.
+
+        Args:
+            tensor_list (list): List of tensors needed for computation
+            func (callable): Function to be executed with the tensors
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        self.context.put([tensor_list, func])
+
+    def pop(self):
+        """
+        Execute the stored computation with the stored tensors.
+        Raises an exception if the queue is empty.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        if self.context.qsize() > 0:
+            tensor_list, func = self.context.get()
+            return func(*tensor_list), tensor_list
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            raise RuntimeError(f"Pop empty queue. rank {rank}")
+        raise RuntimeError("Pop empty queue. No distributed environment detected.")
+
+    def assert_empty(self):
+        """
+        Assert that the queue is empty.
+        Used for debugging and ensuring proper cleanup.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        rank = torch.distributed.get_rank()
+        assert self.context.empty(), f"Queue is not empty. rank {rank}"

@@ -28,7 +28,7 @@ def _run_test(quantization):
     assert result.returncode == 0
 
 
-@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs"])
+@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block"])
 def test_cast_master_weights_to_fp8(quantization):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)

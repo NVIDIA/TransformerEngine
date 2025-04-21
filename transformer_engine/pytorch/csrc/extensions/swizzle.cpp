@@ -6,14 +6,16 @@
 
 #include "extensions.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util.h"
 
-void swizzle_scaling_factors(transformer_engine::TensorWrapper& input, bool rowwise) {
+std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper& input,
+                                                  bool rowwise) {
   using namespace transformer_engine::pytorch;
 
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
   } else if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
-    return;
+    return std::nullopt;
   }
 
   NVTE_CHECK(input.element_size() == 1, "8-bit input required for swizzling scaling factors.");
@@ -48,9 +50,9 @@ void swizzle_scaling_factors(transformer_engine::TensorWrapper& input, bool roww
     output_cu.set_rowwise_data(input.dptr(), DType::kFloat8E4M3, input_shape);
     output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr, DType::kFloat8E8M0, scale_inv_shape);
   } else {
-    input_cu.set_columnwise_data(input.dptr(), DType::kFloat8E4M3, input_shape);
+    input_cu.set_columnwise_data(input.columnwise_dptr(), DType::kFloat8E4M3, input_shape);
     input_cu.set_columnwise_scale_inv(scale_inv_dptr, DType::kFloat8E8M0, scale_inv_shape);
-    output_cu.set_columnwise_data(input.dptr(), DType::kFloat8E4M3, input_shape);
+    output_cu.set_columnwise_data(input.columnwise_dptr(), DType::kFloat8E4M3, input_shape);
     output_cu.set_columnwise_scale_inv(swizzled_scale_inv_dptr, DType::kFloat8E8M0,
                                        scale_inv_shape);
   }
@@ -63,6 +65,8 @@ void swizzle_scaling_factors(transformer_engine::TensorWrapper& input, bool roww
   } else {
     input.set_columnwise_scale_inv(swizzled_scale_inv_dptr, DType::kFloat8E8M0, scale_inv_shape);
   }
+
+  return swizzled_scale_inv;
 }
 
 at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv) {
