@@ -38,12 +38,10 @@ enum NVTEDType {
  *  \brief Shape of the tensor.
  */
 struct NVTEShape {
-  /*! \brief Shape data, of size ndim. */
-  const size_t *data;
+  /*! \brief Shape data, with ndim valid elements. */
+  size_t data[15];
   /*! \brief Number of dimensions. */
   size_t ndim;
-  /*! \brief Copy of data. Num dims limited to permit fixed struct size.*/
-  size_t owned_data[14];
 };
 
 /*! \struct NVTEBasicTensor
@@ -697,15 +695,10 @@ class TensorWrapper {
 
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {
-      &defaultData, 1, {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+      {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
-  NVTEShape convertShape(const NVTEShape &s) {
-    NVTEShape ret = s;
-    // Move the ownership rather than pointing to the parent shape.
-    ret.data = ret.owned_data;
-    return ret;
-  }
+  NVTEShape convertShape(const NVTEShape &s) { return s; }
 
   NVTEShape convertShape(const std::vector<size_t> &s) {
     return nvte_make_shape(s.data(), s.size());

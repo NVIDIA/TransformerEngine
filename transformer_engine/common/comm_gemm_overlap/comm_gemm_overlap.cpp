@@ -564,14 +564,17 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
   if (_rank == 0) printf("!!! [UBP2P] Register UBuf %d\n", _ub_reg);
-  _ubuf = TensorWrapper(buffer_ptr, {buffer_shape[0] / tp_size * _num_ubuf_chunks, buffer_shape[1]},
-                        buffer_dtype);
+  _ubuf = TensorWrapper(
+      buffer_ptr,
+      std::vector<size_t>{buffer_shape[0] / tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      buffer_dtype);
 
   // Create tensor chunks for easy management
   char *ubuf_byte_ptr = reinterpret_cast<char *>(buffer_ptr);
   for (int i = 0; i < _num_ubuf_chunks; i++) {
     _ubufs.push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
-                                   {buffer_shape[0] / tp_size, buffer_shape[1]}, buffer_dtype));
+                                   std::vector<size_t>{buffer_shape[0] / tp_size, buffer_shape[1]},
+                                   buffer_dtype));
     ubuf_byte_ptr += buffer_chunk_bytes;
   }
 

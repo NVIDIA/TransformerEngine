@@ -215,15 +215,13 @@ NVTEDType nvte_tensor_type(const NVTETensor tensor) {
 NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
   NVTEShape ret;
   if (ndim == 0) {
-    ret.data = nullptr;
     ret.ndim = 0;
     return ret;
   }
-  NVTE_CHECK(ndim <= sizeof(ret.owned_data) / sizeof(ret.owned_data[0]),
+  NVTE_CHECK(ndim <= sizeof(ret.data) / sizeof(ret.data[0]),
              "Too many dims for NVTEShape (requested: ", ndim,
-             ", max: ", sizeof(ret.owned_data) / sizeof(ret.owned_data[0]), ")");
-  std::copy(data, data + ndim, ret.owned_data);
-  ret.data = ret.owned_data;
+             ", max: ", sizeof(ret.data) / sizeof(ret.data[0]), ")");
+  std::copy(data, data + ndim, ret.data);
   ret.ndim = ndim;
   return ret;
 }
@@ -351,7 +349,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, {nullptr, 0}};
+    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
   }
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   switch (param_name) {
