@@ -246,7 +246,7 @@ def _apply_rotary_pos_emb_base(
     # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
     # [seq, b, 1, dim] -> [b, seq, 1, dim]
     if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1) 
+        freqs = freqs.transpose(0, 1)
 
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
