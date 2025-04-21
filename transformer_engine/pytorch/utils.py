@@ -155,6 +155,7 @@ def split_tensor_along_dim(
 
     return tensor_list
 
+
 # @klakhani TODO: Consider combining with split_tensor_along_dim() and no_op_cat() and SplitAlongDim
 def combine_tensors(
     tensors: List[torch.Tensor],
@@ -166,6 +167,7 @@ def combine_tensors(
     new_shape = list(tensors[0].shape)
     new_shape.insert(dim, num_tensors)
     from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
     if isinstance(tensors[0], Float8Tensor):
         new_stride = list(tensors[0]._data.stride())
         new_stride.insert(dim, int(new_stride[dim - 1] / num_tensors))
@@ -204,6 +206,7 @@ class SplitAlongDim(torch.autograd.Function):
         ctx.split_size_or_sections = split_size_or_sections
         from transformer_engine.pytorch.float8_tensor import Float8Tensor
         from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+
         if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
@@ -254,6 +257,7 @@ class SplitAlongDim(torch.autograd.Function):
         dims = len(grad_outputs[0].shape)
         split_dim = (ctx.split_dim + dims) % dims
         from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
         if isinstance(grad_outputs[0], Float8Tensor):
             noop_ok = True
             strides = grad_outputs[0].stride()

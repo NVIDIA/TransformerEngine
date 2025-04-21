@@ -43,7 +43,11 @@ import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 
-from transformer_engine.pytorch.dot_product_attention.backends import UnfusedDotProductAttention, FusedAttention, FlashAttention
+from transformer_engine.pytorch.dot_product_attention.backends import (
+    UnfusedDotProductAttention,
+    FusedAttention,
+    FlashAttention,
+)
 
 
 # Setup Attention Logging
@@ -105,7 +109,7 @@ except PackageNotFoundError:
     flash_attn_func_v3 = None
     flash_attn_varlen_func_v3 = None
     flash_attn_with_kvcache_v3 = None
-    #pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
+    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import (

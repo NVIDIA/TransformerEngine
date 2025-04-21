@@ -12,7 +12,12 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.utils import SplitAlongDim, get_device_compute_capability, combine_tensors, split_tensor_along_dim
+from transformer_engine.pytorch.utils import (
+    SplitAlongDim,
+    get_device_compute_capability,
+    combine_tensors,
+    split_tensor_along_dim,
+)
 from transformer_engine.pytorch.utils import attention_mask_func
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
@@ -35,13 +40,17 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.dot_product_attention.context_parallel import attn_forward_func_with_cp
+from transformer_engine.pytorch.dot_product_attention.context_parallel import (
+    attn_forward_func_with_cp,
+)
 from transformer_engine.pytorch.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+
 # Import attention utils
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
+
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     """Make tensor contiguous if final stride is not 1."""
@@ -761,7 +770,10 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
-        from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, mark_activation_offload
+        from transformer_engine.pytorch.cpu_offload import (
+            CPUOffloadEnabled,
+            mark_activation_offload,
+        )
 
         if CPUOffloadEnabled:
             if ctx.fp8:
@@ -856,6 +868,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dv = torch.empty_like(v)
             d_out, q, k, v, out = [maybe_contiguous(x) for x in (d_out, q, k, v, out)]
             from transformer_engine.pytorch.attention import flash_attn_cuda_bwd
+
             flash_attn_cuda_bwd(
                 d_out,
                 q,
@@ -1312,7 +1325,10 @@ class FlashAttention(torch.nn.Module):
                     use_flash_attn_3=use_flash_attn_3,
                 )
         else:
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled, mark_activation_offload
+            from transformer_engine.pytorch.cpu_offload import (
+                CPUOffloadEnabled,
+                mark_activation_offload,
+            )
 
             if CPUOffloadEnabled:
                 mark_activation_offload(
@@ -1334,12 +1350,21 @@ class FlashAttention(torch.nn.Module):
                 #       |                         |     bshd/sbhd/thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
-                    from transformer_engine.pytorch.attention import flash_attn_func, flash_attn_func_v3
+                    from transformer_engine.pytorch.attention import (
+                        flash_attn_func,
+                        flash_attn_func_v3,
+                    )
+
                     func = (
                         flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
                     )  # pylint: disable=possibly-used-before-assignment
                 else:
-                    from transformer_engine.pytorch.attention import flash_attn_varlen_func, flash_attn_varlen_func_v3, flash_attn_with_kvcache_v3
+                    from transformer_engine.pytorch.attention import (
+                        flash_attn_varlen_func,
+                        flash_attn_varlen_func_v3,
+                        flash_attn_with_kvcache_v3,
+                    )
+
                     if not use_flash_attn_3:
                         func = flash_attn_varlen_func
                     elif inference_params is None:
@@ -1505,7 +1530,6 @@ class FlashAttention(torch.nn.Module):
             output = output.reshape(output.shape[0], -1)
 
         return output.contiguous()
-
 
 
 class _PrepareQKVForFA(torch.autograd.Function):
