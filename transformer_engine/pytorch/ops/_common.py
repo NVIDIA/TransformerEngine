@@ -5,19 +5,17 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+
 from typing import Any, Iterable, Optional
 
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+
 from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
-from ..utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    devices_match,
-)
+from ..utils import canonicalize_device, canonicalize_dtype, devices_match
 
 
 def is_float8_tensor(tensor: Any) -> bool:

@@ -4,13 +4,12 @@
 
 """Efficient Cross Entropy kernels written with OpenAI Triton."""
 
-from typing import Union
 from functools import reduce
 from operator import mul
+from typing import Union
 
 import torch
 import torch.distributed as dist
-
 import triton
 import triton.language as tl
 

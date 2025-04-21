@@ -3,23 +3,22 @@
 # See LICENSE for license information.
 """JAX/TE miscellaneous for custom ops"""
 
-import os
 import functools
-from typing import Tuple
+import os
 from importlib.metadata import version as get_pkg_version
-from packaging.version import Version as PkgVersion
-
-import numpy as np
+from typing import Tuple
 
 import jax
-from jax import dtypes
 import jax.numpy as jnp
+import numpy as np
+from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
+from packaging.version import Version as PkgVersion
 
 import transformer_engine_jax
 
+from ..quantize import QuantizeLayout, ScaledTensorFactory, ScalingMode
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..quantize import ScalingMode, ScaledTensorFactory, QuantizeLayout
 
 TEDType = transformer_engine_jax.DType
 

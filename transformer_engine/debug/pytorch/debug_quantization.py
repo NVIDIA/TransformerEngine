@@ -9,12 +9,12 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+
+from typing import Iterable, Optional, Tuple, Union
+
 import torch
 
 import transformer_engine_torch as tex
-
-
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,

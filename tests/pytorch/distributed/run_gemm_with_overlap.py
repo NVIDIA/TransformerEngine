@@ -4,13 +4,13 @@
 #
 # See LICENSE for license information.
 
-import os
-import sys
-import socket
-import warnings
-import subprocess
 import argparse
 import operator
+import os
+import socket
+import subprocess
+import sys
+import warnings
 from functools import partial, reduce
 
 import torch
@@ -19,8 +19,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_cublas_workspace_size_bytes
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)

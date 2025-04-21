@@ -3,71 +3,69 @@
 # See LICENSE for license information.
 
 """Linear API"""
-from typing import Callable, Dict, Optional, Tuple, Union
+import functools
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Callable, Dict, Optional, Tuple, Union
 
-import functools
 import torch
 
 import transformer_engine_torch as tex
-
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
-from .base import (
-    get_workspace,
-    get_ub,
-    TransformerEngineBaseModule,
-    get_dummy_wgrad,
-    _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
-)
-from ._common import noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
-from ..fp8 import FP8GlobalStateManager
-from ..utils import (
-    cast_if_needed,
-    clear_tensor_data,
-    divide,
-    init_method_constant,
-    requires_grad,
-    needs_quantized_gemm,
-    non_tn_fp8_gemm_supported,
-    assert_dim_for_fp8_exec,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
-from ..distributed import (
-    set_tensor_model_parallel_attributes,
-    get_distributed_world_size,
-    allreduce,
-    symmetric_all_reduce,
-    reduce_scatter_along_first_dim,
-    gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
-    _fsdp_scatter_tensors,
-    _fsdp_gather_tensors,
-)
-from ..cpp_extensions import (
-    general_gemm,
-)
+
+from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.utils import any_feature_enabled
 from ..constants import GemmParallelModes, dist_group_type
-from ..jit import no_torch_dynamo
+from ..cpp_extensions import general_gemm
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..distributed import (
+    _fsdp_gather_tensors,
+    _fsdp_scatter_tensors,
+    allreduce,
+    gather_along_first_dim,
+    get_distributed_world_size,
+    in_fp8_activation_recompute_phase,
+    is_fp8_activation_recompute_enabled,
+    reduce_scatter_along_first_dim,
+    set_tensor_model_parallel_attributes,
+    symmetric_all_reduce,
+)
+from ..fp8 import FP8GlobalStateManager
 from ..graph import is_graph_capturing
+from ..jit import no_torch_dynamo
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
-from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import any_feature_enabled
+from ..utils import (
+    assert_dim_for_fp8_exec,
+    cast_if_needed,
+    clear_tensor_data,
+    divide,
+    init_method_constant,
+    needs_quantized_gemm,
+    non_tn_fp8_gemm_supported,
+    nvtx_range_pop,
+    nvtx_range_push,
+    requires_grad,
+)
+from ._common import WeightGradStore, _fix_gathered_fp8_transpose, noop_cat
+from .base import (
+    _2X_ACC_DGRAD,
+    _2X_ACC_FPROP,
+    _2X_ACC_WGRAD,
+    TransformerEngineBaseModule,
+    get_dummy_wgrad,
+    get_ub,
+    get_workspace,
+)
 
 __all__ = ["Linear"]
 

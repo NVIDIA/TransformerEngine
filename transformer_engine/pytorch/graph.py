@@ -7,18 +7,15 @@ from collections.abc import Iterable
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
+from torch._C import _graph_pool_handle
 from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
-from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
-from .fp8 import (
-    fp8_autocast,
-    FP8GlobalStateManager,
-    get_default_fp8_recipe,
-)
+
 from .distributed import get_all_rng_states, graph_safe_rng_available
+from .fp8 import FP8GlobalStateManager, fp8_autocast, get_default_fp8_recipe
 from .module.base import TransformerEngineBaseModule
 from .ops.op import BasicOperation
 

@@ -4,7 +4,7 @@
 """Python interface for c++ extensions"""
 from .activation import *
 from .attention import *
+from .gemm import *
 from .normalization import *
 from .quantization import *
 from .softmax import *
-from .gemm import *

@@ -5,18 +5,20 @@
 """Fusible operations for activation functions."""
 
 from __future__ import annotations
+
 import abc
 from typing import Optional
 
 import torch
 
 import transformer_engine_torch as tex
+
 from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ...utils import clear_tensor_data, devices_match
-from ..op import BasicOperation, OperationContext
 from .._common import reshape
+from ..op import BasicOperation, OperationContext
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):

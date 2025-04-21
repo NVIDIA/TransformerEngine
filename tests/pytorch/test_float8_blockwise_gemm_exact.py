@@ -4,17 +4,17 @@
 
 import pytest
 import torch
+from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
+from references.blockwise_quantizer_reference import CuBLASScaleMunger
+
 import transformer_engine as te
 import transformer_engine_torch as tex
-
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
-from references.blockwise_quantizer_reference import CuBLASScaleMunger
-from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
 
 def fp8_blockwise_gemm_supported() -> bool:
