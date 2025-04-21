@@ -3,11 +3,9 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include "extensions.h"
 #include "kv_cache.cuh"
 #include "thd_utils.cuh"
-#include "transformer_engine/transformer_engine.h"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -451,13 +449,13 @@ std::vector<py::object> fused_attn_bwd(
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    const std::vector<int64_t> &signed_shape = Aux_CTX_Tensors[i].sizes().vec();
-    const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
-
+    std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
+    auto temp_vec = std::vector<size_t>(tmp.begin(), tmp.end());
+    const NVTEShape temp_shape = {temp_vec.data(), temp_vec.size()};
     NVTEBasicTensor temp_data = {
         Aux_CTX_Tensors[i].data_ptr(),
         static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
-        nvte_make_shape(tmp.data(), tmp.size())};
+        temp_shape};
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
