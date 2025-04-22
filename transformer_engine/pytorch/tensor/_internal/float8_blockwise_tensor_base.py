@@ -58,14 +58,12 @@ class Float8BlockwiseQTensorBase:
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data.data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data.data = torch.Tensor() if self._columnwise_data is not None else None
-        self._rowwise_scale_inv.data = (
-            torch.Tensor() if self._rowwise_scale_inv is not None else None
-        )
-        self._columnwise_scale_inv.data = (
-            torch.Tensor() if self._columnwise_scale_inv is not None else None
-        )
+        for t in (self._rowwise_data,
+                  self._columnwise_data,
+                  self._rowwise_scale_inv,
+                  self._columnwise_scale_inv):
+            if t is not None:
+                t.data = torch.Tensor()
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""

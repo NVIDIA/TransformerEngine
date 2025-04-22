@@ -92,9 +92,9 @@ class Float8TensorBase:
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._data.data = torch.Tensor() if self._data is not None else None
-        self._transpose.data = torch.Tensor() if self._transpose is not None else None
-        self._scale_inv.data = torch.Tensor() if self._scale_inv is not None else None
+        for t in (self._data, self._transpose, self._scale_inv):
+            if t is not None:
+                t.data = torch.Tensor()
         self._transpose_invalid = True
 
     def get_metadata(self) -> Dict[str, Any]:
