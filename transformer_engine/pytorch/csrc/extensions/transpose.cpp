@@ -108,4 +108,16 @@ at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
   return out;
 }
 
+std::vector<py::object> fp8_blockwise_transpose(std::vector<py::object> tensor_list) {
+  init_extension();
+  auto none = py::none();
+  for (auto tensor : tensor_list) {
+    NVTE_CHECK(!tensor.is_none(), "Tensor has not been provided");
+    TensorWrapper te_tensor = makeTransformerEngineTensor(tensor, none);
+    nvte_transpose_blockwise(te_tensor.data(), at::cuda::getCurrentCUDAStream());
+  }
+
+  return tensor_list;
+}
+
 }  // namespace transformer_engine::pytorch
