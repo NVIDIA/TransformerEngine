@@ -204,6 +204,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_blockwise_transpose", &transformer_engine::pytorch::fp8_blockwise_transpose,
+        "Blockwise Transpose with dequantize + cast + transpose", py::arg("input_list"));
+ 
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
