@@ -133,9 +133,8 @@ def test_quantization_1D_block_tiling_with_compact_data_and_scales(
         amax_epsilon=eps,
         force_pow_2_scales=pow_2_scales,
         block_scaling_dim=1,
-        rowwise_fmt=tex.RowwiseFmt.COMPACT_DATA_AND_SCALES,
-        columnwise_fmt=tex.ColwiseFmt.COMPACT_DATA_AND_SCALES,
     )
+    sut_quantizer.set_usage(need_gather=True)
 
     # Setup device and random seed
     device = "cuda"
