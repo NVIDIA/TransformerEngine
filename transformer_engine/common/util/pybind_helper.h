@@ -78,13 +78,11 @@
   pybind11::enum_<transformer_engine::RowwiseFmt>(m, "RowwiseFmt", pybind11::module_local())       \
       .value("GEMM_READY_DATA_AND_SCALES",                                                         \
              transformer_engine::RowwiseFmt::GEMM_READY_DATA_AND_SCALES)                           \
-      .value("COMPACT_DATA_AND_SCALES",                                                            \
-             transformer_engine::RowwiseFmt::COMPACT_DATA_AND_SCALES);                             \
+      .value("COMPACT_DATA_AND_SCALES", transformer_engine::RowwiseFmt::COMPACT_DATA_AND_SCALES);  \
   pybind11::enum_<transformer_engine::ColwiseFmt>(m, "ColwiseFmt", pybind11::module_local())       \
       .value("GEMM_READY_DATA_AND_SCALES",                                                         \
              transformer_engine::ColwiseFmt::GEMM_READY_DATA_AND_SCALES)                           \
-      .value("COMPACT_DATA_AND_SCALES",                                                            \
-             transformer_engine::ColwiseFmt::COMPACT_DATA_AND_SCALES);                             \
+      .value("COMPACT_DATA_AND_SCALES", transformer_engine::ColwiseFmt::COMPACT_DATA_AND_SCALES);  \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \

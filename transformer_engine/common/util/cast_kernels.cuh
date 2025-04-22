@@ -1286,13 +1286,16 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = quant_config_cpp ? quant_config_cpp->rowwise_fmt == RowwiseFmt::COMPACT_DATA_AND_SCALES : false;
-        rowwise_option = rowwise_compact
-                             ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                             : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        bool rowwise_compact =
+            quant_config_cpp ? quant_config_cpp->rowwise_fmt == RowwiseFmt::COMPACT_DATA_AND_SCALES
+                             : false;
+        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
+                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = quant_config_cpp ? quant_config_cpp->columnwise_fmt == ColwiseFmt::COMPACT_DATA_AND_SCALES : false;
+        bool columnwise_compact = quant_config_cpp ? quant_config_cpp->columnwise_fmt ==
+                                                         ColwiseFmt::COMPACT_DATA_AND_SCALES
+                                                   : false;
         columnwise_option = columnwise_compact
                                 ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
                                 : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;

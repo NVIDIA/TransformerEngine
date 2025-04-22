@@ -543,7 +543,8 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
   size_t scale_t_stride_y = 0;
 
   if (rowwise_option != FP8BlockwiseRowwiseOption::NONE) {
-    NVTE_CHECK(rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY || rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
+    NVTE_CHECK(rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY ||
+                   rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
                "Unexpected rowwise enum value");
     NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
     NVTE_CHECK(scale_inv.shape.size() == 2, "Scale dimension must be 2.");
