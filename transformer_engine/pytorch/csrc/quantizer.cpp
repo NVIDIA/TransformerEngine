@@ -261,8 +261,8 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
-  this->rowwise_fmt = quantizer.attr("rowwise_fmt").cast<RowwiseFmt>();
-  this->columnwise_fmt = quantizer.attr("columnwise_fmt").cast<ColwiseFmt>();
+  this->rowwise_fmt = quantizer.attr("_rowwise_fmt").cast<RowwiseFmt>();
+  this->columnwise_fmt = quantizer.attr("_columnwise_fmt").cast<ColwiseFmt>();
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {

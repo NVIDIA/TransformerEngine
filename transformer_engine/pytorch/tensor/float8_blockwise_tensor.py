@@ -34,8 +34,8 @@ class Float8BlockQuantizer(Quantizer):
     force_pow_2_scales: bool
     block_scaling_dim: int
     # currently rowwise and columnwise format only applies to 1D quantizer
-    rowwise_fmt: tex.RowwiseFmt
-    columnwise_fmt: tex.ColwiseFmt
+    _rowwise_fmt: tex.RowwiseFmt
+    _columnwise_fmt: tex.ColwiseFmt
 
     def __init__(
         self,
@@ -46,8 +46,7 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
-        rowwise_fmt: tex.RowwiseFmt = tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES,
-        columnwise_fmt: tex.ColwiseFmt = tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES,
+        need_gather: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -55,8 +54,37 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
-        self.rowwise_fmt = rowwise_fmt
-        self.columnwise_fmt = columnwise_fmt
+        self._rowwise_fmt = (
+            tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+            if need_gather
+            else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
+        )
+        self._columnwise_fmt = (
+            tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+            if need_gather
+            else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
+        )
+
+    # override base class set_usage method
+    def set_usage(
+        self,
+        *,
+        rowwise: Optional[bool] = None,
+        columnwise: Optional[bool] = None,
+        need_gather: Optional[bool] = None,
+    ) -> None:
+        super().set_usage(rowwise=rowwise, columnwise=columnwise)
+        if need_gather is not None:
+            self._rowwise_fmt = (
+                tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+                if need_gather
+                else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
+            )
+            self._columnwise_fmt = (
+                tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+                if need_gather
+                else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
+            )
 
     def update_quantized(
         self,
@@ -149,7 +177,7 @@ class Float8BlockQuantizer(Quantizer):
         # CuBLAS requries 1x128 scaling factor to be padded and transposed
         assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
         if columnwise:
-            columnwise_compact = self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+            columnwise_compact = self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
             outer = math.ceil(M / self.block_len)
             inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
             # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
@@ -157,7 +185,7 @@ class Float8BlockQuantizer(Quantizer):
             # so no need to swap inner outer here
             return (outer, inner)
         # rowwise
-        rowwise_compact = self.rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+        rowwise_compact = self._rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
         outer = math.ceil(K / self.block_len)
         inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
         # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
@@ -189,7 +217,7 @@ class Float8BlockQuantizer(Quantizer):
         # since currently 2D scaling only applies to module weights
         if (
             self.block_scaling_dim == 1
-            and self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+            and self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
         ):
             return shape
         colwise_shape = [shape[-1]]
