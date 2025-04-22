@@ -52,8 +52,7 @@ def test_fused_rope(
         pytest.skip("Skipping test with margin=0 and start_positions=True")
 
     if start_positions == True and cp_size > 1:
-        # Note: `start_positions` is used only during inference and cp_size > 1
-        # isn't used during inference, so skipping this path
+        # `start_positions` is only supported for `cp_size=1` and inference.
         pytest.skip("Skipping test with cp_size>1 and start_positions=True")
 
     device = torch.device("cuda:0")
@@ -151,8 +150,7 @@ def test_fused_rope_thd(
 ) -> None:
 
     if start_positions == True and cp_size > 1:
-        # Note: `start_positions` is used only during inference and cp_size > 1
-        # isn't used during inference, so skipping this path
+        # `start_positions` is only supported for `cp_size=1` and inference.
         pytest.skip("Skipping test with cp_size>1 and start_positions=True")
 
     device = torch.device("cuda:0")

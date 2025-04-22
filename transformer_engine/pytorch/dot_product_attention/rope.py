@@ -223,8 +223,7 @@ def _apply_rotary_pos_emb_base(
 
     # In case `start_positions` are provided, create a staggered `freqs` tensor
     # offset by the values in `start_positions`.
-    # Note: `start_positions` usage with cp_size > 1 hasn't been tested
-    # because context parallelism isn't used during inference.
+    # `start_positions` is only supported for `cp_size=1` and inference.
     if start_positions is not None:
         max_offset = torch.max(start_positions)
         assert (
@@ -342,8 +341,7 @@ def apply_rotary_pos_emb(
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
 
-    # Note: `start_positions` is used only during inference and so not supported
-    # with context parallelism.
+    # `start_positions` is only supported for `cp_size=1` and inference.
     assert not (
         cp_size > 1 and start_positions is not None
     ), """start_positions != None with CP SIZE > 1 is not supported!"""
