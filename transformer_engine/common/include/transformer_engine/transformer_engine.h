@@ -302,13 +302,10 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
-  /*! Columnwise transpose option for FP8 blockwise scaling recipe.
-    If true, the columnwise scaling will be transposed.
-    If false, the columnwise scaling will not be transposed.
-    However, the columnwise usage means whether any columnwise tensor
-    get allocated, which is independent of this option.
-  */
-  kNVTEQuantizationConfigFp8ColumnwiseTranspose = 3,
+  /*! Columnwise format for FP8 Sub-tensor scaling recipes where scale_inv is not scalar tensor */
+  kNVTEQuantizationConfigColumnwiseFormat = 3,
+  /*! Rowwise format for FP8 Sub-tensor scaling recipes where scale_inv is not scalar tensor */
+  kNVTEQuantizationConfigRowwiseFormat = 4,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -728,6 +725,22 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
+/*! \enum RowwiseFmt
+ *  \brief Rowwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
+ */
+enum class RowwiseFmt {
+  GEMM_READY_DATA_AND_SCALES = 0,
+  COMPACT_DATA_AND_SCALES = 1
+};
+
+/*! \enum ColwiseFmt
+ *  \brief Columnwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
+ */
+enum class ColwiseFmt {
+  GEMM_READY_DATA_AND_SCALES = 0,
+  COMPACT_DATA_AND_SCALES = 1
+};
+
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
  */
@@ -781,10 +794,16 @@ class QuantizationConfigWrapper {
                                            sizeof(NVTETensor));
   }
 
-  /*! \brief Set columnwise option */
-  void set_fp8_columnwise_transpose(bool columnwise_transpose) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigFp8ColumnwiseTranspose,
-                                           &columnwise_transpose, sizeof(bool));
+  /*! \brief Set rowwise format */
+  void set_rowwise_format(RowwiseFmt rowwise_format) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigRowwiseFormat,
+                                           &rowwise_format, sizeof(RowwiseFmt));
+  }
+
+  /*! \brief Set columnwise format */
+  void set_columnwise_format(ColwiseFmt columnwise_format) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigColumnwiseFormat,
+                                           &columnwise_format, sizeof(ColwiseFmt));
   }
 
  private:

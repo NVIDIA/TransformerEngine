@@ -112,7 +112,7 @@ def initialize_for_many_scales(
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
 @pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
-def test_quantization_1D_block_tiling_with_columnwise_transpose(
+def test_quantization_1D_block_tiling_with_compact_data_and_scales(
     x_dtype: torch.dtype,
     M: int,
     N: int,
@@ -133,8 +133,8 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
         amax_epsilon=eps,
         force_pow_2_scales=pow_2_scales,
         block_scaling_dim=1,
-        columnwise_transpose=False,
-        compact_scales=True,
+        rowwise_fmt=tex.RowwiseFmt.COMPACT_DATA_AND_SCALES,
+        columnwise_fmt=tex.ColwiseFmt.COMPACT_DATA_AND_SCALES,
     )
 
     # Setup device and random seed
@@ -173,14 +173,9 @@ def test_quantization_1D_block_tiling_with_columnwise_transpose(
         qresult_ref.scale_t,
     )
 
-    # TODO: this is a workaround now to pass test,
-    # the kernel will automatically transpose the scale shapes
-    # so we need to do the same here to match the reference
-    sx_ref = sx_ref.transpose(-1, -2).contiguous()
-    # sx_t_ref = sx_t_ref.transpose(-1, -2).contiguous()
-
-    # TODO: workaround for testing columnwise without transpose
+    # match the reference quantize transpose output with the columnwise non-transpose method
     qx_t_ref = qx_t_ref.transpose(-1, -2).contiguous()
+    sx_t_ref = sx_t_ref.transpose(-1, -2).contiguous()
 
     # Check
     torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
