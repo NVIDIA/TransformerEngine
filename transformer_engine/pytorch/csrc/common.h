@@ -173,12 +173,13 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
-  // If true, the columnwise scaling will be transposed.
-  bool columnwise_transpose = true;
+  // rowwise format
+  RowwiseFmt rowwise_fmt = RowwiseFmt::GEMM_READY_DATA_AND_SCALES;
+  // columnwise format
+  ColwiseFmt columnwise_fmt = ColwiseFmt::GEMM_READY_DATA_AND_SCALES;
 
  private:
   int block_scaling_dim = 2;
-  bool compact_scales = false;
 
  public:
   // Initializes from a python handle to a Float8BlockQuantizer

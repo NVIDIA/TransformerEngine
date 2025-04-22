@@ -31,26 +31,27 @@ void quantize_transpose_square_blockwise(const SimpleTensor &input, SimpleTensor
 
 // enum class for rowwise usage
 enum class FP8BlockwiseRowwiseOption {
-  // No rowwise data
+  // No rowwise data, skip rowwise quantization
   NONE,
   // Rowwise data, scales in GEMM format
-  ROWWISE
-  // TODO: FP8 all gather requires some changes.
-  // 1. Compact scales are better for gathering than the GEMM format.
+  ROWWISE_GEMM_READY,
+  // Rowwise data, scales in compact format, needs extra processing (padding, transposing) before GEMM
+  ROWWISE_COMPACT
 };
 
 // enum class for columnwise usage
 // For Hopper sm90 with only TN fp8 gemm, there is need to do columnwise transpose when doing 1D block scaling
 enum class FP8BlockwiseColumnwiseOption {
-  // No columnwise data
+  // No columnwise data, skip columnwise quantization
   NONE,
   // Columnwise data transposed from original shape.
   // Scales in GEMM format corresponding to GEMM ingesting transposed column data.
-  COLUMNWISE_TRANSPOSE,
-  // TODO: FP8 all gather requires some changes.
-  // 1. The transpose gets in the way of the all gather.
-  // 2. Compact scales are better for gathering than the GEMM format.
-  COLUMNWISE
+  // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op 
+  // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
+  COLUMNWISE_GEMM_READY,
+  // Columnwise data in original shape
+  // Scales in compact format, needs extra processing (padding, transposing) before GEMM
+  COLUMNWISE_COMPACT
 };
 
 void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor &scale_inv,

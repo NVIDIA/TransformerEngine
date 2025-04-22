@@ -1283,16 +1283,19 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
       bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
       float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
-      FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
-                                                     ? FP8BlockwiseRowwiseOption::ROWWISE
-                                                     : FP8BlockwiseRowwiseOption::NONE;
+      FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
+      if (output_tensor->has_data()) {
+        bool rowwise_compact = quant_config_cpp ? quant_config_cpp->rowwise_fmt == RowwiseFmt::COMPACT_DATA_AND_SCALES : false;
+        rowwise_option = rowwise_compact
+                             ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
+                             : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+      }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_transpose =
-            quant_config_cpp ? quant_config_cpp->fp8_columnwise_transpose : true;
-        columnwise_option = columnwise_transpose
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE;
+        bool columnwise_compact = quant_config_cpp ? quant_config_cpp->columnwise_fmt == ColwiseFmt::COMPACT_DATA_AND_SCALES : false;
+        columnwise_option = columnwise_compact
+                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
+                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
                                           output_tensor->columnwise_scale_inv, output_tensor->data,

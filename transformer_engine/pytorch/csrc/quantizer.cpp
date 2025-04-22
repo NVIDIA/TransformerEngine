@@ -261,8 +261,8 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
-  this->columnwise_transpose = quantizer.attr("columnwise_transpose").cast<bool>();
-  this->compact_scales = quantizer.attr("compact_scales").cast<bool>();
+  this->rowwise_fmt = quantizer.attr("rowwise_fmt").cast<RowwiseFmt>();
+  this->columnwise_fmt = quantizer.attr("columnwise_fmt").cast<ColwiseFmt>();
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
@@ -310,11 +310,20 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
+      // 2D scaling is always GEMM_READY for now
+      NVTE_CHECK(rowwise_fmt == RowwiseFmt::GEMM_READY_DATA_AND_SCALES, "2D scaling is always GEMM_READY_DATA_AND_SCALES for now.");
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
+      // 1D scaling can be GEMM_READY_DATA_AND_SCALES or COMPACT_DATA_AND_SCALES
+      bool rowwise_compact = rowwise_fmt == RowwiseFmt::COMPACT_DATA_AND_SCALES;
+      // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
-      sinv1 = compact_scales ? m_dim : roundup(m_dim, 4);
+      sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
+      // if the rowwise format is compact, the scaling factor is not be transposed
+      if (rowwise_compact) {
+        std::swap(sinv0, sinv1);
+      }
     } else {
       NVTE_CHECK(false,
                  "Unsupported block_scaling_dim in create_tensor rowwise."
@@ -334,7 +343,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape. Shape ",
                columnwise_shape, " torch shape: ", torch_columnwise_shape);
     if (torch_shape.size() > 0) {
-      if (columnwise_transpose) {
+      if (columnwise_fmt == ColwiseFmt::GEMM_READY_DATA_AND_SCALES) {
         torch_columnwise_shape.reserve(torch_shape.size());
         columnwise_shape.reserve(shape.size());
         torch_columnwise_shape.push_back(torch_shape[torch_shape.size() - 1]);
@@ -344,6 +353,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
           columnwise_shape.push_back(shape[i]);
         }
       } else {
+        // assert we are doing 1D scaling
+        NVTE_CHECK(block_scaling_dim == 1, "Compact columnwise format is not supported for 128x128 2D block scaling.");
         torch_columnwise_shape = torch_shape;
         columnwise_shape = shape;
       }
@@ -351,14 +362,17 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
+      // 2D scaling is always GEMM_READY for now
+      NVTE_CHECK(columnwise_fmt == ColwiseFmt::GEMM_READY_DATA_AND_SCALES, "2D scaling is always GEMM_READY_DATA_AND_SCALES for now.");
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
+      bool columnwise_compact = columnwise_fmt == ColwiseFmt::COMPACT_DATA_AND_SCALES;
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
-      sinv1 = compact_scales ? k_dim : roundup(k_dim, 4);
-      if (!columnwise_transpose) {
-        std::swap(sinv0, sinv1);
-      }
+      sinv1 = columnwise_compact ? k_dim : roundup(k_dim, 4);
+      // GEMM READY case: scaling factor is [sinv0, sinv1], already transposed here for CuBLAS
+      // for COMPACT case, since we apply 128x1 scaling here without transposing columnwise data, scaling factor is also [sinv0, sinv1]
+      // so no need to swap sinv0 and sinv1 here
     } else {
       NVTE_CHECK(false,
                  "Unsupported block_scaling_dim in create_tensor columnwise."

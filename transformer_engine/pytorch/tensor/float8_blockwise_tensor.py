@@ -33,8 +33,9 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
-    columnwise_transpose: bool
-    compact_scales: bool
+    # currently rowwise and columnwise format only applies to 1D quantizer
+    rowwise_fmt: tex.RowwiseFmt
+    columnwise_fmt: tex.ColwiseFmt
 
     def __init__(
         self,
@@ -45,8 +46,8 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
-        columnwise_transpose: bool = True,
-        compact_scales: bool = False,
+        rowwise_fmt: tex.RowwiseFmt = tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES,
+        columnwise_fmt: tex.ColwiseFmt = tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -54,8 +55,8 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
-        self.columnwise_transpose = columnwise_transpose
-        self.compact_scales = compact_scales
+        self.rowwise_fmt = rowwise_fmt
+        self.columnwise_fmt = columnwise_fmt
 
     def update_quantized(
         self,
@@ -132,22 +133,36 @@ class Float8BlockQuantizer(Quantizer):
             M *= shape[i]
         if len(shape) > 0:
             K = shape[-1]
+        # 2D 128x128 quantization block scaling
+        # CuBLAS requries 128x128 scaling factor to be padded
+        # currently rowwise and columnwise format option doesn't apply to 2D scaling
         if self.block_scaling_dim == 2:
             if columnwise:
                 outer = math.ceil(K / self.block_len)
                 inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
                 return (outer, inner)
+            # rowwise
             outer = math.ceil(M / self.block_len)
             inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
             return (outer, inner)
+        # 1D 1x128 quantization block scaling
+        # CuBLAS requries 1x128 scaling factor to be padded and transposed
         assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
         if columnwise:
+            columnwise_compact = self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
             outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4) if not self.compact_scales else K
-            return (outer, inner) if self.columnwise_transpose else (inner, outer)
+            inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
+            # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
+            # for COMPACT case, since we apply 1x128 scaling here without transposing columnwise data, scaling factor is also [outer, inner]
+            # so no need to swap inner outer here
+            return (outer, inner)
+        # rowwise
+        rowwise_compact = self.rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
         outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4) if not self.compact_scales else M
-        return (outer, inner)
+        inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
+        # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
+        # for COMPACT case, since we apply 128x1 scaling, scaling block applies to inner dim, so we need to swap outer and inner here
+        return (outer, inner) if not rowwise_compact else (inner, outer)
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
         """Calculate the shape of a tensor after columnwise permutation.
@@ -169,7 +184,10 @@ class Float8BlockQuantizer(Quantizer):
         """
         if len(shape) == 0:
             return tuple()
-        if not self.columnwise_transpose:
+        # currently columnwise format option only applies to 1D quantizer
+        # for 2D scaling, columnwise format should always be GEMM_READY_DATA_AND_SCALES
+        # since currently 2D scaling only applies to module weights
+        if self.block_scaling_dim == 1 and self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES:
             return shape
         colwise_shape = [shape[-1]]
         for i in range(len(shape) - 1):

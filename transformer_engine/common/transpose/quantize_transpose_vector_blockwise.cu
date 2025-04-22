@@ -99,7 +99,7 @@ Step 2: Cast and store to output_c
 |                                                              ...                                                              |
 +-------------------------------+-------------------------------+-------------------------------+-------------------------------+
 
-Step 3 (if columnwise transpose is True): Transpose, cast and store to output_t
+Step 3 (if columnwise transpose is True, GEMM_READY): Transpose, cast and store to output_t
 * shard memory: 128x128 elements with type=InputType (below graph doesn't consider padding)
 * 8 warps
 * Loop 2 times
@@ -118,7 +118,7 @@ Step 3 (if columnwise transpose is True): Transpose, cast and store to output_t
 | T7  | T15 | T23 | T31 |                       |                       |                       | T7  | T15 | T23 | T31 |                       |                       |                       |
 +-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+-----------------------+
 
-Step 3 (if columnwise transpose is False): Skip Transpose, cast and store to output_t
+Step 3 (if columnwise transpose is False, COMPACT format): Skip Transpose, cast and store to output_t
 * shard memory: 128x128 elements with type=InputType (below graph doesn't consider padding)
 * 8 warps
 * Loop 1 times
@@ -173,10 +173,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
     FP8BlockwiseRowwiseOption rowwise_option, FP8BlockwiseColumnwiseOption columnwise_option,
     const bool pow_2_scaling) {
-  bool return_rowwise = rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE;
-  bool return_columnwise = columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE;
-  bool return_columnwise_transpose =
-      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE;
+  bool return_rowwise = rowwise_option != FP8BlockwiseRowwiseOption::NONE;
+  bool return_columnwise_gemm_ready =
+      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+  bool return_columnwise_compact =
+      columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
 
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecOut>;
@@ -324,8 +325,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
-  // Step 3 (return_columnwise_transpose): Transpose, cast and store to output_t
-  if (return_columnwise_transpose) {
+  // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
+  if (return_columnwise_gemm_ready) {
     constexpr int c_stride =
         kThreadsPerBlock / kNumThreadsStore;  // Stride in columns of shared memory
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
@@ -411,8 +412,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
-  // Step 4 (return_columnwise): cast in 128x1 style and store to output, skip transpose
-  if (return_columnwise) {
+  // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
+  if (return_columnwise_compact) {
     // thread tile should be 4x16, 16 means 8 smem reads
     constexpr int thr_tile_row = kTileDim / kThreadsPerWarp;
     constexpr int thr_tile_col = kNVecOut;
@@ -542,13 +543,14 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
   size_t scale_t_stride_y = 0;
 
   if (rowwise_option != FP8BlockwiseRowwiseOption::NONE) {
-    NVTE_CHECK(rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE,
+    NVTE_CHECK(rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY || rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_COMPACT,
                "Unexpected rowwise enum value");
     NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
     NVTE_CHECK(scale_inv.shape.size() == 2, "Scale dimension must be 2.");
     size_t scale_k = scale_inv.shape[1];
-    scale_stride_x = scale_k;
-    scale_stride_y = 1;
+    bool rowwise_compact = rowwise_option == FP8BlockwiseRowwiseOption::ROWWISE_COMPACT;
+    scale_stride_x = rowwise_compact ? 1 : scale_k;
+    scale_stride_y = rowwise_compact ? scale_k : 1;
   }
 
   if (columnwise_option != FP8BlockwiseColumnwiseOption::NONE) {
@@ -556,13 +558,13 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                "output_t must have same number of dimensions as input.");
 
     if (output_t.shape.size() > 0) {
-      if (columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE) {
+      if (columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY) {
         NVTE_CHECK(output_t.shape[0] == row_length, "Wrong dimension 0 of output_t.");
         for (size_t i = 1; i < output_t.shape.size(); ++i) {
           NVTE_CHECK(output_t.shape.at(i) == input.shape.at(i - 1), "Wrong dimension in output_t");
         }
       } else {
-        NVTE_CHECK(columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE,
+        NVTE_CHECK(columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT,
                    "Unexpected columnwise option enum value");
         NVTE_CHECK(output_t.shape[0] == input.shape[0], "Wrong dimension 0 of output_t.");
         NVTE_CHECK(
@@ -572,10 +574,11 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
     }
 
     NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same dtype.");
-
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "Scale_t dimension must be 2.");
-    scale_t_stride_x = scale_inv_t.shape[1];
-    scale_t_stride_y = 1;
+    bool columnwise_compact = columnwise_option == FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT;
+    size_t scale_t_k = scale_inv_t.shape[1];
+    scale_t_stride_x = columnwise_compact ? 1 : scale_t_k;
+    scale_t_stride_y = columnwise_compact ? scale_t_k : 1;
   }
 
   const size_t num_blocks_x = DIVUP(row_length, (size_t)kTileDim);
