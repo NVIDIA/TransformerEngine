@@ -45,8 +45,10 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   void *d_temp_storage = getDataPtr(workspace[3], 0);
   size_t temp_storage_bytes = std::numeric_limits<size_t>::max();
 
-  nvte_device_radix_sort_pairs(d_temp_storage, &temp_storage_bytes, indices_ptr, sorted_indices_ptr,
-                               row_id_ptr, sorted_row_id_ptr, num_tokens * topK);
+  nvte_device_radix_sort_pairs(
+      d_temp_storage, &temp_storage_bytes, reinterpret_cast<int *>(indices_ptr),
+      reinterpret_cast<int *>(sorted_indices_ptr), reinterpret_cast<int *>(row_id_ptr),
+      reinterpret_cast<int *>(sorted_row_id_ptr), num_tokens * topK);
 
   // Output buffer alloc
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;
