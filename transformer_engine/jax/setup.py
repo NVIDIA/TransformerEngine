@@ -101,7 +101,7 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
         install_requires=["jax", "flax>=0.7.1"],
-        tests_require=["numpy", "praxis"],
+        tests_require=["numpy"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)

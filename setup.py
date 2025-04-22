@@ -119,7 +119,6 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            # test_reqs.extend(["numpy", "praxis"])
             test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
