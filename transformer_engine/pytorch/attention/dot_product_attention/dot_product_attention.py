@@ -4,8 +4,6 @@
 
 """Attention."""
 from contextlib import nullcontext
-from importlib.metadata import version as get_pkg_version
-from importlib.metadata import PackageNotFoundError
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -21,7 +19,6 @@ from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
@@ -40,7 +37,6 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionLogging as attn_log
 
 from transformer_engine.pytorch.attention.dot_product_attention.backends import UnfusedDotProductAttention, FusedAttention, FlashAttention
@@ -48,77 +44,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
 
 # Setup Attention Logging
 attn_log.setup_logging()
-
-"""
-# Global vars for flash attn v2 and v3 imports
-flash_attn_cuda_bwd = None
-flash_attn_func = None
-flash_attn_varlen_func = None
-_flash_attn_fwd = None
-_flash_attn_bwd = None
-_flash_attn_varlen_fwd = None
-_flash_attn_varlen_bwd = None
-try:
-    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
-except PackageNotFoundError:
-    pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
-else:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
-        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
-            fa_utils.is_installed = True
-    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
-        fa_utils.is_installed = True
-
-    if fa_utils.is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
-        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
-        )
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
-        )
-
-        # Setup Flash attention utils
-        fa_utils.set_flash_attention_version()
-    elif (
-        torch.cuda.is_available()
-        and get_device_compute_capability() >= (8, 0)
-        and dpa_utils._NVTE_FLASH_ATTN
-    ):
-        attn_log.fa_logger.warning(
-            "Supported flash-attn versions are %s. Found flash-attn %s.",
-            dpa_utils._get_supported_versions(
-                (
-                    fa_utils.version_required
-                    if get_device_compute_capability() < (10, 0)
-                    else fa_utils.version_required_blackwell
-                ),
-                fa_utils.max_version,
-            ),
-            fa_utils.version,
-        )
-try:
-    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
-except PackageNotFoundError:
-    flash_attn_func_v3 = None
-    flash_attn_varlen_func_v3 = None
-    flash_attn_with_kvcache_v3 = None
-    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
-else:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-    )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-
-    fa_utils.set_flash_attention_3_params()"""
 
 # Global vars for available attention backends and ALiBi cache
 _attention_backends = {
