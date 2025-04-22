@@ -37,7 +37,6 @@ from ..quantize import (
     DelayedScaleQuantizer,
     ScalingMode,
 )
-from .quantization import _quantize_dbias_impl
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
