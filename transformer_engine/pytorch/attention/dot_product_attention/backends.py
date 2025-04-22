@@ -4,6 +4,8 @@
 
 """Backends."""
 from contextlib import nullcontext
+from importlib.metadata import version as get_pkg_version
+from importlib.metadata import PackageNotFoundError
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -40,21 +42,83 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.dot_product_attention.context_parallel import (
-    attn_forward_func_with_cp,
-)
-from transformer_engine.pytorch.dot_product_attention.softmax import FusedScaleMaskSoftmax
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import attn_forward_func_with_cp
+from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
+from transformer_engine.pytorch.attention.inference import InferenceParams
 # Import attention utils
-import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
+from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionLogging as attn_log
 
+# Global vars for flash attn v2 and v3 imports
+flash_attn_cuda_bwd = None
+flash_attn_func = None
+flash_attn_varlen_func = None
+_flash_attn_fwd = None
+_flash_attn_bwd = None
+_flash_attn_varlen_fwd = None
+_flash_attn_varlen_bwd = None
+try:
+    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
+except PackageNotFoundError:
+    pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
+else:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
+        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+            fa_utils.is_installed = True
+    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
+        fa_utils.is_installed = True
 
-def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
-    """Make tensor contiguous if final stride is not 1."""
-    return tensor.contiguous() if tensor.stride(-1) != 1 else tensor
+    if fa_utils.is_installed:
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
+        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
+        )
+
+        # Setup Flash attention utils
+        fa_utils.set_flash_attention_version()
+    elif (
+        torch.cuda.is_available()
+        and get_device_compute_capability() >= (8, 0)
+        and dpa_utils._NVTE_FLASH_ATTN
+    ):
+        attn_log.fa_logger.warning(
+            "Supported flash-attn versions are %s. Found flash-attn %s.",
+            dpa_utils._get_supported_versions(
+                (
+                    fa_utils.version_required
+                    if get_device_compute_capability() < (10, 0)
+                    else fa_utils.version_required_blackwell
+                ),
+                fa_utils.max_version,
+            ),
+            fa_utils.version,
+        )
+try:
+    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
+except PackageNotFoundError:
+    flash_attn_func_v3 = None
+    flash_attn_varlen_func_v3 = None
+    flash_attn_with_kvcache_v3 = None
+    #pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
+else:
+    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flash_attn_3.flash_attn_interface import (
+        flash_attn_varlen_func as flash_attn_varlen_func_v3,
+    )
+    from flash_attn_3.flash_attn_interface import (
+        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+    )
+    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+
+    fa_utils.set_flash_attention_3_params()
 
 
 class UnfusedDotProductAttention(torch.nn.Module):
@@ -866,9 +930,8 @@ class FusedAttnFunc(torch.autograd.Function):
             dq = torch.empty_like(q)
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
-            d_out, q, k, v, out = [maybe_contiguous(x) for x in (d_out, q, k, v, out)]
-            from transformer_engine.pytorch.attention import flash_attn_cuda_bwd
-
+            d_out, q, k, v, out = [dpa_utils.maybe_contiguous(x) for x in (d_out, q, k, v, out)]
+            #from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
             flash_attn_cuda_bwd(
                 d_out,
                 q,
@@ -1350,21 +1413,10 @@ class FlashAttention(torch.nn.Module):
                 #       |                         |     bshd/sbhd/thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
-                    from transformer_engine.pytorch.attention import (
-                        flash_attn_func,
-                        flash_attn_func_v3,
-                    )
-
                     func = (
                         flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
                     )  # pylint: disable=possibly-used-before-assignment
                 else:
-                    from transformer_engine.pytorch.attention import (
-                        flash_attn_varlen_func,
-                        flash_attn_varlen_func_v3,
-                        flash_attn_with_kvcache_v3,
-                    )
-
                     if not use_flash_attn_3:
                         func = flash_attn_varlen_func
                     elif inference_params is None:

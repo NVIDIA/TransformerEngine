@@ -36,23 +36,20 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.attention.inference import InferenceParams
 
 # Import attention utils
-import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
+from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionLogging as attn_log
 
-from transformer_engine.pytorch.dot_product_attention.backends import (
-    UnfusedDotProductAttention,
-    FusedAttention,
-    FlashAttention,
-)
+from transformer_engine.pytorch.attention.dot_product_attention.backends import UnfusedDotProductAttention, FusedAttention, FlashAttention
 
 
 # Setup Attention Logging
 attn_log.setup_logging()
 
+"""
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
 flash_attn_func = None
@@ -121,7 +118,7 @@ else:
     from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
     from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
-    fa_utils.set_flash_attention_3_params()
+    fa_utils.set_flash_attention_3_params()"""
 
 # Global vars for available attention backends and ALiBi cache
 _attention_backends = {
@@ -1197,7 +1194,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                 )
 
-            from .cpu_offload import CPUOffloadEnabled
+            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
 
             if CPUOffloadEnabled:
                 warnings.warn(
