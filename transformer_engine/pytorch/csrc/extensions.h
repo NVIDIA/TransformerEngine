@@ -115,7 +115,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
-std::vector<py::object> fp8_blockwise_transpose(std::vector<py::object> tensor_list);
+py::object fp8_blockwise_transpose(py::object tensor, py::handle quantizer);
 
 }  // namespace transformer_engine::pytorch
 

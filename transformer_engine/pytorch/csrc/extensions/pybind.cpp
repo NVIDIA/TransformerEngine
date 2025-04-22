@@ -205,7 +205,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_blockwise_transpose", &transformer_engine::pytorch::fp8_blockwise_transpose,
-        "Blockwise Transpose with dequantize + cast + transpose", py::arg("input_list"));
+        "Blockwise Transpose with dequantize + cast + transpose",
+        py::call_guard<py::gil_scoped_release>());
 
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());

@@ -6,27 +6,18 @@
 #include <transformer_engine/transpose.h>
 
 #include "common/common.h"
+#include "common/recipe/recipe_common.cuh"
 #include "common/utils.cuh"
 
-constexpr int kTileDim = 128;  // Fixed to 128 beacause we are using 1x128 and 128x1 quantization
-constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
-
 namespace transformer_engine {
-namespace detail {
+namespace {
 
-#define warp_size 32
-#define FP8_MAX 448.0f
-#define EPS 1e-6
-
-__device__ __host__ inline float cast_to_e8(float x) {
-  uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&x);
-  scale_bits &= 0xFF800000;
-  return *reinterpret_cast<float *>(&scale_bits);
-}
+constexpr size_t kThreadsPerWarp = 32;
+constexpr int kTileDim = 128;  // Fixed to 128 because we are using 1x128 and 128x1 quantization
+constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 
 template <typename FP8_TYPE>
 __device__ inline void swap_fp8(FP8_TYPE &a, FP8_TYPE &b) {
-  // 方法1：使用临时变量
   FP8_TYPE temp = a;
   a = b;
   b = temp;
@@ -35,7 +26,7 @@ __device__ inline void swap_fp8(FP8_TYPE &a, FP8_TYPE &b) {
 template <typename T>
 __device__ inline float warp_max_reduce_on_float(T &val) {
   float val_float = float(val);
-  // 使用 butterfly pattern
+  // butterfly pattern
   val_float = max(val_float, __shfl_xor_sync(0xffffffff, val_float, 16));
   val_float = max(val_float, __shfl_xor_sync(0xffffffff, val_float, 8));
   val_float = max(val_float, __shfl_xor_sync(0xffffffff, val_float, 4));
@@ -46,7 +37,7 @@ __device__ inline float warp_max_reduce_on_float(T &val) {
 
 // scaling dim = 128
 // scaling type = int
-// tile shape for each blokc: 128x128
+// tile shape for each block: 128x128
 // Warning: what about the seq_len % 4 != 0? (float4 load scale)
 // This kernel required aligned :
 // 1. hidden_dim % 4 == 0  # use float to load fp8
@@ -54,10 +45,10 @@ __device__ inline float warp_max_reduce_on_float(T &val) {
 template <typename FP8_TYPE>
 __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
     FP8_TYPE *input, float *input_scale_inv, FP8_TYPE *output, float *output_scale_inv,
-    const int hidden_dim, const int seq_len) {
+    const int hidden_dim, const int seq_len, const float epsilon) {
   // define the meta
-  auto warp_id = threadIdx.x / 32;
-  auto lane_id = threadIdx.x % 32;
+  auto warp_id = threadIdx.x / kThreadsPerWarp;
+  auto lane_id = threadIdx.x % kThreadsPerWarp;
   float *input_fp32 = (float *)input;
   float *output_fp32 = (float *)output;
   auto block_offset_x = blockIdx.x * kTileDim;
@@ -73,7 +64,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     smem_scale[i] = (block_offset_x + i < seq_len)
                         ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
-                        : EPS;
+                        : epsilon;
   }
 
   auto offset_col = (block_offset_y / 4 + lane_id);
@@ -139,7 +130,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
 
     __syncwarp();
     if (lane_id == 0) {
-      smem_scale[w] = cast_to_e8(FP8_MAX / (max_val + EPS));
+      smem_scale[w] = compute_scale_from_types<float, FP8_TYPE>(max_val, epsilon, true);
     }
   }
   __syncthreads();
@@ -154,9 +145,10 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
 template <typename FP8_TYPE>
 __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *input_scale_inv,
                                                        FP8_TYPE *output, float *output_scale_inv,
-                                                       const int hidden_dim, const int seq_len) {
-  auto warp_id = threadIdx.x / 32;
-  auto lane_id = threadIdx.x % 32;
+                                                       const int hidden_dim, const int seq_len,
+                                                       const float epsilon) {
+  auto warp_id = threadIdx.x / kThreadsPerWarp;
+  auto lane_id = threadIdx.x % kThreadsPerWarp;
   auto block_offset_x = blockIdx.x * kTileDim;
   auto block_offset_y = blockIdx.y * kTileDim;
   __shared__ float smem_scale[kTileDim];
@@ -167,13 +159,14 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     smem_scale[i] = (block_offset_x + i < seq_len)
                         ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
-                        : EPS;
+                        : epsilon;
   }
 
   // 2. load the fp8 activation from global memory, then transpose on the smem
   // Each warp will load 1x128 row
   for (auto x = warp_id; (x < kTileDim); x += blockDim.x / 32) {
-    for (auto y = lane_id; (block_offset_y + y < hidden_dim) && (y < kTileDim); y += warp_size) {
+    for (auto y = lane_id; (block_offset_y + y < hidden_dim) && (y < kTileDim);
+         y += kThreadsPerWarp) {
       if ((block_offset_x + x < seq_len) && (block_offset_y + y < hidden_dim))
         transposed[y][x] = input[(block_offset_x + x) * hidden_dim + (block_offset_y + y)];
       else
@@ -202,7 +195,7 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
 
     __syncwarp();
     if (lane_id == 0) {
-      smem_scale[x] = cast_to_e8(FP8_MAX / (max_val + EPS));
+      smem_scale[x] = compute_scale_from_types<float, FP8_TYPE>(max_val, epsilon, true);
     }
   }
   __syncthreads();
@@ -217,7 +210,7 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   for (auto x = warp_id; (block_offset_y + x < hidden_dim) && (x < kTileDim);
        x += blockDim.x / 32) {
     auto dest_row = block_offset_y + x;
-    for (auto y = lane_id; (block_offset_x + y < seq_len) && (y < kTileDim); y += warp_size) {
+    for (auto y = lane_id; (block_offset_x + y < seq_len) && (y < kTileDim); y += kThreadsPerWarp) {
       auto dest_col = block_offset_x + y;
       if (dest_row < hidden_dim && dest_col < seq_len) {
         output[dest_row * seq_len + dest_col] = transposed[x][y];
@@ -226,19 +219,20 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   }
 }
 
-}  // namespace detail
+}  // namespace
 }  // namespace transformer_engine
 
-void nvte_transpose_blockwise(NVTETensor input, cudaStream_t stream) {
+void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig quant_config,
+                              cudaStream_t stream) {
   NVTE_API_CALL(nvte_transpose_blockwise);
   using namespace transformer_engine;
-  auto input_tensor = *reinterpret_cast<const Tensor *>(input);
+  auto te_tensor = *reinterpret_cast<const Tensor *>(tensor);
 
   // Get the data and the scale
-  auto rowwise_data = input_tensor.data;
-  auto rowwise_scale_inv = input_tensor.scale_inv;
-  auto colwise_data = input_tensor.columnwise_data;
-  auto colwise_scale_inv = input_tensor.columnwise_scale_inv;
+  auto rowwise_data = te_tensor.data;
+  auto rowwise_scale_inv = te_tensor.scale_inv;
+  auto colwise_data = te_tensor.columnwise_data;
+  auto colwise_scale_inv = te_tensor.columnwise_scale_inv;
 
   // Get the shape and the dtype
   auto rowwise_shape = rowwise_data.shape;
@@ -261,6 +255,12 @@ void nvte_transpose_blockwise(NVTETensor input, cudaStream_t stream) {
              "num of cols of colwise_data must be equal to num of rows of colwise_scale_inv, got "
              "colwise_shape[0]:",
              colwise_shape[0], ", colwise_scale_inv_shape[1]:", colwise_scale_inv_shape[1]);
+  const QuantizationConfig *quant_config_cpp =
+      reinterpret_cast<const QuantizationConfig *>(quant_config);
+  const bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
+  const float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
+  NVTE_CHECK(force_pow_2_scales,
+             "Only power-of-2 scaling is supported for fp8 blockwise transpose");
 
   const size_t hidden_dim = rowwise_shape[1];
   const size_t seq_len = rowwise_shape[0];
@@ -276,20 +276,20 @@ void nvte_transpose_blockwise(NVTETensor input, cudaStream_t stream) {
   if (hidden_dim % 4 == 0 && seq_len % 4 == 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         itype, FP8_TYPE,
-        transformer_engine::detail::dequantize_cast_transpose_1x128_aligned_kernel<FP8_TYPE>
+        transformer_engine::dequantize_cast_transpose_1x128_aligned_kernel<FP8_TYPE>
         <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
                                      reinterpret_cast<float *>(rowwise_scale_inv.dptr),
                                      reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
                                      reinterpret_cast<float *>(colwise_scale_inv.dptr), hidden_dim,
-                                     seq_len););
+                                     seq_len, epsilon););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         itype, FP8_TYPE,
-        transformer_engine::detail::dequantize_cast_transpose_1x128_kernel<FP8_TYPE>
+        transformer_engine::dequantize_cast_transpose_1x128_kernel<FP8_TYPE>
         <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
                                      reinterpret_cast<float *>(rowwise_scale_inv.dptr),
                                      reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
                                      reinterpret_cast<float *>(colwise_scale_inv.dptr), hidden_dim,
-                                     seq_len););
+                                     seq_len, epsilon););
   }
 }

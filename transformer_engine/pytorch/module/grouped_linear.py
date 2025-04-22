@@ -159,7 +159,8 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
             if isinstance(inp, Float8BlockwiseQTensor):
-                inputmats = tex.fp8_blockwise_transpose(inputmats)
+                for inputmat, quantizer in zip(inputmats, input_quantizers):
+                    tex.fp8_blockwise_transpose(inputmat, quantizer)
             else:
                 inputmats = tex.fused_multi_quantize(
                     inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
