@@ -10,6 +10,7 @@
 #include <iostream>
 
 #include "common.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -258,7 +259,7 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   if (tensor == nullptr) return sizeof(float);
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return transformer_engine::typeToSize(t.data.dtype);
+  return transformer_engine::typeToSize(t.dtype());
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -473,4 +474,14 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
   if (config != nullptr) {
     delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
+}
+
+int nvte_is_non_tn_fp8_gemm_supported() {
+  int deviceComputeCapability =
+      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+
+  // Note: this is temporary restriction and should be lifted in the future.
+  // (remove the note once it's done.)
+  return (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
+         deviceComputeCapability >= 130;
 }

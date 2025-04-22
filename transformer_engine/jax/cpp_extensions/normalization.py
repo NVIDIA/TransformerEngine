@@ -26,7 +26,9 @@ from .misc import (
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     NamedSharding,
+    get_cudnn_version,
 )
+from .quantization import _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -62,6 +64,31 @@ def get_forward_sm_margin():
 def get_backward_sm_margin():
     """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def is_norm_fwd_cudnn_enabled(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether CuDNN norm fwd is enabled."""
+    # MXFP8_1D_SCALING always uses CuDNN currently
+    return (
+        int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0")) == 1
+        or scaling_mode == ScalingMode.MXFP8_1D_SCALING
+    )
+
+
+@cache
+def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether norm should compute `gamma += 1.0` for zero-centered gamma
+    in weight dtype as opposed to compute dtype."""
+    if not is_norm_fwd_cudnn_enabled(scaling_mode):
+        # If CuDNN is not enabled, we use the TE backend which uses the compute dtype not weight dtype
+        # Remove this when TE supports gamma += 1.0 in weight dtype
+        return False
+    return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
+
+
+# CuDNN version must be at least this to use MXFP8 fused normalization otherwise unfused norm and quantize will be used
+FUSED_MXFP8_NORM_CUDNN_MIN_VERSION = (9, 10, 0)
 
 
 class NormFwdPrimitive(BasePrimitive):
@@ -101,10 +128,27 @@ class NormFwdPrimitive(BasePrimitive):
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
+        assert (
+            scaling_mode != ScalingMode.MXFP8_1D_SCALING.value
+            or get_cudnn_version() >= FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+        ), (
+            "MXFP8 Fused Normalization is only supported in CuDNN version"
+            f" {FUSED_MXFP8_NORM_CUDNN_MIN_VERSION} or higher"
+        )
+
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused norm and quantization. Please do"
+            " norm in higher-precision then quantize with current tensor scaling."
+        )
+
         mu_rsigama_dtype = jnp.float32
 
         if norm_type == NVTE_Norm_Type.LayerNorm:
             assert gamma_aval.size == beta_aval.size
+            assert gamma_aval.dtype == beta_aval.dtype, (
+                f"gamma and beta should have the same dtype, but got {gamma_aval.dtype} and "
+                f"{beta_aval.dtype}"
+            )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
@@ -788,6 +832,10 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     JAX native layernorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     mean = jnp.mean(x_, axis=-1, keepdims=True)
     var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
@@ -809,6 +857,10 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     JAX native rmsnorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
     normed_input = x_ * rsigma
@@ -884,9 +936,32 @@ def layernorm_fwd(
         )
         return output, mu, rsigma
 
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, mu, rsigma = layernorm_fwd(
+            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
+        )
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, mu, rsigma
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, mu, rsigma = layernorm_fwd(
+            x=x,
+            gamma=gamma,
+            beta=beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, mu, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -914,7 +989,10 @@ def layernorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
@@ -1066,9 +1144,29 @@ def rmsnorm_fwd(
         )
         return output, rsigma
 
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None)
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, rsigma
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, rsigma = rmsnorm_fwd(
+            x=x,
+            gamma=gamma,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -1096,7 +1194,10 @@ def rmsnorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
