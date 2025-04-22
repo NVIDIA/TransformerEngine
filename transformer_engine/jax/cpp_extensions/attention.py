@@ -465,7 +465,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
-                config.context_parallel_load_balanced
+                config.context_parallel_load_balanced,
             )
         )
 
@@ -864,7 +864,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
-                config.context_parallel_load_balanced
+                config.context_parallel_load_balanced,
             )
         )
 
