@@ -66,10 +66,11 @@ class _Fp8Padding(torch.autograd.Function):
 
         return (grad_input, None, None, None)
 
+
 class _Fp8Padding_FromFp8(torch.autograd.Function):
     """
     functional FP8 padding from fp8 input
-    
+
     forward:
         fp8 input -> padded fp8 output
     backward:
@@ -87,24 +88,32 @@ class _Fp8Padding_FromFp8(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
 
-        assert isinstance(inp, Float8BlockwiseQTensor), "Fp8Padding_FromFp8 only support Float8BlockwiseQTensor now"
-        
+        assert isinstance(
+            inp, Float8BlockwiseQTensor
+        ), "Fp8Padding_FromFp8 only support Float8BlockwiseQTensor now"
+
         in_features = inp._rowwise_data.shape[-1]
         in_scale_features = inp._rowwise_scale_inv.shape[0]
-        assert inp._rowwise_data.shape[0] == inp._rowwise_scale_inv.shape[1], 'The number of rows of hidden and scale should be the same'
+        assert (
+            inp._rowwise_data.shape[0] == inp._rowwise_scale_inv.shape[1]
+        ), "The number of rows of hidden and scale should be the same"
 
         # Allocate cast and transpose output tensor
         total_row = sum(padded_m_splits)
 
-        out_data = torch.empty([total_row, in_features], dtype=inp._rowwise_data.dtype, device=inp.device)
-        out_scale_inv = torch.empty([total_row, in_scale_features], dtype=inp._rowwise_scale_inv.dtype, device=inp.device)
+        out_data = torch.empty(
+            [total_row, in_features], dtype=inp._rowwise_data.dtype, device=inp.device
+        )
+        out_scale_inv = torch.empty(
+            [total_row, in_scale_features], dtype=inp._rowwise_scale_inv.dtype, device=inp.device
+        )
 
         rowwise_data = inp._rowwise_data.view(-1, in_features)
         rowwise_scale_inv = inp._rowwise_scale_inv.T.view(-1, in_scale_features).contiguous()
-        
+
         tex.fused_multi_row_padding(rowwise_data, out_data, m_splits, padded_m_splits)
         tex.fused_multi_row_padding(rowwise_scale_inv, out_scale_inv, m_splits, padded_m_splits)
-        
+
         padded_tensor = Float8BlockwiseQTensor(
             shape=out_data.shape,
             dtype=inp.dtype,
@@ -145,6 +154,7 @@ class _Fp8Padding_FromFp8(torch.autograd.Function):
             )
 
         return (grad_input, None, None, None)
+
 
 class Fp8Padding(torch.nn.Module):
     """
@@ -208,7 +218,7 @@ class Fp8Padding(torch.nn.Module):
             else:
                 fn = _Fp8Padding_FromFp8.forward
                 args = [None]
-        else :
+        else:
             if torch.is_grad_enabled():
                 fn = _Fp8Padding.apply
                 args = []

@@ -321,10 +321,7 @@ void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
 /*! \brief Use in the blockwise recipe when enable fp8 a2a
  *         dequantize the input, then transpose the result and cast it back to fp8 alone rowwise.
 */
-void nvte_transpose_blockwise(
-    NVTETensor input,
-    cudaStream_t stream
-);
+void nvte_transpose_blockwise(NVTETensor input, cudaStream_t stream);
 #ifdef __cplusplus
 }  // extern "C"
 #endif

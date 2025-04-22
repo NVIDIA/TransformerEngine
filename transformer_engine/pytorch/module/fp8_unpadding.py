@@ -62,10 +62,11 @@ class _Fp8Unpadding(torch.autograd.Function):
 
         return (grad_input, None, None, None)
 
+
 class _Fp8Unpadding_Fp8Grad(torch.autograd.Function):
     """
     functional FP8 unpadding
-    
+
     forward:
         padded bf16 input -> bf16 output
     backward:
@@ -100,26 +101,40 @@ class _Fp8Unpadding_Fp8Grad(torch.autograd.Function):
         if ctx.requires_dgrad:
             grad_output = grad_output.contiguous()
 
-            assert isinstance(grad_output, Float8BlockwiseQTensor), "Fp8Unpadding_Fp8Grad only support Float8BlockwiseQTensor now"
+            assert isinstance(
+                grad_output, Float8BlockwiseQTensor
+            ), "Fp8Unpadding_Fp8Grad only support Float8BlockwiseQTensor now"
 
             in_features = grad_output._rowwise_data.shape[-1]
             in_scale_features = grad_output._rowwise_scale_inv.shape[0]
-            assert grad_output._rowwise_data.shape[0] == grad_output._rowwise_scale_inv.shape[1], 'The number of rows of hidden and scale should be the same'
+            assert (
+                grad_output._rowwise_data.shape[0] == grad_output._rowwise_scale_inv.shape[1]
+            ), "The number of rows of hidden and scale should be the same"
 
             # Allocate cast and transpose output tensor
             total_row = sum(ctx.padded_m_splits)
             grad_input_data = torch.empty(
-                [total_row, in_features], dtype=grad_output._rowwise_data.dtype, device=grad_output.device
+                [total_row, in_features],
+                dtype=grad_output._rowwise_data.dtype,
+                device=grad_output.device,
             )
             grad_input_scale = torch.empty(
-                [total_row, in_scale_features], dtype=grad_output._rowwise_scale_inv.dtype, device=grad_output.device
+                [total_row, in_scale_features],
+                dtype=grad_output._rowwise_scale_inv.dtype,
+                device=grad_output.device,
             )
 
             rowwise_data = grad_output._rowwise_data.view(-1, in_features)
-            rowwise_scale_inv = grad_output._rowwise_scale_inv.T.view(-1, in_scale_features).contiguous()
-        
-            tex.fused_multi_row_padding(rowwise_data, grad_input_data, ctx.m_splits, ctx.padded_m_splits)
-            tex.fused_multi_row_padding(rowwise_scale_inv, grad_input_scale, ctx.m_splits, ctx.padded_m_splits)
+            rowwise_scale_inv = grad_output._rowwise_scale_inv.T.view(
+                -1, in_scale_features
+            ).contiguous()
+
+            tex.fused_multi_row_padding(
+                rowwise_data, grad_input_data, ctx.m_splits, ctx.padded_m_splits
+            )
+            tex.fused_multi_row_padding(
+                rowwise_scale_inv, grad_input_scale, ctx.m_splits, ctx.padded_m_splits
+            )
 
             # FP8 pad input for forward, FP8 input transpose for backward wgrad
             grad_input = Float8BlockwiseQTensor(
@@ -136,6 +151,7 @@ class _Fp8Unpadding_Fp8Grad(torch.autograd.Function):
             )
 
         return (grad_input, None, None, None)
+
 
 class Fp8Unpadding(torch.nn.Module):
     """
@@ -199,7 +215,7 @@ class Fp8Unpadding(torch.nn.Module):
             else:
                 fn = _Fp8Unpadding_Fp8Grad.forward
                 args = [None]
-        else: 
+        else:
             if torch.is_grad_enabled():
                 fn = _Fp8Unpadding.apply
                 args = []
