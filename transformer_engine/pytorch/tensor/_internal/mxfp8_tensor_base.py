@@ -83,10 +83,12 @@ class MXFP8TensorBase:
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        for t in (self._rowwise_data,
-                  self._columnwise_data,
-                  self._rowwise_scale_inv,
-                  self._columnwise_scale_inv):
+        for t in (
+            self._rowwise_data,
+            self._columnwise_data,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+        ):
             if t is not None:
                 t.data = torch.Tensor()
 
