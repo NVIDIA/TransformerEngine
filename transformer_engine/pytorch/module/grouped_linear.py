@@ -95,14 +95,23 @@ class _GroupedLinear(torch.autograd.Function):
         if isinstance(inp, Float8BlockwiseQTensor):
             rowwise_mats = torch.split(inp._rowwise_data.view(-1, in_features), m_splits)
             scale_in_features = inp._rowwise_scale_inv.shape[0]
-            rowwise_scale_inv_mats = torch.split(inp._rowwise_scale_inv.view(-1, scale_in_features), m_splits, dim = 0)
+            rowwise_scale_inv_mats = torch.split(
+                inp._rowwise_scale_inv.view(-1, scale_in_features), m_splits, dim=0
+            )
             inputmats = []
             for i in range(num_gemms):
                 new_rowwise_data = rowwise_mats[i]
                 new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
-                new_columnwise_data = torch.empty(new_rowwise_data.T.shape, device = new_rowwise_data.device)
-                new_columnwise_scale_inv_shape = [(new_columnwise_data.shape[1] + 128 - 1) // 128 , new_columnwise_data.shape[0]]
-                new_columnwise_scale_inv = torch.empty(new_columnwise_scale_inv_shape, device = new_rowwise_data.device)
+                new_columnwise_data = torch.empty(
+                    new_rowwise_data.T.shape, device=new_rowwise_data.device
+                )
+                new_columnwise_scale_inv_shape = [
+                    (new_columnwise_data.shape[1] + 128 - 1) // 128,
+                    new_columnwise_data.shape[0],
+                ]
+                new_columnwise_scale_inv = torch.empty(
+                    new_columnwise_scale_inv_shape, device=new_rowwise_data.device
+                )
                 inputmats.append(
                     Float8BlockwiseQTensor(
                         shape=rowwise_mats[i].shape,
@@ -136,8 +145,7 @@ class _GroupedLinear(torch.autograd.Function):
         columnwise_usage = is_grad_enabled and inp.requires_grad
         if not columnwise_usage:
             columnwise_usage = (
-                is_fp8_activation_recompute_enabled()
-                and not in_fp8_activation_recompute_phase()
+                is_fp8_activation_recompute_enabled() and not in_fp8_activation_recompute_phase()
             )
         if weight_quantizers[0] is not None:
             for weight_quantizer in weight_quantizers:
@@ -154,7 +162,7 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmats = tex.fp8_blockwise_transpose(inputmats)
             else:
                 inputmats = tex.fused_multi_quantize(
-                    inputmats_no_fp8,  None, input_quantizers, TE_DType[activation_dtype]
+                    inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
                 )
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
@@ -277,15 +285,30 @@ class _GroupedLinear(torch.autograd.Function):
             fp8_grad_output = isinstance(grad_output, Float8BlockwiseQTensor)
             grad_output = grad_output.contiguous()
             if fp8_grad_output:
-                rowwise_mats = torch.split(grad_output._rowwise_data.view(-1,  grad_output.shape[-1]), ctx.m_splits)
-                rowwise_scale_inv_mats = torch.split(grad_output._rowwise_scale_inv.view(-1, grad_output._rowwise_scale_inv.shape[0]), ctx.m_splits, dim = 0)
+                rowwise_mats = torch.split(
+                    grad_output._rowwise_data.view(-1, grad_output.shape[-1]), ctx.m_splits
+                )
+                rowwise_scale_inv_mats = torch.split(
+                    grad_output._rowwise_scale_inv.view(
+                        -1, grad_output._rowwise_scale_inv.shape[0]
+                    ),
+                    ctx.m_splits,
+                    dim=0,
+                )
                 grad_output_mats = []
                 for i in range(ctx.num_gemms):
                     new_rowwise_data = rowwise_mats[i]
                     new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
-                    new_columnwise_data = torch.empty(new_rowwise_data.T.shape, device = new_rowwise_data.device)
-                    new_columnwise_scale_inv_shape = [(new_columnwise_data.shape[1] + 128 - 1) // 128 , new_columnwise_data.shape[0]]
-                    new_columnwise_scale_inv = torch.empty(new_columnwise_scale_inv_shape, device = new_rowwise_data.device)
+                    new_columnwise_data = torch.empty(
+                        new_rowwise_data.T.shape, device=new_rowwise_data.device
+                    )
+                    new_columnwise_scale_inv_shape = [
+                        (new_columnwise_data.shape[1] + 128 - 1) // 128,
+                        new_columnwise_data.shape[0],
+                    ]
+                    new_columnwise_scale_inv = torch.empty(
+                        new_columnwise_scale_inv_shape, device=new_rowwise_data.device
+                    )
                     grad_output_mats.append(
                         Float8BlockwiseQTensor(
                             shape=new_rowwise_data.shape,
@@ -327,7 +350,7 @@ class _GroupedLinear(torch.autograd.Function):
                             ctx.grad_output_quantizers,
                             TE_DType[ctx.activation_dtype],
                         )
-                else : # input grad_output is blockwise
+                else:  # input grad_output is blockwise
                     grad_output = tex.fp8_blockwise_transpose(grad_output_mats)
                     grad_output = grad_output_mats
             else:
