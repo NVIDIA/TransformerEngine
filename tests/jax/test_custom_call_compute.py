@@ -426,16 +426,41 @@ class TestNorm:
             )
             ref_mu = None
 
-        if get_cudnn_version() < (9, 10, 0):
+        precise_comparison = True
+
+        if get_cudnn_version() < (9, 10, 0) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
             # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
-            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+            precise_comparison = False
         elif is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
             # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
             # for zero-centered gamma always
-            assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
-        else:
+            precise_comparison = False
+        elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING and inp_dtype != jnp.float32:
+            # Current implementation of Current Tensor Scaling performs unfused layernorm and quantization
+            # and writes intermediate results into the input dtype, which will slightly reduce precision
+            # if the input dtype is not float32
+            precise_comparison = False
+
+        if precise_comparison:
             assert_bitwise_scaled_tensors(output, ref_out)
+        else:
+            if isinstance(ref_out, ScaledTensor1x):
+                assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+            elif isinstance(ref_out, ScaledTensor2x):
+                assert_allclose(
+                    output.rowwise_tensor.dequantize(),
+                    ref_out.rowwise_tensor.dequantize(),
+                    dtype=out_dtype,
+                )
+                assert_allclose(
+                    output.colwise_tensor.dequantize(),
+                    ref_out.colwise_tensor.dequantize(),
+                    dtype=out_dtype,
+                )
+            else:
+                pytest.fail("Unsupported output type")
+
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
             assert_allclose(mu, ref_mu, dtype=inp_dtype)

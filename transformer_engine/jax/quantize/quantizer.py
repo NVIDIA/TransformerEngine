@@ -206,7 +206,7 @@ class CurrentScaleQuantizer(Quantizer):
         """
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
 
-        compute_dtype = self.scaling_mode.get_scale_dtype()
+        compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
         amax = jnp.max(jnp.abs(x)).reshape((1,))
         fp8_max = jnp.astype(jnp.finfo(self.q_dtype).max, jnp.float32)
@@ -328,7 +328,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
         """
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
 
-        compute_dtype = self.scale.dtype
+        compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
         scaled_x = x.astype(compute_dtype) * self.scale
 

@@ -950,9 +950,9 @@ def layernorm_fwd(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
         out, mu, rsigma = layernorm_fwd(
-            x=x.astype(jnp.float32),
-            gamma=gamma.astype(jnp.float32),
-            beta=beta.astype(jnp.float32),
+            x=x,
+            gamma=gamma,
+            beta=beta,
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             quantizer=None,
@@ -962,10 +962,7 @@ def layernorm_fwd(
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode in (
-        ScalingMode.DELAYED_TENSOR_SCALING,
-        ScalingMode.CURRENT_TENSOR_SCALING,
-    ):
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -1159,8 +1156,8 @@ def rmsnorm_fwd(
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
         out, rsigma = rmsnorm_fwd(
-            x=x.astype(jnp.float32),
-            gamma=gamma.astype(jnp.float32),
+            x=x,
+            gamma=gamma,
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             quantizer=None,
@@ -1170,10 +1167,7 @@ def rmsnorm_fwd(
 
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode in (
-        ScalingMode.DELAYED_TENSOR_SCALING,
-        ScalingMode.CURRENT_TENSOR_SCALING,
-    ):
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
