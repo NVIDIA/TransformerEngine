@@ -439,10 +439,11 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
-    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
-        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
-            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
-        )
+    # TODO(huah): This fast path does not work for CP + THD + unbalanced, need to fix later
+    # if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+    #     return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    #         segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+    #     )
 
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
