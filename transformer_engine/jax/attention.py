@@ -424,6 +424,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     attn_mask_type,
     window_size,
     max_segments_per_seq,
+    context_parallel_load_balanced,
 ):
     # TODO(mgoldfarb-nvidia): Consider an opt-in for arbitrary masking if needed here.
     # Computing the full mask is expensive due to quadratic expansion of Q * KV masking.
@@ -439,7 +440,12 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
-    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+    # TODO(huah): This fast path does not work for CP + THD + unbalanced, need to fix later
+    if (
+        context_parallel_load_balanced
+        and attn_mask_type.is_causal()
+        and (window_size is None or window_size == (-1, -1))
+    ):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
@@ -527,7 +533,12 @@ class SequenceDescriptor:
         return cls(*children)
 
     def get_seqlens_and_offsets(
-        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+        self,
+        attn_mask_type,
+        qkv_layout,
+        window_size,
+        max_segments_per_seq,
+        context_parallel_load_balanced: bool = False,
     ):
         """
         Acquire the seqlens/offsets for cuDNN backend
@@ -549,6 +560,7 @@ class SequenceDescriptor:
                 attn_mask_type,
                 window_size,
                 max_segments_per_seq,
+                context_parallel_load_balanced,
             )
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(

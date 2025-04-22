@@ -465,6 +465,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                config.context_parallel_load_balanced,
             )
         )
 
@@ -863,6 +864,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                config.context_parallel_load_balanced,
             )
         )
 
@@ -1589,7 +1591,7 @@ class _FusedAttnCPWithP2PHelper:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
         if self.config.qkv_layout.is_thd():
-            allowed_masks = [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK]
+            allowed_masks = [AttnMaskType.PADDING_CAUSAL_MASK]
         else:
             allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
         if self.config.attn_mask_type not in allowed_masks:
@@ -2198,8 +2200,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 causal_padding_config = subblock_config
                 padding_config = replace(subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK)
 
+                kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                 output_per_step, softmax_aux_per_step, _ = lax.cond(
-                    not config.context_parallel_load_balanced and cp_rank > idx,
+                    not config.context_parallel_load_balanced and cp_rank > kv_src_rank,
                     partial(compute, padding_config),
                     partial(compute, causal_padding_config),
                 )
