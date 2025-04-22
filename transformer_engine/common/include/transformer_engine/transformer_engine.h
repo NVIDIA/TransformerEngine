@@ -728,18 +728,12 @@ class TensorWrapper {
 /*! \enum RowwiseFmt
  *  \brief Rowwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
  */
-enum class RowwiseFmt {
-  GEMM_READY_DATA_AND_SCALES = 0,
-  COMPACT_DATA_AND_SCALES = 1
-};
+enum class RowwiseFmt { GEMM_READY_DATA_AND_SCALES = 0, COMPACT_DATA_AND_SCALES = 1 };
 
 /*! \enum ColwiseFmt
  *  \brief Columnwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
  */
-enum class ColwiseFmt {
-  GEMM_READY_DATA_AND_SCALES = 0,
-  COMPACT_DATA_AND_SCALES = 1
-};
+enum class ColwiseFmt { GEMM_READY_DATA_AND_SCALES = 0, COMPACT_DATA_AND_SCALES = 1 };
 
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.

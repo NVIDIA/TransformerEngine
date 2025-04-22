@@ -187,7 +187,10 @@ class Float8BlockQuantizer(Quantizer):
         # currently columnwise format option only applies to 1D quantizer
         # for 2D scaling, columnwise format should always be GEMM_READY_DATA_AND_SCALES
         # since currently 2D scaling only applies to module weights
-        if self.block_scaling_dim == 1 and self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES:
+        if (
+            self.block_scaling_dim == 1
+            and self.columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+        ):
             return shape
         colwise_shape = [shape[-1]]
         for i in range(len(shape) - 1):
