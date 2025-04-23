@@ -1475,7 +1475,7 @@ def _fsdp_gather_tensors(
 
 def _is_te_module(module):
     """
-    Check if given module is a Transsformer Engine module that requires the TE checkpoint
+    Check if given module is a Transformer Engine module that requires the TE checkpoint
     implementation for activation recompute.
     """
     from .module import LayerNorm, RMSNorm
