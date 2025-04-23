@@ -94,15 +94,19 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         }
 
     def is_rowwise_fmt_compact(self) -> bool:
+        """Returns True if rowwise format is compact, False otherwise."""
         return self._rowwise_fmt == RowwiseFmt.COMPACT_DATA_AND_SCALES
 
     def is_columnwise_fmt_compact(self) -> bool:
+        """Returns True if columnwise format is compact, False otherwise."""
         return self._columnwise_fmt == ColwiseFmt.COMPACT_DATA_AND_SCALES
 
     def set_rowwise_fmt(self, rowwise_fmt: RowwiseFmt):
+        """Sets the rowwise format."""
         self._rowwise_fmt = rowwise_fmt
 
     def set_columnwise_fmt(self, columnwise_fmt: ColwiseFmt):
+        """Sets the columnwise format."""
         self._columnwise_fmt = columnwise_fmt
 
     def prepare_for_saving(

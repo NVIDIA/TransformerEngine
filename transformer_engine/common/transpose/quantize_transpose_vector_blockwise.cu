@@ -415,35 +415,35 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
   if (return_columnwise_compact) {
     // thread tile should be 4x16, 16 means 8 smem reads
-    constexpr int thr_tile_row = kTileDim / kThreadsPerWarp;
-    constexpr int thr_tile_col = kNVecOut;
-    using RegVec = Vec<IType, thr_tile_col>;
-    using RegScaleVec = Vec<CType, thr_tile_col>;
+    constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
+    constexpr int kThreadTileCol = kNVecOut;
+    using RegVec = Vec<IType, kThreadTileCol>;
+    using RegScaleVec = Vec<CType, kThreadTileCol>;
     constexpr int num_smem_reads = kNVecOut / kNVecSMem;
     // c_stride will not be used here because we only have one iteration
-    // constexpr int c_stride = thr_tile_col * kNumWarps / kNVecSMem;
+    // constexpr int c_stride = kThreadTileCol * kNumWarps / kNVecSMem;
     constexpr int num_iterations =
-        kTileDim / (kNumWarps * thr_tile_col);  // should be only one iteration
+        kTileDim / (kNumWarps * kThreadTileCol);  // should be only one iteration
     static_assert(num_iterations == 1,
                   "num_iterations should be 1 for columnwise non-transpose case");
     const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
     const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * thr_tile_row;                 // Row in shared memory
+    const int r_s = thr_idx_in_warp * kThreadTileRow;                 // Row in shared memory
     int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
     size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
     const size_t c_g =
         static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;  // Column in global memory
     const size_t num_ele = c_g < row_length
-                               ? min(static_cast<size_t>(thr_tile_col), row_length - c_g)
+                               ? min(static_cast<size_t>(kThreadTileCol), row_length - c_g)
                                : 0;  // For not aligned case
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
-      RegVec reg_vec[thr_tile_row];
+      RegVec reg_vec[kThreadTileRow];
       RegScaleVec thr_scale;
 
       // Step 3.1: Load from shared memory to registers
 #pragma unroll
-      for (int i = 0; i < thr_tile_row; ++i) {
+      for (int i = 0; i < kThreadTileRow; ++i) {
         int r = r_s + i;
 #pragma unroll
         for (int j = 0; j < num_smem_reads; ++j) {
@@ -457,11 +457,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
       }
 #pragma unroll
-      for (int reg_idx = 0; reg_idx < thr_tile_col; ++reg_idx) {
+      for (int reg_idx = 0; reg_idx < kThreadTileCol; ++reg_idx) {
         // Step 3.2: Compute local amax
         CType amax = 0;
 #pragma unroll
-        for (int i = 0; i < thr_tile_row; ++i) {
+        for (int i = 0; i < kThreadTileRow; ++i) {
           amax = fmaxf(amax, fabsf(reg_vec[i].data.elt[reg_idx]));
         }
         // Step 3.3: Reduce amax
@@ -486,12 +486,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
       }
       // Step 3.6: Quantize
-      for (int row_idx = 0; row_idx < thr_tile_row; ++row_idx) {
+      for (int row_idx = 0; row_idx < kThreadTileRow; ++row_idx) {
         OType* output_g =
             &output_t[(r_g + row_idx) * row_length + c_g];  // Output address in global memory
         OVec output_vec;
 #pragma unroll
-        for (int i = 0; i < thr_tile_col; ++i) {
+        for (int i = 0; i < kThreadTileCol; ++i) {
           output_vec.data.elt[i] = static_cast<OType>(
               static_cast<CType>(reg_vec[row_idx].data.elt[i]) * thr_scale.data.elt[i]);
         }
