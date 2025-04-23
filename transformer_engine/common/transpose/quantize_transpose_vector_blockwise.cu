@@ -428,7 +428,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
                   "num_iterations should be 1 for columnwise non-transpose case");
     const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
     const int warp_idx = threadIdx.x / kThreadsPerWarp;
-    const int r_s = thr_idx_in_warp * kThreadTileRow;                 // Row in shared memory
+    const int r_s = thr_idx_in_warp * kThreadTileRow;               // Row in shared memory
     int c_s = warp_idx * num_smem_reads;                            // Column in shared memory
     size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Row in global memory
     const size_t c_g =
