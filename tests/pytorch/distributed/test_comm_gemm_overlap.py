@@ -19,8 +19,8 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
 BATCH_SIZE: int = 2
-NUM_HEADS: int = 16
-HEAD_DIM: int = 32
+NUM_HEADS: int = 32
+HEAD_DIM: int = 48
 TE_LAYERS = [
     te.Linear,
     te.LayerNormLinear,
