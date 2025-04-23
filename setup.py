@@ -90,7 +90,12 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
+    setup_reqs: List[str] = [
+        "nvidia-pyindex",
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cudnn-cu12",
+    ]
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
