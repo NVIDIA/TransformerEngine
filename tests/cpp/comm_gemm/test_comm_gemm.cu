@@ -4,10 +4,8 @@
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <functional>
 #include <iostream>
-#include <iterator>
-#include <numeric>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -63,24 +61,24 @@ SimpleTensor MakeSimple(const std::vector<size_t> dims, const std::vector<T>& va
 
 struct TensorHolder {
   template <typename T>
-  static TensorHolder Make(size_t m, size_t n) {
+  static TensorHolder Make(size_t m, size_t n, float scale) {
     TensorHolder ret;
     ret.t.data = MakeSimple({n, m}, std::vector<T>(m * n));
     ret.t.amax = MakeSimple<float>({1}, {0.0f});
-    ret.t.scale = MakeSimple<float>({1}, {1.0f});
-    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f});
+    ret.t.scale = MakeSimple<float>({1}, {scale});
+    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f / scale});
     return ret;
   }
 
   template <typename T>
   static TensorHolder MakeFromData(const std::vector<T>& data, size_t mstart, size_t nstart,
-                                   size_t msize, size_t nsize, size_t ld) {
+                                   size_t msize, size_t nsize, size_t ld, float scale) {
     auto values = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
     TensorHolder ret;
     ret.t.data = MakeSimple({nsize, msize}, values);
     ret.t.amax = MakeSimple<float>({1}, {0.0f});
-    ret.t.scale = MakeSimple<float>({1}, {1.0f});
-    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f});
+    ret.t.scale = MakeSimple<float>({1}, {scale});
+    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f / scale});
     return ret;
   }
 
@@ -94,6 +92,12 @@ struct TensorHolder {
   }
 };
 
+template <typename T>
+float GetScale(float amax) {
+  if constexpr (sizeof(T) > 1) return 1.0;
+  return static_cast<float>(static_cast<T>(std::numeric_limits<float>::max())) / amax;
+}
+
 struct Params {
   DType a_type;
   DType b_type;
@@ -103,7 +107,7 @@ struct Params {
   size_t m;
   size_t n;
   size_t k;
-  double tol;
+  float tol;
 };
 
 class CommGemmFixure : public ::testing::TestWithParam<Params> {
@@ -140,36 +144,43 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                         cudaStream_t stream) = 0;
 
   template <typename AType, typename BType, typename DType>
-  void Run(bool transa, bool transb, size_t m, size_t n, size_t k, double tol) {
+  void Run(bool transa, bool transb, size_t m, size_t n, size_t k, float tol) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
 
+    constexpr float MAX_IN = 1.0;
     std::mt19937 rng(12);
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    std::uniform_real_distribution<float> dist(0.0, MAX_IN);
+
+    float a_scale = GetScale<AType>(MAX_IN);
+    float b_scale = GetScale<BType>(MAX_IN);
+    float d_scale = GetScale<DType>(MAX_IN * MAX_IN * k);
 
     std::vector<AType> adata(m * k);
     std::generate(adata.begin(), adata.end(),
-                  [&rng, &dist] { return static_cast<AType>(dist(rng)); });
+                  [&rng, &dist, a_scale] { return static_cast<AType>(dist(rng) * a_scale); });
     std::vector<BType> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(),
-                  [&rng, &dist] { return static_cast<BType>(dist(rng)); });
+                  [&rng, &dist, b_scale] { return static_cast<BType>(dist(rng) * b_scale); });
 
-    auto ga = transa ? TensorHolder::MakeFromData<AType>(adata, 0, 0, k, m, k)
-                     : TensorHolder::MakeFromData<AType>(adata, 0, 0, m, k, m);
-    auto gb = transb ? TensorHolder::MakeFromData<BType>(bdata, 0, 0, n, k, n)
-                     : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k);
-    auto gd = TensorHolder::Make<DType>(m, n);
+    auto ga = transa ? TensorHolder::MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
+                     : TensorHolder::MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
+    auto gb = transb ? TensorHolder::MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
+                     : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
+    auto gd = TensorHolder::Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
-    auto a = transa ? TensorHolder::MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
-                                                        dims.a_rows_num, dims.a_cols_num, k)
-                    : TensorHolder::MakeFromData<AType>(adata, dims.a_cols_start, dims.a_rows_start,
-                                                        dims.a_cols_num, dims.a_rows_num, m);
-    auto b = transb ? TensorHolder::MakeFromData<BType>(bdata, dims.b_cols_start, dims.b_rows_start,
-                                                        dims.b_cols_num, dims.b_rows_num, n)
-                    : TensorHolder::MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
-                                                        dims.b_rows_num, dims.b_cols_num, k);
-    auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num);
+    auto a = transa
+                 ? TensorHolder::MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
+                                                     dims.a_rows_num, dims.a_cols_num, k, a_scale)
+                 : TensorHolder::MakeFromData<AType>(adata, dims.a_cols_start, dims.a_rows_start,
+                                                     dims.a_cols_num, dims.a_rows_num, m, a_scale);
+    auto b = transb
+                 ? TensorHolder::MakeFromData<BType>(bdata, dims.b_cols_start, dims.b_rows_start,
+                                                     dims.b_cols_num, dims.b_rows_num, n, b_scale)
+                 : TensorHolder::MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                                     dims.b_rows_num, dims.b_cols_num, k, b_scale);
+    auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
     Tensor bias;
     Tensor pre_act_out;
@@ -177,7 +188,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     bool accumulate = false;
     CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias, &pre_act_out, transa, transb, grad, accumulate,
              0 /*comm_sm_count*/, stream);
-    auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20);
+    auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20, 1.0);
     nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &bias, &pre_act_out, transa, transb, grad, &workspace.t,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
@@ -194,11 +205,11 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                  dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      // if (rand() % 100 < 3) {
-      //   std::cerr << "== at " << rank_ << ": " << i << ": " << static_cast<double>(out[i]) << " "
-      //             << static_cast<double>(out_golden[i]) << std::endl;
-      // }
-      EXPECT_NEAR(static_cast<double>(out[i]), static_cast<double>(out_golden[i]), tol * k);
+      if (rand() % 100 < 3) {
+        // std::cerr << "== at " << rank_ << ": " << i << ": " << static_cast<float>(out[i]) << " "
+        //           << static_cast<float>(out_golden[i]) << std::endl;
+      }
+      EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol * k);
     }
   }
 
@@ -360,23 +371,35 @@ INSTANTIATE_TEST_SUITE_P(
         Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 256, 128, 64,
                1e-9},
         Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 256, 128,
+               64, 1e-4},
+        Params{DType::kFloat8E5M2, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 256, 128,
+               64, 1e-4},
+        Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 256, 128,
+               64, 1e-4},
+        Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 256, 128,
                64, 1e-4}),
     &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(
     GemmRs, GemmRs,
     testing::Values(
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 256, 128, 64, 1e-3},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 256, 128, 64, 5e-1},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 256, 128, 64, 1e-3},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 256, 128, 64,
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 64, 128, 256, 1e-3},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 64, 128, 256, 5e-1},
+        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64, 128, 256, 1e-3},
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 64, 128, 256,
                5e-3},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 256, 128, 64,
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 64, 128, 256,
                5e-1},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 256, 128, 64,
+        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64, 128, 256,
                5e-3},
         Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 64, 128,
-               256, 5e-2}),
+               256, 1e-1},
+        Params{DType::kFloat8E5M2, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 64, 128,
+               256, 1e-1},
+        Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 64, 128,
+               256, 1e-1},
+        Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 64, 128,
+               256, 1e-1}),
     &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(
