@@ -30,7 +30,7 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 project(transformer_engine LANGUAGES CUDA CXX)
 
 # Attempt to find CUDA Toolkit normally
-#find_package(CUDAToolkit)
+find_package(CUDAToolkit)
 
 # If CUDA toolkit not found, try pip-installed Python packages
 if (NOT CUDAToolkit_FOUND)
@@ -133,12 +133,7 @@ target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # Configure dependencies
-if (USE_PYTHON_CUDA_LIBS)
-  target_link_libraries(transformer_engine PUBLIC
-                        cudart
-                        cublas
-                        cudnn)
-else()
+if (NOT USE_PYTHON_CUDA_LIBS)
   target_link_libraries(transformer_engine PUBLIC
                         CUDA::cublas
                         CUDA::cudart
