@@ -225,7 +225,7 @@ def cuda_archs() -> str:
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
-    _, nvcc_bin = cuda_path()
+    nvcc_bin = nvcc_path()
     output = subprocess.run(
         [nvcc_bin, "-V"],
         capture_output=True,
