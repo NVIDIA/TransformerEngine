@@ -66,7 +66,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, cpu_model_init_move_to_gpu, is_cpu_model_init_enabled, cpu_model_init_move_to_cpu
 
 from ..cpp_extensions import (
     general_gemm,
@@ -128,6 +128,8 @@ class _LayerNormLinear(torch.autograd.Function):
         debug: Optional[bool] = False,
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # pylint: disable=missing-function-docstring
+
+        origin_weight, weight = cpu_model_init_move_to_gpu(weight)
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._LayerNormLinear.forward"
@@ -273,7 +275,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
-                workspace_dtype=activation_dtype,
+                workspace_dtype=activation_dtype
             )
 
         # Cast bias to expected dtype
@@ -376,21 +378,13 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
+            if module.cpu_model_init:
+                weightmat = module.offload_weightmat_to_cpu(weightmat, "weight")
+            
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
-                weight,
+                weightmat if weightmat is not origin_weight else None,
+                origin_weight,
                 bias,
                 ln_weight,
                 ln_out,
@@ -409,7 +403,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.input_quantizer = input_quantizer
             ctx.owns_input = inputmat is not inp
-            ctx.weight = weight
+            ctx.origin_weight = origin_weight
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -502,23 +496,20 @@ class _LayerNormLinear(torch.autograd.Function):
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
-                origin_weight,
+                _,
                 bias,
                 ln_weight,
                 ln_out,
                 mu,
                 rsigma,
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
-            )
+            if weight is None:
+                weight = ctx.origin_weight
+            
+            _, weight = cpu_model_init_move_to_gpu(weight)
+            _, ctx.origin_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_weight.main_grad)
+
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -533,14 +524,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    origin_weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    origin_weight.main_grad = main_grad
 
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
@@ -758,13 +741,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 general_gemm_wgrad = functools.partial(
                     general_gemm,
                     out_dtype=(
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ctx.origin_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     workspace=get_workspace(),
                     layout="NT",
                     grad=True,
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                    out=main_grad if ctx.fuse_wgrad_accumulation else None,
+                    out=ctx.origin_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     use_split_accumulator=use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     quantization_params=ctx.grad_weight_quantizer,
@@ -842,20 +825,24 @@ class _LayerNormLinear(torch.autograd.Function):
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
 
+        if ctx.origin_weight.device.type == "cpu":
+            ctx.origin_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_weight.main_grad)
+
+
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
-                origin_weight.grad_added_to_main_grad = True
-                if getattr(origin_weight, "zero_out_wgrad", False):
+            if ctx.fuse_wgrad_accumulation and hasattr(ctx.origin_weight, "grad_added_to_main_grad"):
+                ctx.origin_weight.grad_added_to_main_grad = True
+                if getattr(ctx.origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
-                        origin_weight.dtype,
+                        list(ctx.origin_weight.main_grad.shape),
+                        ctx.origin_weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
-                        origin_weight.dtype,
+                        list(ctx.origin_weight.main_grad.shape),
+                        ctx.origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -1066,6 +1053,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
+        
+        self.cpu_model_init = is_cpu_model_init_enabled()
+        weight_device = device
+        if self.cpu_model_init:
+            assert device != "meta", "CPU model init is not supported on 'meta' device."
+            weight_device = "cpu"
+            assert fuse_wgrad_accumulation, "CPU model init is not supported without fuse_wgrad_accumulation"
+
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1164,8 +1159,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight_tensor = torch.empty(
             self.out_features,
             self.in_features,
-            device=device,
+            device=weight_device,
             dtype=params_dtype,
+            pin_memory=self.cpu_model_init,
         )
         bias_tensor = None
         if self.use_bias:
@@ -1401,6 +1397,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
+            
+            if self.cpu_model_init:
+                assert weight_tensor.device.type == "cpu", "Weight tensor must be on CPU when cpu_model_init is True."
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
@@ -1503,6 +1502,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
+        if self.cpu_model_init:
+            weight_quantizer.internal = False
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

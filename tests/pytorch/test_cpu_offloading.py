@@ -23,7 +23,7 @@ fp8_recipes = [
 ]
 
 SIZE = 512
-NUM_HEADS = 8
+NUM_HEADS = 2
 NUM_LAYERS = 5
 EPSILON = 0.1
 
@@ -37,20 +37,22 @@ assert os.getenv("NVTE_FLASH_ATTN") == "0"
 # For the TransformerLayer, activation offloading with dropout is not supported,
 # so we set hidden_dropout to 0.0.
 model_types = {
-    "linear": lambda: te.Linear(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "layernorm_mlp": lambda: te.LayerNormMLP(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "layernorm_linear": lambda: te.LayerNormLinear(SIZE, SIZE, params_dtype=torch.bfloat16),
-    "multihead_attention": lambda: te.MultiheadAttention(
-        SIZE, NUM_HEADS, params_dtype=torch.bfloat16
-    ),
-    "transformer_layer": lambda: te.TransformerLayer(
-        SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
-    ),
+    "linear": lambda fuse_wgrad_accumulation=False: te.Linear(
+        SIZE, SIZE, params_dtype=torch.bfloat16, fuse_wgrad_accumulation=fuse_wgrad_accumulation),
+    "layernorm_mlp": lambda fuse_wgrad_accumulation=False: te.LayerNormMLP(
+        SIZE, SIZE, params_dtype=torch.bfloat16, fuse_wgrad_accumulation=fuse_wgrad_accumulation),
+    "layernorm_linear": lambda fuse_wgrad_accumulation=False: te.LayerNormLinear(
+        SIZE, SIZE, params_dtype=torch.bfloat16, fuse_wgrad_accumulation=fuse_wgrad_accumulation),
+    "multihead_attention": lambda fuse_wgrad_accumulation=False: te.MultiheadAttention(
+        SIZE, NUM_HEADS, params_dtype=torch.bfloat16, fuse_wgrad_accumulation=fuse_wgrad_accumulation),
+    "transformer_layer": lambda fuse_wgrad_accumulation=False: te.TransformerLayer(
+        SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, 
+        hidden_dropout=0.0, fuse_wgrad_accumulation=fuse_wgrad_accumulation, fuse_qkv_params=fuse_wgrad_accumulation),
 }
 
 
 def _get_input():
-    return torch.empty((128, SIZE, SIZE), dtype=torch.bfloat16).cuda()
+    return torch.randn((128, SIZE, SIZE), dtype=torch.bfloat16, requires_grad=True).cuda()
 
 
 def _get_fp8_weight_cache_size(models, fp8_recipe):
@@ -72,9 +74,24 @@ def _get_fp8_weight_cache_size(models, fp8_recipe):
     factor_for_scale_inv_tensor = (1 + 1 / 32) if fp8_recipe.mxfp8() else 1
     return (2 * params_bytes * factor_for_scale_inv_tensor) / (1024**2)
 
+def _get_weights_size(models):
+    params_bytes = 0
+    for model in models:
+        for name, param in model.named_parameters():
+            if "weight" in name:
+                params_bytes += param.numel() * param.element_size()
+    return params_bytes / (1024**2)
 
-def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload):
-    tensor = _get_input()
+def _delayed_scaling_helper_tensor_size(models):
+    return 0.05 * len(models)
+
+def _alloc_main_grad(models, device):
+    for model in models:
+        for name, param in model.named_parameters():
+            if "weight" in name:
+                param.main_grad = torch.randn_like(param).to(device).to(torch.float32)
+
+def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload, microbatching=False):
     if cpu_offload:
         offload_context, sync_function = te.get_cpu_offload_context(
             enabled=True,
@@ -86,18 +103,30 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
     else:
         offload_context = nullcontext()
         sync_function = lambda x: x
+    
+    def run_fwd(is_first_microbatch):
+        tensor = _get_input()
 
-    for model in models:
-        with te.fp8_autocast(
-            enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
-        ), offload_context:
-            tensor = model(tensor)
-        tensor = sync_function(tensor)
+        for model in models:
+            with te.fp8_autocast(
+                enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
+            ), offload_context:
+                tensor = model(tensor, is_first_microbatch=is_first_microbatch)
+            tensor = sync_function(tensor)
 
-    max_mem_used = torch.cuda.memory_allocated() / (1024**2)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
+        max_mem_used = torch.cuda.memory_allocated() / (1024**2)
 
-    return max_mem_used
+        #tensor.sum().backward()
+        return max_mem_used
+    
+    if microbatching:
+        mem1 = run_fwd(True)  
+        mem2 = run_fwd(False)
+        return max(mem1, mem2)
+    else:
+        return run_fwd(None)
+
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
@@ -142,3 +171,39 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     assert (
         memory_consumption_diff < _get_fp8_weight_cache_size(models_list[1:], fp8_recipe) + EPSILON
     )
+
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("microbatching", [True, False])
+@pytest.mark.parametrize("model_key", model_types.keys())
+def test_weight_offloading(fp8_recipe, model_key, microbatching):
+    if model_key == "multihead_attention":
+        pytest.skip("MultiheadAttention does not support weight offloading with interleaved layers")
+
+    with te.cpu_model_init(enabled=True):
+        models_cpu_init = [model_types[model_key](fuse_wgrad_accumulation=True) for _ in range(NUM_LAYERS)]
+    
+    _alloc_main_grad(models_cpu_init, device="cpu")
+
+    with_cpu_init = _measure_memory_between_forward_and_backward(models_cpu_init, fp8_recipe, False, microbatching=microbatching)
+    del models_cpu_init
+    
+
+    with te.cpu_model_init(enabled=False):
+        models_no_cpu_init = [model_types[model_key](fuse_wgrad_accumulation=True) for _ in range(NUM_LAYERS)]
+    
+    _alloc_main_grad(models_no_cpu_init, device="cuda")
+    
+    without_cpu_init = _measure_memory_between_forward_and_backward(models_no_cpu_init, fp8_recipe, False, microbatching=microbatching)
+    #assert with_cpu_init < without_cpu_init
+    if model_key != "transformer_layer":
+        weights_size = _get_weights_size(models_no_cpu_init)
+        weights_fp8_cache_size = _get_fp8_weight_cache_size(models_no_cpu_init, fp8_recipe)
+        main_grad_buffer_size = _get_weights_size(models_no_cpu_init) * 2 # dtype is float32, not bfloat16, so the size is double the weights size
+        tolerance = EPSILON
+        if fp8_recipe is not None:
+            if fp8_recipe.delayed():
+                tolerance += _delayed_scaling_helper_tensor_size(models_no_cpu_init)
+
+        assert abs((without_cpu_init - with_cpu_init) - weights_size - weights_fp8_cache_size - main_grad_buffer_size) < tolerance
+
+

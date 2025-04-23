@@ -34,9 +34,11 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_gather_tensors,
 )
+from ..cpu_offload import cpu_model_init_move_to_cpu, cpu_model_init_move_to_gpu
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8Tensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -1028,7 +1030,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
-        workspace_dtype: Optional[torch.dtype] = None,
+        workspace_dtype: Optional[torch.dtype] = None
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1070,6 +1072,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+            if out is not None:
+                if isinstance(out, Float8Tensor):
+                    if out._data.device.type == "cpu":
+                        out, _ = cpu_model_init_move_to_gpu(out)
             if quantizer is not None and isinstance(out, MXFP8TensorBase):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     out = None
@@ -1101,7 +1107,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
             out = quantizer.quantize(tensor, dtype=workspace_dtype)
-
             # Update cache
             if cache_name is not None:
                 self._fp8_workspaces[cache_name] = out
@@ -1118,6 +1123,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             else:
                 tex.quantize(tensor, quantizer, out, skip_update_flag)
         return out
+
+    def offload_weightmat_to_cpu(self, weightmat, cache_name):
+        """
+        Offload weightmat to CPU and cache it.
+        """
+        if not self.cpu_model_init:
+            return weightmat
+
+        cpu_tensor = cpu_model_init_move_to_cpu(weightmat)
+        if cache_name is not None:
+            if cache_name in self._fp8_workspaces:
+                self._fp8_workspaces[cache_name] = cpu_tensor
+        return cpu_tensor
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs

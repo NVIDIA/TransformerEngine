@@ -113,6 +113,7 @@ class Float8Quantizer(Quantizer):
                 data.numel() // inner_dim,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=device == "cpu"
             )
 
         # Construct FP8 tensor
@@ -361,6 +362,9 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
+        if self._data.device.type == "cpu":
+            return "Float8Tensor on CPU - _data = " + str(self._data)
+
         return (
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
@@ -623,6 +627,13 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             pass
 
         return super().__torch_dispatch__(func, types, args, kwargs)
+
+    def cuda(self, non_blocking: bool = False):
+        self._data = self._data.cuda(non_blocking=non_blocking)
+        if self._transpose is not None:
+            self._transpose = self._transpose.cuda(non_blocking=non_blocking)
+        self._scale_inv = self._scale_inv.cuda(non_blocking=non_blocking)
+        return self
 
     @classmethod
     def _make_in_reduce_ex(

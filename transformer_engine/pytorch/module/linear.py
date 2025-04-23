@@ -65,7 +65,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, cpu_model_init_move_to_gpu, is_cpu_model_init_enabled, cpu_model_init_move_to_cpu
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 
@@ -117,6 +117,9 @@ class _Linear(torch.autograd.Function):
         debug: Optional[bool] = False,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+
+        origin_weight, weight = cpu_model_init_move_to_gpu(weight)
+
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -272,7 +275,6 @@ class _Linear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-
         out, *_, rs_out = general_gemm(
             weightmat,
             inputmat_total,
@@ -305,7 +307,6 @@ class _Linear(torch.autograd.Function):
                 if force_hp_input_gather:
                     assert not isinstance(inputmat, QuantizedTensor)
                 saved_inputmat = inputmat
-
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensor):
@@ -325,24 +326,16 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
             # TODO(ksivamani): Check memory usage
+            if module.cpu_model_init:
+                weightmat = module.offload_weightmat_to_cpu(weightmat, "weight")
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
-                weightmat,
-                weight,
+                weightmat if weightmat is not origin_weight else None,
+                origin_weight,
                 bias,
             )
+
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -355,8 +348,7 @@ class _Linear(torch.autograd.Function):
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            if fuse_wgrad_accumulation and weight.requires_grad:
-                ctx.main_grad = weight.main_grad
+            ctx.origin_weight = origin_weight
 
             ctx.debug = debug
             ctx.cpu_offloading = cpu_offloading
@@ -430,25 +422,15 @@ class _Linear(torch.autograd.Function):
                     )
 
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+            inputmat, weight_fp8, _, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
-            )
-
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    weight.main_grad = main_grad
+            if weight_fp8 is None:
+                weight_fp8 = ctx.origin_weight
+            
+            _, weight_fp8 = cpu_model_init_move_to_gpu(weight_fp8)
+            _, ctx.origin_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_weight.main_grad)
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -681,13 +663,13 @@ class _Linear(torch.autograd.Function):
                 general_gemm_wgrad = functools.partial(
                     general_gemm,
                     out_dtype=(
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ctx.origin_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
                     workspace=get_workspace(),
                     layout="NT",
                     grad=True,
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                    out=main_grad if ctx.fuse_wgrad_accumulation else None,
+                    out=ctx.origin_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     use_split_accumulator=use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     quantization_params=ctx.grad_weight_quantizer,
@@ -729,24 +711,28 @@ class _Linear(torch.autograd.Function):
                 dgrad_work.wait()
                 dgrad_work = None
 
+        if ctx.origin_weight.device.type == "cpu":
+            ctx.origin_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_weight.main_grad)
+
+
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
             if (
                 ctx.fuse_wgrad_accumulation
-                and weight is not None
-                and hasattr(weight, "grad_added_to_main_grad")
+                and ctx.origin_weight is not None
+                and hasattr(ctx.origin_weight, "grad_added_to_main_grad")
             ):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
+                ctx.origin_weight.grad_added_to_main_grad = True
+                if getattr(ctx.origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(ctx.origin_weight.main_grad.shape),
+                        ctx.origin_weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(ctx.origin_weight.main_grad.shape),
+                        ctx.origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -759,7 +745,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensor):
+        if ctx.fp8 and not isinstance(ctx.origin_weight, QuantizedTensor):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
@@ -920,6 +906,12 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.name = name
+        self.cpu_model_init = is_cpu_model_init_enabled()
+        weight_device = device
+        if self.cpu_model_init:
+            assert device != "meta", "CPU model init is not supported on 'meta' device."
+            weight_device = "cpu"
+            assert fuse_wgrad_accumulation, "CPU model init is not supported without fuse_wgrad_accumulation"
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -1000,21 +992,23 @@ class Linear(TransformerEngineBaseModule):
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
+
+
         # Contiguous buffers for params
         weight_tensor = torch.empty(
             self.out_features,
             self.in_features,
-            device=device,
+            device=weight_device,
             dtype=params_dtype,
+            pin_memory=self.cpu_model_init,
         )
         bias_tensor = None
         if self.use_bias:
             bias_tensor = torch.empty(
                 self.out_features,
                 device=device,
-                dtype=params_dtype,
+                dtype=params_dtype
             )
-
         # Configure parameter splits
         self.weight_names = []
         self.bias_names = []
@@ -1175,6 +1169,7 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
@@ -1192,7 +1187,7 @@ class Linear(TransformerEngineBaseModule):
         if self.ub_overlap_rs_dgrad:
             if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
                 fp8_grad = True
-
+        
         with self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
@@ -1213,6 +1208,9 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = None
+        
+            if self.cpu_model_init:
+                assert weight_tensor.device.type == "cpu", "Weight tensor must be on CPU when cpu_model_init is True."
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
@@ -1304,7 +1302,7 @@ class Linear(TransformerEngineBaseModule):
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
+        weight_quantizer.internal = False
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

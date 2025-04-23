@@ -4,12 +4,12 @@
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
 from __future__ import annotations
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
 from typing import Any, Dict, Optional
 
 import torch
 
-from .tensor.float8_tensor import Float8Tensor
+from .tensor.float8_tensor import Float8Tensor, Float8TensorBase
 
 __all__ = ["get_cpu_offload_context"]
 
@@ -620,3 +620,75 @@ def get_cpu_offload_context(
             group_prefetch_offload_commit_async,
         )
     return nullcontext(), group_prefetch_offload_commit_async
+
+CPU_MODEL_INIT_ENABLED = False
+WEIGHT_LOAD_STREAM = torch.cuda.Stream()
+WEIGHT_OFFLOAD_STREAM = torch.cuda.Stream()
+
+def is_cpu_model_init_enabled():
+    return CPU_MODEL_INIT_ENABLED
+
+@contextmanager
+def cpu_model_init(enabled: bool = True):
+    global CPU_MODEL_INIT_ENABLED
+    CPU_MODEL_INIT_ENABLED = enabled
+    yield
+    CPU_MODEL_INIT_ENABLED = False
+
+def cpu_model_init_move_to_gpu(tensor):
+    if tensor is None:
+        return None, None
+    cpu_tensor = None
+    if type(tensor) == Float8TensorBase:
+        return tensor, tensor
+    if isinstance(tensor, Float8Tensor):
+        if tensor._data.device.type == "cuda":
+            return tensor, tensor
+    elif tensor.device.type == "cuda":
+        return tensor, tensor
+
+    copied_event = torch.cuda.Event()
+    before_compute_event = torch.cuda.Event()
+
+    with torch.cuda.stream(WEIGHT_LOAD_STREAM):
+        cpu_tensor = tensor 
+        tensor = cpu_tensor.cuda(non_blocking=True)
+        tensor.requires_grad = cpu_tensor.requires_grad
+        if hasattr(cpu_tensor, "main_grad"):
+            tensor.main_grad = cpu_tensor.main_grad
+        copied_event.record()
+    torch.cuda.current_stream().wait_event(copied_event)
+    before_compute_event.record()
+    WEIGHT_LOAD_STREAM.wait_event(before_compute_event)
+    return cpu_tensor, tensor
+
+def cpu_model_init_move_to_cpu(tensor):
+    if tensor is None:
+        return None
+
+    before_copy_event = torch.cuda.Event()
+    after_compute_event = torch.cuda.Event()
+
+    after_compute_event.record()
+    WEIGHT_OFFLOAD_STREAM.wait_event(after_compute_event)
+
+    with torch.cuda.stream(WEIGHT_OFFLOAD_STREAM):
+        
+        before_copy_event.record()
+        cpu_tensor = None 
+        if isinstance(tensor, Float8Tensor):
+            cpu_tensor = tensor._quantizer.make_empty(shape=tensor.shape, device="cpu")
+        else:
+            cpu_tensor = torch.empty(
+                tensor.shape,   
+                dtype=tensor.dtype,
+                device="cpu",
+                pin_memory=tensor.is_pinned()
+            )
+        cpu_tensor.copy_(tensor, non_blocking=True)
+    
+    torch.cuda.current_stream().wait_event(before_copy_event)
+
+    return cpu_tensor
+    
+    
