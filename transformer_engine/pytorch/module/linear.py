@@ -1207,7 +1207,7 @@ class Linear(TransformerEngineBaseModule):
                             "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    unfused_weights = [w.dequantize() for w in unfused_weights]
+                    raise RuntimeError("FP8 weights without FP8 computation is not supported")
             weight_tensor = noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
