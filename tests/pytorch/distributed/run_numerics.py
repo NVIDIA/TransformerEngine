@@ -300,6 +300,11 @@ def _loss_backward(output_single_node, output_distributed):
     LOSS_FN(output_distributed, target).backward()
 
 
+def _loss_backward_dw(model_single_node, model_distributed):
+    model_single_node.backward_dw()
+    model_distributed.backward_dw()
+
+
 def _alloc_main_grad(model_single_node, model_distributed):
     for model in [model_single_node, model_distributed]:
         for param in model.parameters():
@@ -473,6 +478,10 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -494,6 +503,7 @@ def test_linear():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column", "row"]:
@@ -645,6 +655,10 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -667,6 +681,7 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:
@@ -746,6 +761,9 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -771,6 +789,7 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
 
     for kwargs in kwargs_list:

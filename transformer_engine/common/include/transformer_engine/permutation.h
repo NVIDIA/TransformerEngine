@@ -18,4 +18,7 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
                     const NVTETensor prob, const int num_rows, const int topK, const int num_cols,
                     cudaStream_t stream = nullptr);
 
+void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes, int *keys_in,
+                                  int *keys_out, int *values_in, int *values_out, size_t num_items);
+
 #endif  // TRANSFORMER_ENGINE_PERMUTATION_H_
