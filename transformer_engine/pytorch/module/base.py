@@ -37,7 +37,11 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
-from ..tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from ..tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from ..tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
@@ -448,7 +452,7 @@ def fill_userbuffers_buffer_for_all_gather(
         return global_tensor, local_tensor
 
     # FP8 data
-    if isinstance(quantizer, Float8Quantizer):
+    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
         if not isinstance(local_tensor, Float8TensorBase):
             if isinstance(local_tensor, QuantizedTensor):
                 local_tensor.dequantize()
@@ -548,7 +552,7 @@ def fill_userbuffers_buffer_for_all_gather(
         return global_tensor, local_tensor
 
     # Unsupported data format
-    raise ValueError(f"Unsupported quantizer ({quantizer})")
+    raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):

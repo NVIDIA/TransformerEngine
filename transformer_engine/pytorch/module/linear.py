@@ -435,24 +435,6 @@ class _Linear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with torch.cuda.nvtx.range("_Linear_backward"):
-            if (
-                ctx.fp8
-                and any(
-                    [
-                        ctx.ub_overlap_ag,
-                        ctx.ub_overlap_rs_dgrad,
-                        ctx.ub_bulk_dgrad,
-                        ctx.ub_bulk_wgrad,
-                    ]
-                )
-                and (ctx.fp8_recipe is not None)
-            ):
-                if not ctx.fp8_recipe.float8_per_tensor_scaling():
-                    raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
-                        " current scaling"
-                    )
-
             saved_tensors = ctx.saved_tensors
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
@@ -513,8 +495,8 @@ class _Linear(torch.autograd.Function):
                     ctx.requires_wgrad
                     and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer)
                 ):
-                    grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    grad_output_wgrad, grad_output_wgrad_work = gather_along_first_dim(
+                    ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                    wgrad_grad_output, wgrad_grad_output_work = gather_along_first_dim(
                         grad_output,
                         ctx.tp_group,
                         async_op=True,
@@ -546,20 +528,13 @@ class _Linear(torch.autograd.Function):
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
             if ctx.grad_output_quantizer is not None:
-                rowwise_usage = True
-                columnwise_usage = True
-                if ctx.ub_overlap_ag and isinstance(
-                    ctx.grad_output_quantizer,
-                    (Float8Quantizer, Float8CurrentScalingQuantizer),
-                ):
-                    # If data is in FP8 and communication is handled
-                    # with Userbuffers, we compute FP8 transposes
-                    # manually
-                    columnwise_usage = False
-                ctx.grad_output_quantizer.set_usage(
-                    rowwise=rowwise_usage,
-                    columnwise=columnwise_usage,
-                )
+                quantizer = ctx.grad_output_quantizer
+                quantizer.set_usage(rowwise=True, columnwise=True)
+                if ctx.ub_overlap_ag:
+                    # Userbuffers only supports communication for one
+                    # tensor usage at a time. Configure quantizer with
+                    # usage for only dgrad GEMM.
+                    quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor
             # Cast to expected dtype and perform tensor-parallel communication

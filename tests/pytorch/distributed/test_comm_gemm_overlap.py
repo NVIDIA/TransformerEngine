@@ -20,7 +20,7 @@ RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 16
-HEAD_DIM: int = 48
+HEAD_DIM: int = 32
 TE_LAYERS = [
     te.Linear,
     te.LayerNormLinear,
@@ -251,15 +251,7 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
 
 @pytest.mark.parametrize(
     "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling"],
-    ids=[" DELAYED SCALING ", " CURRENT SCALING "],
-)
-@pytest.mark.parametrize(
-    "fp8",
-    (True,),
-    ids=[
-        " FP8  ",
-    ],
+    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
 )
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
@@ -279,12 +271,12 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         )
     ),
     ids=[
-        f" {te.Linear.__name__} - ROW-PARALLEL ",
-        f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
-        f" {te.Linear.__name__} - COL-PARLALEL - DGRAD+RS ",
-        f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
-        f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
-        f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",
+        f"{te.Linear.__name__}-row_tensor_parallel",
+        f"{te.Linear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
+        f"{te.Linear.__name__}-col_tensor_parallel-DGRAD+RS",
+        f"{te.LayerNormLinear.__name__}-row_tensor_parallel",
+        f"{te.LayerNormLinear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
+        f"{te.LayerNormLinear.__name__}-col_tensor_parallel-DGRAD+RS",
     ]
     + [
         " " + " - ".join(test_name_parts) + " "
@@ -295,12 +287,12 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
     ],
 )
 def test_layers_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, quantization,
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization)
 
 
 @pytest.mark.parametrize(
