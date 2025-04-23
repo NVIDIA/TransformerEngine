@@ -84,6 +84,7 @@ if __name__ == "__main__":
         The script requires JAX to be installed for building.
         It will raise a RuntimeError if JAX is not available.
     """
+
     # Extensions
     common_headers_dir = "common_headers"
     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))

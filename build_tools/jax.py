@@ -43,7 +43,7 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
-    cuda_home, _ = cuda_path()
+    cuda_home = cuda_path()
     xla_home = xla_path()
     include_dirs = [
         cuda_home / "include",

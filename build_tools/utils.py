@@ -163,7 +163,31 @@ def found_pybind11() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def cuda_path() -> Tuple[str, str]:
-    """CUDA root path and NVCC binary path as a tuple.
+    """Returns CUDA root path.
+
+    Throws FileNotFoundError if CUDA is not found."""
+    # Try finding CUDA
+    cuda_home: Optional[Path] = None
+    if cuda_home is None and os.getenv("CUDA_HOME"):
+        # Check in CUDA_HOME
+        cuda_home = Path(os.getenv("CUDA_HOME"))
+    if cuda_home is None:
+        # Check in NVCC
+        nvcc_bin = shutil.which("nvcc")
+        if nvcc_bin is not None:
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
+    if cuda_home is None:
+        # Last-ditch guess in /usr/local/cuda
+        cuda_home = Path("/usr/local/cuda")
+    if not cuda_home.is_file():
+        raise FileNotFoundError(f"Could not find CUDA at {cuda_home}")
+
+    return cuda_home
+
+
+@functools.lru_cache(maxsize=None)
+def nvcc_path() -> Tuple[str, str]:
+    """Returns the NVCC binary path.
 
     Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
@@ -185,7 +209,7 @@ def cuda_path() -> Tuple[str, str]:
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
-    return cuda_home, nvcc_bin
+    return nvcc_bin
 
 
 @functools.lru_cache(maxsize=None)
@@ -298,18 +322,3 @@ def install_and_import(package):
     main_package = package.split("[")[0]
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
-
-
-def uninstall_te_wheel_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_cu12",
-            "transformer_engine_torch",
-            "transformer_engine_jax",
-        ]
-    )

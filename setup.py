@@ -5,7 +5,6 @@
 """Installation script."""
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -23,7 +22,6 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
-    uninstall_te_wheel_packages,
 )
 
 frameworks = get_frameworks()
@@ -159,9 +157,6 @@ if __name__ == "__main__":
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-            # Remove residual FW packages since compiling from source
-            # results in a single binary with FW extensions included.
-            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 
