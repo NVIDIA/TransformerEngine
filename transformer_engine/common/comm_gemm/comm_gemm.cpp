@@ -321,6 +321,11 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_D_SCALE_POINTER,
         &d->scale.dptr, sizeof(void*)));
+    if (d->amax.dptr) {
+      NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+          ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_AMAX_D_POINTER,
+          &d->amax.dptr, sizeof(void*)));
+    }
   }
 
   if (comm_sm_count) {
