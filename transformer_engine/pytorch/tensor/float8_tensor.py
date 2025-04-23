@@ -113,7 +113,7 @@ class Float8Quantizer(Quantizer):
                 data.numel() // inner_dim,
                 dtype=torch.uint8,
                 device=device,
-                pin_memory=device == "cpu"
+                pin_memory=device == "cpu",
             )
 
         # Construct FP8 tensor

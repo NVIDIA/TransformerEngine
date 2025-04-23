@@ -67,7 +67,13 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, cpu_model_init_move_to_gpu, is_cpu_model_init_enabled, cpu_model_init_move_to_cpu
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    mark_activation_offload,
+    cpu_model_init_move_to_gpu,
+    is_cpu_model_init_enabled,
+    cpu_model_init_move_to_cpu,
+)
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -511,7 +517,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-            
+
             if module.cpu_model_init:
                 fc1_weight_final = module.offload_weightmat_to_cpu(fc1_weight_final, "fc1_weight")
                 fc2_weight_final = module.offload_weightmat_to_cpu(fc2_weight_final, "fc2_weight")
@@ -550,7 +556,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
             ctx.origin_fc1_weight = origin_fc1_weight
             ctx.origin_fc2_weight = origin_fc2_weight
-
 
             ctx.device = device
             ctx.activation_dtype = activation_dtype
@@ -668,12 +673,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight = ctx.origin_fc1_weight
             if fc2_weight is None:
                 fc2_weight = ctx.origin_fc2_weight
-                
+
             _, fc1_weight = cpu_model_init_move_to_gpu(fc1_weight)
             _, fc2_weight = cpu_model_init_move_to_gpu(fc2_weight)
-            _, ctx.origin_fc1_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_fc1_weight.main_grad)
-            _, ctx.origin_fc2_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_fc2_weight.main_grad)
-
+            _, ctx.origin_fc1_weight.main_grad = cpu_model_init_move_to_gpu(
+                ctx.origin_fc1_weight.main_grad
+            )
+            _, ctx.origin_fc2_weight.main_grad = cpu_model_init_move_to_gpu(
+                ctx.origin_fc2_weight.main_grad
+            )
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP
@@ -782,7 +790,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     rowwise_usage=ctx.fc2_weight_quantizer.rowwise_usage,
                     columnwise_usage=ctx.fc2_weight_quantizer.columnwise_usage,
                 )
-            
+
             gemm_output, *_ = general_gemm(
                 fc2_weight,
                 grad_output,
@@ -1111,9 +1119,13 @@ class _LayerNormMLP(torch.autograd.Function):
         clear_tensor_data(mu, rsigma)
 
         if ctx.origin_fc1_weight.device.type == "cpu":
-            ctx.origin_fc1_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_fc1_weight.main_grad)
+            ctx.origin_fc1_weight.main_grad = cpu_model_init_move_to_cpu(
+                ctx.origin_fc1_weight.main_grad
+            )
         if ctx.origin_fc2_weight.device.type == "cpu":
-            ctx.origin_fc2_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_fc2_weight.main_grad)
+            ctx.origin_fc2_weight.main_grad = cpu_model_init_move_to_cpu(
+                ctx.origin_fc2_weight.main_grad
+            )
 
         if ctx.fc1_weight_requires_grad:
             # Handle custom DDP from mcore.
@@ -1398,7 +1410,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.cpu_model_init:
             assert device != "meta", "CPU model init is not supported on 'meta' device."
             weight_device = "cpu"
-            assert fuse_wgrad_accumulation, "CPU model init is not supported without fuse_wgrad_accumulation"
+            assert (
+                fuse_wgrad_accumulation
+            ), "CPU model init is not supported without fuse_wgrad_accumulation"
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -1465,7 +1479,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_output_features = self.size_per_partition
 
         fc1_weight = Parameter(
-            torch.empty(fc1_output_features, hidden_size, device=weight_device, dtype=params_dtype, pin_memory=self.cpu_model_init)
+            torch.empty(
+                fc1_output_features,
+                hidden_size,
+                device=weight_device,
+                dtype=params_dtype,
+                pin_memory=self.cpu_model_init,
+            )
         )
         self.register_parameter(
             "fc1_weight",
@@ -1485,7 +1505,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # FC2 init
         fc2_weight = Parameter(
-            torch.empty(hidden_size, self.size_per_partition, device=weight_device, dtype=params_dtype, pin_memory=self.cpu_model_init)
+            torch.empty(
+                hidden_size,
+                self.size_per_partition,
+                device=weight_device,
+                dtype=params_dtype,
+                pin_memory=self.cpu_model_init,
+            )
         )
         self.register_parameter(
             "fc2_weight",
@@ -1611,11 +1637,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.ub_overlap_rs:
             if get_ub("fc2_fprop").is_fp8_ubuf():
                 fp8_output = True
-    
+
         if self.cpu_model_init:
             for weight in [self.fc1_weight, self.fc2_weight]:
-                assert weight.device.type == "cpu", "Weight tensor must be on CPU when cpu_model_init is True."
-        
+                assert (
+                    weight.device.type == "cpu"
+                ), "Weight tensor must be on CPU when cpu_model_init is True."
+
         with self.prepare_forward(inp, num_gemms=2) as inp:
             quantizers = (
                 self._get_quantizers(fp8_output)

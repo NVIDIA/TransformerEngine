@@ -66,7 +66,13 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, cpu_model_init_move_to_gpu, is_cpu_model_init_enabled, cpu_model_init_move_to_cpu
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    mark_activation_offload,
+    cpu_model_init_move_to_gpu,
+    is_cpu_model_init_enabled,
+    cpu_model_init_move_to_cpu,
+)
 
 from ..cpp_extensions import (
     general_gemm,
@@ -275,7 +281,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
-                workspace_dtype=activation_dtype
+                workspace_dtype=activation_dtype,
             )
 
         # Cast bias to expected dtype
@@ -380,7 +386,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if module.cpu_model_init:
                 weightmat = module.offload_weightmat_to_cpu(weightmat, "weight")
-            
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat if weightmat is not origin_weight else None,
@@ -506,10 +512,9 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if weight is None:
                 weight = ctx.origin_weight
-            
+
             _, weight = cpu_model_init_move_to_gpu(weight)
             _, ctx.origin_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_weight.main_grad)
-
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -741,7 +746,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 general_gemm_wgrad = functools.partial(
                     general_gemm,
                     out_dtype=(
-                        ctx.origin_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ctx.origin_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     workspace=get_workspace(),
                     layout="NT",
@@ -828,10 +835,11 @@ class _LayerNormLinear(torch.autograd.Function):
         if ctx.origin_weight.device.type == "cpu":
             ctx.origin_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_weight.main_grad)
 
-
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(ctx.origin_weight, "grad_added_to_main_grad"):
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                ctx.origin_weight, "grad_added_to_main_grad"
+            ):
                 ctx.origin_weight.grad_added_to_main_grad = True
                 if getattr(ctx.origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
@@ -1053,14 +1061,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.name = name
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-        
+
         self.cpu_model_init = is_cpu_model_init_enabled()
         weight_device = device
         if self.cpu_model_init:
             assert device != "meta", "CPU model init is not supported on 'meta' device."
             weight_device = "cpu"
-            assert fuse_wgrad_accumulation, "CPU model init is not supported without fuse_wgrad_accumulation"
-
+            assert (
+                fuse_wgrad_accumulation
+            ), "CPU model init is not supported without fuse_wgrad_accumulation"
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1397,9 +1406,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
-            
+
             if self.cpu_model_init:
-                assert weight_tensor.device.type == "cpu", "Weight tensor must be on CPU when cpu_model_init is True."
+                assert (
+                    weight_tensor.device.type == "cpu"
+                ), "Weight tensor must be on CPU when cpu_model_init is True."
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)

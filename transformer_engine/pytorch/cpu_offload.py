@@ -621,12 +621,15 @@ def get_cpu_offload_context(
         )
     return nullcontext(), group_prefetch_offload_commit_async
 
+
 CPU_MODEL_INIT_ENABLED = False
 WEIGHT_LOAD_STREAM = torch.cuda.Stream()
 WEIGHT_OFFLOAD_STREAM = torch.cuda.Stream()
 
+
 def is_cpu_model_init_enabled():
     return CPU_MODEL_INIT_ENABLED
+
 
 @contextmanager
 def cpu_model_init(enabled: bool = True):
@@ -634,6 +637,7 @@ def cpu_model_init(enabled: bool = True):
     CPU_MODEL_INIT_ENABLED = enabled
     yield
     CPU_MODEL_INIT_ENABLED = False
+
 
 def cpu_model_init_move_to_gpu(tensor):
     if tensor is None:
@@ -651,7 +655,7 @@ def cpu_model_init_move_to_gpu(tensor):
     before_compute_event = torch.cuda.Event()
 
     with torch.cuda.stream(WEIGHT_LOAD_STREAM):
-        cpu_tensor = tensor 
+        cpu_tensor = tensor
         tensor = cpu_tensor.cuda(non_blocking=True)
         tensor.requires_grad = cpu_tensor.requires_grad
         if hasattr(cpu_tensor, "main_grad"):
@@ -661,6 +665,7 @@ def cpu_model_init_move_to_gpu(tensor):
     before_compute_event.record()
     WEIGHT_LOAD_STREAM.wait_event(before_compute_event)
     return cpu_tensor, tensor
+
 
 def cpu_model_init_move_to_cpu(tensor):
     if tensor is None:
@@ -673,22 +678,17 @@ def cpu_model_init_move_to_cpu(tensor):
     WEIGHT_OFFLOAD_STREAM.wait_event(after_compute_event)
 
     with torch.cuda.stream(WEIGHT_OFFLOAD_STREAM):
-        
+
         before_copy_event.record()
-        cpu_tensor = None 
+        cpu_tensor = None
         if isinstance(tensor, Float8Tensor):
             cpu_tensor = tensor._quantizer.make_empty(shape=tensor.shape, device="cpu")
         else:
             cpu_tensor = torch.empty(
-                tensor.shape,   
-                dtype=tensor.dtype,
-                device="cpu",
-                pin_memory=tensor.is_pinned()
+                tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=tensor.is_pinned()
             )
         cpu_tensor.copy_(tensor, non_blocking=True)
-    
+
     torch.cuda.current_stream().wait_event(before_copy_event)
 
     return cpu_tensor
-    
-    

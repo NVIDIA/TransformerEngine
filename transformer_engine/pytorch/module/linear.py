@@ -65,7 +65,13 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload, cpu_model_init_move_to_gpu, is_cpu_model_init_enabled, cpu_model_init_move_to_cpu
+from ..cpu_offload import (
+    is_cpu_offload_enabled,
+    mark_activation_offload,
+    cpu_model_init_move_to_gpu,
+    is_cpu_model_init_enabled,
+    cpu_model_init_move_to_cpu,
+)
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 
@@ -119,7 +125,6 @@ class _Linear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         origin_weight, weight = cpu_model_init_move_to_gpu(weight)
-
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -428,7 +433,7 @@ class _Linear(torch.autograd.Function):
 
             if weight_fp8 is None:
                 weight_fp8 = ctx.origin_weight
-            
+
             _, weight_fp8 = cpu_model_init_move_to_gpu(weight_fp8)
             _, ctx.origin_weight.main_grad = cpu_model_init_move_to_gpu(ctx.origin_weight.main_grad)
 
@@ -663,7 +668,9 @@ class _Linear(torch.autograd.Function):
                 general_gemm_wgrad = functools.partial(
                     general_gemm,
                     out_dtype=(
-                        ctx.origin_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        ctx.origin_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     workspace=get_workspace(),
                     layout="NT",
@@ -713,7 +720,6 @@ class _Linear(torch.autograd.Function):
 
         if ctx.origin_weight.device.type == "cpu":
             ctx.origin_weight.main_grad = cpu_model_init_move_to_cpu(ctx.origin_weight.main_grad)
-
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
@@ -911,7 +917,9 @@ class Linear(TransformerEngineBaseModule):
         if self.cpu_model_init:
             assert device != "meta", "CPU model init is not supported on 'meta' device."
             weight_device = "cpu"
-            assert fuse_wgrad_accumulation, "CPU model init is not supported without fuse_wgrad_accumulation"
+            assert (
+                fuse_wgrad_accumulation
+            ), "CPU model init is not supported without fuse_wgrad_accumulation"
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -992,8 +1000,6 @@ class Linear(TransformerEngineBaseModule):
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
 
-
-
         # Contiguous buffers for params
         weight_tensor = torch.empty(
             self.out_features,
@@ -1004,11 +1010,7 @@ class Linear(TransformerEngineBaseModule):
         )
         bias_tensor = None
         if self.use_bias:
-            bias_tensor = torch.empty(
-                self.out_features,
-                device=device,
-                dtype=params_dtype
-            )
+            bias_tensor = torch.empty(self.out_features, device=device, dtype=params_dtype)
         # Configure parameter splits
         self.weight_names = []
         self.bias_names = []
@@ -1187,7 +1189,7 @@ class Linear(TransformerEngineBaseModule):
         if self.ub_overlap_rs_dgrad:
             if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
                 fp8_grad = True
-        
+
         with self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
@@ -1208,9 +1210,11 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = None
-        
+
             if self.cpu_model_init:
-                assert weight_tensor.device.type == "cpu", "Weight tensor must be on CPU when cpu_model_init is True."
+                assert (
+                    weight_tensor.device.type == "cpu"
+                ), "Weight tensor must be on CPU when cpu_model_init is True."
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
