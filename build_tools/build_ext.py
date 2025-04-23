@@ -4,7 +4,6 @@
 
 """Installation script."""
 
-import ctypes
 import os
 import subprocess
 import sys
