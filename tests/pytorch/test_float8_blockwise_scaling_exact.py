@@ -134,7 +134,7 @@ def test_quantization_1D_block_tiling_with_compact_data_and_scales(
         force_pow_2_scales=pow_2_scales,
         block_scaling_dim=1,
     )
-    sut_quantizer.set_usage(need_gather=True)
+    sut_quantizer.set_usage(need_compact=True)
 
     # Setup device and random seed
     device = "cuda"
@@ -203,6 +203,10 @@ def test_quantization_1D_block_tiling_with_compact_data_and_scales(
         atol=0.0,
         rtol=0.0,
     )
+
+    # check if the fp8 output between C++ and Python are the same
+    assert x_fp8_sut._rowwise_fmt == x_fp8_sut_cpp_alloc._rowwise_fmt
+    assert x_fp8_sut._columnwise_fmt == x_fp8_sut_cpp_alloc._columnwise_fmt
 
 
 def check_quantization_block_tiling_versus_reference(
