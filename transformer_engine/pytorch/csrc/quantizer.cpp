@@ -400,7 +400,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
         "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
-        "is_2D_scaled"_a = (block_scaling_dim == 2));
+        "is_2D_scaled"_a = (block_scaling_dim == 2), "rowwise_fmt"_a = rowwise_fmt,
+        "columnwise_fmt"_a = columnwise_fmt);
   } else {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass));
@@ -408,7 +409,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype), "rowwise_data"_a = data_rowwise,
         "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = scale_inv_rowwise,
         "columnwise_scale_inv"_a = scale_inv_colwise, "fp8_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer, "is_2D_scaled"_a = (block_scaling_dim == 2));
+        "quantizer"_a = this->quantizer, "is_2D_scaled"_a = (block_scaling_dim == 2),
+        "rowwise_fmt"_a = rowwise_fmt, "columnwise_fmt"_a = columnwise_fmt);
   }
 
   return {std::move(tensor), std::move(ret)};
