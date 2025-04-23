@@ -347,7 +347,7 @@ int nvte_is_non_tn_fp8_gemm_supported();
  *
  *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
 */
-void nvte_memset(void* ptr, int value, size_t size_in_bytes, cudaStream_t stream);
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -37,26 +37,60 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
 
 namespace {
 
-__global__ void __launch_bounds__(1)
-    memset_kernel(float *__restrict__ ptr,
-                  int value, size_t size_in_bytes) {
-  *ptr = value;
+constexpr size_t kThreadsPerBlock = 256;
+template <typename TVectorized>
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx * sizeof(TVectorized) >= size_in_bytes) {
+    return;  // Out of bounds
+  }
+
+  if ((idx + 1) * sizeof(TVectorized) > size_in_bytes) {
+    // If the buffer size is not an even multiple of the vectorization, manually set the remaining bytes unvectorized.
+    size_t remaining_bytes = size_in_bytes - idx * sizeof(TVectorized);
+    memset(reinterpret_cast<uint8_t *>(ptr) + idx * sizeof(TVectorized), value, remaining_bytes);
+    return;
+  }
+
+  union {
+    TVectorized value;
+    uint8_t data[sizeof(TVectorized)];
+  } data;
+  for (size_t i = 0; i < sizeof(TVectorized); ++i) {
+    data.data[i] = static_cast<uint8_t>(value);
+  }
+  reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
 }
 
 }  // namespace
 
+#define MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, vectorizedType, stream) \
+  if (size_in_bytes >= sizeof(vectorizedType) &&                                             \
+      reinterpret_cast<size_t>(ptr) % sizeof(vectorizedType) == 0) {                         \
+    size_t numBlocks = DIVUP(size_in_bytes, kThreadsPerBlock * sizeof(vectorizedType));      \
+    dim3 grid(numBlocks, 1, 1);                                                              \
+    memset_kernel<vectorizedType>                                                            \
+        <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    return;                                                                                  \
+  }
+
 extern "C" {
-void nvte_memset(void* ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_memset);
+  NVTE_CHECK(ptr != nullptr, "Pointer for memset must be allocated.");
+
   if (size_in_bytes > 4096) {
+    // Use cudaMemsetAsync for larger sizes.
     cudaMemsetAsync(ptr, value, size_in_bytes, stream);
     return;
   }
 
-  NVTE_CHECK(ptr != nullptr, "Pointer for memset must be allocated.");
-  memset_kernel<<<1, 1, 0, stream>>>(
-      reinterpret_cast<float *>(ptr),
-      value,
-      size_in_bytes);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float4, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float2, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
 }  // extern "C"
 
