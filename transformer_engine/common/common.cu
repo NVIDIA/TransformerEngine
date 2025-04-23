@@ -35,6 +35,31 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   }
 }
 
+namespace {
+
+__global__ void __launch_bounds__(1)
+    memset_kernel(float *__restrict__ ptr,
+                  int value, size_t size_in_bytes) {
+  *ptr = value;
+}
+
+}  // namespace
+
+extern "C" {
+void nvte_memset(void* ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
+  if (size_in_bytes > 4096) {
+    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    return;
+  }
+
+  NVTE_CHECK(ptr != nullptr, "Pointer for memset must be allocated.");
+  memset_kernel<<<1, 1, 0, stream>>>(
+      reinterpret_cast<float *>(ptr),
+      value,
+      size_in_bytes);
+}
+}  // extern "C"
+
 void checkCuDriverContext(CUstream stream) {
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
