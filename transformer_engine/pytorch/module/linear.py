@@ -738,10 +738,28 @@ class _Linear(torch.autograd.Function):
                         dgrad_shape, dtype=ctx.activation_dtype, device=grad_output.device
                     )
 
+                # Arguments to include in wgrad GEMM closure
+                wgrad_gemm_kwargs = {
+                    "workspace": get_workspace(),
+                    "out_dtype": (
+                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                    ),
+                    "quantization_params": ctx.grad_weight_quantizer,
+                    "accumulate": accumulate_wgrad_into_param_main_grad,
+                    "layout": "NT",
+                    "out": main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
+                    "use_split_accumulator": use_split_accumulator,
+                    "grad": True,
+                    "ub": ub_obj_wgrad,
+                    "ub_type": ub_type_wgrad,
+                    "extra_output": reduce_scatter_out,
+                    "bulk_overlap": ctx.ub_bulk_wgrad,
+                }
+
                 def wgrad_gemm(
                     x: torch.Tensor,
                     dy: torch.Tensor,
-                    reduce_scatter_out: Optional[torch.Tensor] = None,
                     _is_delayed: bool = True,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                     """Perform wgrad GEMM: dw = dy^T * x
@@ -756,36 +774,19 @@ class _Linear(torch.autograd.Function):
                     # Check for invalid configurations
                     if _is_delayed:
                         if (
-                            ub_obj_wgrad is not None
-                            or ub_type_wgrad is not None
-                            or ctx.ub_bulk_wgrad
+                            wgrad_gemm_kwargs["ub"] is not None
+                            or wgrad_gemm_kwargs["ub_type"] is not None
+                            or wgrad_gemm_kwargs["extra_output"] is not None
+                            or wgrad_gemm_kwargs["bulk_overlap"]
                         ):
                             raise NotImplementedError(
                                 "Delayed weight grad computation is not supported "
                                 "with Userbuffers (tensor-parallel communication overlapping)"
                             )
 
-                    dtype = main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
-
                     # Perform GEMM
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                    dw, db, *_ = general_gemm(
-                        x,
-                        dy,
-                        workspace=get_workspace(),
-                        out_dtype=dtype,
-                        quantization_params=ctx.grad_weight_quantizer,
-                        accumulate=accumulate_wgrad_into_param_main_grad,
-                        layout="NT",
-                        out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                        bias=(bias if (grad_bias is None and not ctx.fp8) else None),
-                        use_split_accumulator=use_split_accumulator,
-                        grad=True,
-                        ub=ub_obj_wgrad,
-                        ub_type=ub_type_wgrad,
-                        extra_output=reduce_scatter_out,
-                        bulk_overlap=ctx.ub_bulk_wgrad,
-                    )
+                    dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                     # Deallocate input tensor
@@ -798,15 +799,22 @@ class _Linear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmat_total, grad_output], wgrad_gemm)
                 else:
+
+                    # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(
                         inputmat_total,
                         grad_output,
-                        reduce_scatter_out=reduce_scatter_out,
                         _is_delayed=False,
                     )
+
+                    # Update grad bias if needed
                     if grad_bias is None:
                         grad_bias = grad_bias_
                     del grad_bias_
+
+                    # Deallocate input tensor
+                    if ctx.owns_input:
+                        clear_tensor_data(inputmat_total)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad:
