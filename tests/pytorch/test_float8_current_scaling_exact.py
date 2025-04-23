@@ -385,7 +385,7 @@ class TestFP8RecipeLinearBase:
         )
 
         # recipe1
-        using_fp8_recipe = recipe1 != GetRecipes.none
+        using_fp8_recipe = recipe1() != GetRecipes.none()
         if using_fp8_recipe:
             with fp8_autocast(enabled=True, fp8_recipe=recipe1()):
                 y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_linear(x, w, bias, gradient)
@@ -393,7 +393,7 @@ class TestFP8RecipeLinearBase:
             y_q_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_linear(x, w, bias, gradient)
 
         # recipe2
-        using_fp8_recipe = recipe2 != GetRecipes.none
+        using_fp8_recipe = recipe2() != GetRecipes.none()
         if using_fp8_recipe:
             with fp8_autocast(enabled=True, fp8_recipe=recipe2()):
                 y_q, dgrad, wgrad, bgrad = self.run_linear(x, w, bias, gradient)
@@ -608,7 +608,7 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         )
 
         # recipe1
-        using_fp8_recipe = recipe1 != GetRecipes.none
+        using_fp8_recipe = recipe1() != GetRecipes.none()
         if using_fp8_recipe:
             with fp8_autocast(enabled=True, fp8_recipe=recipe1()):
                 y_q_ref, ln_out_ref, dgrad_ref, wgrad_ref, bgrad_ref = self.run_layernorm_linear(
@@ -630,7 +630,7 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
             )
 
         # recipe2
-        using_fp8_recipe = recipe2 != GetRecipes.none
+        using_fp8_recipe = recipe2() != GetRecipes.none()
         if using_fp8_recipe:
             with fp8_autocast(enabled=True, fp8_recipe=recipe2()):
                 y_q, ln_out, dgrad, wgrad, bgrad = self.run_layernorm_linear(
