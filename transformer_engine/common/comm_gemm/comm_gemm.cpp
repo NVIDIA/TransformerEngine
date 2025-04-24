@@ -9,6 +9,7 @@
 #include <memory>
 #include <tuple>
 #include <type_traits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -326,6 +327,46 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
           ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_AMAX_D_POINTER,
           &d->amax.dptr, sizeof(void*)));
     }
+  }
+
+  // Might be set to ALLREDUCE before, need to OR with the new flags to set.
+  cublasMpMatmulEpilogue_t epilogue{};
+  size_t size_read{};
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeGet(
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE, &epilogue,
+      sizeof epilogue, &size_read));
+  NVTE_CHECK(size_read == sizeof epilogue);
+  // (bias, gelu, grad) -> epilogue
+  const std::map<std::tuple<bool, bool, bool>, cublasMpMatmulEpilogue_t> flags_to_epilogue{
+      {{true, true, false}, CUBLASMP_MATMUL_EPILOGUE_GELU_AUX_BIAS},
+      {{true, true, true}, CUBLASMP_MATMUL_EPILOGUE_DGELU_BGRAD},
+      {{true, false, false}, CUBLASMP_MATMUL_EPILOGUE_BIAS},
+      {{true, false, true}, CUBLASMP_MATMUL_EPILOGUE_BGRADB},
+      {{false, true, false}, CUBLASMP_MATMUL_EPILOGUE_GELU_AUX},
+      {{false, true, true}, CUBLASMP_MATMUL_EPILOGUE_DGELU},
+  };
+  if (auto it = flags_to_epilogue.find({bias->data.dptr, pre_act_out->data.dptr, grad});
+      it != flags_to_epilogue.end()) {
+    epilogue = static_cast<cublasMpMatmulEpilogue_t>(epilogue | it->second);
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE, &epilogue,
+        sizeof epilogue));
+  }
+
+  if (bias->data.dptr) {
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_POINTER, &bias->data.dptr,
+        sizeof bias->data.dptr));
+  }
+
+  if (pre_act_out->data.dptr) {
+    cudaDataType_t aux_type = get_cuda_dtype(pre_act_out->data.dtype);
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_DATA_TYPE,
+        &aux_type, sizeof aux_type));
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_POINTER,
+        &pre_act_out->data.dptr, sizeof pre_act_out->data.dptr));
   }
 
   if (comm_sm_count) {
