@@ -168,34 +168,69 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 q_K = q.shape[-1]
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
+            inner_q_dimension_tiled = True
+            if self._is_rowwise_fmt_compact():
+                scales_untiled_dim, scales_tiled_dim = scale_inv.shape
+                inner_scale_dimension_tiled = True
+                scales_are_compact = True
+            else:
+                scales_tiled_dim, scales_untiled_dim = scale_inv.shape
+                inner_scale_dimension_tiled = False
+                scales_are_compact = False
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
-            transpose_output = True
-            if len(q.shape) >= 1:
-                q_M = q.shape[0]
-            for i in range(1, len(q.shape)):
-                q_K *= q.shape[i]
+            scales_tiled_dim, scales_untiled_dim = scale_inv.shape
+            inner_scale_dimension_tiled = False
+            if self._is_columnwise_fmt_compact():
+                inner_q_dimension_tiled = False
+                transpose_output = False
+                if len(q.shape) >= 1:
+                    q_K = q.shape[-1]
+                for i in range(len(q.shape) - 1):
+                    q_M *= q.shape[i]
+                scales_are_compact = True
+            else:
+                inner_q_dimension_tiled = True
+                transpose_output = True
+                if len(q.shape) >= 1:
+                    q_M = q.shape[0]
+                for i in range(1, len(q.shape)):
+                    q_K *= q.shape[i]
+                scales_are_compact = False
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
-        k_tiles, scale_m = scale_inv.shape
-        if q_K % block_len != 0:
-            k_pad_amount = (block_len - (q_K % block_len)) % block_len
-            q = torch.nn.functional.pad(
-                q, (0, k_pad_amount, 0, 0), mode="constant", value=0
-            ).contiguous()
-        _, padded_K = q.shape
-        q_tiled = q.reshape(q_M, k_tiles, block_len)
-        if scale_m > q_M:
-            # scale_m is 4 element aligned.
+        if inner_q_dimension_tiled:
+            if q_K % block_len != 0:
+                k_pad_amount = (block_len - (q_K % block_len)) % block_len
+                q = torch.nn.functional.pad(
+                    q, (0, k_pad_amount, 0, 0), mode="constant", value=0
+                ).contiguous()
+            padded_M, padded_K = q.shape
+            q_tiled = q.reshape(q_M, scales_tiled_dim, block_len)
+        else:
+            if q_M % block_len != 0:
+                m_pad_amount = (block_len - (q_M % block_len)) % block_len
+                q = torch.nn.functional.pad(
+                    q, (0, 0, 0, m_pad_amount), mode="constant", value=0
+                ).contiguous()
+            padded_M, padded_K = q.shape
+            q_tiled = q.reshape(scales_tiled_dim, block_len, q_K)
+        if not scales_are_compact and scales_untiled_dim > q_M:
+            # untiled scale dimension is 4 element aligned.
             scale_inv = scale_inv[:, :q_M].contiguous()
-        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, k_tiles, 1)
+        if scales_are_compact and inner_scale_dimension_tiled:
+            dq_scale = scale_inv.contiguous().reshape(q_M, scales_tiled_dim, 1)
+        elif scales_are_compact and not inner_scale_dimension_tiled:
+            dq_scale = scale_inv.contiguous().reshape(scales_tiled_dim, 1, q_K)
+        else:
+            dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
         torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
         result = q_tiled.view(torch_q_dtype).to(torch.float32) * dq_scale
-        if padded_K != q_K:
-            result = result.reshape(q_M, padded_K)[:, :q_K]
+        if padded_M != q_M or padded_K != q_K:
+            result = result.reshape(padded_M, padded_K)[:q_M, :q_K]
         result = result.to(dtype)
         if len(orig_shape) == 0:
             result = result.reshape([])
@@ -210,15 +245,14 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
-        if self._is_rowwise_fmt_compact() or self._is_columnwise_fmt_compact():
-            raise NotImplementedError(
-                "Currently for fp8 block scaling, dequantization only supports"
-                " GEMM_READY_DATA_AND_SCALES format."
-            )
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
 
+        if self._is_rowwise_fmt_compact() or self._is_columnwise_fmt_compact():
+            raise NotImplementedError(
+                "Dequantize is not implemented for 2D block scaling with compact formats."
+            )
         # 2D block scaling dequantize
         # assert that the format is GEMM_READY_DATA_AND_SCALES for 2D scaling, raise clear error message if not
         assert self._rowwise_fmt == RowwiseFmt.GEMM_READY_DATA_AND_SCALES, (
