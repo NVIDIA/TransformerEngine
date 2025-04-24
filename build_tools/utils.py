@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from importlib.metadata import version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -177,6 +178,14 @@ def cuda_path() -> Tuple[str, str]:
         if nvcc_bin is not None:
             cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
     if cuda_home is None:
+        # Check pip wheels for cudart.
+        try:
+            import nvidia
+        except ModuleNotFoundError as e:
+            cuda_home = None
+        else:
+            cuda_home = Path(nvidia.__file__).parent / "cuda_runtime"
+    if cuda_home is None:
         # Last-ditch guess in /usr/local/cuda
         cuda_home = Path("/usr/local/cuda")
     if not cuda_home.is_dir():
@@ -223,18 +232,37 @@ def cuda_archs() -> str:
 
 
 def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple."""
-    # Query NVCC for version info
-    nvcc_bin = nvcc_path()
-    output = subprocess.run(
-        [nvcc_bin, "-V"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split(".")
-    return tuple(int(v) for v in version)
+    """CUDA Toolkit version as a (major, minor) tuple.
+
+    Try to get cuda version by locating the nvcc executable and running nvcc --version. If
+    nvcc is not found, look for the cuda runtime package pip `nvidia-cuda-runtime-cu12`
+    and check pip version.
+    """
+
+    try:
+        nvcc_bin = nvcc_path()
+    except FileNotFoundError as e:
+        pass
+    else:
+        output = subprocess.run(
+            [nvcc_bin, "-V"],
+            capture_output=True,
+            check=True,
+            universal_newlines=True,
+        )
+        match = re.search(r"release\s*([\d.]+)", output.stdout)
+        version = match.group(1).split(".")
+        return tuple(int(v) for v in version)
+
+    try:
+        version_str = version("nvidia-cuda-runtime-cu12")
+        version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
+        return version_tuple
+    except importlib.metadata.PackageNotFoundError:
+        raise RuntimeError(
+            "Cannot return cuda version as both NVCC executable and cudaRT pip wheel were not"
+            " found."
+        )
 
 
 def get_frameworks() -> List[str]:

@@ -55,7 +55,13 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=["torch"],
+        setup_requires=[
+            "torch>=2.1",
+            "nvidia-cuda-runtime-cu12==12.8.90",
+            "nvidia-cublas-cu12==12.8.4.1",
+            "nvidia-cudnn-cu12==9.8.0.87",
+        ],
+        install_requires=["torch>=2.1"],
         tests_require=["numpy", "torchvision"],
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):

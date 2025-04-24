@@ -101,6 +101,13 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+        setup_requires=[
+            "jax[cuda12]",
+            "flax>=0.7.1",
+            "nvidia-cuda-runtime-cu12==12.8.90",
+            "nvidia-cublas-cu12==12.8.4.1",
+            "nvidia-cudnn-cu12==9.8.0.87",
+        ],
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy"],
     )
