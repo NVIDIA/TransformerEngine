@@ -7,7 +7,6 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
-import functools
 import torch
 
 import transformer_engine_torch as tex
@@ -24,7 +23,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ._common import noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
+from ._common import noop_cat, WeightGradStore
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     cast_if_needed,
@@ -33,7 +32,6 @@ from ..utils import (
     init_method_constant,
     requires_grad,
     needs_quantized_gemm,
-    is_non_tn_fp8_gemm_supported,
     assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,

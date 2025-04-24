@@ -13,7 +13,7 @@ import torch
 from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
+from ...fp8 import FP8GlobalStateManager
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -184,11 +184,6 @@ class UserbuffersForwardLinear(FusedOperation):
             input_quantizer = None
             weight_quantizer = None
             output_quantizer = None
-        with_quantized_output = (
-            with_quantized_compute
-            and tensor_parallel_mode != "row"
-            and output_quantizer is not None
-        )
 
         # Get Userbuffers communicator
         ub_comm = get_ub(ub_comm_name + "_fprop")
@@ -294,7 +289,6 @@ class UserbuffersForwardLinear(FusedOperation):
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         input_quantizer = None
         weight_quantizer = None
-        output_quantizer = None
         grad_output_quantizer = None
         grad_input_quantizer = None
         if with_quantized_compute:
@@ -305,13 +299,6 @@ class UserbuffersForwardLinear(FusedOperation):
                 )
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
-            next_op = basic_op_next_ops[-1]
-            if (
-                next_op is not None
-                and next_op.num_quantizers("forward") > 0
-                and recipe.delayed()
-            ):
-                output_quantizer = next_op.get_quantizer("forward", 0)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
             prev_op = basic_op_prev_ops[0]
             if (
@@ -343,7 +330,7 @@ class UserbuffersForwardLinear(FusedOperation):
             with_quantized_compute=with_quantized_compute,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
-            output_quantizer=output_quantizer,
+            output_quantizer=None,  # Not supported
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         x_local = extra_outputs["input"]

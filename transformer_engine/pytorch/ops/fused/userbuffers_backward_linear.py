@@ -5,8 +5,7 @@
 """Linear layer backward with Userbuffers communication."""
 
 from __future__ import annotations
-from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Optional
 import warnings
 
 import torch
@@ -14,8 +13,6 @@ import torch
 from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...distributed import gather_along_first_dim, get_distributed_world_size
-from ...float8_tensor import Float8Tensor
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -226,11 +223,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight_quantizer = None
             grad_output_quantizer = None
             grad_input_quantizer = None
-        with_quantized_grad_input = (
-            with_quantized_compute
-            and tensor_parallel_mode != "column"
-            and grad_input_quantizer is not None
-        )
 
         # Get Userbuffers communicators
         # Note: Communication patterns are (1) overlap dy all-gather
@@ -459,14 +451,27 @@ class UserbuffersBackwardLinear(FusedOperation):
             if isinstance(x, QuantizedTensor):
                 x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
+            # Check grad weight tensor
+            dw = grad_weight
+            dw_dtype = dtype
+            if dw is None:
+                if accumulate_into_grad_weight:
+                    raise ValueError(
+                        "Attempted to accumulate into grad weight tensor "
+                        "without providing grad weight tensor"
+                    )
+            else:
+                dw_dtype = dw.dtype
+
             # Perform wgrad GEMM
             dw, *_ = general_gemm(
                 x,
                 dy,
                 get_workspace(),
-                out_dtype=dtype,
+                out_dtype=dw_dtype,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
+                out=dw,
                 use_split_accumulator=_2X_ACC_WGRAD,
                 grad=True,
                 ub=ub_comm_wgrad,
@@ -547,7 +552,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             input_quantizer=linear_op_ctx.input_quantizer,
             weight_quantizer=linear_op_ctx.weight_quantizer,
             grad_output_quantizer=linear_op_ctx.grad_output_quantizer,
-            grad_input_quantizer=linear_op_ctx.grad_input_quantizer,
+            grad_input_quantizer=None,  # Not supported
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         grad_input, grad_weight, extra_outputs = retval

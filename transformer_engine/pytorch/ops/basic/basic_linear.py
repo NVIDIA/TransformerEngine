@@ -817,7 +817,7 @@ class BasicLinear(BasicOperation):
             x_async = None
             dy_async = None
 
-            # Check grad input tensor
+            # Check grad weight tensor
             dw = grad_weight
             dw_dtype = dtype
             if dw is None:

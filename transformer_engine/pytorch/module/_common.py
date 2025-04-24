@@ -33,7 +33,7 @@ def _get_normalization_func(normalization: str, forward: bool):
     return bwd_normalization_funcs[normalization]
 
 
-def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
+def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:  ### TODO Remove
     """Reorder FP8 transposes after Userbuffers gather.
 
     The all-gather is performed in-place in the Float8Tensor's
