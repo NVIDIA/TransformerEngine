@@ -176,9 +176,12 @@ class TestFloat8BlockwiseTensor:
     )
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     @pytest.mark.parametrize("dq_columnwise", [True, False])
+    @pytest.mark.parametrize("need_compact", [True, False])
     def test_quantize_dequantize_dims(
-        self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool
+        self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool, need_compact: bool
     ) -> None:
+        if need_compact and block_scaling_dim != 1:
+            pytest.skip("need_compact only implemented for 1D block quantization.")
         atol = _tols[tex.DType.kFloat8E4M3]["atol"]
         rtol = _tols[tex.DType.kFloat8E4M3]["rtol"]
         quantizer = Float8BlockQuantizer(
@@ -186,6 +189,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
+            need_compact=need_compact,
         )
         self._test_quantize_dequantize(
             quantizer=quantizer,
