@@ -174,9 +174,8 @@ class _LayerNormLinear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-            if (
-                with_input_all_gather
-                and isinstance(input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+            if with_input_all_gather and isinstance(
+                input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
             ):
                 input_quantizer.set_usage(columnwise=False)
             if isinstance(input_quantizer, Float8BlockQuantizer):
