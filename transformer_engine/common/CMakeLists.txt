@@ -40,7 +40,6 @@ if (NOT CUDAToolkit_FOUND)
   set(cublas_wheel_path "${Python_SITELIB}/nvidia/cublas")
   set(cudnn_wheel_path "${Python_SITELIB}/nvidia/cudnn")
 
-  message(STATUS "cwp ${cuda_wheel_path} ${Python_SITEARCH} ${Python_SITELIB}")
   if (NOT EXISTS "${cuda_wheel_path}")
     message(FATAL_ERROR "CUDA not found in pip wheels either. Please install CUDAToolkit or nvidia-cuda-runtime-cu12 (pip).")
   endif()
