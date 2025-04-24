@@ -179,7 +179,7 @@ def cuda_path() -> Tuple[str, str]:
     if cuda_home is None:
         # Last-ditch guess in /usr/local/cuda
         cuda_home = Path("/usr/local/cuda")
-    if not cuda_home.is_file():
+    if not cuda_home.is_dir():
         raise FileNotFoundError(f"Could not find CUDA at {cuda_home}")
 
     return cuda_home
