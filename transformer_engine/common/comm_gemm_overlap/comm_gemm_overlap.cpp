@@ -150,7 +150,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       return {1, 1};
     }
     size_t height = 1;
-    for (size_t i=0; i<shape.size()-1; ++i) {
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
       height *= shape[i];
     }
     return {height, shape.back()};
@@ -160,9 +160,8 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   std::tie(chunk_height, chunk_width) = flatten_shape_to_2d(chunk_shape);
 
   // Check tensor dimensions
-#define NVTE_DIM_CHECK(cond, message)                                   \
-  NVTE_CHECK(cond, message,                                             \
-             " (tensor shape=", shape, ", chunk shape=", chunk_shape,   \
+#define NVTE_DIM_CHECK(cond, message)                                                \
+  NVTE_CHECK(cond, message, " (tensor shape=", shape, ", chunk shape=", chunk_shape, \
              ", chunk offset=", chunk_offset, ")")
   NVTE_DIM_CHECK(height > 0 && width > 0, "Attempted to get chunk from empty tensor");
   NVTE_DIM_CHECK(chunk_height > 0 && chunk_width > 0, "Attempted to get empty tensor chunk");
@@ -452,9 +451,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   size_t k = transa ? A.size(1) : A.size(0);
   size_t n = _ubuf.size(0);
   size_t m_chunk = m / _num_splits;
-  const std::vector<size_t> input_a_chunk_shape = (transa
-                                                   ? std::vector<size_t>{m_chunk, k}
-                                                   : std::vector<size_t>{k, m_chunk});
+  const std::vector<size_t> input_a_chunk_shape =
+      (transa ? std::vector<size_t>{m_chunk, k} : std::vector<size_t>{k, m_chunk});
   const std::vector<size_t> output_chunk_shape = {n, m_chunk};
   size_t input_a_chunk_size = m_chunk * k;
   size_t output_chunk_size = n * m_chunk;
@@ -813,9 +811,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     const int num_steps = _tp_size / 2;
 
     // Chunk dims
-    std::vector<size_t> input_b_chunk_shape = (transb
-                                               ? std::vector<size_t>{k, 2 * n_chunk}
-                                               : std::vector<size_t>{2 * n_chunk, k});
+    std::vector<size_t> input_b_chunk_shape =
+        (transb ? std::vector<size_t>{k, 2 * n_chunk} : std::vector<size_t>{2 * n_chunk, k});
     std::vector<size_t> output_chunk_shape = {2 * n_chunk, k};
     size_t input_b_chunk_size = 2 * n_chunk * k;
     size_t output_chunk_size = 2 * n_chunk * m;
@@ -848,9 +845,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       // GEMM
       auto input_b_chunk =
           get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
-      auto output_chunk = get_tensor_chunk(D,
-                                           output_chunk_size * send_chunk_id,
-                                           output_chunk_shape);
+      auto output_chunk =
+          get_tensor_chunk(D, output_chunk_size * send_chunk_id, output_chunk_shape);
       auto aux_chunk =
           (do_gelu)
               ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id, {n_chunk * 2, k})
@@ -883,9 +879,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     }
   } else {
     // Chunk dims
-    std::vector<size_t> input_b_chunk_shape = (transb
-                                               ? std::vector<size_t>{k, n_chunk}
-                                               : std::vector<size_t>{n_chunk, k});
+    std::vector<size_t> input_b_chunk_shape =
+        (transb ? std::vector<size_t>{k, n_chunk} : std::vector<size_t>{n_chunk, k});
     std::vector<size_t> output_chunk_shape = {n_chunk, m};
     size_t input_b_chunk_size = n_chunk * k;
     size_t output_chunk_size = n_chunk * m;
@@ -901,12 +896,10 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       int recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      auto input_b_chunk = get_buffer_chunk_like(B,
-                                                 input_b_chunk_size * send_chunk_id,
-                                                 input_b_chunk_shape);
-      auto output_chunk = get_tensor_chunk(D,
-                                           output_chunk_size * send_chunk_id,
-                                           output_chunk_shape);
+      auto input_b_chunk =
+          get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
+      auto output_chunk =
+          get_tensor_chunk(D, output_chunk_size * send_chunk_id, output_chunk_shape);
       auto aux_chunk =
           (do_gelu)
               ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id, {n_chunk, k})

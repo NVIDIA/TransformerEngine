@@ -501,9 +501,7 @@ def fill_userbuffers_buffer_for_all_gather(
 
         # Copy MXFP8 data to local chunk of Userbuffers buffer
         local_data = (
-            local_tensor._rowwise_data
-            if with_rowwise_data
-            else local_tensor._columnwise_data
+            local_tensor._rowwise_data if with_rowwise_data else local_tensor._columnwise_data
         )
         comm.copy_into_buffer(local_data, local_chunk=True)
 

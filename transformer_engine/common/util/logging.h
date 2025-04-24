@@ -17,11 +17,11 @@
 
 #include "../util/string.h"
 
-#define NVTE_WARN(...)                                               \
-  do {                                                               \
-    std::cerr << ::transformer_engine::concat_strings(               \
-        __FILE__ ":", __LINE__, " in function ", __func__, ": ",     \
-        ::transformer_engine::concat_strings(__VA_ARGS__), "\n");    \
+#define NVTE_WARN(...)                                            \
+  do {                                                            \
+    std::cerr << ::transformer_engine::concat_strings(            \
+        __FILE__ ":", __LINE__, " in function ", __func__, ": ",  \
+        ::transformer_engine::concat_strings(__VA_ARGS__), "\n"); \
   } while (false)
 
 #define NVTE_ERROR(...)                                              \

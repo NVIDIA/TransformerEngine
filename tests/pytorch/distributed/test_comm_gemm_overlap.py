@@ -287,7 +287,10 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
     ],
 )
 def test_layers_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, quantization,
+    layer_type,
+    linear_parallel_mode,
+    overlap_rs_dgrad,
+    quantization,
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.

@@ -294,18 +294,12 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if not recipe.delayed() and not recipe.mxfp8():
-                raise RuntimeError(
-                    "Userbuffers is only supported with FP8 delayed scaling recipe"
-                )
+                raise RuntimeError("Userbuffers is only supported with FP8 delayed scaling recipe")
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
             prev_op = basic_op_prev_ops[0]
-            if (
-                prev_op is not None
-                and prev_op.num_quantizers("backward") > 0
-                and recipe.delayed()
-            ):
+            if prev_op is not None and prev_op.num_quantizers("backward") > 0 and recipe.delayed():
                 grad_input_quantizer = prev_op.get_quantizer("backward", 0)
 
         # Get autocast dtype if needed

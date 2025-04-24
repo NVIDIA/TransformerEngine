@@ -151,8 +151,8 @@ void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
   const size_t element_size = input.element_size();
   NVTE_CHECK(_ubuf.element_size() == element_size,
              "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
-             "(input dtype has ", element_size, " bytes, UB dtype has ",
-             _ubuf.element_size(), " bytes)");
+             "(input dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
 
   // Input data
   const size_t input_size = input_.numel();
@@ -164,10 +164,9 @@ void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
   if (local_chunk) {
     NVTE_CHECK(input_size * _tp_size == ubuf_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
-               "(input_size=", input_size, ", tensor_parallel_size=", _tp_size, ", ubuf_size=",
-               ubuf_size, ")");
-    dst_ptr = (reinterpret_cast<char *>(dst_ptr)
-               + (ubuf_size / _tp_size) * _tp_id * element_size);
+               "(input_size=", input_size, ", tensor_parallel_size=", _tp_size,
+               ", ubuf_size=", ubuf_size, ")");
+    dst_ptr = (reinterpret_cast<char *>(dst_ptr) + (ubuf_size / _tp_size) * _tp_id * element_size);
   } else {
     NVTE_CHECK(input_size == ubuf_size,
                "Tried to copy an invalid tensor into a Userbuffers buffer ",
@@ -182,8 +181,7 @@ void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
 }
 
-at::Tensor CommOverlap::get_buffer(bool local_chunk,
-                                   std::optional<std::vector<int64_t>> shape) {
+at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
   // Check buffer shape
   const size_t ubuf_size = _ubuf.numel();
   if (shape) {
@@ -203,14 +201,14 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk,
     if (local_chunk) {
       dim0 /= _tp_size;
     }
-    shape = { dim0, dim1 };
+    shape = {dim0, dim1};
   }
 
   // Data pointer
   void *ubuf_ptr = _ubuf.dptr();
   if (local_chunk) {
-    ubuf_ptr = (reinterpret_cast<char *>(ubuf_ptr)
-                + (ubuf_size / _tp_size) * _tp_id * _ubuf.element_size());
+    ubuf_ptr = (reinterpret_cast<char *>(ubuf_ptr) +
+                (ubuf_size / _tp_size) * _tp_id * _ubuf.element_size());
   }
 
   // Construct PyTorch tensor
@@ -246,8 +244,8 @@ void CommOverlapP2P::copy_into_buffer(const at::Tensor &input, bool local_chunk)
   const size_t element_size = input.element_size();
   NVTE_CHECK(_ubuf.element_size() == element_size,
              "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
-             "(input dtype has ", element_size, " bytes, UB dtype has ",
-             _ubuf.element_size(), " bytes)");
+             "(input dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
 
   // Input data
   const size_t input_size = input_.numel();
@@ -268,14 +266,12 @@ void CommOverlapP2P::copy_into_buffer(const at::Tensor &input, bool local_chunk)
   }
 
   // Copy data
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr,
-                                  input_size * element_size,
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, input_size * element_size,
                                   cudaMemcpyDeviceToDevice,
                                   (cudaStream_t)at::cuda::getCurrentCUDAStream()));
 }
 
-at::Tensor CommOverlapP2P::get_buffer(bool local_chunk,
-                                      std::optional<std::vector<int64_t>> shape) {
+at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
   // Check buffer shape
   if (shape) {
     const size_t requested_size = transformer_engine::pytorch::product(*shape);
@@ -294,7 +290,7 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk,
     if (local_chunk) {
       dim0 /= _tp_size;
     }
-    shape = { dim0, dim1 };
+    shape = {dim0, dim1};
   }
 
   // Data pointer

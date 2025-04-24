@@ -163,12 +163,11 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                if (
-                    not force_hp_input_gather
-                    and not isinstance(inputmat, QuantizedTensor)
-                ):
+                if not force_hp_input_gather and not isinstance(inputmat, QuantizedTensor):
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-                    if isinstance(input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                    if isinstance(
+                        input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                    ):
                         # All-gather is not supported with FP8 column-wise data
                         input_quantizer.set_usage(columnwise=False)
                     inputmat = input_quantizer(inputmat)
@@ -273,7 +272,9 @@ class _Linear(torch.autograd.Function):
         reduce_scatter_out = None
         if ub_overlap_rs_fprop:
             out_shape = [reduce(multiply_op, inp_shape[:-1]) // tp_world_size, out_features]
-            reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inputmat_total.device)
+            reduce_scatter_out = torch.empty(
+                out_shape, dtype=activation_dtype, device=inputmat_total.device
+            )
 
         # ------------------------------------------------------
         # Forward GEMM
@@ -310,7 +311,9 @@ class _Linear(torch.autograd.Function):
                 out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
-                    out, _ = symmetric_all_reduce(gemm_out, tp_group, all_reduce_type=symmetric_ar_type)
+                    out, _ = symmetric_all_reduce(
+                        gemm_out, tp_group, all_reduce_type=symmetric_ar_type
+                    )
                 else:
                     out, _ = allreduce(gemm_out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
@@ -494,10 +497,7 @@ class _Linear(torch.autograd.Function):
                 # GEMM. We work around by overlapping dgrad GEMM +
                 # row-scaled all-gather (UB) + column-scaled
                 # all-gather (NCCL).
-                if (
-                    ctx.requires_wgrad
-                    and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer)
-                ):
+                if ctx.requires_wgrad and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     wgrad_grad_output, wgrad_grad_output_work = gather_along_first_dim(
                         grad_output,
@@ -616,9 +616,7 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_dgrad"):
-                        use_split_accumulator = (
-                            recipe.fp8_gemm_dgrad.use_split_accumulator
-                        )
+                        use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
                 # Update grad input quantizer
                 if ctx.grad_input_quantizer is not None:
@@ -691,7 +689,7 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
-                if (ctx.fp8 or ctx.debug):
+                if ctx.fp8 or ctx.debug:
                     if isinstance(inputmat_total, QuantizedTensor):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
@@ -706,7 +704,7 @@ class _Linear(torch.autograd.Function):
                     wgrad_grad_output_work = None
                 if wgrad_grad_output is None:
                     wgrad_grad_output = grad_output
-                if (ctx.fp8 or ctx.debug):
+                if ctx.fp8 or ctx.debug:
                     if isinstance(wgrad_grad_output, QuantizedTensor):
                         wgrad_grad_output.update_usage(columnwise_usage=True)
                     else:

@@ -495,7 +495,10 @@ def main() -> None:
         group = world_group()  # Initialize NCCL
         bootstrap_backend = "mpi" if launcher() == "ompi" else "nccl"
         userbuffer_configs = {
-            "fc1_dgrad": {"method": "ring_exchange", "fp8_buf": False},  # Overlap dgrad RS with dgrad GEMM
+            "fc1_dgrad": {
+                "method": "ring_exchange",
+                "fp8_buf": False,
+            },  # Overlap dgrad RS with dgrad GEMM
         }
         te.module.base.initialize_ub(
             [
