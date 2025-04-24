@@ -457,8 +457,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
             else:
                 global_dbias = local_dbias
 
-            # jax.debug.print('Local scale inv: {}', local_scale_inv)
-
             return (
                 local_x,
                 local_colwise_x,
