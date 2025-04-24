@@ -104,9 +104,9 @@ if __name__ == "__main__":
         setup_requires=[
             "jax[cuda12]",
             "flax>=0.7.1",
-            "nvidia-cuda-runtime-cu12==12.8.90",
-            "nvidia-cublas-cu12==12.8.4.1",
-            "nvidia-cudnn-cu12==9.8.0.87",
+            "nvidia-cuda-runtime-cu12",
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
         ],
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy"],

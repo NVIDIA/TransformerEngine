@@ -57,9 +57,9 @@ if __name__ == "__main__":
         cmdclass={"build_ext": CMakeBuildExtension},
         setup_requires=[
             "torch>=2.1",
-            "nvidia-cuda-runtime-cu12==12.8.90",
-            "nvidia-cublas-cu12==12.8.4.1",
-            "nvidia-cudnn-cu12==9.8.0.87",
+            "nvidia-cuda-runtime-cu12",
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
         ],
         install_requires=["torch>=2.1"],
         tests_require=["numpy", "torchvision"],
