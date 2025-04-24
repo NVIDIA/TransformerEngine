@@ -226,7 +226,8 @@ class _Linear(torch.autograd.Function):
                         and not in_fp8_activation_recompute_phase()
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            # FP8 cast to workspace buffer
+
+            # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weightmat = module.get_weight_workspace(
                 tensor=weight,
@@ -238,13 +239,14 @@ class _Linear(torch.autograd.Function):
                 workspace_dtype=activation_dtype,
             )
             weightmat.update_usage(rowwise_usage=True)
+
         else:
             weightmat = cast_if_needed(weightmat, activation_dtype)  # Cast for AMP
         # ------------------------------------------------------
         # Weight tensor is ready for GEMM...
         # ------------------------------------------------------
 
-        # Prepare bias by casting to expected dtype
+        # Cast bias to expected dtype
         bias_dtype = activation_dtype
         if needs_quantized_gemm(inputmat_total) and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16
@@ -540,7 +542,6 @@ class _Linear(torch.autograd.Function):
                     quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor
-            # Cast to expected dtype and perform tensor-parallel communication
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
@@ -784,11 +785,6 @@ class _Linear(torch.autograd.Function):
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                     dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
-
-                    # Deallocate input tensor
-                    if ctx.owns_input:
-                        clear_tensor_data(x)
-
                     return dw, db
 
                 # Choose whether to call wgrad GEMM now or delay
