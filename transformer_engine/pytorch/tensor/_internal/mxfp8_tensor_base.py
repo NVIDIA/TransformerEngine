@@ -92,10 +92,6 @@ class MXFP8TensorBase:
             if t is not None:
                 t.data = torch.Tensor()
 
-        self._columnwise_scale_inv.data = (
-            torch.Tensor() if self._columnwise_scale_inv is not None else None
-        )
-
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
