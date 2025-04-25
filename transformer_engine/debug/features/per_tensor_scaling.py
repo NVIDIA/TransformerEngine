@@ -60,7 +60,7 @@ def per_tensor_cast(
 @Registry.register_feature(namespace="transformer_engine")
 class PerTensorScaling(TEConfigAPIMapper):
     """
-    It allows to use per tensor current scaling for the specific tensors.
+    Allows using per-tensor current scaling for the specific tensors.
 
     Can be used only within `DelayedScaling` recipe autocast.
 
