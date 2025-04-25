@@ -146,7 +146,7 @@ def get_build_ext(
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
             # to handle CUDA files correctly.
-            if "pytorch" not in get_frameworks() and not framework_extension_only:
+            if "pytorch" not in get_frameworks():
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
@@ -157,17 +157,21 @@ def get_build_ext(
 
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 original_compile_fn = self.compiler._compile
-                self.compiler.src_extensions += [".cu", ".cuh"]
+                if not framework_extension_only:
+                    self.compiler.src_extensions += [".cu", ".cuh"]
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
                     original_compiler = self.compiler.compiler_so
                     try:
-                        nvcc_bin = nvcc_path()
                         original_compiler = self.compiler.compiler_so
 
-                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
+                        if (
+                            os.path.splitext(src)[1] in [".cu", ".cuh"]
+                            and not framework_extension_only
+                        ):
+                            nvcc_bin = nvcc_path()
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
@@ -179,7 +183,6 @@ def get_build_ext(
                             # Forward unknown options
                             if not any("--forward-unknown-opts" in flag for flag in cflags):
                                 cflags.append("--forward-unknown-opts")
-
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]
 

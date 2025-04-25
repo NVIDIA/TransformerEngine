@@ -163,34 +163,24 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_path() -> Tuple[str, str]:
-    """Returns CUDA root path.
+def cuda_toolkit_include_path() -> Tuple[str, str]:
+    """Returns root path for cuda toolkit includes.
 
-    Throws FileNotFoundError if CUDA is not found."""
+    return `None` if CUDA is not found."""
     # Try finding CUDA
     cuda_home: Optional[Path] = None
     if cuda_home is None and os.getenv("CUDA_HOME"):
         # Check in CUDA_HOME
-        cuda_home = Path(os.getenv("CUDA_HOME"))
+        cuda_home = Path(os.getenv("CUDA_HOME")) / "include"
     if cuda_home is None:
         # Check in NVCC
         nvcc_bin = shutil.which("nvcc")
         if nvcc_bin is not None:
-            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc"))
-    if cuda_home is None:
-        # Check pip wheels for cudart.
-        try:
-            import nvidia
-        except ModuleNotFoundError as e:
-            cuda_home = None
-        else:
-            cuda_home = Path(nvidia.__file__).parent / "cuda_runtime"
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc")) / "include"
     if cuda_home is None:
         # Last-ditch guess in /usr/local/cuda
-        cuda_home = Path("/usr/local/cuda")
-    if not cuda_home.is_dir():
-        raise FileNotFoundError(f"Could not find CUDA at {cuda_home}")
-
+        if Path("/usr/local/cuda").is_dir():
+            cuda_home = Path("/usr/local/cuda") / "include"
     return cuda_home
 
 
@@ -219,6 +209,30 @@ def nvcc_path() -> Tuple[str, str]:
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
     return nvcc_bin
+
+
+@functools.lru_cache(maxsize=None)
+def get_cuda_include_dirs() -> Tuple[str, str]:
+    """Returns the NVCC include directory found via pip package."""
+
+    # If cuda is installed via toolkit, all necessary headers
+    # are bundled inside the top level cuda directory.
+    if cuda_toolkit_include_path() is not None:
+        return [cuda_toolkit_include_path()]
+
+    # Use pip wheels to include all headers.
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        raise RuntimeError("CUDA not found.")
+
+    cuda_root = Path(nvidia.__file__).parent
+    return [
+        cuda_root / "cuda_nvcc" / "include",
+        cuda_root / "cublas" / "include",
+        cuda_root / "cuda_runtime" / "include",
+        cuda_root / "cudnn" / "include",
+    ]
 
 
 @functools.lru_cache(maxsize=None)
