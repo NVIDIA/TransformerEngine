@@ -48,6 +48,7 @@ class DisableFP8Layer:
         DisableFP8Layer is the only feature provided by the Transformer Engine
         which does not inherit from TEConfigAPIMapper.
 
-        Explanation of the parse_config_and_api can be found in the nvidia-dlframework-inspect documentation.
+        Explanation of the parse_config_and_api can be found in the
+        nvidia-dlframework-inspect documentation.
         """
         return config["enabled"], None
