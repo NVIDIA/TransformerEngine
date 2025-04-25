@@ -1394,8 +1394,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                             "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    warnings.warn("You are using quantized weights without quantized compute. "
-                                  "Please make sure this is intentional.")
+                    warnings.warn(
+                        "You are using quantized weights without quantized compute. "
+                        "Please make sure this is intentional."
+                    )
                     unfused_weights = [w.dequantize() for w in unfused_weights]
 
             weight_tensor = noop_cat(unfused_weights)
