@@ -174,6 +174,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                      : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
     auto gbias = TensorHolder::MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
     auto gd = TensorHolder::Make<DType>(m, n, d_scale);
+    // auto gaux = TensorHolder::Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
     auto a = transa
@@ -190,6 +191,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
         TensorHolder::MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
                                              dims.d_rows_num, dims.d_cols_num, m, bias_scale);
     auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+    // auto aux = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
     Tensor pre_act_out;
     bool grad = false;
@@ -197,7 +199,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias, &pre_act_out, transa, transb, grad, accumulate,
              0 /*comm_sm_count*/, stream);
     auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &bias, &pre_act_out, transa, transb, grad, &workspace.t,
+    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias, &pre_act_out, transa, transb, grad, &workspace.t,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
@@ -368,38 +370,38 @@ std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
 
 INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
                          testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                false, false, 256, 128, 64, 5e-2},
+                                                false, false, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                false, true, 256, 128, 64, 5e-2},
+                                                false, true, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                true, false, 256, 128, 64, 5e-2},
+                                                true, false, 256, 128, 64, 1e-3},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, false, 256, 128, 64, 5e-2},
+                                                DType::kBFloat16, false, false, 256, 128, 64, 1e-3},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, true, 256, 128, 64, 5e-2},
+                                                DType::kBFloat16, false, true, 256, 128, 64, 1e-3},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, true, false, 256, 128, 64, 5e-2},
+                                                DType::kBFloat16, true, false, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2},
+                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
-                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2},
+                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3},
                                          Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
-                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2}),
+                                                DType::kFloat16, true, false, 256, 128, 64, 1e-3}),
                          &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
                          testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
                                                 false, false, 64, 128, 256, 5e-2},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
-                                                false, true, 64, 128, 256, 5e-1},
+                                                false, true, 64, 128, 256, 5e-2},
                                          Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
                                                 true, false, 64, 128, 256, 5e-2},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, false, 64, 128, 256, 5e-1},
+                                                DType::kBFloat16, false, false, 64, 128, 256, 5e-2},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, false, true, 64, 128, 256, 5e-1},
+                                                DType::kBFloat16, false, true, 64, 128, 256, 5e-2},
                                          Params{DType::kBFloat16, DType::kBFloat16,
-                                                DType::kBFloat16, true, false, 64, 128, 256, 5e-1},
+                                                DType::kBFloat16, true, false, 64, 128, 256, 5e-2},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
                                                 DType::kFloat16, true, false, 64, 128, 256, 5e-2},
                                          Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
