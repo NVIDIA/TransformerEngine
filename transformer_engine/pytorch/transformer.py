@@ -14,7 +14,6 @@ from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.attention.dot_product_attention.utils import check_set_window_size
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -284,11 +283,9 @@ class TransformerLayer(torch.nn.Module):
         super().__init__()
 
         self.self_attn_mask_type = self_attn_mask_type
-        self.window_size = check_set_window_size(self_attn_mask_type, window_size)
+        self.window_size = window_size
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
-        self.enc_dec_window_size = check_set_window_size(
-            enc_dec_attn_mask_type, enc_dec_window_size
-        )
+        self.enc_dec_window_size = enc_dec_window_size
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -655,12 +652,10 @@ class TransformerLayer(torch.nn.Module):
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
             window_size = self.window_size
-        window_size = check_set_window_size(self_attn_mask_type, window_size)
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
         if enc_dec_window_size is None:
             enc_dec_window_size = self.enc_dec_window_size
-        enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
 
         assert (
             self_attn_mask_type in AttnMaskTypes

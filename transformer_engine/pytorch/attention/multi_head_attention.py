@@ -217,7 +217,7 @@ class MultiheadAttention(torch.nn.Module):
 
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
-        self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        self.window_size = window_size
         self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -571,7 +571,6 @@ class MultiheadAttention(torch.nn.Module):
             attn_mask_type = self.attn_mask_type
         if window_size is None:
             window_size = self.window_size
-        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
