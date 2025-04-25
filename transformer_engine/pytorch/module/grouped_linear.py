@@ -676,7 +676,10 @@ class GroupedLinear(TransformerEngineBaseModule):
             assert (
                 not inp._is_2D_scaled
                 and inp._get_quantizer().rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
-            ), "GroupedLinear only supports fp8 blockwise 1D scaled tensor with compact data and scales."
+            ), (
+                "GroupedLinear only supports fp8 blockwise 1D scaled tensor with compact data and"
+                " scales."
+            )
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
