@@ -426,7 +426,14 @@ def fill_userbuffers_buffer_for_all_gather(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fill local shard of Userbuffers buffer with data for all-gather
 
-    Returns the full tensor and the local shard.
+    Returns the full tensor and the local shard, both using the
+    Userbuffers buffer as their underlying data. These tensors should
+    be used carefully (e.g. only immediately before and after a
+    Userbuffers operation) since the underlying data may be
+    overwritten by other Userbuffers operations.
+
+    May perform blocking communication if needed for the gathered
+    tensor's metadata, e.g. scaling factors.
 
     """
 

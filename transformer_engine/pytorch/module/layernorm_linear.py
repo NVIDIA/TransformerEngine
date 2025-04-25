@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
 from .base import (
+    fill_userbuffers_buffer_for_all_gather,
     get_workspace,
     get_ub,
     TransformerEngineBaseModule,
@@ -151,9 +152,6 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
         tp_world_size = get_distributed_world_size(tp_group)
-        ub_overlap_ag_fprop = (
-            ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
-        )
 
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
@@ -162,6 +160,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # Configure Userbuffers communication (comm+GEMM overlap)
         ub_obj = None
         ub_type = None
+        ub_overlap_ag_fprop = (
+            ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
+        )
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.RS
@@ -227,7 +228,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    ln_out = input_quantizer(ln_out)
+                    if not force_hp_blockwise_ln_out_gather:
+                        ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                     ln_out_total = input_quantizer(ln_out_total)
             else:
@@ -883,7 +885,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor
+                    # Deallocate input tensor if permitted
                     if not ctx.return_layernorm_output:
                         clear_tensor_data(ln_out_total)
 
@@ -1608,12 +1610,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
+        weight_quantizer.internal = False
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
             grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-            grad_output_quantizer.internal = True
+            grad_output_quantizer.internal = False
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
 

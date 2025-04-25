@@ -804,7 +804,7 @@ class _Linear(torch.autograd.Function):
                         grad_bias = grad_bias_
                     del grad_bias_
 
-                    # Deallocate input tensor
+                    # Deallocate input tensor if permitted
                     if ctx.owns_input:
                         clear_tensor_data(inputmat_total)
 
