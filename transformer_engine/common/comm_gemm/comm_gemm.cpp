@@ -155,8 +155,7 @@ int64_t block_size(CommGemmCtx* ctx, int64_t global_size) {
 }
 
 void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
-                        const Tensor* b, const Tensor* d, const Tensor* bias,
-                        const Tensor* pre_act_out, bool transa, bool transb) {
+                        const Tensor* b, const Tensor* d, bool transa, bool transb) {
   const auto a0 = a->flat_first_dim();
   const auto a1 = a->flat_last_dim();
   const auto b0 = b->flat_first_dim();
@@ -193,8 +192,7 @@ void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
 }
 
 void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
-                        const Tensor* b, const Tensor* d, const Tensor* bias,
-                        const Tensor* pre_act_out, bool transa, bool transb) {
+                        const Tensor* b, const Tensor* d, bool transa, bool transb) {
   const auto a0 = a->flat_first_dim();
   const auto a1 = a->flat_last_dim();
   const auto b0 = b->flat_first_dim();
@@ -231,8 +229,7 @@ void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
 }
 
 void GemmArInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const Tensor* a,
-                        const Tensor* b, const Tensor* d, const Tensor* bias,
-                        const Tensor* pre_act_out, bool transa, bool transb) {
+                        const Tensor* b, const Tensor* d, bool transa, bool transb) {
   const auto a0 = a->flat_first_dim();
   const auto a1 = a->flat_last_dim();
   const auto b0 = b->flat_first_dim();
@@ -268,8 +265,7 @@ void GemmArInitMatrices(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const
 }
 
 using InitMatricesFn = void (*)(CommGemmCtx*, int64_t, int64_t, int64_t, const Tensor*,
-                                const Tensor*, const Tensor*, const Tensor*, const Tensor*, bool,
-                                bool);
+                                const Tensor*, const Tensor*, bool, bool);
 
 void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo,
                    int64_t m, int64_t n, int64_t k, const Tensor* a, const Tensor* b,
@@ -282,7 +278,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
 
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
 
-  init_matrices_fn(ctx, m, n, k, a, b, d, bias, pre_act_out, transa, transb);
+  init_matrices_fn(ctx, m, n, k, a, b, d, transa, transb);
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -345,7 +341,9 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
       {{false, true, false}, CUBLASMP_MATMUL_EPILOGUE_GELU_AUX},
       {{false, true, true}, CUBLASMP_MATMUL_EPILOGUE_DGELU},
   };
-  if (auto it = flags_to_epilogue.find({bias->data.dptr, pre_act_out->data.dptr, grad});
+  if (auto it =
+          flags_to_epilogue.find({bias ? bias->data.dptr != nullptr : false,
+                                  pre_act_out ? pre_act_out->data.dptr != nullptr : false, grad});
       it != flags_to_epilogue.end()) {
     epilogue = static_cast<cublasMpMatmulEpilogue_t>(epilogue | it->second);
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
