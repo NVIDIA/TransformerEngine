@@ -310,7 +310,7 @@ def apply_rotary_pos_emb(
             qkv_formats:            "thd", "bshd", "sbhd"
             context parallelism:    no
             start_positions:        yes
-            interleaving            yes
+            interleaving:            yes
 
     Parameters
     ----------
