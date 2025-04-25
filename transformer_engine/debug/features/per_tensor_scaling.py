@@ -68,7 +68,7 @@ class PerTensorScaling(TEConfigAPIMapper):
     ----------
 
     gemms/gemms_struct: List[str]
-        list of gemms to enable per-tensor scaling for
+        list of gemms to enable per-tensor current scaling for
 
             - fprop
             - dgrad
