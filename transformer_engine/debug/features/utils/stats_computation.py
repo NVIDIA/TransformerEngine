@@ -3,9 +3,7 @@
 # See LICENSE for license information.
 
 """
-This file combines all mathematical functions used to compute
-the statistics or combine computed statistics for subtensors
-for statistics for full tensor.
+Mathematical functions used to tensor statistics computation.
 """
 
 import math
