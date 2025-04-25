@@ -53,7 +53,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
-      cudaMemsetAsync(amax, 0, sizeof(float), stream);
+      nvte_memset(amax, 0, sizeof(float), stream);
       output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_rowwise_scale_inv(
@@ -266,7 +266,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
-      cudaMemsetAsync(amax, 0, sizeof(float), stream);
+      nvte_memset(amax, 0, sizeof(float), stream);
       output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_rowwise_scale_inv(
