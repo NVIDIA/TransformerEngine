@@ -55,6 +55,7 @@ _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
 _cu_seqlens_cache = {}
 
+
 class AttentionLogging:
     """
     Manage logging for attention module
@@ -88,6 +89,7 @@ def _get_supported_versions(version_min, version_max):
     Calculate version info based on min and max numbers
     """
     return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     """Make tensor contiguous if final stride is not 1."""

@@ -42,13 +42,20 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import attn_forward_func_with_cp
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    attn_forward_func_with_cp,
+)
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
+
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import AttentionLogging as attn_log
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
+)
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionLogging as attn_log,
+)
 
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
@@ -106,7 +113,7 @@ except PackageNotFoundError:
     flash_attn_func_v3 = None
     flash_attn_varlen_func_v3 = None
     flash_attn_with_kvcache_v3 = None
-    #pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
+    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import (
@@ -1143,7 +1150,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
             d_out, q, k, v, out = [dpa_utils.maybe_contiguous(x) for x in (d_out, q, k, v, out)]
-            #from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
+            # from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
             flash_attn_cuda_bwd(
                 d_out,
                 q,
@@ -1617,4 +1624,3 @@ class FusedAttention(torch.nn.Module):
 
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
-

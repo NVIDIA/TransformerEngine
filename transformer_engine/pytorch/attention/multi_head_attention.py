@@ -34,6 +34,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 
+
 class MultiheadAttention(torch.nn.Module):
     r"""
     Multi-head Attention (MHA), including Query,
@@ -317,7 +318,7 @@ class MultiheadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
-                     name=name + ".linear_qkv" if name is not None else None,
+                    name=name + ".linear_qkv" if name is not None else None,
                     **common_gemm_kwargs,
                 )
         elif self.attention_type == "cross":

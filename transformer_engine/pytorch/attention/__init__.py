@@ -9,4 +9,9 @@ from .multi_head_attention import MultiheadAttention
 from .inference import InferenceParams
 from .rope import RotaryPositionEmbedding
 
-__all__ = ["DotProductAttention", "MultiheadAttention", "InferenceParams", "RotaryPositionEmbedding"]
+__all__ = [
+    "DotProductAttention",
+    "MultiheadAttention",
+    "InferenceParams",
+    "RotaryPositionEmbedding",
+]

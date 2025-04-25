@@ -38,9 +38,12 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
+)
 
 _cu_seqlens_info_with_cp_cache = {}
+
 
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
@@ -610,17 +613,26 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_fwd_v3,
+                )
+
                 flash_attn_fwd = (
                     _flash_attn_fwd_v3  # pylint: disable=possibly-used-before-assignment
                 )
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
             else:
                 if qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_varlen_fwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
@@ -1577,17 +1589,26 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if ctx.use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_bwd_v3,
+                )
+
                 flash_attn_bwd = (
                     _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
                 )
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_varlen_bwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if fa_utils.v2_4_plus:
@@ -2430,14 +2451,23 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_fwd_v3,
+                )
+
                 flash_attn_fwd = _flash_attn_fwd_v3
             else:
                 if qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_varlen_fwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
@@ -2680,15 +2710,24 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if ctx.use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_bwd_v3,
+                )
+
                 flash_attn_bwd = _flash_attn_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_varlen_bwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if fa_utils.v2_4_plus:
@@ -2902,15 +2941,24 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_fwd_v3,
+                )
+
                 flash_attn_fwd = _flash_attn_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
             else:
                 if qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_varlen_fwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_fwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_fwd,
+                    )
+
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
@@ -3221,7 +3269,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if ctx.use_flash_attn_3:
-                from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd_v3
+                from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                    _flash_attn_bwd_v3,
+                )
+
                 flash_attn_bwd = (
                     _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
                 )
@@ -3229,10 +3280,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_varlen_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_varlen_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_varlen_bwd
                 else:
-                    from transformer_engine.pytorch.attention.dot_product_attention.backends import _flash_attn_bwd
+                    from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+                        _flash_attn_bwd,
+                    )
+
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:

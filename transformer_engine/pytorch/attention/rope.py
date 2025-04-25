@@ -136,7 +136,14 @@ class FusedRoPEFunc(torch.autograd.Function):
             "thd",
         ), f"Unsupported tensor_format: {tensor_format}."
         output = tex.fused_rope_forward(
-            t, freqs, start_positions, QKVFormat[tensor_format], interleaved, cu_seqlens, cp_size, cp_rank
+            t,
+            freqs,
+            start_positions,
+            QKVFormat[tensor_format],
+            interleaved,
+            cu_seqlens,
+            cp_size,
+            cp_rank,
         )
         ctx.save_for_backward(freqs, cu_seqlens)
         ctx.tensor_format = tensor_format
@@ -234,7 +241,6 @@ def _apply_rotary_pos_emb_base(
         cur_seq_len <= max_seq_len
     ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
     freqs = freqs[:cur_seq_len]
-
 
     # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
     # [seq, b, 1, dim] -> [b, seq, 1, dim]
