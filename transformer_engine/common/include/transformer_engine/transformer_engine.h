@@ -338,6 +338,17 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
  */
 int nvte_is_non_tn_fp8_gemm_supported();
 
+/*! \brief Performs a memset of the data at the given pointer and size in bytes.
+ *
+ *  \param[in] ptr Pointer to the memory to be set.
+ *  \param[in] value Value to set the memory to.
+ *  \param[in] size_in_bytes Size of the memory in bytes.
+ *  \param[in] stream CUDA stream to use for the operation.
+ *
+ *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
+*/
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 
