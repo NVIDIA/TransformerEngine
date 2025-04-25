@@ -11,6 +11,7 @@ import torch
 
 MAX_FP8_VALUE_INT8 = 126
 
+
 @torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
