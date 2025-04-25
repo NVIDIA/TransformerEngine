@@ -32,7 +32,6 @@ from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
-import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 
 
 class MultiheadAttention(torch.nn.Module):

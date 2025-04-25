@@ -10,8 +10,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 
-from packaging.version import Version as PkgVersion
-
 import torch
 
 import transformer_engine_torch as tex

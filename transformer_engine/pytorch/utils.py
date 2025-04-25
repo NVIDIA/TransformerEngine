@@ -191,7 +191,9 @@ def combine_tensors(
 
 
 class SplitAlongDim(torch.autograd.Function):
-    """"""
+    """
+    Split tensor along given dimension
+    """
 
     @staticmethod
     def forward(
