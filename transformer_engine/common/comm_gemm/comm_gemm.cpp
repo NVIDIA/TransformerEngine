@@ -351,13 +351,17 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
         sizeof epilogue));
   }
 
-  if (bias->data.dptr) {
+  if (bias && bias->data.dptr) {
+    cudaDataType_t bias_type = get_cuda_dtype(bias->data.dtype);
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_DATA_TYPE,
+        &bias_type, sizeof bias_type));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_POINTER, &bias->data.dptr,
         sizeof bias->data.dptr));
   }
 
-  if (pre_act_out->data.dptr) {
+  if (pre_act_out && pre_act_out->data.dptr) {
     cudaDataType_t aux_type = get_cuda_dtype(pre_act_out->data.dtype);
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_DATA_TYPE,
@@ -365,6 +369,24 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_POINTER,
         &pre_act_out->data.dptr, sizeof pre_act_out->data.dptr));
+    int64_t aux_ld = 0; // TODO:
+    NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_LD, &aux_ld,
+        sizeof aux_ld));
+    if (is_fp8_dtype(pre_act_out->dtype())) {
+      NVTE_CHECK(pre_act_out->scale.dptr, "Scaling must be set for FP8 dtype");
+      NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+          ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_SCALE_MODE,
+          &scale_mode, sizeof scale_mode));
+      NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+          ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_SCALE_POINTER,
+          &pre_act_out->scale.dptr, sizeof(void*)));
+      if (pre_act_out->amax.dptr) {
+        NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
+            ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_EPILOGUE_AUX_AMAX_POINTER,
+            &pre_act_out->amax.dptr, sizeof(void*)));
+      }
+    }
   }
 
   if (comm_sm_count) {

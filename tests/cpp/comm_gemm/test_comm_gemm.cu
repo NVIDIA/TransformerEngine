@@ -174,7 +174,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                      : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
     auto gbias = TensorHolder::MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
     auto gd = TensorHolder::Make<DType>(m, n, d_scale);
-    // auto gaux = TensorHolder::Make<DType>(m, n, d_scale);
+    auto gaux = TensorHolder::Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
     auto a = transa
@@ -191,15 +191,14 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
         TensorHolder::MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
                                              dims.d_rows_num, dims.d_cols_num, m, bias_scale);
     auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
-    // auto aux = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+    auto aux = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
-    Tensor pre_act_out;
     bool grad = false;
     bool accumulate = false;
-    CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias, &pre_act_out, transa, transb, grad, accumulate,
+    CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias, &aux, transa, transb, grad, accumulate,
              0 /*comm_sm_count*/, stream);
     auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias, &pre_act_out, transa, transb, grad, &workspace.t,
+    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias, &gaux, transa, transb, grad, &workspace.t,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
