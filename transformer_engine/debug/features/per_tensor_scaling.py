@@ -135,8 +135,8 @@ class PerTensorScaling(TEConfigAPIMapper):
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
         assert isinstance(default_quantizer, Float8Quantizer), (
-            f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor: Per"
-            " tensor current scaling can be used only within `DelayedScaling` recipe autocast."
+            f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor: "
+            "Per-tensor current scaling can be used only within `DelayedScaling` recipe autocast."
             f" {layer_name}"
         )
 
