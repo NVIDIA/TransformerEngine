@@ -93,39 +93,7 @@ class _GroupedLinear(torch.autograd.Function):
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         if isinstance(inp, Float8BlockwiseQTensor):
-            rowwise_mats = torch.split(inp._rowwise_data.view(-1, in_features), m_splits)
-            scale_in_features = inp._rowwise_scale_inv.shape[0]
-            rowwise_scale_inv_mats = torch.split(
-                inp._rowwise_scale_inv.view(-1, scale_in_features), m_splits, dim=0
-            )
-            inputmats = []
-            for i in range(num_gemms):
-                new_rowwise_data = rowwise_mats[i]
-                new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
-                new_columnwise_data = torch.empty(
-                    new_rowwise_data.T.shape, device=new_rowwise_data.device
-                )
-                new_columnwise_scale_inv_shape = [
-                    (new_columnwise_data.shape[1] + 128 - 1) // 128,
-                    new_columnwise_data.shape[0],
-                ]
-                new_columnwise_scale_inv = torch.empty(
-                    new_columnwise_scale_inv_shape, device=new_rowwise_data.device
-                )
-                inputmats.append(
-                    Float8BlockwiseQTensor(
-                        shape=rowwise_mats[i].shape,
-                        dtype=inp.dtype,
-                        rowwise_data=new_rowwise_data,
-                        rowwise_scale_inv=new_rowwise_scale_inv,
-                        columnwise_data=new_columnwise_data,
-                        columnwise_scale_inv=new_columnwise_scale_inv,
-                        fp8_dtype=inp._fp8_dtype,
-                        quantizer=None,
-                        is_2D_scaled=False,
-                        requires_grad=inp.requires_grad,
-                    )
-                )
+            inputmats = inp.split(m_splits)
         else:
             inputmats = torch.split(inp.view(-1, in_features), m_splits)
             # Cast input to expected dtype
@@ -153,15 +121,13 @@ class _GroupedLinear(torch.autograd.Function):
         if output_quantizers[0] is not None:
             for output_quantizer in output_quantizers:
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
+
         fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
         if fp8:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
-            if isinstance(inp, Float8BlockwiseQTensor):
-                for inputmat, quantizer in zip(inputmats, input_quantizers):
-                    tex.fp8_blockwise_transpose(inputmat, quantizer)
-            else:
+            elif not isinstance(inp, QuantizedTensor):
                 inputmats = tex.fused_multi_quantize(
                     inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
                 )
@@ -183,6 +149,7 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = inputmats_no_fp8
             bias_dtype = activation_dtype
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
+
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
 
         out = torch.empty(
@@ -220,6 +187,9 @@ class _GroupedLinear(torch.autograd.Function):
             if weight_requires_grad:
                 for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensor):
+                        # Create columnwise data if not already present.
+                        inputmat.update_usage(rowwise_usage=True, columnwise_usage=True)
+                        # Release rowwise data.
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             if inp.requires_grad:
                 for weight in weights_fp8:
@@ -276,54 +246,12 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = ctx.main_grads
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
-                for i in ctx.num_gemms:
-                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
-                    w.main_grad = main_grads[i]
-                    weights[i] = w
 
             # preprocess grad_output
             fp8_grad_output = isinstance(grad_output, Float8BlockwiseQTensor)
             grad_output = grad_output.contiguous()
             if fp8_grad_output:
-                rowwise_mats = torch.split(
-                    grad_output._rowwise_data.view(-1, grad_output.shape[-1]), ctx.m_splits
-                )
-                rowwise_scale_inv_mats = torch.split(
-                    grad_output._rowwise_scale_inv.view(
-                        -1, grad_output._rowwise_scale_inv.shape[0]
-                    ),
-                    ctx.m_splits,
-                    dim=0,
-                )
-                grad_output_mats = []
-                for i in range(ctx.num_gemms):
-                    new_rowwise_data = rowwise_mats[i]
-                    new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
-                    new_columnwise_data = torch.empty(
-                        new_rowwise_data.T.shape, device=new_rowwise_data.device
-                    )
-                    new_columnwise_scale_inv_shape = [
-                        (new_columnwise_data.shape[1] + 128 - 1) // 128,
-                        new_columnwise_data.shape[0],
-                    ]
-                    new_columnwise_scale_inv = torch.empty(
-                        new_columnwise_scale_inv_shape, device=new_rowwise_data.device
-                    )
-                    grad_output_mats.append(
-                        Float8BlockwiseQTensor(
-                            shape=new_rowwise_data.shape,
-                            dtype=grad_output.dtype,
-                            rowwise_data=new_rowwise_data,
-                            rowwise_scale_inv=new_rowwise_scale_inv,
-                            columnwise_data=new_columnwise_data,
-                            columnwise_scale_inv=new_columnwise_scale_inv,
-                            fp8_dtype=grad_output._fp8_dtype,
-                            quantizer=None,
-                            is_2D_scaled=False,
-                            requires_grad=grad_output.requires_grad,
-                        )
-                    )
+                grad_output_mats = grad_output.split(ctx.m_splits)
             else:
                 grad_output_mats = torch.split(
                     grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
@@ -331,31 +259,33 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
             if ctx.fp8:
-                if not fp8_grad_output:
-                    if ctx.use_bias:
-                        # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
-                        # for Float8BlockQuantizer.
-                        if ctx.fp8_recipe.float8_block_scaling():
-                            for i in range(ctx.num_gemms):
-                                grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                                grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
-                        else:
-                            for i in range(ctx.num_gemms):
-                                grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                    grad_output_mats[i], ctx.grad_output_quantizers[i]
-                                )
+                if ctx.use_bias:
+                    assert not fp8_grad_output, "FP8 grad_output does not support bias."
+                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
+                    # for Float8BlockQuantizer.
+                    if ctx.fp8_recipe.float8_block_scaling():
+                        for i in range(ctx.num_gemms):
+                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                            grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
                     else:
-                        grad_output = tex.fused_multi_quantize(
-                            grad_output_mats,
-                            None,
-                            ctx.grad_output_quantizers,
-                            TE_DType[ctx.activation_dtype],
-                        )
+                        for i in range(ctx.num_gemms):
+                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
+                                grad_output_mats[i], ctx.grad_output_quantizers[i]
+                            )
+                elif not fp8_grad_output:
+                    grad_output = tex.fused_multi_quantize(
+                        grad_output_mats,
+                        None,
+                        ctx.grad_output_quantizers,
+                        TE_DType[ctx.activation_dtype],
+                    )
                 else:  # input grad_output is blockwise
-                    grad_output = tex.fp8_blockwise_transpose(grad_output_mats)
+                    for grad_output_mat in grad_output_mats:
+                        grad_output_mat.update_usage(rowwise_usage=True, columnwise_usage=True)
                     grad_output = grad_output_mats
             else:
                 grad_output = grad_output_mats
+
             if ctx.is_first_microbatch is not None:
                 accumulate_wgrad_into_param_main_grad = (
                     ctx.fuse_wgrad_accumulation and not ctx.is_first_microbatch
@@ -743,8 +673,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         """
         fp8_input = isinstance(inp, QuantizedTensor)
         if fp8_input:
-            if not isinstance(inp, Float8BlockwiseQTensor):
-                raise ValueError("GroupedLinear only support Float8BlockwiseQTensor input.")
+            assert (
+                not inp._is_2D_scaled
+                and inp._get_quantizer().rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+            ), "GroupedLinear only supports fp8 blockwise 1D scaled tensor with compact data and scales."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()

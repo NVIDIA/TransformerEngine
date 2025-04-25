@@ -325,23 +325,12 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         ), "Must retain some data either columnwise or rowwise"
 
         if columnwise_usage and rowwise_usage:
-            if not self._is_2D_scaled:
-                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
-                # data/scale_inv because their scale values are different.
-                assert (
-                    self._rowwise_data is not None
-                    and self._rowwise_scale_inv is not None
-                    and self._columnwise_data is not None
-                    and self._columnwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage."
-            else:
-                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
-                # rowwise data/scale_inv.
-                assert (
-                    self._rowwise_data is not None and self._rowwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
-                if self._columnwise_data is None or self._columnwise_scale_inv is None:
-                    self._create_columnwise()
+            # If columnwise data/scale_inv is None, we can create them from rowwise data/scale_inv.
+            assert (
+                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+            ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+            if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                self._create_columnwise()
             return
 
         if rowwise_usage:
@@ -436,6 +425,41 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
+
+    def split(self, split_size_or_sections, dim=0):
+        """Splits the tensor into chunks."""
+        assert dim == 0, "Float8BlockwiseQTensor only supports splitting along the first dimension."
+        assert (
+            not self._is_2D_scaled
+        ), "Float8BlockwiseQTensor only supports splitting 1D scaled tensors."
+        assert self._rowwise_data is not None, "Float8BlockwiseQTensor has no rowwise data."
+        assert self._get_quantizer().rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES, (
+            "Float8BlockwiseQTensor only supports splitting 1D scaled tensors with compact data and"
+            " scales."
+        )
+        in_features = self._rowwise_data.shape[-1]
+        rowwise_mats = torch.split(
+            self._rowwise_data.view(-1, in_features), split_size_or_sections, dim=dim
+        )
+        scale_in_features = self._rowwise_scale_inv.shape[-1]
+        rowwise_scale_inv_mats = torch.split(
+            self._rowwise_scale_inv.view(-1, scale_in_features),
+            split_size_or_sections,
+            dim=dim,
+        )
+        return [
+            Float8BlockwiseQTensor(
+                shape=mat.shape,
+                dtype=self.dtype,
+                rowwise_data=mat,
+                rowwise_scale_inv=scale_inv_mat,
+                fp8_dtype=self._fp8_dtype,
+                quantizer=self._get_quantizer(),
+                is_2D_scaled=self._is_2D_scaled,
+                requires_grad=self.requires_grad,
+            )
+            for mat, scale_inv_mat in zip(rowwise_mats, rowwise_scale_inv_mats)
+        ]
 
     @classmethod
     def _make_in_reduce_ex(
