@@ -237,7 +237,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 raise ValueError("Missing quantizer for FC1 input tensor")
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
             if sequence_parallel and isinstance(
-                    fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
             ):
                 fc1_input_quantizer.set_usage(columnwise=False)
             if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
@@ -763,11 +763,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_total = None
             ln_out_total_work = None
             ub_obj_fc1_dgrad = None
-            if (
-                ctx.fc1_weight_requires_grad
-                and ctx.tensor_parallel
-                and ctx.sequence_parallel
-            ):
+            if ctx.fc1_weight_requires_grad and ctx.tensor_parallel and ctx.sequence_parallel:
                 quantizer = None
                 if ctx.fp8 or ctx.debug and not ctx.force_hp_fc1_input_gather:
                     quantizer = ctx.fc1_input_quantizer
