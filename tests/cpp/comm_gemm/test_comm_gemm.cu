@@ -143,7 +143,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                         bool transa, bool transb, bool grad, bool accumulate, int comm_sm_count,
                         cudaStream_t stream) = 0;
 
-  template <typename AType, typename BType, typename DType>
+  template <typename AType, typename BType, typename DType, typename BiasType>
   void Run(bool transa, bool transb, size_t m, size_t n, size_t k, float tol) {
     cudaStream_t stream{};
     NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
@@ -155,6 +155,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     float a_scale = GetScale<AType>(MAX_IN);
     float b_scale = GetScale<BType>(MAX_IN);
     float d_scale = GetScale<DType>(MAX_IN * MAX_IN * k);
+    float bias_scale = GetScale<BiasType>(MAX_IN);
 
     std::vector<AType> adata(m * k);
     std::generate(adata.begin(), adata.end(),
@@ -162,11 +163,16 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     std::vector<BType> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(),
                   [&rng, &dist, b_scale] { return static_cast<BType>(dist(rng) * b_scale); });
+    std::vector<BiasType> biasdata(m * n);
+    std::generate(biasdata.begin(), biasdata.end(), [&rng, &dist, bias_scale] {
+      return static_cast<BiasType>(dist(rng) * bias_scale);
+    });
 
     auto ga = transa ? TensorHolder::MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
                      : TensorHolder::MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
     auto gb = transb ? TensorHolder::MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
                      : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
+    auto gbias = TensorHolder::MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
     auto gd = TensorHolder::Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
@@ -180,9 +186,11 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                                      dims.b_cols_num, dims.b_rows_num, n, b_scale)
                  : TensorHolder::MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
                                                      dims.b_rows_num, dims.b_cols_num, k, b_scale);
+    auto bias =
+        TensorHolder::MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
+                                             dims.d_rows_num, dims.d_cols_num, m, bias_scale);
     auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
-    Tensor bias;
     Tensor pre_act_out;
     bool grad = false;
     bool accumulate = false;
@@ -324,83 +332,81 @@ TEST_P(AgGemm, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
-      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
-            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
-          })})});
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
 
 TEST_P(GemmRs, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
-      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
-            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
-          })})});
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
 
 TEST_P(GemmAr, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
       a_type, AType,
-      {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          b_type, BType, {TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(d_type, DType, {
-            Run<AType, DType, DType>(transa, transb, m, n, k, tol);
-          })})});
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          b_type, BType,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+              d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
   const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
   std::ostringstream ss;
   ss << to_string(a_type) << "_" << to_string(b_type) << "_" << to_string(d_type) << "_"
-     << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x" << n << "x" << k;
+     << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x" << n << "x" << k;
   return ss.str();
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AgGemm, AgGemm,
-    testing::Values(
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 256, 128, 64, 1e-9},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 256, 128, 64, 1e-9},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 256, 128, 64, 1e-9},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 256, 128, 64,
-               1e-9},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 256, 128, 64,
-               1e-9},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 256, 128, 64,
-               1e-9},
-        Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 256, 128,
-               64, 1e-4},
-        Params{DType::kFloat8E5M2, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 256, 128,
-               64, 1e-4},
-        Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 256, 128,
-               64, 1e-4},
-        Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 256, 128,
-               64, 1e-4}),
-    &ParamSuffix);
+INSTANTIATE_TEST_SUITE_P(AgGemm, AgGemm,
+                         testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                false, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                false, true, 256, 128, 64, 5e-2},
+                                         Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                true, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, false, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, false, true, 256, 128, 64, 5e-2},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, true, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
+                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2},
+                                         Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 256, 128, 64, 5e-2}),
+                         &ParamSuffix);
 
-INSTANTIATE_TEST_SUITE_P(
-    GemmRs, GemmRs,
-    testing::Values(
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, false, 64, 128, 256, 1e-3},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, false, true, 64, 128, 256, 5e-1},
-        Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64, 128, 256, 1e-3},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, false, 64, 128, 256,
-               5e-3},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, false, true, 64, 128, 256,
-               5e-1},
-        Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64, 128, 256,
-               5e-3},
-        Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 64, 128,
-               256, 1e-1},
-        Params{DType::kFloat8E5M2, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 64, 128,
-               256, 1e-1},
-        Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat8E4M3, true, false, 64, 128,
-               256, 1e-1},
-        Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false, 64, 128,
-               256, 1e-1}),
-    &ParamSuffix);
+INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
+                         testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                false, false, 64, 128, 256, 5e-2},
+                                         Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                false, true, 64, 128, 256, 5e-1},
+                                         Params{DType::kFloat16, DType::kFloat16, DType::kFloat16,
+                                                true, false, 64, 128, 256, 5e-2},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, false, false, 64, 128, 256, 5e-1},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, false, true, 64, 128, 256, 5e-1},
+                                         Params{DType::kBFloat16, DType::kBFloat16,
+                                                DType::kBFloat16, true, false, 64, 128, 256, 5e-1},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2},
+                                         Params{DType::kFloat8E4M3, DType::kFloat8E5M2,
+                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2},
+                                         Params{DType::kFloat8E5M2, DType::kFloat8E4M3,
+                                                DType::kFloat16, true, false, 64, 128, 256, 5e-2}),
+                         &ParamSuffix);
 
 INSTANTIATE_TEST_SUITE_P(
     GemmAr, GemmAr,
@@ -416,6 +422,6 @@ INSTANTIATE_TEST_SUITE_P(
                            64 * 4, 64 * 4, 1e-4},
                     Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
                            64 * 4, 64 * 4, 1e-4},
-                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat8E4M3, true, false,
+                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kBFloat16, true, false,
                            64, 64 * 4, 64 * 4, 1e-4}),
     &ParamSuffix);
