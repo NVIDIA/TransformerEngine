@@ -27,11 +27,17 @@ class LogFp8TensorStats(BaseLogTensorStats):
     This feature handles logging of FP8 tensor stats.
 
 
-    In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
+    In a distributed setting, the auxiliary stats are computed on each rank and gathered after
+    the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log
+    stats!
 
-    `LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.
+    `LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked
+    per `debug_api.step()`, then stats for all tensors except weights will be accumulated.
 
-    `LogFp8TensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogFp8TensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.
+    `LogFp8TensorStats` can induce significant overhead. To mitigate this issue, logging stats
+    with `freq > 1` is recommended. If `LogFp8TensorStats` is not used in a given step, the
+    overhead is smaller. If no other feature is used for the layer, the TE layer will
+    run as fast as it would without `debug_api` initialized.
 
     Parameters
     ----------
