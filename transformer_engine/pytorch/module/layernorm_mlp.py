@@ -8,7 +8,6 @@ import warnings
 from typing import Callable, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
-import functools
 
 import torch
 from torch.nn.parameter import Parameter
@@ -43,7 +42,6 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     requires_grad,
-    is_non_tn_fp8_gemm_supported,
     needs_quantized_gemm,
 )
 from ..distributed import (
@@ -67,7 +65,7 @@ from ..tensor.float8_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
+from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
     QuantizedTensor,

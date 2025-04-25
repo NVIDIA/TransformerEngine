@@ -9,7 +9,6 @@ from typing import Callable, Dict, Optional, Tuple, Union
 from functools import reduce
 from operator import mul as multiply_op
 
-import functools
 import torch
 from torch.nn import init
 
@@ -54,7 +53,7 @@ from ..distributed import (
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ._common import apply_normalization, noop_cat, _fix_gathered_fp8_transpose, WeightGradStore
+from ._common import apply_normalization, noop_cat, WeightGradStore
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,

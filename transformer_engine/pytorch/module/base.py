@@ -480,7 +480,7 @@ def fill_userbuffers_buffer_for_all_gather(
             fp8_dtype=local_tensor._fp8_dtype,
             requires_grad=False,
             quantizer=quantizer,
-        )  ### TODO Consider internal tensor
+        )
         return global_tensor, local_tensor
 
     # MXFP8 data
@@ -553,7 +553,7 @@ def fill_userbuffers_buffer_for_all_gather(
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
             requires_grad=False,
-        )  ### TODO Consider internal tensor
+        )
         return global_tensor, local_tensor
 
     # Unsupported data format

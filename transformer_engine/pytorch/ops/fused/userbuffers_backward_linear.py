@@ -265,7 +265,6 @@ class UserbuffersBackwardLinear(FusedOperation):
                     )
 
         # Compute grad bias if needed
-        # TODO: Fuse with grad output quantization
         db = None
         db_async = None
         if bias_requires_grad:
