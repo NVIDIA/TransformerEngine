@@ -33,7 +33,6 @@ from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 
-
 class MultiheadAttention(torch.nn.Module):
     r"""
     Multi-head Attention (MHA), including Query,
