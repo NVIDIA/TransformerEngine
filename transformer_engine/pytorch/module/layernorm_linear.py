@@ -1394,7 +1394,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                             "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    raise RuntimeError("FP8 weights without FP8 computation is not supported")
+                    warnings.warn("You are using quantized weights without quantized compute. "
+                                  "Please make sure this is intentional.")
 
             weight_tensor = noop_cat(unfused_weights)
             if self.use_bias:
