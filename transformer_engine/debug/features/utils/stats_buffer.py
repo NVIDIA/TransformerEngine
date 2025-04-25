@@ -73,8 +73,8 @@ class _Buffer:
         Because of the microbatching, feed() can be used multiple
         times for one log().
 
-        Ability to combine result for already processed tensors with
-        results of new tensor are the main reason for such a design of this class.
+        The main reason of this design: need to combine results for already processed
+        tensors with the result of the new tensor.
         """
 
         self.iteration = iteration
