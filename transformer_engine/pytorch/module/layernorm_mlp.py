@@ -726,7 +726,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if (
                 ctx.ub_overlap_ag
                 and ctx.fc2_weight_requires_grad
-                and isinstance(ctx.fc2_grad_output_quantizer)
+                and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
             ):
                 ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                 fc2_wgrad_grad_output, fc2_wgrad_grad_output_work = gather_along_first_dim(
@@ -931,13 +931,13 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([act_out, grad_output], fc2_wgrad_gemm)
+                    ctx.wgrad_store.put([act_out, fc2_wgrad_grad_output], fc2_wgrad_gemm)
                 else:
 
                     # Call wgrad GEMM now
                     fc2_wgrad, fc2_bias_grad_ = fc2_wgrad_gemm(
                         act_out,
-                        grad_output,
+                        fc2_wgrad_grad_output,
                         _is_delayed=False,
                     )
 
@@ -1176,10 +1176,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     # Check for invalid configurations
                     if _is_delayed:
                         if (
-                            wgrad_gemm_kwargs["ub"] is not None
-                            or wgrad_gemm_kwargs["ub_type"] is not None
-                            or wgrad_gemm_kwargs["extra_output"] is not None
-                            or wgrad_gemm_kwargs["bulk_overlap"]
+                            fc1_wgrad_gemm_kwargs["ub"] is not None
+                            or fc1_wgrad_gemm_kwargs["ub_type"] is not None
+                            or fc1_wgrad_gemm_kwargs["extra_output"] is not None
+                            or fc1_wgrad_gemm_kwargs["bulk_overlap"]
                         ):
                             raise NotImplementedError(
                                 "Delayed weight grad computation is not supported "
@@ -1912,11 +1912,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 ]
             if torch.is_grad_enabled():
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
                 fc2_grad_output_quantizer.internal = False
                 fc1_grad_output_quantizer = self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_INPUT1
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
                 ]
                 fc1_grad_output_quantizer.internal = False
 
@@ -2001,25 +2001,25 @@ class LayerNormMLP(TransformerEngineBaseModule):
         else:
             # fc2_grad_output_quantizer: set configs about amax epsilon and power_2_scale for fc2_grad_output_quantizer
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                tex.FP8BwdTensors.GRAD_OUTPUT2
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                tex.FP8BwdTensors.GRAD_OUTPUT2
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             # fc1_grad_output_quantizer: also set numerical configs for fc1_grad_output_quantizer
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_INPUT1
+                tex.FP8BwdTensors.GRAD_OUTPUT1
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_INPUT1
+                tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].with_amax_reduction = True
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].amax_reduction_group = self.tp_group
 
     def backward_dw(self):

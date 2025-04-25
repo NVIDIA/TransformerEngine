@@ -279,7 +279,7 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         f"{te.LayerNormLinear.__name__}-col_tensor_parallel-DGRAD+RS",
     ]
     + [
-        " " + " - ".join(test_name_parts) + " "
+        "-".join(test_name_parts)
         for test_name_parts in zip(
             [layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
             ["BULK DGRAD/WGRAD", "DGRAD+RS"] * len(TE_LAYERS[2:]),

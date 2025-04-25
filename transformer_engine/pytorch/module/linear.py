@@ -789,13 +789,13 @@ class _Linear(torch.autograd.Function):
 
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([inputmat_total, grad_output], wgrad_gemm)
+                    ctx.wgrad_store.put([inputmat_total, wgrad_grad_output], wgrad_gemm)
                 else:
 
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(
                         inputmat_total,
-                        grad_output,
+                        wgrad_grad_output,
                         _is_delayed=False,
                     )
 

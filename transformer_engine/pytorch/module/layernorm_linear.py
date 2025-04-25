@@ -583,7 +583,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ctx.requires_wgrad and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     wgrad_grad_output, wgrad_grad_output_work = gather_along_first_dim(
-                        grad_output,
+                        grad_outputs[0],
                         ctx.tp_group,
                         async_op=True,
                         quantizer=ctx.grad_output_quantizer,
@@ -870,13 +870,13 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([ln_out_total, grad_output], wgrad_gemm)
+                    ctx.wgrad_store.put([ln_out_total, wgrad_grad_output], wgrad_gemm)
                 else:
 
                     # Call wgrad GEMM now
                     wgrad, grad_bias_ = wgrad_gemm(
                         ln_out_total,
-                        grad_output,
+                        wgrad_grad_output,
                         _is_delayed=False,
                     )
 
@@ -1676,3 +1676,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
             self.quantizers["scaling_bwd"][
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            # parallel related
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # customize grad_output_quantizer with amax reduction TP group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
