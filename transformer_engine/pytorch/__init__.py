@@ -88,10 +88,10 @@ from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
-from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
-from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
+from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,

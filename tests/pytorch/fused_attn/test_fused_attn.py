@@ -23,8 +23,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
     AttentionParams,
 )
-from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,

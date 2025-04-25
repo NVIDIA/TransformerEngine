@@ -6,7 +6,7 @@ import os
 import torch
 from typing import Tuple
 from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
-from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
+from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state
 seed = 1234

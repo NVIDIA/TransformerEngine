@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import torch
 
 import transformer_engine as te
-from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 
 import transformers
 from transformers.models.llama.modeling_llama import (
