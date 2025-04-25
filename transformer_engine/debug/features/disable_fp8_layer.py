@@ -46,7 +46,8 @@ class DisableFP8Layer:
     def parse_config_and_api(self, config, **_kwargs):
         """Determines whether to run the API
         DisableFP8Layer is the only feature provided by the Transformer Engine
-        which does not inherit from TEConfigAPIMapper.
+        which does not inherit from TEConfigAPIMapper - this mapper is primarly responsible for
+        parsing gemms and tensors fields from the config, which are not needed for this feature.
 
         Explanation of the parse_config_and_api can be found in the
         nvidia-dlframework-inspect documentation.

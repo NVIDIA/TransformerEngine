@@ -12,18 +12,16 @@ import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.registry import Registry, api_method
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Format
-from transformer_engine.pytorch.fp8 import _default_sf_compute
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
-    Float8Quantizer,
+    Float8CurrentScalingQuantizer
 )
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 
 def per_tensor_cast(
-    tensor: torch.Tensor, fp8_dtype: tex.DType, margin: int = 0, out: Float8Tensor = None
+    tensor: torch.Tensor, fp8_dtype: tex.DType, out: Float8Tensor = None
 ) -> Float8Tensor:
     """
     This function computes the scaling factors based on the tensor amax and then casts it to the fp8
@@ -33,23 +31,15 @@ def per_tensor_cast(
         torch.float,
         torch.float16,
         torch.bfloat16,
-    ), "[NVTORCH INSPECT ERROR] Unsupported tensor type for per tensor scaling"
+    ), "[NVTORCH INSPECT ERROR] Unsupported tensor type for per tensor current scaling"
     assert tensor.is_cuda, "[NVTORCH INSPECT ERROR] Must be a GPU tensor."
     assert fp8_dtype in {
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
     }, "[NVTORCH INSPECT ERROR] Only 2 FP8 types: E4M3 and E5M2 are supported in TE."
     tensor = tensor.contiguous()
-    if fp8_dtype == tex.DType.kFloat8E4M3:
-        fp8_max = Format.E4M3.value.max_fwd
-    else:
-        fp8_max = Format.E5M2.value.max_fwd
-    amax = tensor.abs().max().float()
-    one = torch.ones(1, device=tensor.device)
 
-    scale = _default_sf_compute(amax, one, fp8_max, margin)
-
-    quantizer = Float8Quantizer(scale, amax, fp8_dtype)
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype)
 
     if out is not None:
         quantizer.update_quantized(tensor, out)
@@ -79,8 +69,6 @@ class PerTensorScaling(TEConfigAPIMapper):
             - activation
             - gradient
             - weight
-    margin: int, default = 0
-        impacts the computation of scaling factors, default is 0, `amax = original_amax * (2^margin)`.
 
     Example
     -------
@@ -97,10 +85,6 @@ class PerTensorScaling(TEConfigAPIMapper):
                     gemms: [dgrad]
                     tensors: [weight, activation]
     """
-
-    def _get_margin_default(self):
-        """Returns default value of the margin parameter of the quantization."""
-        return 0
 
     @api_method
     def fp8_gemm(
@@ -131,10 +115,10 @@ class PerTensorScaling(TEConfigAPIMapper):
     ):  # pylint: disable=unused-argument
         """API call used to process the tensor."""
         for key in config.keys():
-            if key not in ["gemm", "tensor", "margin"]:
+            if key not in ["gemm", "tensor"]:
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
-        assert isinstance(default_quantizer, Float8Quantizer), (
+        assert isinstance(default_quantizer, Float8CurrentScalingQuantizer), (
             f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor: "
             "Per-tensor current scaling can be used only within `DelayedScaling` recipe autocast."
             f" {layer_name}"
@@ -146,6 +130,5 @@ class PerTensorScaling(TEConfigAPIMapper):
             extra_cachable_args=(gemm, tensor_name),
         )
 
-        margin = config.get("margin", self._get_margin_default())
-        fp8_tensor = per_tensor_cast(tensor, default_quantizer.dtype, margin=margin, out=out)
+        fp8_tensor = per_tensor_cast(tensor, default_quantizer.dtype, out=out)
         return fp8_tensor

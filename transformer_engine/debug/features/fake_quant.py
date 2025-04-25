@@ -22,7 +22,7 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 
 
-def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, margin=0, out=None):
+def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):
     """Input tensor is quantized to fp8 and then dequantized."""
 
     assert tensor.dtype in (
@@ -49,7 +49,7 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, margin=0, out=Non
             fp8_dtype = tex.DType.kFloat8E5M2
         amax = tensor.abs().max().float()
         one = torch.ones(1, device=tensor.device)
-        scale = _default_sf_compute(amax, one, fp8_max, margin)
+        scale = _default_sf_compute(amax, one, fp8_max)
 
         quantizer = Float8Quantizer(scale, amax, fp8_dtype)
     else:
@@ -98,8 +98,6 @@ class FakeQuant(TEConfigAPIMapper):
 
             - FP8E5M2
             - FP8E4M3
-    margin: int, default = 0
-        impacts the computation of scaling factors, default is 0, `amax = original_amax * (2^margin)`.
 
     Example
     -------
@@ -123,10 +121,6 @@ class FakeQuant(TEConfigAPIMapper):
     def _supported_formats(self):
         """Returns formats that one can fake quantize tensor to."""
         return ["FP8E4M3", "FP8E5M2", "MXFP8E4M3", "MXFP8E5M2"]
-
-    def _get_margin_default(self):
-        """Returns default value of the margin parameter of the quantization."""
-        return 0
 
     @api_method
     def fp8_gemm_enabled(
@@ -158,7 +152,7 @@ class FakeQuant(TEConfigAPIMapper):
         """API call used to process the tensor."""
 
         for key in config.keys():
-            if key not in ["gemm", "tensor", "quant_format", "margin"]:
+            if key not in ["gemm", "tensor", "quant_format"]:
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
         if "quant_format" not in config:
@@ -180,8 +174,7 @@ class FakeQuant(TEConfigAPIMapper):
         )
 
         quant_format = config["quant_format"]
-        margin = config.get("margin", self._get_margin_default())
-        q_tensor = fake_quantize(tensor, quant_format, margin=margin, out=out)
+        q_tensor = fake_quantize(tensor, quant_format, out=out)
         if dtype is not None:
             q_tensor = q_tensor.to(dtype)
         return q_tensor

@@ -15,7 +15,7 @@ class TestDummyFeature(TEConfigAPIMapper):
     and does nothing.
 
     If no features are used, then TE layer automatically switches to the non-debug mode.
-    This feature is invoked for each gemm to prevent this behavior.
+    This feature is invoked for each GEMM to prevent this behavior.
     """
 
     @api_method

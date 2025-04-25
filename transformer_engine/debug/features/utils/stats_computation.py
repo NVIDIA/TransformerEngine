@@ -9,7 +9,9 @@ Mathematical functions used to tensor statistics computation.
 import math
 import torch
 
+MAX_FP8_VALUE_INT8 = 126
 
+@torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
@@ -127,7 +129,7 @@ STATS = {
         lambda buffers: sum(_get(buffers, "underflows_num")),
     ),
     "saturations_num": (
-        lambda x: (x == 126).sum(),
+        lambda x: (x == MAX_FP8_VALUE_INT8).sum(),
         lambda buffers: sum(_get(buffers, "saturations_num")),
     ),
     "std": (
@@ -146,7 +148,7 @@ STATS = {
         lambda buffers: 100 * sum(_get(buffers, "underflows_num")) / sum(_get(buffers, "numel")),
     ),
     "saturations%": (
-        lambda x: (x == 126).sum() / x.numel() * 100,
+        lambda x: (x == MAX_FP8_VALUE_INT8).sum() / x.numel() * 100,
         lambda buffers: 100 * sum(_get(buffers, "saturations_num")) / sum(_get(buffers, "numel")),
     ),
 }
