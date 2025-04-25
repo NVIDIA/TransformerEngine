@@ -74,7 +74,7 @@ class PerTensorScaling(TEConfigAPIMapper):
             - dgrad
             - wgrad
     tensors/tensors_struct: List[str]
-        list of tensors to enable per-tensor scaling for
+        list of tensors to enable per-tensor current scaling for
 
             - activation
             - gradient
