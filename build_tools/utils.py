@@ -232,6 +232,9 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
         cuda_root / "cublas" / "include",
         cuda_root / "cuda_runtime" / "include",
         cuda_root / "cudnn" / "include",
+        cuda_root / "cuda_cccl" / "include",
+        cuda_root / "nvtx" / "include",
+        cuda_root / "cuda_nvrtc" / "include",
     ]
 
 

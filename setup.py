@@ -92,6 +92,10 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         "nvidia-cuda-runtime-cu12",
         "nvidia-cublas-cu12",
         "nvidia-cudnn-cu12",
+        "nvidia-cuda-cccl-cu12",
+        "nvidia-cuda-nvcc-cu12",
+        "nvidia-nvtx-cu12",
+        "nvidia-cuda-nvrtc-cu12",
     ]
     install_reqs: List[str] = [
         "pydantic",
