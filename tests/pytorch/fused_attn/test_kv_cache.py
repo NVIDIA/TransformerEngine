@@ -24,10 +24,7 @@ from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
-from transformer_engine.pytorch.attention import (
-    DotProductAttention,
-    InferenceParams
-)
+from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils as fa_utils,
 )
