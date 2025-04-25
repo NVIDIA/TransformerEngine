@@ -123,7 +123,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-    cudaMemsetAsync(amax, 0, sizeof(float), stream);
+    nvte_memset(amax, 0, sizeof(float), stream);
     output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
   }
 
