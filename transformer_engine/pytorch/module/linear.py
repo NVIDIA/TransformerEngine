@@ -1210,6 +1210,8 @@ class Linear(TransformerEngineBaseModule):
                 else:
                     warnings.warn("You are using quantized weights without quantized compute. "
                                   "Please make sure this is intentional.")
+                    unfused_weights = [w.dequantize() for w in unfused_weights]
+
             weight_tensor = noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
