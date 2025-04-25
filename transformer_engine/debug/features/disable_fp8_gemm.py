@@ -47,7 +47,7 @@ class DisableFP8GEMM(TEConfigAPIMapper):
             if key != "gemm":
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
-        # If this feature is invoked, then fp8 gemm is disabled.
+        # If this feature is invoked, then FP8 GEMM is disabled.
         # If not, then default behaviour in TransformerEngineAPI
         # is that fp8_gemm() API call returns True.
         return False
