@@ -41,13 +41,13 @@ if (NOT CUDAToolkit_FOUND)
   set(cudnn_wheel_path "${Python_SITELIB}/nvidia/cudnn")
 
   if (NOT EXISTS "${cuda_wheel_path}")
-    message(FATAL_ERROR "CUDA not found in pip wheels either. Please install CUDAToolkit or nvidia-cuda-runtime-cu12 (pip).")
+    message(FATAL_ERROR "Could not find CUDA in Python environment. Please install the CUDA Toolkit. Alternatively, please install nvidia-cuda-runtime-cu12 and nvidia-cublas-cu12 from PyPI.")
   endif()
   if (NOT EXISTS "${cublas_wheel_path}/lib")
     message(FATAL_ERROR "CUBLAS not found in pip wheels either. Please install CUDAToolkit or nvidia-cublas-cu12 (pip).")
   endif()
   if (NOT EXISTS "${cudnn_wheel_path}/lib")
-    message(FATAL_ERROR "CUDNN not found in pip wheels either. Please install CUDAToolkit or nvidia-cudnn-cu12 (pip).")
+    message(FATAL_ERROR "CUDNN not found in pip wheels either. Please install cuDNN or nvidia-cudnn-cu12 (pip).")
   endif()
 
   # Manually link/include wheel versions

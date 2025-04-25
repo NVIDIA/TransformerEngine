@@ -213,7 +213,7 @@ def nvcc_path() -> Tuple[str, str]:
 
 @functools.lru_cache(maxsize=None)
 def get_cuda_include_dirs() -> Tuple[str, str]:
-    """Returns the NVCC include directory found via pip package."""
+    """Returns the CUDA header directory."""
 
     # If cuda is installed via toolkit, all necessary headers
     # are bundled inside the top level cuda directory.
@@ -276,10 +276,7 @@ def cuda_version() -> Tuple[int, ...]:
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:
-        raise RuntimeError(
-            "Cannot return cuda version as both NVCC executable and cudaRT pip wheel were not"
-            " found."
-        )
+        raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
 
 
 def get_frameworks() -> List[str]:
