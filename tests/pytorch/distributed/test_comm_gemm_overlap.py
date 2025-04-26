@@ -108,10 +108,7 @@ def _run_layer_with_overlap(
         test_cmd.append("--overlap-rs-dgrad")
 
     if fp8:
-        if (
-            quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
-            and not fp8_available
-        ):
+        if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8" and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
