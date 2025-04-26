@@ -355,7 +355,16 @@ void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
 
-int roundup(const int value, const int multiple);
+template <typename T>
+T divup(const T value, const T multiple) {
+  assert(multiple > 0);
+  return ((value + multiple - 1) / multiple);
+}
+
+template <typename T>
+T roundup(const T value, const T multiple) {
+  return divup(value, multiple) * multiple;
+}
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 }  // namespace transformer_engine::pytorch
