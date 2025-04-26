@@ -348,7 +348,10 @@ class _Linear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.backward_input_needs_gather:
+                    if (
+                        isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                        or not ctx.backward_input_needs_gather
+                    ):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 if force_hp_input_gather:
                     assert not isinstance(inputmat, QuantizedTensorBase)
@@ -1487,16 +1490,16 @@ class Linear(TransformerEngineBaseModule):
         assert (
             recipe.float8_block_scaling()
         ), "blockwise scaling recipe quantizer customization here"
-        
+
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
                 # set compact for inp tensor X
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
+                    need_compact=True
+                )
         else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # set compact for grad_output tensor dY
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].set_usage(
+                    need_compact=True
+                )
