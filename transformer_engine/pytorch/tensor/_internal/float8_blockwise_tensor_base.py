@@ -93,13 +93,20 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             "columnwise_fmt": self._columnwise_fmt,
         }
 
-    def is_rowwise_fmt_compact(self) -> bool:
-        """Returns True if rowwise format is compact, False otherwise."""
+    def _is_rowwise_fmt_compact(self) -> bool:
         return self._rowwise_fmt == RowwiseFmt.COMPACT_DATA_AND_SCALES
 
-    def is_columnwise_fmt_compact(self) -> bool:
-        """Returns True if columnwise format is compact, False otherwise."""
+    def _is_columnwise_fmt_compact(self) -> bool:
         return self._columnwise_fmt == ColwiseFmt.COMPACT_DATA_AND_SCALES
+    
+    def is_compact_format(self) -> bool:
+        """Returns True if the format is compact for available usage, False otherwise."""
+        compact = True
+        if self._rowwise_data is not None:
+            compact = compact and self._is_rowwise_fmt_compact()
+        if self._columnwise_data is not None:
+            compact = compact and self._is_columnwise_fmt_compact()
+        return compact
 
     def set_rowwise_fmt(self, rowwise_fmt: RowwiseFmt):
         """Sets the rowwise format."""
@@ -203,7 +210,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
-        if self.is_rowwise_fmt_compact() or self.is_columnwise_fmt_compact():
+        if self._is_rowwise_fmt_compact() or self._is_columnwise_fmt_compact():
             raise NotImplementedError(
                 "Currently for fp8 block scaling, dequantization only supports"
                 " GEMM_READY_DATA_AND_SCALES format."
@@ -288,6 +295,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         dims = list(self._columnwise_data.size(*args, **kwargs))
+        if self._is_columnwise_fmt_compact():
+            return torch.Size(dims)
         reordered = []
         for i in range(1, len(dims)):
             reordered.append(dims[i])
@@ -325,6 +334,13 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         h = min(self._columnwise_scale_inv.shape[0], columnwise_scale_inv.shape[0])
         w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
         self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
+
+    def _transpose_columnwise_data(self):
+        """Plainly transpose the columnwise data and scale inv."""
+        if self._columnwise_data is not None:
+            self._columnwise_data = tex.fp8_transpose(
+                self._columnwise_data, self._fp8_dtype, out=None
+            )
 
     def __repr__(self):
         if self._rowwise_data is not None:
