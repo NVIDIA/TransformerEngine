@@ -619,8 +619,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         device_compute_capability = get_device_compute_capability()
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or \
-            (device_compute_capability < 100 and cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
+            device_compute_capability < 100 and cp_size == 2
+        )
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
@@ -1569,8 +1570,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         device_compute_capability = get_device_compute_capability()
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or \
-            (device_compute_capability < 100 and cp_size == 2)
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
+            device_compute_capability < 100 and cp_size == 2
+        )
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
             restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
@@ -5049,9 +5051,10 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_type = attention_type
-        self.use_FAv2_bwd = os.getenv(
-            "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
-        ) == "1" and get_device_compute_capability() == 90
+        self.use_FAv2_bwd = (
+            os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
+            and get_device_compute_capability() == 90
+        )
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
 

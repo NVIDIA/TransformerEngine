@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
 #include "common/util/cuda_runtime.h"
+#include "extensions.h"
 
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 

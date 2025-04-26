@@ -478,10 +478,7 @@ def get_attention_backend(
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
-        or (
-            head_dim_qk > 192
-            and device_compute_capability not in (80, 90, 100, 120)
-        )
+        or (head_dim_qk > 192 and device_compute_capability not in (80, 90, 100, 120))
     ):
         if FlashAttentionUtils.is_installed:
             logger.debug(
