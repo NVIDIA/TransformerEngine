@@ -133,9 +133,12 @@ class _Linear(torch.autograd.Function):
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
+
+        # Do TP communication in high precision if quantized format
+        # does not support communication
         force_hp_input_gather = (
             fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
-        )  # Perform TP communication in high precision and afterward quantize
+        )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         ub_obj = None
@@ -250,6 +253,7 @@ class _Linear(torch.autograd.Function):
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
         if needs_quantized_gemm(inputmat_total) and activation_dtype == torch.float32:
+            # cuBLAS does not support FP8 GEMM with FP32 bias, so we cast to BF16
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
@@ -345,8 +349,6 @@ class _Linear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
-                if force_hp_input_gather:
-                    assert not isinstance(inputmat, QuantizedTensor)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.

@@ -181,11 +181,14 @@ class _LayerNormLinear(torch.autograd.Function):
             if isinstance(input_quantizer, Float8BlockQuantizer):
                 input_quantizer.set_usage(columnwise=False)
 
-        # Avoid quantized norm kernel if norm output will be returned
-        # or if a gather of ln_out must be in high precision.
+        # Do TP communication in high precision if quantized format
+        # does not support communication
         force_hp_blockwise_ln_out_gather = (
             fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
-        )  # Perform TP communication in high precision.
+        )
+
+        # Avoid quantized norm kernel if norm output will be returned
+        # or if a gather of ln_out must be in high precision.
         with_quantized_norm = (
             fp8
             and not return_layernorm_output
@@ -294,6 +297,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
         if needs_quantized_gemm(ln_out_total) and activation_dtype == torch.float32:
+            # cuBLAS does not support FP8 GEMM with FP32 bias, so we cast to BF16
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
@@ -394,10 +398,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
-
-                    # For force_hp_blockwise_ln_out_gather, we should
-                    # be saving the unquantized ln_out to ctx.
-                    assert not force_hp_blockwise_ln_out_gather
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if isinstance(weightmat, QuantizedTensor):

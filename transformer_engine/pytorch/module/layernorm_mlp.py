@@ -243,10 +243,11 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
                 fc1_input_quantizer.set_usage(columnwise=False)
 
-        # TODO(kwyss): Support FP8 allgather of Float8BlockQuantizer recipe
+        # Do TP communication in high precision if quantized format
+        # does not support communication
         force_hp_fc1_input_gather = (
             fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
-        )  # Perform TP communication in high precision.
+        )
 
         # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
@@ -360,6 +361,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # Cast biases to expected dtype
         bias_dtype = activation_dtype
         if needs_quantized_gemm(ln_out_total) and activation_dtype == torch.float32:
+            # cuBLAS does not support FP8 GEMM with FP32 bias, so we cast to BF16
             bias_dtype = torch.bfloat16
         if fc1_bias is not None:
             fc1_bias = cast_if_needed(fc1_bias, bias_dtype)
@@ -536,8 +538,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not return_layernorm_output:
                     clear_tensor_data(ln_out)
                 ln_out = None
-            elif force_hp_fc1_input_gather:
-                assert not isinstance(ln_out, QuantizedTensor)
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
