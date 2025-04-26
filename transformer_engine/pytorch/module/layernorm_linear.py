@@ -67,6 +67,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
@@ -196,7 +197,6 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not force_hp_blockwise_ln_out_gather
         )
 
         # Apply normalization
@@ -230,6 +230,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
+                # TODO(zhongbo): This might not be doing right thing
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
@@ -391,7 +392,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
-            ctx.force_hp_blockwise_ln_out_gather = force_hp_blockwise_ln_out_gather
 
             # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
@@ -399,7 +399,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
+                    if isinstance(ln_out, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -428,7 +428,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 if ctx.grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # get back torch.Tensor. Torch rips off tfhe Parameter wrapper.
                     # You need to preserve the weight object to have all the attributes user
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
@@ -1376,6 +1376,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        elif recipe.float8_block_scaling():
+            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif other recipes (mxfp8, etc)
 
     def reset_layer_norm_parameters(self) -> None:
@@ -1677,3 +1679,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
+
+    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on blockwise scaling recipe + layernorm_linear."""
+        assert (
+            recipe.float8_block_scaling()
+        ), "blockwise scaling recipe quantizer customization here"
+        if fwd:
+            if self.sequence_parallel and self.parallel_mode == "column":
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].set_usage(need_compact=True)

@@ -260,9 +260,6 @@ class _LayerNormMLP(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and not debug
         )
-        if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
-            # Kernels not available for norm fusion.
-            with_quantized_norm = False
 
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
@@ -289,11 +286,11 @@ class _LayerNormMLP(torch.autograd.Function):
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
                 # norm output will be returned
+                # TODO(zhongbo): This might not be doing right thing
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    if not force_hp_fc1_input_gather:
-                        ln_out = fc1_input_quantizer(ln_out)
+                    ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
@@ -566,7 +563,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.force_hp_fc1_input_gather = force_hp_fc1_input_gather
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
@@ -1643,8 +1639,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         super().set_meta_tensor(fwd, recipe)
 
         # customize quantizers based on each recipe & layer configs
-        if FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling():
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        elif recipe.float8_block_scaling():
+            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
     def reset_layer_norm_parameters(self) -> None:
@@ -1995,6 +1994,22 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
+
+    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on blockwise scaling recipe + layernorm_mlp."""
+        assert (
+            recipe.float8_block_scaling()
+        ), "blockwise scaling recipe quantizer customization here"
+        if fwd:
+            if self.sequence_parallel and self.set_parallel_mode:
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].set_usage(need_compact=True)
+        else:
+            if self.sequence_parallel and self.set_parallel_mode:
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].set_usage(need_compact=True)
 
     def backward_dw(self):
         """

@@ -77,6 +77,12 @@ def general_gemm(
         # There is not use_split_accumulator == False
         # implementation for Float8BlockwiseQTensorBase GEMM
         use_split_accumulator = True
+        # TODO(zhongbo) optimize out this special case check for wgrad
+        if layout == "NT":
+            A_columnwise_data_shape = A._columnwise_data.shape
+            B_columnwise_data_shape = B._columnwise_data.shape
+            assert A_columnwise_data_shape[1] == B_columnwise_data_shape[1], "Shape mismatch between A and B"
+
     args = (
         A,
         transa,  # transa

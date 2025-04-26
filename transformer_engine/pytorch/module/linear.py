@@ -66,6 +66,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
@@ -347,7 +348,7 @@ class _Linear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
+                    if isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.backward_input_needs_gather:
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 if force_hp_input_gather:
                     assert not isinstance(inputmat, QuantizedTensorBase)
@@ -396,7 +397,6 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.force_hp_input_gather = force_hp_input_gather
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
@@ -1214,6 +1214,8 @@ class Linear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        elif recipe.float8_block_scaling():
+            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
     def reset_parameters(self, defer_init=False):
@@ -1479,3 +1481,22 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
+
+    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on blockwise scaling recipe + linear."""
+        assert (
+            recipe.float8_block_scaling()
+        ), "blockwise scaling recipe quantizer customization here"
+        
+        if fwd:
+            if self.sequence_parallel and self.parallel_mode == "column":
+                # set compact for inp tensor X
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].set_usage(need_compact=True)
+        else:
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # set compact for grad_output tensor dY
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].set_usage(need_compact=True)

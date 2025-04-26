@@ -100,11 +100,15 @@ def main(argv=None, namespace=None):
 
     # Quantization scheme
     QUANTIZATION = args.quantization
-    if QUANTIZATION in ("fp8", "mxfp8", "fp8_block_scaling"):
-        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    if QUANTIZATION in ("fp8", "mxfp8"):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    elif QUANTIZATION == "fp8_block_scaling":
+        SEQ_LEN = 128
+        BATCH_SIZE = 128
+        HIDDEN_SIZE = 512
 
     test_dict = [
         test_quantizer,
