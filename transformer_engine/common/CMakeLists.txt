@@ -23,49 +23,13 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
 
-# Python
-find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
-# Attempt to find CUDA Toolkit normally
-find_package(CUDAToolkit)
-
-# If CUDA toolkit not found, try pip-installed Python packages
-if (NOT CUDAToolkit_FOUND)
-  message(WARNING "CUDAToolkit not found via find_package. Trying Python wheel fallback...")
-
-  set(cuda_wheel_path "${Python_SITELIB}/nvidia/cuda_runtime")
-  set(cublas_wheel_path "${Python_SITELIB}/nvidia/cublas")
-  set(cudnn_wheel_path "${Python_SITELIB}/nvidia/cudnn")
-
-  if (NOT EXISTS "${cuda_wheel_path}")
-    message(FATAL_ERROR "Could not find CUDA in Python environment. Please install the CUDA Toolkit. Alternatively, please install nvidia-cuda-runtime-cu12 and nvidia-cublas-cu12 from PyPI.")
-  endif()
-  if (NOT EXISTS "${cublas_wheel_path}/lib")
-    message(FATAL_ERROR "CUBLAS not found in pip wheels either. Please install CUDAToolkit or nvidia-cublas-cu12 (pip).")
-  endif()
-  if (NOT EXISTS "${cudnn_wheel_path}/lib")
-    message(FATAL_ERROR "CUDNN not found in pip wheels either. Please install cuDNN or nvidia-cudnn-cu12 (pip).")
-  endif()
-
-  # Manually link/include wheel versions
-  include_directories(${cuda_wheel_path}/include)
-  include_directories(${cublas_wheel_path}/include)
-  include_directories(${cudnn_wheel_path}/include)
-
-  # Add the wheel-shared libs as raw link libraries
-  link_directories(${cuda_wheel_path}/lib)
-  link_directories(${cublas_wheel_path}/lib)
-  link_directories(${cudnn_wheel_path}/lib)
-
-  set(USE_PYTHON_CUDA_LIBS ON)
-else()
-  set(USE_PYTHON_CUDA_LIBS OFF)
-  if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-    message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
-  endif()
+# CUDA Toolkit
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.0)
+  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
 endif()
 
 # cuDNN frontend API
@@ -78,6 +42,9 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
             "within the Transformer Engine source.")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+
+# Python
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -131,14 +98,13 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-# Configure dependencies
-if (NOT USE_PYTHON_CUDA_LIBS)
-  target_link_libraries(transformer_engine PUBLIC
-                        CUDA::cublas
-                        CUDA::cudart
-                        CUDNN::cudnn_all)
-endif()
 
+
+# Configure dependencies
+target_link_libraries(transformer_engine PUBLIC
+                      CUDA::cublas
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
