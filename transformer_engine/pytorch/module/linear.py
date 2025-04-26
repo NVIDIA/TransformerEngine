@@ -226,6 +226,7 @@ class _Linear(torch.autograd.Function):
                         and not in_fp8_activation_recompute_phase()
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                weight_quantizer.internal = False  # Not yet supported
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -307,17 +308,16 @@ class _Linear(torch.autograd.Function):
         out = None
         if ub_overlap_rs_fprop:
             out = reduce_scatter_out
-        elif parallel_mode == "row":
+        elif parallel_mode == "row" and tp_size > 1:
             nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
+            out = gemm_out
             if sequence_parallel:
-                out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
+                out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
-                    out, _ = symmetric_all_reduce(
-                        gemm_out, tp_group, all_reduce_type=symmetric_ar_type
-                    )
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
                 else:
-                    out, _ = allreduce(gemm_out, tp_group)
+                    out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
         else:
             out = gemm_out
@@ -540,6 +540,7 @@ class _Linear(torch.autograd.Function):
                     # tensor usage at a time. Configure quantizer with
                     # usage for only dgrad GEMM.
                     quantizer.set_usage(columnwise=False)
+                quantizer.internal = False  # Not yet supported
 
             # Prepare grad output tensor
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
@@ -659,16 +660,17 @@ class _Linear(torch.autograd.Function):
                     dgrad = reduce_scatter_out
                 elif ctx.ub_bulk_wgrad:
                     dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
-                elif ctx.parallel_mode == "column":
+                elif ctx.parallel_mode == "column" and ctx.tp_size > 1:
                     nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
+                    dgrad = gemm_out
                     if ctx.sequence_parallel:
                         dgrad, dgrad_work = reduce_scatter_along_first_dim(
-                            gemm_out,
+                            dgrad,
                             ctx.tp_group,
                             async_op=True,
                         )
                     else:
-                        dgrad, dgrad_work = allreduce(gemm_out, ctx.tp_group, async_op=True)
+                        dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
                     nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
                 else:
                     dgrad = gemm_out

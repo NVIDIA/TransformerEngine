@@ -842,9 +842,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_fc2_dgrad,
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
+
+            # Prepare input grad tensor
+            dact = None
+            fc2_dgrad = None
             if fc2_dgrad_gemm_gelu_fusion:
                 dact = gemm_output
-                fc2_dgrad = None
             else:
                 fc2_dgrad = gemm_output
 
@@ -862,15 +865,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if ln_out_total_work is not None:
-                    ln_out_total_work.wait()
-                    ln_out_total_work = None
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(ln_out_total, QuantizedTensor):
-                        ln_out_total.update_usage(columnwise_usage=True)
+                    if isinstance(act_out, QuantizedTensor):
+                        act_out.update_usage(columnwise_usage=True)
                     else:
-                        ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        ln_out_total = ctx.input_quantizer(ln_out_total)
+                        ctx.fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
+                        act_out = ctx.fc2_input_quantizer(act_out)
 
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -1080,16 +1080,17 @@ class _LayerNormMLP(torch.autograd.Function):
             elif ctx.ub_bulk_wgrad:
                 fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True)
             elif ctx.set_parallel_mode and not ctx.ub_bulk_wgrad:
+                fc1_dgrad = gemm_out
                 if ctx.sequence_parallel:
                     if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
-                        gemm_out = gemm_out + grad_outputs[1].view_as(fc1_dgrad)
+                        fc1_dgrad = fc1_dgrad + grad_outputs[1].view_as(fc1_dgrad)
                     fc1_dgrad, fc1_dgrad_work = reduce_scatter_along_first_dim(
-                        gemm_out,
+                        fc1_dgrad,
                         ctx.tp_group,
                         async_op=True,
                     )
                 elif ctx.tensor_parallel:
-                    fc1_dgrad, fc1_dgrad_work = allreduce(gemm_out, ctx.tp_group, async_op=True)
+                    fc1_dgrad, fc1_dgrad_work = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
             else:
                 fc1_dgrad = gemm_out
 

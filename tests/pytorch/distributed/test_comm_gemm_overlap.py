@@ -15,6 +15,7 @@ if torch.cuda.device_count() < 2:
     pytest.skip("Comm+GEMM overlap requires at least 2 GPUs.")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 RNG_SEED: int = 42
 SEQ_LENGTH: int = 1024
@@ -107,8 +108,13 @@ def _run_layer_with_overlap(
         test_cmd.append("--overlap-rs-dgrad")
 
     if fp8:
-        if not fp8_available:
+        if (
+            quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
+            and not fp8_available
+        ):
             pytest.skip(reason_for_no_fp8)
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         test_cmd.append("--fp8")
         test_cmd.append(f"--quantization={quantization}")
 
@@ -342,22 +348,11 @@ def test_multi_layer_with_overlap_bf16(
 
 @pytest.mark.parametrize(
     "quantization",
-    ["fp8_delayed_scaling", "fp8_current_scaling"],
-    ids=[" DELAYED SCALING ", " CURRENT SCALING "],
-)
-@pytest.mark.parametrize(
-    "fp8",
-    (True,),
-    ids=[
-        " FP8  ",
-    ],
+    ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
 )
 @pytest.mark.parametrize(
     "num_layers",
     (2,),
-    ids=[
-        " 2 layers ",
-    ],
 )
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
@@ -369,7 +364,7 @@ def test_multi_layer_with_overlap_bf16(
         )
     ),
     ids=[
-        " " + " - ".join(test_name_parts) + " "
+        "-".join(test_name_parts)
         for test_name_parts in zip(
             [te.TransformerLayer.__name__ for _ in range(2)],
             ["BULK DGRAD/WGRAD", "DGRAD+RS"],
@@ -377,11 +372,11 @@ def test_multi_layer_with_overlap_bf16(
     ],
 )
 def test_multi_layer_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, quantization, num_layers
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
     _run_layer_with_overlap(
-        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers
+        layer_type, linear_parallel_mode, overlap_rs_dgrad, True, quantization, num_layers
     )
