@@ -98,7 +98,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
     def _is_columnwise_fmt_compact(self) -> bool:
         return self._columnwise_fmt == ColwiseFmt.COMPACT_DATA_AND_SCALES
-    
+
     def is_compact_format(self) -> bool:
         """Returns True if the format is compact for available usage, False otherwise."""
         compact = True

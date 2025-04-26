@@ -1047,7 +1047,7 @@ def _all_gather_fp8_blockwise(
         quantizer.set_usage(need_compact=False)
         out = quantizer(out)
         return out, None
-    
+
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
@@ -1069,7 +1069,9 @@ def _all_gather_fp8_blockwise(
         inp = quantizer(inp.dequantize())
 
     # Begin to do network communication, need to make sure compact format
-    assert inp.is_compact_format(), "FP8 Blockwise Quantized Input tensor must be in compact format to do FP8 allgather"
+    assert (
+        inp.is_compact_format()
+    ), "FP8 Blockwise Quantized Input tensor must be in compact format to do FP8 allgather"
 
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1110,7 +1112,7 @@ def _all_gather_fp8_blockwise(
             )
 
     handle = coalescing_manager if async_op else None
-    
+
     # Unlike MXFP8, this fp8 blockwise tensor primarily works with Hopper
     # This means that we need to transpose the gathered columnwise data
     # Example usage is grad_output tensor, ie. dY in linear backward

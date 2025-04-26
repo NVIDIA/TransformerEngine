@@ -399,7 +399,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(ln_out, (MXFP8TensorBase, Float8BlockwiseQTensorBase)) or not ctx.ln_out_needs_gather:
+                    if (
+                        isinstance(ln_out, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                        or not ctx.ln_out_needs_gather
+                    ):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -1668,7 +1671,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-
 
     def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on blockwise scaling recipe + layernorm_linear."""
