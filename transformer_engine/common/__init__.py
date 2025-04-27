@@ -151,23 +151,6 @@ def _load_nvrtc():
     return ctypes.CDLL(f"libnvrtc.{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
 
-def _load_cublas():
-    """Load CUBLAS shared library."""
-
-    # Attempt to locate CUBLAS in Python dist-packages
-    lib_path = glob.glob(
-        os.path.join(
-            sysconfig.get_path("purelib"),
-            f"nvidia/cuda_nvrtc/lib/libnvrtc.{_get_sys_extension()}.*[0-9]",
-        )
-    )
-    if lib_path:
-        assert (
-            len(lib_path) == 1
-        ), f"Found {len(lib_path)} libnvrtc.{_get_sys_extension()}.x in nvidia-cuda-nvrtc-cuXX."
-        return ctypes.CDLL(lib_path[0], mode=ctypes.RTLD_GLOBAL)
-
-
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     _CUDNN_LIB_CTYPES = _load_cudnn()
     _NVRTC_LIB_CTYPES = _load_nvrtc()
