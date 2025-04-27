@@ -11,9 +11,8 @@ import subprocess
 import ctypes
 import os
 import platform
+import importlib
 from pathlib import Path
-
-import transformer_engine
 
 
 def is_package_installed(package):
@@ -28,13 +27,7 @@ def is_package_installed(package):
 
 def get_te_path() -> Path:
     """Find Transformer Engine install path using pip"""
-
-    # If TE is installed in the main python package directory, prioritize it
-    # for cases where user is running from a TE directory where an editable
-    # build is not installed.
-    if (Path(sysconfig.get_path("purelib")) / "transformer_engine").exists():
-        return Path(sysconfig.get_path("purelib"))
-    return Path(transformer_engine.__path__[0]).parent
+    return Path(importlib.metadata.distribution("transformer_engine").locate_file("").resolve())
 
 
 def _get_sys_extension():
