@@ -12,6 +12,7 @@ import ctypes
 import os
 import platform
 import importlib
+import functools
 from pathlib import Path
 
 
@@ -66,6 +67,19 @@ def _load_nvidia_cuda_library(lib_name: str):
             ctypes_handles.append(ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL))
 
     return path_found, ctypes_handles
+
+
+@functools.lru_cache(maxsize=None)
+def _nvidia_cudart_include_dir():
+    """Returns the include directory for cuda_runtime.h if exists in python environment."""
+
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        return ""
+
+    include_dir = Path(nvidia.__file__).parent / "cuda_runtime"
+    return str(include_dir) if include_dir.exists() else ""
 
 
 def _load_cudnn():
@@ -148,4 +162,9 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _CUDNN_LIB_CTYPES = _load_cudnn()
     _NVRTC_LIB_CTYPES = _load_nvrtc()
     _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
+    _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
     _TE_LIB_CTYPES = _load_library()
+
+    # Needed to find the correct headers for NVRTC kernels.
+    if not os.getenv("NVTE_CUDA_INCLUDE_DIR") and _nvidia_cudart_include_dir():
+        os.environ["NVTE_CUDA_INCLUDE_DIR"] = _nvidia_cudart_include_dir()
