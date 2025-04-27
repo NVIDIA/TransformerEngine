@@ -9,11 +9,11 @@ import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..utils import assert_dim_for_fp8_exec, get_sm_count
+from ..utils import get_sm_count
 
 from ..tensor.quantized_tensor import Quantizer
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
     "general_gemm",
@@ -25,46 +25,6 @@ __all__ = [
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
-
-
-def swizzle_inputs(A: torch.Tensor, B: torch.Tensor, layout: str):
-    """Swizzle gemm inputs and return original scaling factor inverses."""
-    if not isinstance(A, MXFP8TensorBase) or not isinstance(B, MXFP8TensorBase):
-        return None
-
-    original_scale_inverses = (
-        A._rowwise_scale_inv,
-        A._columnwise_scale_inv,
-        B._rowwise_scale_inv,
-        B._columnwise_scale_inv,
-    )
-
-    if layout[0] == "T":
-        A._rowwise_scale_inv = tex.rowwise_swizzle(A._rowwise_data, A._rowwise_scale_inv)
-    else:
-        A._columnwise_scale_inv = tex.columnwise_swizzle(
-            A._columnwise_data, A._columnwise_scale_inv
-        )
-
-    if layout[1] == "N":
-        B._rowwise_scale_inv = tex.rowwise_swizzle(B._rowwise_data, B._rowwise_scale_inv)
-    else:
-        B._columnwise_scale_inv = tex.columnwise_swizzle(
-            B._columnwise_data, B._columnwise_scale_inv
-        )
-
-    return original_scale_inverses
-
-
-def reset_swizzled_inputs(A, B, scale_inverses):
-    """Reset the swizzled scale inverses after GEMM."""
-    if scale_inverses is not None:
-        (
-            A._rowwise_scale_inv,
-            A._columnwise_scale_inv,
-            B._rowwise_scale_inv,
-            B._columnwise_scale_inv,
-        ) = scale_inverses
 
 
 def general_gemm(
@@ -109,9 +69,20 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
+    debug_quantizer = None
+    if isinstance(quantization_params, DebugQuantizer):
+        debug_quantizer = quantization_params
+        quantization_params = quantization_params.parent_quantizer
+        A = A.get_tensor(not transa)
+        B = B.get_tensor(transb)
+
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
+    if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
+        # There is not use_split_accumulator == False
+        # implementation for Float8BlockwiseQTensorBase GEMM
+        use_split_accumulator = True
     args = (
         A,
         transa,  # transa
@@ -137,9 +108,10 @@ def general_gemm(
         "bulk_overlap": bulk_overlap,
     }
 
-    original_scale_inverses = swizzle_inputs(A, B, layout)
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    reset_swizzled_inputs(A, B, original_scale_inverses)
+
+    if debug_quantizer is not None:
+        out = debug_quantizer.process_gemm_output(out)
 
     return out, bias_grad, gelu_input, extra_output
 
@@ -168,14 +140,6 @@ def general_grouped_gemm(
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-
-    # assert [a.is_contiguous() for a in A]
-    # assert [b.is_contiguous() for b in B]
-
-    if isinstance(A[0], Float8TensorBase):
-        for a, b in zip(A, B):
-            assert_dim_for_fp8_exec(a._data)
-            assert_dim_for_fp8_exec(b._data)
 
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms

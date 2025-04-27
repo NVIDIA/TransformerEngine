@@ -110,12 +110,15 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
             install_reqs.extend(["torch>=2.1"])
+            install_reqs.append(
+                "nvdlfw-inspect @"
+                " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+            )
             # Blackwell is not supported as of Triton 3.2.0, need custom internal build
             # install_reqs.append("triton")
             test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            # test_reqs.extend(["numpy", "praxis"])
             test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]

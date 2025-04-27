@@ -12,6 +12,7 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 
@@ -25,7 +26,9 @@ from .misc import (
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     NamedSharding,
+    get_cudnn_version,
 )
+from .quantization import _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -61,6 +64,31 @@ def get_forward_sm_margin():
 def get_backward_sm_margin():
     """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def is_norm_fwd_cudnn_enabled(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether CuDNN norm fwd is enabled."""
+    # MXFP8_1D_SCALING always uses CuDNN currently
+    return (
+        int(os.getenv("NVTE_NORM_FWD_USE_CUDNN", "0")) == 1
+        or scaling_mode == ScalingMode.MXFP8_1D_SCALING
+    )
+
+
+@cache
+def is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode: ScalingMode) -> bool:
+    """Retrieves whether norm should compute `gamma += 1.0` for zero-centered gamma
+    in weight dtype as opposed to compute dtype."""
+    if not is_norm_fwd_cudnn_enabled(scaling_mode):
+        # If CuDNN is not enabled, we use the TE backend which uses the compute dtype not weight dtype
+        # Remove this when TE supports gamma += 1.0 in weight dtype
+        return False
+    return int(os.getenv("NVTE_ZERO_CENTERED_GAMMA_IN_WTYPE", "0")) == 1
+
+
+# CuDNN version must be at least this to use MXFP8 fused normalization otherwise unfused norm and quantize will be used
+FUSED_MXFP8_NORM_CUDNN_MIN_VERSION = (9, 10, 0)
 
 
 class NormFwdPrimitive(BasePrimitive):
@@ -100,10 +128,47 @@ class NormFwdPrimitive(BasePrimitive):
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
+        assert (
+            scaling_mode != ScalingMode.MXFP8_1D_SCALING.value
+            or get_cudnn_version() >= FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+        ), (
+            "MXFP8 Fused Normalization is only supported in CuDNN version"
+            f" {FUSED_MXFP8_NORM_CUDNN_MIN_VERSION} or higher"
+        )
+
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused norm and quantization. Please do"
+            " norm in higher-precision then quantize with current tensor scaling."
+        )
+
         mu_rsigama_dtype = jnp.float32
 
         if norm_type == NVTE_Norm_Type.LayerNorm:
             assert gamma_aval.size == beta_aval.size
+            assert gamma_aval.dtype == beta_aval.dtype, (
+                f"gamma and beta should have the same dtype, but got {gamma_aval.dtype} and "
+                f"{beta_aval.dtype}"
+            )
+
+        out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
+        mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
+        if norm_type == NVTE_Norm_Type.RMSNorm:
+            mu_aval = mu_aval.update(shape=(1,))
+
+        updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+
+        colwise_out_shape = x_aval.shape if is_2x else (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer)
+
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_shape = colwise_scale_inv_shape if is_2x else (1,)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
 
         (wkspace_info,) = transformer_engine_jax.get_norm_fwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
@@ -112,33 +177,13 @@ class NormFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(gamma_aval.dtype),  # wtype
             jax_dtype_to_te_dtype(out_dtype),
             norm_type,
-            scaling_mode.value,
+            scaling_mode,
             zero_centered_gamma,
             epsilon,
             get_forward_sm_margin(),
             is_2x,
         )
-
-        out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
-        mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
-        if norm_type == NVTE_Norm_Type.RMSNorm:
-            mu_aval = mu_aval.update(shape=(1,))
-
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = scaling_mode.get_scale_shape_2x(
-            x_aval.shape, is_padded=not is_outer
-        )
-
-        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
-        colwise_scale_inv_aval = jax.core.ShapedArray(
-            shape=colwise_scale_inv_shape, dtype=scale_dtype
-        )
-        colwise_out_aval = jax.core.ShapedArray(
-            shape=x_aval.shape if is_2x else (1,), dtype=out_dtype
-        )
-
-        updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
-
-        wkspace_aval = x_aval.update(
+        wkspace_aval = jax.core.ShapedArray(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
         )
 
@@ -274,9 +319,9 @@ class NormFwdPrimitive(BasePrimitive):
             scale_shapes=scale_shapes,
             is_outer=False,
         )
-        rowwise_scale_inv_shape, colwise_scale_inv_shape = scaling_mode.get_scale_shape_2x(
-            x.shape, is_padded=False
-        )
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_scale_shape_2x(x.shape, is_padded=False)
         # slice out padding for mxfp8, noop for DelayedScaling
         scale_inv = scale_inv.flatten()[: reduce(operator.mul, rowwise_scale_inv_shape, 1)].reshape(
             rowwise_scale_inv_shape
@@ -364,6 +409,8 @@ class NormFwdPrimitive(BasePrimitive):
         del zero_centered_gamma, epsilon, out_dtype, result_infos
         del scale_dtype, scale_shapes, is_outer
         x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
+        out_spec = (*x_spec[:-1], None)
         if x_spec[-1] is not None:
             warnings.warn(
                 f"Does not support to shard hidden dim in {NormFwdPrimitive.name}! "
@@ -371,34 +418,27 @@ class NormFwdPrimitive(BasePrimitive):
                 "and hurt performance."
             )
 
-        out_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec[:-1], None), desc="NormFwdPrimitive.out"
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.out")
+        colwise_out_spec = out_spec if is_2x else (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_out_spec), desc="NormFwdPrimitive.colwise_out"
         )
-        if is_2x:
-            colwise_out_sharding = out_sharding.duplicate_with_new_description(
-                "NormFwdPrimitive.colwise_out"
-            )
-        else:
-            colwise_out_sharding = NamedSharding(
-                mesh, PartitionSpec(None), desc="NormFwdPrimitive.colwise_out"
-            )
-
         rsigma_sharding = NamedSharding(
             mesh, PartitionSpec(*x_spec[:-1]), desc="NormFwdPrimitive.rsigma"
         )
-        mu_sharding = rsigma_sharding.duplicate_with_new_description("NormFwdPrimitive.mu")
-        if norm_type == NVTE_Norm_Type.RMSNorm:
-            mu_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.mu")
+        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
+        mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
+
+        scale_inv_spec = amax_spec = (None,)
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[1])), desc="NormFwdPrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="NormFwdPrimitive.scale_inv"
         )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="NormFwdPrimitive.scale_inv"
-            )
-
-        amax_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.amax")
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="NormFwdPrimitive.amax")
         output = (
             out_sharding,
             colwise_out_sharding,
@@ -427,8 +467,11 @@ class NormFwdPrimitive(BasePrimitive):
     ):
         del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
         g_spec = get_padded_spec(arg_infos[2])
         b_spec = get_padded_spec(arg_infos[3])
+        out_spec = (*x_spec[:-1], None)
+
         if x_spec[-1] is not None:
             warnings.warn(
                 f"Does not support to shard hidden dim in {NormFwdPrimitive.name}! "
@@ -445,43 +488,30 @@ class NormFwdPrimitive(BasePrimitive):
                 f"{NormFwdPrimitive.name} does not support sharding of parameter beta "
                 "Enforcing no sharding of parameters hidden dim! "
             )
-        x_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec[:-1], None), desc="NormFwdPrimitive.x"
-        )
-        g_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.gamma")
-        b_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.beta")
-        out_sharding = x_sharding.duplicate_with_new_description("NormFwdPrimitive.out")
-        if is_2x:
-            colwise_out_sharding = out_sharding.duplicate_with_new_description(
-                "NormFwdPrimitive.colwise_out"
-            )
-        else:
-            colwise_out_sharding = NamedSharding(
-                mesh, PartitionSpec(None), desc="NormFwdPrimitive.colwise_out"
-            )
 
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.out")
+        colwise_out_spec = out_spec if is_2x else (None,)
+        colwise_out_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_out_spec), desc="NormFwdPrimitive.colwise_out"
+        )
         rsigma_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(*get_padded_spec(arg_infos[0])[:-1]),
-            desc="NormFwdPrimitive.rsigma",
+            mesh, PartitionSpec(*x_spec[:-1]), desc="NormFwdPrimitive.rsigma"
         )
-        mu_sharding = rsigma_sharding.duplicate_with_new_description("NormFwdPrimitive.mu")
-        if norm_type == NVTE_Norm_Type.RMSNorm:
-            mu_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.mu")
+        mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
+        mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
 
-        scale_sharding = NamedSharding(
-            mesh, PartitionSpec(*get_padded_spec(arg_infos[1])), desc="NormFwdPrimitive.scale"
-        )
-        scale_inv_sharding = scale_sharding.duplicate_with_new_description(
-            "NormFwdPrimitive.scale_inv"
-        )
-        amax_sharding = NamedSharding(mesh, PartitionSpec(None), desc="NormFwdPrimitive.amax")
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="NormFwdPrimitive.scale_inv"
-            )
+        scale_inv_spec = amax_spec = (None,)
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
+            scale_inv_spec = out_spec
 
-        arg_shardings = (x_sharding, scale_sharding, g_sharding, b_sharding)
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="NormFwdPrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="NormFwdPrimitive.amax")
+
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
@@ -517,7 +547,7 @@ class NormFwdPrimitive(BasePrimitive):
                 scale_shapes=scale_shapes,
                 is_outer=True,
             )
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             else:
                 global_updated_amax = local_amax
@@ -533,6 +563,57 @@ class NormFwdPrimitive(BasePrimitive):
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del (
+            zero_centered_gamma,
+            epsilon,
+            out_dtype,
+            scale_dtype,
+            scale_shapes,
+            is_outer,
+            mesh,
+            result_types,
+        )
+
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            len(value_types[0].shape), unique_var="i", flatten_axis=-1
+        )
+        x_axes = scale_rules.input_spec
+
+        out = x_axes[:-1] + ("k",)
+        colwise_out = out if is_2x else ("…4",)
+        rsigma = x_axes[:-1]
+        mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = ("…6",)
+
+        return SdyShardingRule(
+            (x_axes, ("…1",), ("…2",), ("…3",)),
+            (
+                out,
+                colwise_out,
+                scale_rules.rowwise_rule,
+                scale_rules.colwise_rule,
+                amax,
+                mu,
+                rsigma,
+            ),
+            **scale_rules.factor_sizes,
+        )
 
 
 register_primitive(NormFwdPrimitive)
@@ -737,6 +818,11 @@ class NormBwdPrimitive(BasePrimitive):
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return "...0, ...1 i, ...2, ...3, ...4 -> ...1 j, k, l"
+
 
 register_primitive(NormBwdPrimitive)
 
@@ -746,6 +832,10 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     JAX native layernorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     mean = jnp.mean(x_, axis=-1, keepdims=True)
     var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
@@ -767,6 +857,10 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     JAX native rmsnorm implementation
     """
     x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
     normed_input = x_ * rsigma
@@ -824,7 +918,6 @@ def layernorm_fwd(
         if isinstance(quantizer, DelayedScaleQuantizer)
         else jnp.ones((1,), dtype=jnp.float32)
     )
-
     if quantizer is None:
         output, _, _, _, _, mu, rsigma = NormFwdPrimitive.outer_primitive.bind(
             x,
@@ -835,7 +928,7 @@ def layernorm_fwd(
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             out_dtype=x.dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
             scale_shapes=((1,), (1,)),
@@ -843,9 +936,32 @@ def layernorm_fwd(
         )
         return output, mu, rsigma
 
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, mu, rsigma = layernorm_fwd(
+            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
+        )
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, mu, rsigma
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, mu, rsigma = layernorm_fwd(
+            x=x,
+            gamma=gamma,
+            beta=beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, mu, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -864,7 +980,7 @@ def layernorm_fwd(
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
         out_dtype=quantizer.q_dtype,
-        scaling_mode=quantizer.scaling_mode,
+        scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
         scale_shapes=quantizer.get_scale_shapes(x.shape),
@@ -873,7 +989,10 @@ def layernorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
@@ -882,7 +1001,7 @@ def layernorm_fwd(
     # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
     # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
     # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
-    if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
             x.shape, is_padded=False
         )
@@ -1017,7 +1136,7 @@ def rmsnorm_fwd(
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             out_dtype=x.dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
             scale_shapes=((), ()),
@@ -1025,9 +1144,29 @@ def rmsnorm_fwd(
         )
         return output, rsigma
 
+    if (
+        quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
+    ):
+        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None)
+        out, _ = _quantize_dbias_impl(out, quantizer)
+        return out, rsigma
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform norm in higher precision then quantize after.
+        out, rsigma = rmsnorm_fwd(
+            x=x,
+            gamma=gamma,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
+        return out, rsigma
+
     is_2x2x = quantizer.is_2x2x()
     # TE/common normalization doesn't support 2x delayed scaling
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode.is_tensor_scaling():
         is_2x2x = False
     (
         rowwise_casted_output,
@@ -1046,7 +1185,7 @@ def rmsnorm_fwd(
         zero_centered_gamma=zero_centered_gamma,
         epsilon=epsilon,
         out_dtype=quantizer.q_dtype,
-        scaling_mode=quantizer.scaling_mode,
+        scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
         scale_shapes=quantizer.get_scale_shapes(x.shape),
@@ -1055,7 +1194,10 @@ def rmsnorm_fwd(
     quantizer.update(updated_amax)
 
     # TE/common Norm doesn't support 2x delayed scaling so do 1x then JAX transpose
-    if quantizer.is_2x2x() and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+    if quantizer.is_2x2x() and quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    ):
         colwise_casted_output = jnp.transpose(
             rowwise_casted_output, (-1, *range(rowwise_casted_output.ndim - 1))
         )
@@ -1064,7 +1206,7 @@ def rmsnorm_fwd(
     # cuDNN MXFP8 Norm does not support padding but we enforced padded scale inputs for nvte APIs.
     # So here we need to slice out the zero tail and reshape it to the unpadded scale shape.
     # The ScaledTensorFactory takes care of padding when creating the ScaledTensor
-    if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+    if quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         rowwise_unpadded_shape, colwise_unpadded_shape = quantizer.get_scale_shapes(
             x.shape, is_padded=False
         )

@@ -95,29 +95,21 @@ struct TypeInfo{
     constexpr static size_t size = sizeof(T);
 };
 
-struct QuantizationOptions {
-  bool force_pow_2_scales = false;
-  float amax_epsilon = 0.0;
-  size_t block_scaling_dim = 2u;
-};
-
 class Tensor {
  public:
   Tensor(const std::string& name,
          const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const QuantizationOptions* q_opts = nullptr);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
 
   Tensor(const std::string& name,
          const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const QuantizationOptions* q_opts = nullptr) :
-    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode, q_opts) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
+    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 

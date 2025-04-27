@@ -286,6 +286,12 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigForcePow2Scales = 0,
   /*! Small value to add to amax for numerical stability */
   kNVTEQuantizationConfigAmaxEpsilon = 1,
+  /*! Noop tensor (containing a scalar).
+   If the scalar element value = 1, quantization kernel will early exit.
+   This is a tensor because the flag must be on GPU in order to enable
+   conditional early even when captured in a static CUDA graph.
+  */
+  kNVTEQuantizationConfigNoopTensor = 2,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -325,6 +331,23 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
  *  \param[in] config Config to be destroyed.
  */
 void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
+
+/*! \brief Check if non-TN FP8 Gemm is supported.
+ *
+ *  \return A flag which indicates whether non-TN FP8 Gemm is supported or not.
+ */
+int nvte_is_non_tn_fp8_gemm_supported();
+
+/*! \brief Performs a memset of the data at the given pointer and size in bytes.
+ *
+ *  \param[in] ptr Pointer to the memory to be set.
+ *  \param[in] value Value to set the memory to.
+ *  \param[in] size_in_bytes Size of the memory in bytes.
+ *  \param[in] stream CUDA stream to use for the operation.
+ *
+ *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
+*/
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -722,6 +745,12 @@ class QuantizationConfigWrapper {
   void set_amax_epsilon(float amax_epsilon) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
                                            &amax_epsilon, sizeof(float));
+  }
+
+  /*! \brief Set noop tensor pointer */
+  void set_noop_tensor(NVTETensor noop_tensor) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
+                                           sizeof(NVTETensor));
   }
 
  private:

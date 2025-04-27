@@ -8,21 +8,18 @@ import transformer_engine as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
-from transformer_engine.pytorch.utils import get_device_compute_capability
 from references.blockwise_quantizer_reference import CuBLASScaleMunger
 from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
 
 def fp8_blockwise_gemm_supported() -> bool:
-    return (
-        get_device_compute_capability() >= (9, 0)
-        and get_device_compute_capability() < (10, 0)
-        and float(torch.version.cuda) >= 12.9
-    )
+    supported, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
+    return supported
 
 
 def cublas_gemm_fp8_blockwise_case(

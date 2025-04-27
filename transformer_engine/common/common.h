@@ -195,7 +195,18 @@ struct Tensor {
   }
 
   const std::vector<size_t> &rowwise_shape_ref() const {
-    rowwise_shape_cache = shape();
+    auto shape_queried = shape();
+    // This method is primarily designed for nvte_shape.
+    // An unfortunate consequence of unconditionally assigning
+    // values to rowwise_shape_cache without a check is that
+    // repeated calls to rowwise_shape_ref are likely to
+    // invalidate the data pointers from previous calls.
+    // If the shape has changed, then invalidating is necessary
+    // in at least some cases, but we want to keep the data
+    // valid otherwise.
+    if (rowwise_shape_cache != shape_queried) {
+      rowwise_shape_cache = std::move(shape_queried);
+    }
     return rowwise_shape_cache;
   }
 
@@ -233,10 +244,12 @@ struct Tensor {
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
+  NVTETensor noop_tensor = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),  // force_pow_2_scales
-      sizeof(float)  // amax_epsilon
+      sizeof(bool),       // force_pow_2_scales
+      sizeof(float),      // amax_epsilon
+      sizeof(NVTETensor)  // noop_tensor
   };
 };
 
