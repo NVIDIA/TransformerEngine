@@ -20,6 +20,25 @@ __all__ = [
     "general_grouped_gemm",
 ]
 
+# for fp8 blockwise recipe, we supproted options to output compact format versus GEMM_READY format for quantization
+# but for FP8 GEMMs, only TN layout is supported in hopper, so there transpose needs to be done before calling the GEMM
+# sanity check here to make sure all the data & scale formats have been set to GEMM_READY, not compact
+def _sanity_check_data_format(A, B, layout):
+    if isinstance(A, Float8BlockwiseQTensorBase) and isinstance(B, Float8BlockwiseQTensorBase):
+        if layout == "TN":
+            assert not (
+                A._is_rowwise_fmt_compact() or B._is_rowwise_fmt_compact()
+            ), "A rowwise data and B rowwise data must be in GEMM_READY format for TN layout"
+        elif layout == "NN":
+            assert not (
+                A._is_columnwise_fmt_compact() or B._is_rowwise_fmt_compact()
+            ), "A columnwise data and B rowwise data must be in GEMM_READY format for NN layout"
+        elif layout == "NT":
+            assert not (
+                A._is_columnwise_fmt_compact() or B._is_columnwise_fmt_compact()
+            ), "A columnwise data and B columnwise data must be in GEMM_READY format for NT layout"
+    # add more elif to check for other recipes
+
 
 def general_gemm(
     A: torch.Tensor,
@@ -77,13 +96,8 @@ def general_gemm(
         # There is not use_split_accumulator == False
         # implementation for Float8BlockwiseQTensorBase GEMM
         use_split_accumulator = True
-        # TODO(zhongbo) optimize out this special case check for wgrad
-        if layout == "NT":
-            A_columnwise_data_shape = A._columnwise_data.shape
-            B_columnwise_data_shape = B._columnwise_data.shape
-            assert (
-                A_columnwise_data_shape[1] == B_columnwise_data_shape[1]
-            ), "Shape mismatch between A and B"
+
+    _sanity_check_data_format(A, B, layout)
 
     args = (
         A,
