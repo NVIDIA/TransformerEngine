@@ -366,7 +366,6 @@ class FusedAdam(torch.optim.Optimizer):
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
         """
-        state = self.state[param]
         first_moment = self.get_unscaled_state(param, "exp_avg")
         second_moment = self.get_unscaled_state(param, "exp_avg_sq")
         variance = second_moment - torch.square(first_moment)
