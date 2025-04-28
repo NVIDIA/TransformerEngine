@@ -1,12 +1,9 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-import functools
 import logging
 import math
 import os
-from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union, Optional
 from contextlib import contextmanager
 
@@ -15,26 +12,22 @@ import torch
 
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.attention import (
+from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
-    MultiheadAttention,
     _attention_backends,
 )
-from transformer_engine.pytorch.dot_product_attention.utils import (
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     get_attention_backend,
     check_set_window_size,
     AttentionParams,
 )
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.attention import InferenceParams
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    AttnBiasType,
-    AttnMaskType,
     FusedAttnBackend,
-    QKVLayout,
     fused_attn_bwd,
     fused_attn_fwd,
 )
@@ -49,9 +42,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 import transformer_engine_torch as tex
-from transformer_engine_torch import NVTE_Fused_Attn_Backend
 from transformer_engine.pytorch.tensor.quantized_tensor import (
-    QuantizedTensor,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,

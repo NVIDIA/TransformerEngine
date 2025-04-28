@@ -246,7 +246,6 @@ def _apply_rotary_pos_emb_base(
     # [seq, b, 1, dim] -> [b, seq, 1, dim]
     if tensor_format == "bshd":
         freqs = freqs.transpose(0, 1)
-
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
@@ -311,7 +310,7 @@ def apply_rotary_pos_emb(
             qkv_formats:            "thd", "bshd", "sbhd"
             context parallelism:    no
             start_positions:        yes
-            interleaving:           yes
+            interleaving:            yes
 
     Parameters
     ----------
