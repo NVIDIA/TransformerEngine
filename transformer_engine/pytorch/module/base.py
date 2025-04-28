@@ -36,7 +36,9 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer, Float8BlockwiseQTensor
+from ..tensor.mxfp8_tensor import MXFP8Tensor
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -799,6 +801,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
+            self._check_weight_tensor_recipe_correspondence()
 
             if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].delayed():
                 assert self.fp8_meta["recipe"].reduce_amax, (
@@ -1178,6 +1181,45 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 level=logging.WARNING,
             )
             self.name = f"Layer_{TEDebugState.get_layer_count()}"
+
+    def _check_weight_tensor_recipe_correspondence(self) -> None:
+        """
+        Verify that the weight tensor types match their corresponding recipe type.
+        This is invoked in the forward().
+
+        This establishes a 1:1 correspondence between recipe types and tensor types:
+        - DelayedScaling → Float8Tensor
+        - Float8CurrentScaling → Float8Tensor
+        - MXFP8BlockScaling → MXFP8Tensor
+        - Float8BlockScaling → Float8BlockTensor
+
+        Example case to check: recipe is DelayedScaling (DelayedScaling is set in fp8_autocast()),
+        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in fp8_model_init()).
+        """
+        if not self.fp8 and not self.fp8_calibration:
+            return
+        if not hasattr(self, "weight_names") or not self.weight_names:
+            return
+
+        recipe = self.fp8_meta["recipe"]
+        expected_tensor_class = None
+        if recipe.delayed() or recipe.float8_current_scaling():
+            expected_tensor_class = Float8Tensor
+        elif recipe.mxfp8():
+            expected_tensor_class = MXFP8Tensor
+        elif recipe.float8_block_scaling():
+            expected_tensor_class = Float8BlockwiseQTensor
+        else:
+            raise RuntimeError(f"Unsupported recipe type: {recipe.__class__.__name__}")
+
+        weight_tensors = [getattr(self, name) for name in self.weight_names]
+        for i, tensor in enumerate(weight_tensors):
+            if isinstance(tensor, QuantizedTensor) and not isinstance(tensor, expected_tensor_class):
+                raise RuntimeError(
+                    f"Tensor type mismatch for '{self.weight_names[i]}': expected {expected_tensor_class.__name__} for "
+                    f"recipe {recipe.__class__.__name__}, got {tensor.__class__.__name__}. "
+                    f"Please check the recipes assigned during fp8_model_init() and fp8_autocast() calls."
+                )
 
     def _turn_off_unsupported_features_in_debug(self):
         if (

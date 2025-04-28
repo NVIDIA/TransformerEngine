@@ -13,14 +13,19 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
-    get_default_fp8_recipe,
+    fp8_model_init,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch import Linear
+from transformer_engine.pytorch.distributed import fp8_autocast
+from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
 
 # FP8 per tensor delayed scaling
@@ -367,3 +372,32 @@ class TestFP8Recipe:
             )
 
         torch.testing.assert_close(fp8_meta[forward_key].scale, expected_scale)
+
+    @pytest.mark.parametrize(
+        "model_init_recipe",
+        [
+            pytest.param(
+                MXFP8BlockScaling(),
+                marks=pytest.mark.skipif(
+                    not mxfp8_available,
+                    reason=reason_for_no_mxfp8
+                )
+            ),
+            pytest.param(
+                Float8BlockScaling(),
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=reason_for_no_fp8_block_scaling
+                )
+            )
+        ]
+    )
+    def test_check_for_weight_tensor_and_recipe_correspondence(self, model_init_recipe):
+        with fp8_model_init(enabled=True, recipe=model_init_recipe):
+            linear = Linear(32, 32).cuda()
+
+        x = torch.randn(32, 32, device="cuda")
+        with fp8_autocast(enabled=True, fp8_recipe=DelayedScaling()):
+            with pytest.raises(RuntimeError) as excinfo:
+                _ = linear(x)
+            assert "Tensor type mismatch" in str(excinfo.value)
