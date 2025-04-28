@@ -75,7 +75,7 @@ def _nvidia_cudart_include_dir():
 
     try:
         import nvidia
-    except ModuleNotFoundError as e:
+    except ModuleNotFoundError:
         return ""
 
     include_dir = Path(nvidia.__file__).parent / "cuda_runtime"
@@ -162,7 +162,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     _CUDNN_LIB_CTYPES = _load_cudnn()
     _NVRTC_LIB_CTYPES = _load_nvrtc()
     _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cublas")
-    _CUBLAS_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
+    _CUDART_LIB_CTYPES = _load_nvidia_cuda_library("cuda_runtime")
     _TE_LIB_CTYPES = _load_library()
 
     # Needed to find the correct headers for NVRTC kernels.
