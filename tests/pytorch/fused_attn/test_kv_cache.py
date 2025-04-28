@@ -11,6 +11,12 @@ import math
 import pytest
 import torch
 
+from test_fused_attn import (
+    ModelConfig,
+    reset_rng_states,
+    _get_attention_backends,
+)
+
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
@@ -18,19 +24,14 @@ from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
-from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
+)
 from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
-)
-from test_fused_attn import (
-    ModelConfig,
-    reset_rng_states,
-    _get_attention_backends,
 )
 
 # Initialize RNG state
