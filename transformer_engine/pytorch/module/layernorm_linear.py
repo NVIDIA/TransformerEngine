@@ -177,8 +177,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if with_input_all_gather and isinstance(
                 input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
             ):
-                input_quantizer.set_usage(columnwise=False)
-            if isinstance(input_quantizer, Float8BlockQuantizer):
+                # All-gather is not supported with FP8 column-wise data
                 input_quantizer.set_usage(columnwise=False)
 
         # Do TP communication in high precision if quantized format

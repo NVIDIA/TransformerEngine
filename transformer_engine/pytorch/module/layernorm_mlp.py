@@ -239,8 +239,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if sequence_parallel and isinstance(
                 fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
             ):
-                fc1_input_quantizer.set_usage(columnwise=False)
-            if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
+                # All-gather is not supported with FP8 column-wise data
                 fc1_input_quantizer.set_usage(columnwise=False)
 
         # Do TP communication in high precision if quantized format
