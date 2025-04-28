@@ -285,6 +285,8 @@ class TestFloat8BlockwiseTensor:
         self, dims: DimsType, block_scaling_dim: int, need_compact: bool
     ) -> None:
         """Test serialization of Float8BlockwiseQTensor"""
+        if need_compact and block_scaling_dim != 1:
+            pytest.skip("need_compact only implemented for 1D block quantization.")
         device = "cuda"
         dtype = torch.bfloat16
         x_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
@@ -293,12 +295,8 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
+            need_compact=need_compact,
         )
-        if need_compact:
-            # skip the test when block_scaling_dim == 2
-            pytest.skip(
-                "Skipping test because the dequantization for compact format is not implemented"
-            )
 
         # Create FP8 tensor
         x_fp8 = quantizer.quantize(x_hp)
