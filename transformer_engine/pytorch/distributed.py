@@ -37,13 +37,6 @@ from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-try:
-    import torch.distributed._symmetric_memory as symm_mem
-
-    HAS_TORCH_SYMMETRIC = True
-except ImportError:
-    HAS_TORCH_SYMMETRIC = False
-
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
 
