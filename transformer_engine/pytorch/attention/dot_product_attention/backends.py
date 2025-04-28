@@ -1383,9 +1383,10 @@ class FusedAttention(torch.nn.Module):
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
         self.attention_type = attention_type
-        self.use_FAv2_bwd = os.getenv(
-            "NVTE_FUSED_ATTN_USE_FAv2_BWD", "0"
-        ) == "1" and get_device_compute_capability() == 90
+        self.use_FAv2_bwd = (
+            os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
+            and get_device_compute_capability() == 90
+        )
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
 
