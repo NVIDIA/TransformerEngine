@@ -7,7 +7,8 @@ from __future__ import annotations
 import functools
 import math
 import os
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Union
+import numpy as np
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -153,6 +154,184 @@ def split_tensor_along_dim(
         return tuple(chunk.contiguous() for chunk in tensor_list)
 
     return tensor_list
+
+
+# @klakhani TODO: Consider combining with split_tensor_along_dim() and no_op_cat() and SplitAlongDim
+def combine_tensors(
+    tensors: List[torch.Tensor],
+    dim: int,
+) -> torch.Tensor:
+    """Combine tensors along a particular dimension"""
+
+    num_tensors = len(tensors)
+    new_shape = list(tensors[0].shape)
+    new_shape.insert(dim, num_tensors)
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+    if isinstance(tensors[0], Float8Tensor):
+        new_stride = list(tensors[0]._data.stride())
+        new_stride.insert(dim, int(new_stride[dim - 1] / num_tensors))
+        combined_tensor = torch.Tensor().to(device=tensors[0].device, dtype=tensors[0]._data.dtype)
+        combined_tensor.set_(
+            tensors[0]._data.untyped_storage(),
+            tensors[0]._data.storage_offset(),
+            new_shape,
+            new_stride,
+        )
+        combined_tensor = Float8Tensor.make_like(tensors[0], data=combined_tensor, shape=new_shape)
+    else:
+        new_stride = list(tensors[0].stride())
+        new_stride.insert(dim, int(new_stride[dim - 1] / num_tensors))
+        combined_tensor = torch.Tensor().to(device=tensors[0].device, dtype=tensors[0].dtype)
+        combined_tensor.set_(
+            tensors[0].untyped_storage(), tensors[0].storage_offset(), new_shape, new_stride
+        )
+
+    return combined_tensor
+
+
+class SplitAlongDim(torch.autograd.Function):
+    """
+    Split tensor along given dimension
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        mixed_x_layer: torch.Tensor,
+        split_dim: int,
+        split_size_or_sections: Union[int, List[int], Tuple[int]],
+        squeeze=False,
+    ) -> Tuple[torch.Tensor, ...]:
+        # pylint: disable=missing-function-docstring
+        ctx.split_dim = split_dim
+        ctx.split_size_or_sections = split_size_or_sections
+        from transformer_engine.pytorch.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+
+        if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
+            mixed_x_layer, Float8Tensor
+        ):
+            return tuple(
+                Float8TensorBase(
+                    fp8_scale_inv=mixed_x_layer._scale_inv,
+                    fp8_dtype=mixed_x_layer._fp8_dtype,
+                    data=x.squeeze(split_dim) if squeeze else x,
+                    shape=x.squeeze(split_dim).shape if squeeze else x.shape,
+                    quantizer=mixed_x_layer._quantizer,
+                )
+                for x in torch.split(
+                    mixed_x_layer._data,
+                    split_size_or_sections=split_size_or_sections,
+                    dim=split_dim,
+                )
+            )
+        if isinstance(mixed_x_layer, Float8Tensor):
+            return tuple(
+                Float8Tensor.make_like(
+                    mixed_x_layer,
+                    data=x.squeeze(split_dim) if squeeze else x,
+                    shape=x.squeeze(split_dim).shape if squeeze else x.shape,
+                )
+                for x in torch.split(
+                    mixed_x_layer._data,
+                    split_size_or_sections=split_size_or_sections,
+                    dim=split_dim,
+                )
+            )
+        out_list = torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
+        if squeeze:
+            out_list = [x.squeeze(split_dim) for x in out_list]
+        return out_list
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        # pylint: disable=missing-function-docstring
+        assert len(grad_outputs) > 0, "No gradients received for backprop!"
+
+        if isinstance(ctx.split_size_or_sections, (list, tuple)):
+            split_sizes = ctx.split_size_or_sections
+            assert len(grad_outputs) == len(
+                split_sizes
+            ), "Unequal number of gradients vs split sections for backprop!"
+        if isinstance(ctx.split_size_or_sections, int):
+            split_sizes = [ctx.split_size_or_sections] * len(grad_outputs)
+        dims = len(grad_outputs[0].shape)
+        split_dim = (ctx.split_dim + dims) % dims
+        from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+        if isinstance(grad_outputs[0], Float8Tensor):
+            noop_ok = True
+            strides = grad_outputs[0].stride()
+            data_ptr = grad_outputs[0]._data.untyped_storage().data_ptr()
+            shape = list(grad_outputs[0].shape)
+            for i, tensor in enumerate(grad_outputs):
+                shape_i = shape
+                shape_i[split_dim] = split_sizes[i]
+                offset_size = sum(split_sizes[:i]) * np.prod(shape[split_dim + 1 :])
+                if (
+                    tensor.stride() != strides
+                    or list(tensor.shape) != shape_i
+                    or tensor._data.untyped_storage().data_ptr() != data_ptr
+                    or tensor.storage_offset() != offset_size
+                ):
+                    noop_ok = False
+                    break
+            if noop_ok:
+                ret = torch.Tensor().to(
+                    device=grad_outputs[0].device, dtype=grad_outputs[0]._data.dtype
+                )
+                new_shape = list(shape)
+                new_shape[split_dim] = sum(split_sizes)
+                ret.set_(
+                    grad_outputs[0]._data.untyped_storage(),
+                    grad_outputs[0]._data.storage_offset(),
+                    new_shape,
+                    strides,
+                )
+                return (
+                    Float8Tensor.make_like(grad_outputs[0], data=ret, shape=ret.shape),
+                    None,
+                    None,
+                )
+
+            grad_outputs_data = [x._data for x in grad_outputs]
+            data = torch.cat(grad_outputs_data, dim=split_dim)
+            return (
+                Float8Tensor.make_like(grad_outputs[0], data=data, shape=data.shape),
+                None,
+                None,
+                None,
+            )
+        noop_ok = True
+        strides = grad_outputs[0].stride()
+        data_ptr = grad_outputs[0].untyped_storage().data_ptr()
+        shape = list(grad_outputs[0].shape)
+        for i, tensor in enumerate(grad_outputs):
+            shape_i = shape
+            shape_i[split_dim] = split_sizes[i]
+            offset_size = sum(split_sizes[:i]) * np.prod(shape[split_dim + 1 :])
+            if (
+                tensor.stride() != strides
+                or list(tensor.shape) != shape_i
+                or tensor.untyped_storage().data_ptr() != data_ptr
+                or tensor.storage_offset() != offset_size
+            ):
+                noop_ok = False
+                break
+        if noop_ok:
+            ret = torch.Tensor().to(device=grad_outputs[0].device, dtype=grad_outputs[0].dtype)
+            new_shape = list(shape)
+            new_shape[split_dim] = sum(split_sizes)
+            ret.set_(
+                grad_outputs[0].untyped_storage(),
+                grad_outputs[0].storage_offset(),
+                new_shape,
+                strides,
+            )
+            return ret, None, None
+
+        return torch.cat(grad_outputs, dim=split_dim), None, None
 
 
 def validate_ctx_manager(ctx: Callable) -> None:
