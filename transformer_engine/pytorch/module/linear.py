@@ -126,6 +126,7 @@ class _Linear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
+        inp_requires_grad = inp.requires_grad
         assert inp_shape[-1] == in_features, "GEMM not possible"
 
         tp_world_size = get_distributed_world_size(tp_group)
@@ -134,7 +135,8 @@ class _Linear(torch.autograd.Function):
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
-        inputmat = inp.view(-1, in_features)
+        inp = inp.view(-1, in_features)
+        inputmat = inp
         inputmat_total = None
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
@@ -210,7 +212,7 @@ class _Linear(torch.autograd.Function):
         if fp8 or debug:
             # Configure quantizer
             if weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp.requires_grad
+                columnwise_usage = is_grad_enabled and inp_requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
@@ -307,7 +309,7 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
+            if inp_requires_grad:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -373,9 +375,10 @@ class _Linear(torch.autograd.Function):
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
-            ctx.requires_dgrad = inp.requires_grad
+            ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+
             ctx.owns_input = saved_inputmat is not inp
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE

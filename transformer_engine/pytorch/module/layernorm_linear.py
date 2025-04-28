@@ -137,8 +137,10 @@ class _LayerNormLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
+        inp_requires_grad = inp.requires_grad
         assert inp_shape[-1] == in_features, "GEMM not possible"
-        inputmat = inp.view((-1, in_features))
+        inp = inp.view((-1, in_features))
+        inputmat = inp
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
 
@@ -399,7 +401,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
-            ctx.requires_dgrad = inp.requires_grad
+            ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
