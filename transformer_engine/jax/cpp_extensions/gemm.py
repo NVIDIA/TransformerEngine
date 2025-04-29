@@ -177,10 +177,7 @@ def _jax_gemm_tensor_scaling_fp8(
     lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
 ):
     """FP8 GEMM for XLA pattern match"""
-    assert rhs.scaling_mode in (
-        ScalingMode.DELAYED_TENSOR_SCALING,
-        ScalingMode.CURRENT_TENSOR_SCALING,
-    ), "rhs does not have delayed tensor scaling mode"
+    assert rhs.scaling_mode.is_tensor_scaling(), "rhs does not have tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
@@ -272,10 +269,7 @@ def _jax_gemm(
 
     def _jax_gemm_fp8_impl(lhs, rhs):
 
-        if lhs.scaling_mode in (
-            ScalingMode.DELAYED_TENSOR_SCALING,
-            ScalingMode.CURRENT_TENSOR_SCALING,
-        ):
+        if lhs.scaling_mode.is_tensor_scaling():
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums)
 
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
