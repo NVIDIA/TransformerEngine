@@ -7,7 +7,9 @@ Config module for quantization metadata management
 This module provides configuration and helper functions for managing quantization metadata
 in JAX, including support for different scaling modes and datatypes.
 """
+from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Dict, Union
 
@@ -15,7 +17,7 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from transformer_engine_jax import DType
+from transformer_engine_jax import DType, QuantizeLayout
 from transformer_engine_jax import get_cublasLt_version
 from transformer_engine_jax import (
     get_cuda_version,
@@ -34,6 +36,10 @@ __all__ = [
     "update_collections",
     "get_delayed_scaling",
     "NVTE_FP8_COLLECTION_NAME",
+    "UsageType",
+    "UsageContext",
+    "QuantizerParams",
+    "RecipeManager",
 ]
 
 _is_fp8_available = None
@@ -154,6 +160,145 @@ def _format2dtypes(format_: recipe.Format):
     return jnp.bfloat16, jnp.bfloat16
 
 
+class UsageType(Enum):
+    """Enumeration for usage types in quantization."""
+
+    X = 0
+    KERNEL = 1
+    DGRAD = 2
+
+
+@dataclass
+class UsageContext:
+    """Context of where a particular quantizer will be used which is needed by some recipes."""
+
+    usage_type: UsageType
+
+
+@dataclass
+class QuantizerParams:
+    """Parameters for quantization."""
+
+    scaling_mode: ScalingMode
+    q_dtype: jnp.dtype
+    q_layout: QuantizeLayout
+
+    @staticmethod
+    def create(
+        scaling_mode: ScalingMode,
+        q_dtype: Optional[jnp.dtype] = None,
+        q_layout: Optional[QuantizeLayout] = None,
+        usage_context: Optional[UsageContext] = None,
+    ) -> "QuantizerParams":
+        """Create QuantizerParams with specified scaling mode, dtype, and axis."""
+        assert (
+            usage_context is not None or q_dtype is not None
+        ), "Either usage_context or q_dtype must be provided."
+        if q_dtype is None:
+            q_dtype = (
+                QuantizeConfig.BWD_DTYPE
+                if usage_context.usage_type == UsageType.DGRAD
+                else QuantizeConfig.FWD_DTYPE
+            )
+        if q_layout is None:
+            q_layout = (
+                QuantizeLayout.ROWWISE_COLWISE
+                if QuantizeConfig.IF_QUANTIZE_2X
+                else QuantizeLayout.ROWWISE
+            )
+        return QuantizerParams(scaling_mode=scaling_mode, q_dtype=q_dtype, q_layout=q_layout)
+
+    @staticmethod
+    def create_noop_params() -> "QuantizerParams":
+        """Create no-op quantizer params. No quantization will be performed and the data will stay in high-precision."""
+        return QuantizerParams(
+            scaling_mode=ScalingMode.NO_SCALING,
+            q_dtype=jnp.float32,
+            q_layout=QuantizeLayout.ROWWISE,
+        )
+
+
+class RecipeManager(ABC):
+    """Abstract base class for each recipe. Compartmentalizes recipe-specific logic, such as quantization parameters and support checks."""
+
+    @abstractmethod
+    def is_supported(self, gpu_id: Optional[int] = None) -> Tuple[bool, str]:
+        """Check if the recipe is supported on the given GPU."""
+        pass
+
+    @abstractmethod
+    def get_quantizer_params(self, usage_context: UsageContext) -> QuantizerParams:
+        """Get quantizer parameters for the given usage context."""
+        pass
+
+
+class DelayedScalingRecipeManager(RecipeManager):
+    """Recipe manager for delayed tensor scaling FP8."""
+
+    def is_supported(self, gpu_id=None):
+        """Check if the recipe is supported on the given GPU."""
+        return is_fp8_available(scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING, gpu_id=gpu_id)
+
+    def get_quantizer_params(self, usage_context: UsageContext) -> QuantizerParams:
+        """Get quantizer parameters for the given usage context."""
+        return QuantizerParams.create(
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            usage_context=usage_context,
+        )
+
+
+class MXFP8BlockScalingRecipeManager(RecipeManager):
+    """Recipe manager for MXFP8 block scaling."""
+
+    def is_supported(self, gpu_id=None):
+        """Check if the recipe is supported on the given GPU."""
+        return is_fp8_available(scaling_mode=ScalingMode.MXFP8_1D_SCALING, gpu_id=gpu_id)
+
+    def get_quantizer_params(self, usage_context: UsageContext) -> QuantizerParams:
+        """Get quantizer parameters for the given usage context."""
+        return QuantizerParams.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            usage_context=usage_context,
+        )
+
+
+class CurrentScalingRecipeManager(RecipeManager):
+    """Recipe manager for current tensor scaling FP8."""
+
+    def is_supported(self, gpu_id=None):
+        """Check if the recipe is supported on the given GPU."""
+        return is_fp8_available(scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING, gpu_id=gpu_id)
+
+    def get_quantizer_params(self, usage_context: UsageContext) -> QuantizerParams:
+        """Get quantizer parameters for the given usage context."""
+        return QuantizerParams.create(
+            scaling_mode=ScalingMode.CURRENT_TENSOR_SCALING,
+            usage_context=usage_context,
+        )
+
+
+class RecipeManagerFactory:
+    """Factory class to create recipe managers based on the provided FP8 recipe."""
+
+    @staticmethod
+    def create_recipe_manager(fp8_recipe: recipe.Recipe) -> RecipeManager:
+        """Creates a recipe manager based on the provided FP8 recipe.
+
+        Args:
+            fp8_recipe: The FP8 recipe to use for initialization
+        Returns:
+            A recipe manager corresponding to the given recipe.
+        """
+        if isinstance(fp8_recipe, recipe.DelayedScaling):
+            return DelayedScalingRecipeManager()
+        elif isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            return MXFP8BlockScalingRecipeManager()
+        elif isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+            return CurrentScalingRecipeManager()
+        else:
+            raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
+
+
 class AmaxComputeAlgo(Enum):
     """Enumeration for AMAX computation algorithms.
 
@@ -164,27 +309,6 @@ class AmaxComputeAlgo(Enum):
 
     MAX = "max"
     MOST_RECENT = "most_recent"
-
-
-def _get_scaling_mode(fp8_recipe: recipe.Recipe) -> ScalingMode:
-    """Convert recipe.Recipe to ScalingMode.
-
-    Args:
-        fp8_recipe: The FP8 recipe to convert
-
-    Returns:
-        The corresponding ScalingMode
-
-    Raises:
-        ValueError: If the recipe type is not supported
-    """
-    if isinstance(fp8_recipe, recipe.DelayedScaling):
-        return ScalingMode.DELAYED_TENSOR_SCALING
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-        return ScalingMode.MXFP8_1D_SCALING
-    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
-        return ScalingMode.CURRENT_TENSOR_SCALING
-    raise ValueError("Invalid fp8_recipe!")
 
 
 class QuantizeConfig:
@@ -204,7 +328,7 @@ class QuantizeConfig:
         FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
         FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
         IF_QUANTIZE_2X: Whether 2x quantization is enabled
-        SCALING_MODE: Scaling mode
+        RECIPE_MANAGER: Recipe manager for handling quantization recipe-specific logic
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
     """
@@ -219,7 +343,7 @@ class QuantizeConfig:
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False
     IF_QUANTIZE_2X: bool = False
-    SCALING_MODE: ScalingMode = ScalingMode.NO_SCALING
+    RECIPE_MANAGER: Optional[RecipeManager] = None
 
     # DelayedScaling
     AMAX_HISTORY_LEN: int = 1024
@@ -241,11 +365,15 @@ class QuantizeConfig:
         Args:
             fp8_recipe: The FP8 recipe to use for initialization
         """
+        recipe_manager = RecipeManagerFactory.create_recipe_manager(fp8_recipe)
+        fp8_available, reason_for_no_fp8 = recipe_manager.is_supported()
+        assert fp8_available, reason_for_no_fp8
+
         cls.INITIALIZED = True
         cls.MARGIN = fp8_recipe.margin if "margin" in dir(fp8_recipe) else 0.0
         cls.FP8_FORMAT = fp8_recipe.fp8_format
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
-        cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
+        cls.RECIPE_MANAGER = recipe_manager
         cls.IF_QUANTIZE_2X = True
 
     @classmethod
@@ -255,11 +383,10 @@ class QuantizeConfig:
         cls.MARGIN = 0.0
         cls.FP8_FORMAT = recipe.Format.HYBRID
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
-        cls.SCALING_MODE = ScalingMode.NO_SCALING
+        cls.RECIPE_MANAGER = None
         cls.FP8_2X_ACC_FPROP = False
         cls.FP8_2X_ACC_DGRAD = False
         cls.FP8_2X_ACC_WGRAD = False
-        cls.SCALING_MODE = ScalingMode.NO_SCALING
         cls.IF_QUANTIZE_2X = False
         # DelayedScaling
         cls.AMAX_HISTORY_LEN = 1024
@@ -359,6 +486,26 @@ class BlockScalingQuantizeConfig:
         QuantizeConfig.finalize()
 
 
+def get_quantize_config(
+    fp8_recipe: recipe.Recipe,
+) -> QuantizeConfig:
+    """Get the quantization configuration based on the FP8 recipe.
+
+    Args:
+        fp8_recipe: The FP8 recipe to use for initialization
+    Returns:
+        The quantization config class corresponding to the given recipe.
+    """
+    if isinstance(fp8_recipe, recipe.DelayedScaling):
+        return DelayedScalingQuantizeConfig
+    elif isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        return BlockScalingQuantizeConfig
+    elif isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        return CurrentScalingQuantizeConfig
+    else:
+        raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
+
+
 @contextmanager
 def fp8_autocast(
     enabled: bool = False,
@@ -408,18 +555,11 @@ def fp8_autocast(
     if mesh_resource is None:
         mesh_resource = MeshResource()
 
-    Config = DelayedScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-        Config = BlockScalingQuantizeConfig
-    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
-        Config = CurrentScalingQuantizeConfig
+    Config = get_quantize_config(fp8_recipe)
 
     try:
         with global_shard_guard(mesh_resource):
             if enabled:
-                fp8_available, reason_for_no_fp8 = is_fp8_available(_get_scaling_mode(fp8_recipe))
-                assert fp8_available, reason_for_no_fp8
-
                 Config.initialize(fp8_recipe)
             yield
     finally:
