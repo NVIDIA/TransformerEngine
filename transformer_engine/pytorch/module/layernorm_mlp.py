@@ -1653,6 +1653,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.bias_gelu_nvfusion = False
 
+            # Make sure weight tensor has correct quantizer
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            if fc1_weight_quantizer is not None and isinstance(fc1_weight, QuantizedTensor):
+                fc1_weight._quantizer = fc1_weight_quantizer
+            if fc2_weight_quantizer is not None and isinstance(fc2_weight, QuantizedTensor):
+                fc2_weight._quantizer = fc2_weight_quantizer
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
