@@ -58,6 +58,12 @@ _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+_QUANTIZED_WEIGHT_TENSOR_TYPES = (
+    QuantizedTensor,
+    Float8TensorBase,
+    MXFP8TensorBase,
+    Float8BlockwiseQTensorBase,
+)
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -1202,21 +1208,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         recipe = self.fp8_meta["recipe"]
-        expected_tensor_class = None
-        if recipe.delayed() or recipe.float8_current_scaling():
-            expected_tensor_class = Float8Tensor
-        elif recipe.mxfp8():
-            expected_tensor_class = MXFP8Tensor
-        elif recipe.float8_block_scaling():
-            expected_tensor_class = Float8BlockwiseQTensor
-        else:
-            raise RuntimeError(f"Unsupported recipe type: {recipe.__class__.__name__}")
-
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, QuantizedTensor) and not isinstance(tensor, expected_tensor_class):
+            if isinstance(tensor, _QUANTIZED_WEIGHT_TENSOR_TYPES) and not isinstance(tensor, recipe.expected_tensor_class):
                 raise RuntimeError(
-                    f"Tensor type mismatch for '{self.weight_names[i]}': expected {expected_tensor_class.__name__} for "
+                    f"Tensor type mismatch for '{self.weight_names[i]}': expected {recipe.expected_tensor_class.__name__} for "
                     f"recipe {recipe.__class__.__name__}, got {tensor.__class__.__name__}. "
                     f"Please check the recipes assigned during fp8_model_init() and fp8_autocast() calls."
                 )

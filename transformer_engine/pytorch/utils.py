@@ -10,7 +10,6 @@ import os
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
-import transformer_engine.pytorch.cpp_extensions as ext
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 from .tensor.quantized_tensor import QuantizedTensor
@@ -262,6 +261,9 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
+    # Import locally to avoid circular dependencies (cpp_extensions imports utils).
+    import transformer_engine.pytorch.cpp_extensions as ext  # pylint: disable=import-outside-toplevel
+
     encoded_version = ext.get_cudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
