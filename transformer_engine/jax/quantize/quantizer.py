@@ -748,7 +748,7 @@ class QuantizerFactory:
             else:
                 q_x_params.q_layout = QuantizeLayout.ROWWISE
                 q_kernel_params.q_layout = QuantizeLayout.COLWISE
-                q_dgrad_params = QuantizerParams.create_noop_params()
+                q_dgrad_params.q_layout = None  # Default layout for quantizer
 
         # Create the quantizer sets
         q_set = []
