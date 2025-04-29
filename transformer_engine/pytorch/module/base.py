@@ -743,6 +743,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
+        _original_recipe = self.fp8_meta.get("recipe", None)
+
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
@@ -780,6 +782,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+
+        _current_recipe = self.fp8_meta["recipe"]
+        if _original_recipe is not None and _original_recipe.__class__ != _current_recipe.__class__:
+            warnings.warn(
+                f"Recipe type changed from {_original_recipe.__class__.__name__} "
+                f"to {_current_recipe.__class__.__name__}. "
+                f"This may affect model behavior."
+            )
 
     @contextmanager
     def prepare_forward(
