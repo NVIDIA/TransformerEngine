@@ -25,7 +25,9 @@ import transformer_engine_torch as tex
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 
 # FP8 per tensor delayed scaling
@@ -378,19 +380,15 @@ class TestFP8Recipe:
         [
             pytest.param(
                 MXFP8BlockScaling(),
-                marks=pytest.mark.skipif(
-                    not mxfp8_available,
-                    reason=reason_for_no_mxfp8
-                )
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
             ),
             pytest.param(
                 Float8BlockScaling(),
                 marks=pytest.mark.skipif(
-                    not fp8_block_scaling_available,
-                    reason=reason_for_no_fp8_block_scaling
-                )
-            )
-        ]
+                    not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+                ),
+            ),
+        ],
     )
     def test_check_for_weight_tensor_and_recipe_correspondence(self, model_init_recipe):
         with fp8_model_init(enabled=True, recipe=model_init_recipe):

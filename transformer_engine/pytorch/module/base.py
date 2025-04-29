@@ -788,7 +788,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             warnings.warn(
                 f"Recipe type changed from {_original_recipe.__class__.__name__} "
                 f"to {_current_recipe.__class__.__name__}. "
-                f"This may affect model behavior."
+                "This may affect model behavior."
             )
 
     @contextmanager
@@ -1218,11 +1218,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = self.fp8_meta["recipe"]
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, _QUANTIZED_WEIGHT_TENSOR_TYPES) and not isinstance(tensor, recipe.expected_tensor_class):
+            if isinstance(tensor, _QUANTIZED_WEIGHT_TENSOR_TYPES) and not isinstance(
+                tensor, recipe.expected_tensor_class
+            ):
                 raise RuntimeError(
-                    f"Tensor type mismatch for '{self.weight_names[i]}': expected {recipe.expected_tensor_class.__name__} for "
-                    f"recipe {recipe.__class__.__name__}, got {tensor.__class__.__name__}. "
-                    f"Please check the recipes assigned during fp8_model_init() and fp8_autocast() calls."
+                    f"Tensor type mismatch for '{self.weight_names[i]}': expected"
+                    f" {recipe.expected_tensor_class.__name__} for recipe"
+                    f" {recipe.__class__.__name__}, got {tensor.__class__.__name__}. Please check"
+                    " the recipes assigned during fp8_model_init() and fp8_autocast() calls."
                 )
 
     def _turn_off_unsupported_features_in_debug(self):
