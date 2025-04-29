@@ -67,11 +67,9 @@ stats_to_num = {
     "dynamic_range_top": 10,
     "dynamic_range_bottom": 11,
     "underflows_num": 12,
-    "saturations_num": 13,
-    "std": 14,
-    "dynamic_range": 15,
-    "underflows%": 16,
-    "saturations%": 17,
+    "std": 13,
+    "dynamic_range": 14,
+    "underflows%": 15
 }
 
 DEPENDENCIES = {
@@ -88,11 +86,9 @@ DEPENDENCIES = {
     "dynamic_range_top": {"dynamic_range_top"},
     "dynamic_range_bottom": {"dynamic_range_bottom"},
     "underflows_num": {"underflows_num"},
-    "saturations_num": {"saturations_num"},
     "std": {"variance", "numel", "sum"},
     "dynamic_range": {"dynamic_range_top", "dynamic_range_bottom"},
-    "underflows%": {"underflows_num", "numel"},
-    "saturations%": {"saturations_num", "numel"},
+    "underflows%": {"underflows_num", "numel"}
 }
 
 STATS = {
@@ -126,12 +122,8 @@ STATS = {
         lambda buffers: min(_get(buffers, "dynamic_range_bottom")),
     ),
     "underflows_num": (
-        lambda x: (x == 0).sum(),
+        lambda x: (x._data == 0).sum(),
         lambda buffers: sum(_get(buffers, "underflows_num")),
-    ),
-    "saturations_num": (
-        lambda x: (x == MAX_FP8_VALUE_INT8).sum(),
-        lambda buffers: sum(_get(buffers, "saturations_num")),
     ),
     "std": (
         torch.std,
@@ -147,9 +139,5 @@ STATS = {
     "underflows%": (
         lambda x: (x == 0).sum() / x.numel() * 100,
         lambda buffers: 100 * sum(_get(buffers, "underflows_num")) / sum(_get(buffers, "numel")),
-    ),
-    "saturations%": (
-        lambda x: (x == MAX_FP8_VALUE_INT8).sum() / x.numel() * 100,
-        lambda buffers: 100 * sum(_get(buffers, "saturations_num")) / sum(_get(buffers, "numel")),
     ),
 }

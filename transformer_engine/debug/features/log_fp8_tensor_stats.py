@@ -46,7 +46,6 @@ class LogFp8TensorStats(BaseLogTensorStats):
             list of statistics to log
 
                 - underflows% - percentage of elements of the tensor equal to 0,
-                - saturations% - percentage of elements at the max representable value
         tensors/tensors_struct: List[str]
             list of tensors to log
 
@@ -75,10 +74,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
                     enabled: True
                     tensors_struct:
                     - tensor: activation
-                    stats: [underflows%, saturations%]
+                    stats: [underflows%]
                     freq: 1
                     - tensor: gradient
-                    stats: [saturations%]
+                    stats: [underflows%]
                     freq: 5
                     start_step: 0
                     end_step: 80
@@ -86,7 +85,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     def _get_supported_stats_list(self):
         """Returns stats this feature can log."""
-        return {"underflows%", "saturations%"}
+        return {"underflows%"}
 
     @api_method
     def inspect_tensor_postquantize_enabled(
