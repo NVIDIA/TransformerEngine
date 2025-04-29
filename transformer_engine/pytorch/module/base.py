@@ -40,7 +40,7 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ...common.recipe import Recipe
+from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 
@@ -669,6 +669,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if state is None:
             return
+
+        # TE 1.x checkpoint compatibility: add DelayedScaling recipe if missing
+        if "recipe" not in state:
+            # TE 1.x only supported delayed scaling, which was the default recipe
+            state["recipe"] = DelayedScaling()
+            # TE 1.x also saved scale_inv, which is not needed with Recipe object
+            state.pop("scale_inv_fwd", None)
+            state.pop("scale_inv_bwd", None)
 
         # Load extra items
         self.fp8_meta.update(state["extra_fp8_variables"])
