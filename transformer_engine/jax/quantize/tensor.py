@@ -281,10 +281,21 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             0 < flatten_axis < data_ndim
         ), f"flatten_axis {flatten_axis} is out of bounds for data.ndim = {data_ndim}"
 
-        expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
-            self.data.shape,
+        group_axis = (
+            len(self.original_shape) + self.group_axis if self.group_axis < 0 else self.group_axis
+        )
+        assert 0 <= group_axis < data_ndim, (
+                f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
+                )
+
+        # Only need to correct the group_axis for the lhs input case
+        if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
+            self.group_axis = self.flatten_axis
+
+        expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
+            self.original_shape,
             self.group_sizes,
-            self.other_sizes,
+            self.group_axis,
             self.is_colwise,
             is_padded=True,
             flatten_axis=flatten_axis,

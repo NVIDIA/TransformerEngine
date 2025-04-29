@@ -16,6 +16,7 @@
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "../util/multi_streams.h"
 #include "common/util/cuda_runtime.h"
 
 namespace {
@@ -569,18 +570,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
-static std::once_flag init_flag;
-static cudaStream_t compute_streams[num_streams];
-static cudaEvent_t cublas_event[num_streams];
-
-// Warning: only call once per device!
-static void init_streams_and_events() {
-  for (int i = 0; i < num_streams; i++) {
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
-    NVTE_CHECK_CUDA(cudaEventCreate(&cublas_event[i]));
-  }
-}
-
 }  // namespace transformer_engine
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
@@ -640,8 +629,11 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
+  using cublas_event = detail::events;
+  using compute_streams = detail::compute_streams;
+
   // Inits streams and events (once, globally)
-  std::call_once(init_flag, init_streams_and_events);
+  std::call_once(detail::init_flag, detail::init_streams_and_events);
 
   int num_stream_used = std::min(num_streams, num_gemms);
   // wait for current stream to finish

@@ -6,6 +6,7 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional
 from packaging import version
+import math
 
 import jax
 import jax.numpy as jnp
@@ -26,8 +27,17 @@ from .misc import (
     NamedSharding,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor2x, ScaledTensor, ScaledTensorFactory
-from ..quantize import Quantizer, QuantizeLayout, DelayedScaleQuantizer, ScalingMode
+from ..quantize import (
+        ScaledTensor2x,
+        ScaledTensor,
+        ScaledTensorFactory,
+        GroupedScaledTensor1x,
+        Quantizer,
+        GroupedQuantizer,
+        QuantizeLayout,
+        DelayedScaleQuantizer,
+        ScalingMode,
+        )
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -705,3 +715,226 @@ def quantize_dbias(
     return _quantize_dbias_impl(
         dz, quantizer=quantizer, is_dbias=is_dbias, flatten_axis=flatten_axis
     )
+
+
+
+
+class GroupedQuantizePrimitive(BasePrimitive):
+    """
+    Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
+    """
+
+    name = "te_grouped_quantize_ffi"
+    multiple_results = True
+    impl_static_args = (
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        x_aval,
+        scale_aval,
+        group_sizes_aval,
+        *,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p abstract
+        """
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        out_shape = math.prod(x_aval.shape)
+        # TODO(Phuong): can scale_aval be None?
+        assert scale_aval is None or scale_aval.dtype == jnp.float32
+
+        if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            rowwise_out_shape = out_shape
+        else:
+            rowwise_out_shape = (1,)
+        rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
+
+        updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_grouped_scale_shape_2x(x_aval.shape,
+                                     group_sizes_aval.size,
+                                     group_axis,
+                                     is_padded=True,
+                                     flatten_axis=flatten_axis)
+
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            colwise_out_shape = out_shape
+        else:
+            colwise_out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
+
+        return (
+            rowwise_out_aval,
+            colwise_out_aval,
+            scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        te_dbias_quantize_p outer primitive abstract
+        """
+        # Phuong: keeping outer abstract so that we can add fuse dbias later
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+        ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+
+    @staticmethod
+    def lowering(
+        ctx,
+        x,
+        scale,
+        group_sizes,
+        *,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p lowering rules
+        """
+        del out_dtype, scale_dtype
+        x_aval, scale_aval = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert scale_aval.dtype == jnp.float32
+        return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
+            ctx,
+            x,
+            scale,
+            group_sizes,
+            scaling_mode=scaling_mode.value,
+            q_layout=q_layout,
+            flatten_axis=flatten_axis,
+            group_axis=group_axis,
+        )
+
+    @staticmethod
+    def impl(
+        ctx,
+        x,
+        scale,
+        group_sizes,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p implementation
+        """
+        assert GroupedQuantizePrimitive.inner_primitive is not None
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+        ) = GroupedQuantizePrimitive.inner_primitive.bind(
+            x,
+            scale,
+            group_sizes,
+            out_dtype=out_dtype,
+            scaling_mode=scaling_mode,
+            q_layout=q_layout,
+            flatten_axis=flatten_axis,
+            group_axis=group_axis,
+            scale_dtype=scale_dtype,
+        )
+        return (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax)
+
+
+def grouped_quantize(
+    x: jnp.ndarray,
+    group_quantizer: GroupedQuantizer,
+    group_sizes: jnp.ndarray = None,
+    flatten_axis: int = -1,
+    group_axis: int = 0,
+) -> GroupedScaledTensor1x:
+
+    if not GroupedQuantizePrimitive.enabled():
+        return group_quantizer.quantize(x, flatten_axis=flatten_axis, group_sizes=group_sizes,
+                                        group_axis=group_axis)
+
+    group_sizes = group_sizes or jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+    n_groups = group_sizes.size
+    scale = jnp.empty((n_groups,), jnp.float32)
+
+    # TODO: add a WAR for DelayedScaling COLWISE
+    if group_quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        for i, quantizer_i in enumerate(group_quantizer.quantizers):
+            scale = scale.at[i].set(quantizer_i.scale)
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+    ) = GroupedQuantizePrimitive.outer_primitive.bind(
+        x,
+        scale,
+        group_sizes,
+        out_dtype=group_quantizer.q_dtype,
+        scaling_mode=group_quantizer.scaling_mode.value,
+        q_layout=group_quantizer.q_layout.value,
+        flatten_axis=flatten_axis,
+        group_axis=group_axis,
+        scale_dtype=group_quantizer.get_scale_dtype(),
+    )
+    # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
+    if group_quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and group_quantizer.is_2x2x():
+        colwise_scale_inv = rowwise_scale_inv
+
+    if group_quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        for i, quantizer_i in enumerate(group_quantizer.quantizers):
+            quantizer_i.update(updated_amax[i])
+
+    out = ScaledTensorFactory.create(
+        data=rowwise_casted_output,
+        scale_inv=rowwise_scale_inv,
+        colwise_data=colwise_casted_output,
+        colwise_scale_inv=colwise_scale_inv,
+        scaling_mode=group_quantizer.scaling_mode,
+        dq_dtype=x.dtype,
+        q_layout=group_quantizer.q_layout,
+        data_layout=group_quantizer.get_data_layout(),
+        flatten_axis=flatten_axis,
+        group_sizes=group_sizes,
+        group_axis=group_axis,
+    )
+    return out
