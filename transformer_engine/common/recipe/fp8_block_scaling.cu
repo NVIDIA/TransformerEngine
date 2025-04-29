@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/recipe.h>
+
 #include "../common.h"
 #include "../utils.cuh"
 
