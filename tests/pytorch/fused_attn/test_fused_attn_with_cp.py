@@ -51,7 +51,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 
 
 @pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < 80, reason="CP tests require sm80+.")
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
@@ -111,7 +111,7 @@ model_configs_fused_attn = {
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 7), reason="cuDNN 8.9.7+ is required.")
-@pytest.mark.skipif(get_device_compute_capability() < 80, reason="CP tests require sm80+.")
+@pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
@@ -122,11 +122,11 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
 
-    if qkv_format == "thd" and get_device_compute_capability() < 90:
+    if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+!")
     if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
-    if dtype == "fp8" and get_device_compute_capability() < 90:
+    if dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
 
     config = model_configs_fused_attn[model]

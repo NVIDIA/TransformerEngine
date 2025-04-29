@@ -43,7 +43,7 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 DimsType = Union[Iterable[int], int]
 
 # TODO replace with call to fp8.py when recipe added.
-recipe_available = get_device_compute_capability() >= 90 and float(torch.version.cuda) >= 12.8
+recipe_available = get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8
 reason_for_no_recipe = "Quantize kernels require TMA and are only relevant with GEMMS."
 
 

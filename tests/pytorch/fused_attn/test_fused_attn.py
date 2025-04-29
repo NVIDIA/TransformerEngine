@@ -724,7 +724,7 @@ model_configs_layout_thd = {
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
 @pytest.mark.skipif(
-    get_device_compute_capability() < 90, reason="THD is only supported on Hopper+."
+    get_device_compute_capability() < (9, 0), reason="THD is only supported on Hopper+."
 )
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_layout_thd])
@@ -1440,7 +1440,7 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < 90, reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
@@ -1647,7 +1647,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < 90, reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
@@ -1663,7 +1663,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     #    indirect verification method, we create Q/K/V as all 1s and check if O is all 1s
     # 3. we avoid running FP16/BF16 kernels as they do not have dropout support on Blackwell
     # if "padding" not in config.attn_mask_type and "causal" not in config.attn_mask_type:
-    #    if get_device_compute_capability() >= 100:
+    #    if get_device_compute_capability() >= (10, 0):
     #        config.dropout_p = 0.1
 
     if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (
@@ -1913,7 +1913,7 @@ models_v1 = ["fp8_3", "fp8_4", "fp8_7", "fp8_8"]
     reason=f"""cuDNN {"8.9.3" if cudnn_frontend_version == 0 else "9.2.1"}+ is required.""",
 )
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < 90, reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", models_v1 if cudnn_frontend_version == 1 else models_v0)
 def test_custom_mha_fp8_vs_f16(dtype, model):

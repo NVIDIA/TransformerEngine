@@ -53,7 +53,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
 
-sm_80plus = get_device_compute_capability() >= 80
+sm_80plus = get_device_compute_capability() >= (8, 0)
 
 seed = 1234
 torch.manual_seed(seed)
