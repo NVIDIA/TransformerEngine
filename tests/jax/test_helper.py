@@ -73,8 +73,7 @@ class TestFP8Functions(unittest.TestCase):
         self._check_defult_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=DelayedScaling()):
-            self.assertFalse(QuantizeConfig.is_fp8_enabled())
-            self._compare_delay_scaling(get_delayed_scaling(), DelayedScaling())
+            self._check_defult_state()
 
         self._check_defult_state()
 
@@ -98,8 +97,7 @@ class TestFP8Functions(unittest.TestCase):
         self._check_defult_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=Float8CurrentScaling()):
-            self.assertFalse(QuantizeConfig.is_fp8_enabled())
-            self._compare_current_scaling(Float8CurrentScaling())
+            self._check_defult_state()
 
         self._check_defult_state()
 
@@ -123,8 +121,7 @@ class TestFP8Functions(unittest.TestCase):
         self._check_defult_state()
 
         with fp8_autocast(enabled=False, fp8_recipe=MXFP8BlockScaling()):
-            self.assertFalse(QuantizeConfig.is_fp8_enabled())
-            self._compare_mxfp8_scaling(MXFP8BlockScaling())
+            self._check_defult_state()
 
         self._check_defult_state()
 
