@@ -33,9 +33,9 @@ __all__ = ["fp8_autocast", "fp8_model_init"]
 
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if get_device_compute_capability() >= 90:  # hopper and above
+    if get_device_compute_capability() >= (9, 0):  # hopper and above
         return True, ""
-    if get_device_compute_capability() < 89:  # pre-ada
+    if get_device_compute_capability() < (8, 9):  # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
     if tex.get_cublasLt_version() < 120103:
         return False, "CublasLt version 12.1.3.x or higher required for FP8 execution on Ada."
@@ -46,7 +46,7 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
-    if get_device_compute_capability() >= 100:  # blackwell and above
+    if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
@@ -54,8 +54,8 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if (
-        get_device_compute_capability() >= 90
-        and get_device_compute_capability() < 100
+        get_device_compute_capability() >= (9, 0)
+        and get_device_compute_capability() < (10, 0)
         and float(torch.version.cuda) >= 12.9
     ):
         return True, ""
@@ -64,7 +64,7 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
-    if get_device_compute_capability() >= 100:  # blackwell and above
+    if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return MXFP8BlockScaling()
     return DelayedScaling()
 

@@ -296,8 +296,6 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
-int get_device_compute_capability(int device_id);
-
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/

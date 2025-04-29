@@ -322,7 +322,8 @@ def get_attention_backend(
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": "sm" + str(device_compute_capability),
+        "compute_capability": "sm"
+        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
         "flash_attn_version": (
             str(FlashAttentionUtils.version)
             if FlashAttentionUtils.is_installed
@@ -366,14 +367,14 @@ def get_attention_backend(
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
 
     # Filter: Compute capability
-    if device_compute_capability < 80:
+    if device_compute_capability < (8, 0):
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for compute capability < sm80")
         use_flash_attention_2 = False
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for compute capability < sm80")
             use_fused_attention = False
-    if device_compute_capability != 90:
+    if device_compute_capability != (9, 0):
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
@@ -487,7 +488,10 @@ def get_attention_backend(
     if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
-        or (head_dim_qk > 192 and device_compute_capability not in (80, 90, 100, 120))
+        or (
+            head_dim_qk > 192
+            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+        )
     ):
         if FlashAttentionUtils.is_installed:
             logger.debug(
@@ -834,7 +838,7 @@ def get_attention_backend(
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
             and (
-                device_compute_capability < 90
+                device_compute_capability < (9, 0)
                 or core_attention_bias_requires_grad
                 or cudnn_version < (8, 9, 5)
             )
@@ -904,7 +908,7 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if use_flash_attention and use_fused_attention and device_compute_capability >= 90:
+    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
             "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
             "for performance reasons"

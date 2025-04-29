@@ -244,8 +244,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-  m.def("get_device_compute_capability", &get_device_compute_capability,
-        "Get device compute capability", py::call_guard<py::gil_scoped_release>());
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
   // Support THD format for Context Parallel
