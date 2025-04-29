@@ -441,6 +441,14 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.535 and actual[1] > 0.73
 
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.535 and actual[1] > 0.73
+
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
@@ -466,6 +474,15 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.535 and actual[1] > 0.73
 
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8_shardy(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.535 and actual[1] > 0.73
 
 
 if __name__ == "__main__":
