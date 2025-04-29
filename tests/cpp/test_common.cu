@@ -738,8 +738,6 @@ void fillUniform(Tensor *t) {
 template<typename InputEncoding, InputsFillCase Case>
 void fillCase_special(Tensor *t) {
   const size_t size = product(t->rowwise_shape());
-  const size_t rows = t->rowwise_shape().ndim > 0 ? t->rowwise_shape().data[0] : 1;
-  const size_t cols = t->rowwise_shape().ndim > 1 ? t->rowwise_shape().data[1] : 1;
 
   if constexpr (Case == InputsFillCase::zeros) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
@@ -759,16 +757,13 @@ void fillCase_special(Tensor *t) {
     std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
       InputType *data = t->rowwise_cpu_dptr<InputType>();
-      for (size_t i = 0; i < rows; ++i) {
-        for (size_t j = 0; j < cols; ++j) {
-          const size_t idx = i * cols + j;
-          const bool is_negative = (dis_sign(t->gen()) < 0.0);
-          double val = dis(t->gen());
-          if (is_negative) {
-            val = -val;
-          }
-          data[idx] = static_cast<InputType>(val);
+      for (size_t idx = 0; idx < size; ++idx) {
+        const bool is_negative = (dis_sign(t->gen()) < 0.0);
+        double val = dis(t->gen());
+        if (is_negative) {
+          val = -val;
         }
+        data[idx] = static_cast<InputType>(val);
       }
     });
   }
