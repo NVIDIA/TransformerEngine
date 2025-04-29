@@ -69,7 +69,7 @@ stats_to_num = {
     "underflows_num": 12,
     "std": 13,
     "dynamic_range": 14,
-    "underflows%": 15
+    "underflows%": 15,
 }
 
 DEPENDENCIES = {
@@ -88,7 +88,7 @@ DEPENDENCIES = {
     "underflows_num": {"underflows_num"},
     "std": {"variance", "numel", "sum"},
     "dynamic_range": {"dynamic_range_top", "dynamic_range_bottom"},
-    "underflows%": {"underflows_num", "numel"}
+    "underflows%": {"underflows_num", "numel"},
 }
 
 STATS = {
