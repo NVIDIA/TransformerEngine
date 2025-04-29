@@ -70,7 +70,7 @@ try:
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
-    if torch.cuda.is_available() and get_device_compute_capability() >= 100:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
         if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
             fa_utils.is_installed = True
     elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
@@ -92,7 +92,7 @@ else:
         fa_utils.set_flash_attention_version()
     elif (
         torch.cuda.is_available()
-        and get_device_compute_capability() >= 80
+        and get_device_compute_capability() >= (8, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
         attn_log.fa_logger.warning(
@@ -100,7 +100,7 @@ else:
             dpa_utils._get_supported_versions(
                 (
                     fa_utils.version_required
-                    if get_device_compute_capability() < 100
+                    if get_device_compute_capability() < (10, 0)
                     else fa_utils.version_required_blackwell
                 ),
                 fa_utils.max_version,
@@ -1385,7 +1385,7 @@ class FusedAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.use_FAv2_bwd = (
             os.getenv("NVTE_FUSED_ATTN_USE_FAv2_BWD", "0") == "1"
-            and get_device_compute_capability() == 90
+            and get_device_compute_capability() == (9, 0)
         )
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic

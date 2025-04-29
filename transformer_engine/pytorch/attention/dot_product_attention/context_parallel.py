@@ -479,7 +479,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         device_compute_capability = get_device_compute_capability()
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
-            device_compute_capability < 100 and cp_size == 2
+            device_compute_capability < (10, 0) and cp_size == 2
         )
 
         causal = "causal" in attn_mask_type
@@ -1442,7 +1442,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         device_compute_capability = get_device_compute_capability()
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
-            device_compute_capability < 100 and cp_size == 2
+            device_compute_capability < (10, 0) and cp_size == 2
         )
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
