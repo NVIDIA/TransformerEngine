@@ -738,8 +738,8 @@ void fillUniform(Tensor *t) {
 template<typename InputEncoding, InputsFillCase Case>
 void fillCase_special(Tensor *t) {
   const size_t size = product(t->rowwise_shape());
-  const size_t rows = t->rowwise_shape().data[0];
-  const size_t cols = t->rowwise_shape().data[1];
+  const size_t rows = t->rowwise_shape().ndim > 0 ? t->rowwise_shape().data[0] : 1;
+  const size_t cols = t->rowwise_shape().ndim > 1 ? t->rowwise_shape().data[1] : 1;
 
   if constexpr (Case == InputsFillCase::zeros) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
