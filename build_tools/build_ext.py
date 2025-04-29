@@ -4,7 +4,6 @@
 
 """Installation script."""
 
-import ctypes
 import os
 import subprocess
 import sys
@@ -23,7 +22,7 @@ from .utils import (
     debug_build_enabled,
     found_ninja,
     get_frameworks,
-    cuda_path,
+    nvcc_path,
     get_max_jobs_for_parallel_build,
 )
 
@@ -94,7 +93,9 @@ class CMakeExtension(setuptools.Extension):
         print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
-def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel_lib: bool = False):
+def get_build_ext(
+    extension_cls: Type[setuptools.Extension], framework_extension_only: bool = False
+):
     class _CMakeBuildExtension(extension_cls):
         """Setuptools command with support for CMake extension modules"""
 
@@ -132,7 +133,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
             # Ensure that binaries are not in global package space.
             lib_dir = (
                 "wheel_lib"
-                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or install_so_in_wheel_lib
+                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
                 else ""
             )
             target_dir = install_dir / "transformer_engine" / lib_dir
@@ -143,8 +144,8 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
                 os.remove(ext)
 
         def build_extensions(self):
-            # BuildExtensions from PyTorch already handle CUDA files correctly
-            # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
+            # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
+            # to handle CUDA files correctly.
             if "pytorch" not in get_frameworks():
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
@@ -156,17 +157,21 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
 
                 # Define new _compile method that redirects to NVCC for .cu and .cuh files.
                 original_compile_fn = self.compiler._compile
-                self.compiler.src_extensions += [".cu", ".cuh"]
+                if not framework_extension_only:
+                    self.compiler.src_extensions += [".cu", ".cuh"]
 
                 def _compile_fn(obj, src, ext, cc_args, extra_postargs, pp_opts) -> None:
                     # Copy before we make any modifications.
                     cflags = copy.deepcopy(extra_postargs)
                     original_compiler = self.compiler.compiler_so
                     try:
-                        _, nvcc_bin = cuda_path()
                         original_compiler = self.compiler.compiler_so
 
-                        if os.path.splitext(src)[1] in [".cu", ".cuh"]:
+                        if (
+                            os.path.splitext(src)[1] in [".cu", ".cuh"]
+                            and not framework_extension_only
+                        ):
+                            nvcc_bin = nvcc_path()
                             self.compiler.set_executable("compiler_so", str(nvcc_bin))
                             if isinstance(cflags, dict):
                                 cflags = cflags["nvcc"]
@@ -178,7 +183,6 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
                             # Forward unknown options
                             if not any("--forward-unknown-opts" in flag for flag in cflags):
                                 cflags.append("--forward-unknown-opts")
-
                         elif isinstance(cflags, dict):
                             cflags = cflags["cxx"]
 
