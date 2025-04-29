@@ -723,7 +723,9 @@ class GroupedLinear(TransformerEngineBaseModule):
             # Note: Quantizer might have changed if quantization
             # recipe changed
             for i in range(self.num_gemms):
-                if weight_quantizers[i] is not None and isinstance(weight_tensors[i], QuantizedTensor):
+                if weight_quantizers[i] is not None and isinstance(
+                    weight_tensors[i], QuantizedTensor
+                ):
                     weight_tensors[i]._quantizer = weight_quantizers[i]
 
             if torch.is_grad_enabled():
