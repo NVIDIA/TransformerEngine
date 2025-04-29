@@ -585,7 +585,9 @@ def has_te_modules(network):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [
@@ -1498,7 +1500,9 @@ def _is_te_module(module):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [

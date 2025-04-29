@@ -4,11 +4,12 @@
 
 """JAX related extensions."""
 import os
+import shutil
 from pathlib import Path
 
 import setuptools
 
-from .utils import cuda_path, all_files_in_dir
+from .utils import get_cuda_include_dirs, all_files_in_dir
 from typing import List
 
 
@@ -43,16 +44,16 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
-    cuda_home, _ = cuda_path()
-    xla_home = xla_path()
-    include_dirs = [
-        cuda_home / "include",
-        common_header_files,
-        common_header_files / "common",
-        common_header_files / "common" / "include",
-        csrc_header_files,
-        xla_home,
-    ]
+    include_dirs = get_cuda_include_dirs()
+    include_dirs.extend(
+        [
+            common_header_files,
+            common_header_files / "common",
+            common_header_files / "common" / "include",
+            csrc_header_files,
+            xla_path(),
+        ]
+    )
 
     # Compile flags
     cxx_flags = ["-O3"]
