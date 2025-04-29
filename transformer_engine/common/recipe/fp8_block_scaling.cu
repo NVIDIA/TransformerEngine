@@ -6,6 +6,8 @@
 
 #include <transformer_engine/recipe.h>
 
+#include <cassert>
+
 #include "../common.h"
 #include "../utils.cuh"
 
