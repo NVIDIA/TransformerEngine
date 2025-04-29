@@ -501,7 +501,7 @@ def get_attention_backend(
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
                 head_dim_qk,
                 head_dim_v,
-                device_compute_capability,
+                ".".join([str(i) for i in device_compute_capability]),
             )
         use_flash_attention_2 = False
     if use_flash_attention_3 and (head_dim_qk > 128 or head_dim_v > 128):
