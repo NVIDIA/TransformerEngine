@@ -792,7 +792,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
         _current_recipe = self.fp8_meta["recipe"]
-        if _original_recipe is not None and _original_recipe.__class__ != _current_recipe.__class__:
+        if _original_recipe is not None and not (
+            issubclass(_current_recipe.__class__, _original_recipe.__class__)
+            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        ):
             warnings.warn(
                 f"Recipe type changed from {_original_recipe.__class__.__name__} "
                 f"to {_current_recipe.__class__.__name__}. "
