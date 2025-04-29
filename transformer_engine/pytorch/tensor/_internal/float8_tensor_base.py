@@ -142,5 +142,8 @@ class Float8TensorBase:
         data = self._data
         if not data.is_contiguous():
             data = data.contiguous()
-        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
+        if data.device.type == "cpu":
+            self._transpose = data
+        else:
+            self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
         self._transpose_invalid = False
