@@ -1394,10 +1394,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                             "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    warnings.warn(
-                        "You are using quantized weights without quantized compute. "
-                        "Please make sure this is intentional."
-                    )
                     unfused_weights = [w.dequantize() for w in unfused_weights]
 
             weight_tensor = noop_cat(unfused_weights)
@@ -1428,6 +1424,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             ) = quantizers
+
+            # Make sure weight tensor has correct quantizer
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            if weight_quantizer is not None and isinstance(weight_tensor, QuantizedTensor):
+                weight_tensor._quantizer = weight_quantizer
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply

@@ -4,7 +4,6 @@
 
 """GroupedLinear API"""
 from typing import Union, Optional, Callable, Tuple, List
-import warnings
 
 import functools
 import torch
@@ -677,10 +676,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fp8:
-                warnings.warn(
-                    "You are using quantized weights without quantized compute. "
-                    "Please make sure this is intentional."
-                )
                 weight_tensors = [
                     w.dequantize() if isinstance(w, QuantizedTensor) else w for w in weight_tensors
                 ]
@@ -718,6 +713,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                     ]
                     for i in range(self.num_gemms):
                         grad_output_quantizers[i].internal = True
+
+            # Make sure weight tensor has correct quantizer
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            for i in range(self.num_gemms):
+                if weight_quantizers[i] is not None and isinstance(weight_tensors[i], QuantizedTensor):
+                    weight_tensors[i]._quantizer = weight_quantizers[i]
 
             if torch.is_grad_enabled():
                 linear_fn = _GroupedLinear.apply
