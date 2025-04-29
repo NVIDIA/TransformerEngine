@@ -434,7 +434,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_bulk_dgrad = ub_bulk_dgrad
             ctx.ub_name = ub_name
-            ctx.requires_dgrad = inp.requires_grad
+            ctx.requires_dgrad = inp_requires_grad
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
@@ -464,7 +464,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
-                shape = list(inp.shape)
+                shape = list(inp_shape)
                 shape[0] *= tp_size
                 return out, ln_out_return.view(shape)
             return out, ln_out_return.view_as(inp)
