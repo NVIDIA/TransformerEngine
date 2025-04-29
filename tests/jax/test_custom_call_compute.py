@@ -78,12 +78,17 @@ def is_shape_supported_by_mxfp8(input_shape):
 
 def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
+        assert a.scaling_mode == b.scaling_mode
         assert a.scale_inv.dtype == b.scale_inv.dtype
-        if a.scale_inv.dtype == jnp.float8_e8m0fnu:
+        if a.scaling_mode.is_tensor_scaling():
+            # Assert in dq_dtype as some unfused codepaths have an intermediate cast
+            # to an input dtype which reduces precision compared to everything in fp32
+            assert_allclose(a.scale_inv, b.scale_inv, dtype=a.dq_dtype)
+        elif a.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Compare MXFP8 scales as uint8
             assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
         else:
-            assert_allclose(a.scale_inv, b.scale_inv)
+            raise ValueError(f"Unsupported scaling mode {a.scaling_mode}")
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
@@ -614,6 +619,12 @@ class TestFusedQuantize:
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
+
+        if (flatten_axis < 0 and flatten_axis + len(input_shape) <= 0) or flatten_axis <= 0:
+            pytest.skip(
+                f"Flatten axis {flatten_axis} is not supported for input shape {input_shape}. There"
+                " must be at least one axis on either side of the flatten_axis split."
+            )
 
         key = jax.random.PRNGKey(0)
         input = jax.random.uniform(key, input_shape, in_dtype)
