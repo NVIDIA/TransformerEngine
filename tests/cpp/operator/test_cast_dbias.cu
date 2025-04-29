@@ -70,7 +70,7 @@ void performTest(const std::vector<size_t>& shape) {
 
   Tensor output_c("output_c", shape, otype);
   // dbias has the same data type with "output grad"
-  Tensor dbias("dbias", {H}, itype);
+  Tensor dbias("dbias", std::vector<size_t>{H}, itype);
 
   fillUniform(&input);
   setRandomScale(&output_c);

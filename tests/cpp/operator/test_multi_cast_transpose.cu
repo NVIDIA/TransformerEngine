@@ -81,9 +81,9 @@ void performTest() {
   for (size_t tensor_id = 0; tensor_id < num_tensors; ++tensor_id) {
     const size_t height = tensor_dims[tensor_id].first;
     const size_t width = tensor_dims[tensor_id].second;
-    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), { height, width }, itype));
+    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), std::vector<size_t>{ height, width }, itype));
     output_list.emplace_back(Tensor("output_" + std::to_string(tensor_id),
-                                    { height, width }, otype, true, true));
+                                    std::vector<size_t>{ height, width }, otype, true, true));
 
     auto& input = input_list.back();
     auto& output = output_list.back();
