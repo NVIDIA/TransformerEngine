@@ -145,7 +145,7 @@ class _Linear(torch.autograd.Function):
             fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
         )  # Perform TP communication in high precision.
         if fp8:
-            # assert_dim_for_fp8_exec(inputmat, weight)
+            assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
                 FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
