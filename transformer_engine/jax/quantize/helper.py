@@ -224,12 +224,10 @@ class RecipeManager(ABC):
     @abstractmethod
     def is_supported(self, gpu_id: Optional[int] = None) -> Tuple[bool, str]:
         """Check if the recipe is supported on the given GPU."""
-        pass
 
     @abstractmethod
     def get_quantizer_params(self, usage_context: UsageContext) -> QuantizerParams:
         """Get quantizer parameters for the given usage context."""
-        pass
 
 
 class DelayedScalingRecipeManager(RecipeManager):
@@ -291,12 +289,11 @@ class RecipeManagerFactory:
         """
         if isinstance(fp8_recipe, recipe.DelayedScaling):
             return DelayedScalingRecipeManager()
-        elif isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
             return MXFP8BlockScalingRecipeManager()
-        elif isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
             return CurrentScalingRecipeManager()
-        else:
-            raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
+        raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
 
 
 class AmaxComputeAlgo(Enum):
@@ -498,12 +495,11 @@ def get_quantize_config(
     """
     if isinstance(fp8_recipe, recipe.DelayedScaling):
         return DelayedScalingQuantizeConfig
-    elif isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         return BlockScalingQuantizeConfig
-    elif isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
         return CurrentScalingQuantizeConfig
-    else:
-        raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
+    raise ValueError(f"Unsupported recipe type: {type(fp8_recipe)}")
 
 
 @contextmanager
