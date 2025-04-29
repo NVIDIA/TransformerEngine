@@ -41,6 +41,7 @@ is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 SUPPORTED_RECIPES = []
 if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
@@ -217,37 +218,10 @@ class TestDistributedLayernormMLP:
                             m_grad, s_grad, dtype=dtype, err_msg=f"multi_grads[{i}] is not close"
                         )
                 else:
-                    is_gated = len(activation_type) > 1
-                    rtol = None
-                    atol = None
-                    if is_gated:
-                        if dtype == jnp.bfloat16:
-                            if i == 2:
-                                rtol = 800
-                                atol = 9e-2
-                            if i == 4:
-                                atol = 300
-                                rtol = 1e-1
-                        if dtype == jnp.float16:
-                            if i == 1:  # gamma
-                                rtol = 200
-                                atol = 1e-2
-                            if i == 2:
-                                rtol = 2000
-                                atol = 7e-2
-                            if i == 4 and fp8_recipe == recipe.MXFP8BlockScaling():  # bias_1
-                                # Accumulating dbias across a large tensor introduces a larger difference
-                                rtol = 200
-                                atol = 4e-2
-                            if i == 4 and fp8_recipe == recipe.DelayedScaling():
-                                rtol = 2200
-                                atol = 9e-2
                     assert_allclose(
                         multi_grads[i],
                         single_grads[i],
                         dtype=dtype,
-                        rtol=rtol,
-                        atol=atol,
                         err_msg=f"multi_grads[{i}] is not close",
                     )
 

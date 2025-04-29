@@ -230,9 +230,15 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Increase the workspace by the number of maximum concurrent streams
+    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    if _cublas_workspace is None:
+        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
+        # This ensures we don't do `.repeat()` on an already expanded workspace
+        _cublas_workspace = torch.empty(
+            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
+        ).repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from importlib.metadata import version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 
@@ -162,8 +163,30 @@ def found_pybind11() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def cuda_path() -> Tuple[str, str]:
-    """CUDA root path and NVCC binary path as a tuple.
+def cuda_toolkit_include_path() -> Tuple[str, str]:
+    """Returns root path for cuda toolkit includes.
+
+    return `None` if CUDA is not found."""
+    # Try finding CUDA
+    cuda_home: Optional[Path] = None
+    if cuda_home is None and os.getenv("CUDA_HOME"):
+        # Check in CUDA_HOME
+        cuda_home = Path(os.getenv("CUDA_HOME")) / "include"
+    if cuda_home is None:
+        # Check in NVCC
+        nvcc_bin = shutil.which("nvcc")
+        if nvcc_bin is not None:
+            cuda_home = Path(nvcc_bin.rstrip("/bin/nvcc")) / "include"
+    if cuda_home is None:
+        # Last-ditch guess in /usr/local/cuda
+        if Path("/usr/local/cuda").is_dir():
+            cuda_home = Path("/usr/local/cuda") / "include"
+    return cuda_home
+
+
+@functools.lru_cache(maxsize=None)
+def nvcc_path() -> Tuple[str, str]:
+    """Returns the NVCC binary path.
 
     Throws FileNotFoundError if NVCC is not found."""
     # Try finding NVCC
@@ -185,7 +208,34 @@ def cuda_path() -> Tuple[str, str]:
     if not nvcc_bin.is_file():
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
-    return cuda_home, nvcc_bin
+    return nvcc_bin
+
+
+@functools.lru_cache(maxsize=None)
+def get_cuda_include_dirs() -> Tuple[str, str]:
+    """Returns the CUDA header directory."""
+
+    # If cuda is installed via toolkit, all necessary headers
+    # are bundled inside the top level cuda directory.
+    if cuda_toolkit_include_path() is not None:
+        return [cuda_toolkit_include_path()]
+
+    # Use pip wheels to include all headers.
+    try:
+        import nvidia
+    except ModuleNotFoundError as e:
+        raise RuntimeError("CUDA not found.")
+
+    cuda_root = Path(nvidia.__file__).parent
+    return [
+        cuda_root / "cuda_nvcc" / "include",
+        cuda_root / "cublas" / "include",
+        cuda_root / "cuda_runtime" / "include",
+        cuda_root / "cudnn" / "include",
+        cuda_root / "cuda_cccl" / "include",
+        cuda_root / "nvtx" / "include",
+        cuda_root / "cuda_nvrtc" / "include",
+    ]
 
 
 @functools.lru_cache(maxsize=None)
@@ -199,18 +249,34 @@ def cuda_archs() -> str:
 
 
 def cuda_version() -> Tuple[int, ...]:
-    """CUDA Toolkit version as a (major, minor) tuple."""
-    # Query NVCC for version info
-    _, nvcc_bin = cuda_path()
-    output = subprocess.run(
-        [nvcc_bin, "-V"],
-        capture_output=True,
-        check=True,
-        universal_newlines=True,
-    )
-    match = re.search(r"release\s*([\d.]+)", output.stdout)
-    version = match.group(1).split(".")
-    return tuple(int(v) for v in version)
+    """CUDA Toolkit version as a (major, minor) tuple.
+
+    Try to get cuda version by locating the nvcc executable and running nvcc --version. If
+    nvcc is not found, look for the cuda runtime package pip `nvidia-cuda-runtime-cu12`
+    and check pip version.
+    """
+
+    try:
+        nvcc_bin = nvcc_path()
+    except FileNotFoundError as e:
+        pass
+    else:
+        output = subprocess.run(
+            [nvcc_bin, "-V"],
+            capture_output=True,
+            check=True,
+            universal_newlines=True,
+        )
+        match = re.search(r"release\s*([\d.]+)", output.stdout)
+        version = match.group(1).split(".")
+        return tuple(int(v) for v in version)
+
+    try:
+        version_str = version("nvidia-cuda-runtime-cu12")
+        version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
+        return version_tuple
+    except importlib.metadata.PackageNotFoundError:
+        raise RuntimeError("Could neither find NVCC executable nor CUDA runtime Python package.")
 
 
 def get_frameworks() -> List[str]:
@@ -298,18 +364,3 @@ def install_and_import(package):
     main_package = package.split("[")[0]
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
-
-
-def uninstall_te_wheel_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_cu12",
-            "transformer_engine_torch",
-            "transformer_engine_jax",
-        ]
-    )
