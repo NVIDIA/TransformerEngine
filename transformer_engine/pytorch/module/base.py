@@ -790,6 +790,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 f"to {_current_recipe.__class__.__name__}. "
                 "This may affect model behavior."
             )
+            # Clear cached workspaces as they were created with the old recipe/quantizer type
+            self._fp8_workspaces.clear()
 
     @contextmanager
     def prepare_forward(
