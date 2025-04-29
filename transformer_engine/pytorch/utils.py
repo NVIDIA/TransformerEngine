@@ -236,9 +236,11 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
 
     for tensor in tensors:
         assert math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0, (
-            f"FP8 execution requires the product of all dimensions except the last to be divisible by 8 "
-            f"and the last dimension to be divisible by 16, but got tensor with dims={list(tensor.size())}"
+            "FP8 execution requires the product of all dimensions except the last to be divisible"
+            " by 8 and the last dimension to be divisible by 16, but got tensor with"
+            f" dims={list(tensor.size())}"
         )
+
 
 def is_bf16_compatible() -> None:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
