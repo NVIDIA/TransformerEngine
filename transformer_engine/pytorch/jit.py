@@ -9,7 +9,8 @@ from typing import Callable, Optional, Tuple
 
 import torch
 
-from .utils import is_torch_min_version, gpu_autocast_ctx
+from . import torch_version
+from .utils import gpu_autocast_ctx
 
 # pylint: disable=unnecessary-lambda-assignment
 
@@ -33,13 +34,13 @@ def lazy_compile(func):
 
 
 jit_fuser = lambda func: func
-if is_torch_min_version("2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+if torch_version() >= (2, 0, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = lazy_compile
 
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
-if is_torch_min_version("2.2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = lazy_compile
 
 
@@ -51,9 +52,9 @@ no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recu
 def set_jit_fusion_options() -> None:
     """Set PyTorch JIT layer fusion options."""
     # flags required to enable jit fusion kernels
-    if is_torch_min_version("2.2.0a0"):
+    if torch_version() >= (2, 2, 0):
         pass
-    elif is_torch_min_version("1.10.0a0"):
+    elif torch_version() >= (1, 10, 0):
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)

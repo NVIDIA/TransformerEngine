@@ -19,11 +19,11 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
+from . import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,
     needs_quantized_gemm,
-    is_torch_min_version,
 )
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
@@ -272,7 +272,7 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    if is_torch_min_version("2.4.0a0"):
+    if torch_version() >= (2, 4, 0):
         gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
         gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
         gpu_autocast_ctx = torch.amp.autocast(

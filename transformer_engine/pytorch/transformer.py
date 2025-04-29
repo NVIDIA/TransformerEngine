@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
@@ -25,7 +26,6 @@ from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
     torch_get_autocast_gpu_dtype,
-    is_torch_min_version,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -437,7 +437,7 @@ class TransformerLayer(torch.nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        use_nvfuser = is_torch_min_version("1.10.0a0") and not is_torch_min_version("2.2.0a0")
+        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
         self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
 
         if self.bias_dropout_fusion:
