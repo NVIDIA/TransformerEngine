@@ -125,9 +125,7 @@ class _Linear(torch.autograd.Function):
 
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
-        inp_shape = inp.shape
-        inp_requires_grad = inp.requires_grad
-        assert inp_shape[-1] == in_features, "GEMM not possible"
+        assert inp.shape[-1] == in_features, "GEMM not possible"
 
         tp_world_size = get_distributed_world_size(tp_group)
         backward_needs_input = is_grad_enabled and weight.requires_grad
@@ -135,7 +133,7 @@ class _Linear(torch.autograd.Function):
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
-        inp = inp.view(-1, in_features)
+
         inputmat = inp
         inputmat_total = None
         with_input_all_gather_nccl = (
@@ -147,7 +145,7 @@ class _Linear(torch.autograd.Function):
             fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
         )  # Perform TP communication in high precision.
         if fp8:
-            assert_dim_for_fp8_exec(inputmat, weight)
+            #assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
                 FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
@@ -212,7 +210,7 @@ class _Linear(torch.autograd.Function):
         if fp8 or debug:
             # Configure quantizer
             if weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp_requires_grad
+                columnwise_usage = is_grad_enabled and inp.requires_grad
                 if not columnwise_usage:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
@@ -257,7 +255,7 @@ class _Linear(torch.autograd.Function):
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.RS
-            out_shape = [reduce(multiply_op, inp_shape[:-1]) // tp_world_size, out_features]
+            out_shape = [reduce(multiply_op, inp.shape[:-1]) // tp_world_size, out_features]
             rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inputmat_total.device)
 
         elif ub_overlap_ag_fprop:
@@ -309,7 +307,7 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp_requires_grad:
+            if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -366,7 +364,7 @@ class _Linear(torch.autograd.Function):
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp_shape
+            ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_overlap_ag = ub_overlap_ag_dgrad
@@ -375,7 +373,7 @@ class _Linear(torch.autograd.Function):
             ctx.ub_bulk_wgrad = ub_bulk_wgrad
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
-            ctx.requires_dgrad = inp_requires_grad
+            ctx.requires_dgrad = inp.requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
 
@@ -401,7 +399,6 @@ class _Linear(torch.autograd.Function):
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
-        out = out.view(-1, *inp_shape[1:-1], out_features)
         return out
 
     @staticmethod
