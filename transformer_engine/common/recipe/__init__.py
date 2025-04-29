@@ -186,11 +186,12 @@ class DelayedScaling(Recipe):
 
     def __repr__(self) -> str:
         return (
+            f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha},"
+            f"fp8_mha={self.fp8_mha}, "
             f"expected_tensor_class={self.expected_tensor_class.__name__}"
         )
 
@@ -253,6 +254,7 @@ class Float8CurrentScaling(Recipe):
 
     def __repr__(self) -> str:
         return (
+            f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
             f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
@@ -301,8 +303,12 @@ class MXFP8BlockScaling(Recipe):
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
 
     def __repr__(self) -> str:
-        return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]}," \
-               f"expected_tensor_class={self.expected_tensor_class.__name__}"
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"margin={self.margin}, "
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"expected_tensor_class={self.expected_tensor_class.__name__}"
+        )
 
 
 @dataclass()
@@ -387,6 +393,7 @@ class Float8BlockScaling(Recipe):
 
     def __repr__(self) -> str:
         return (
+            f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
             f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "

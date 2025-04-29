@@ -36,9 +36,7 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
-from ..tensor.float8_tensor import Float8Tensor
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer, Float8BlockwiseQTensor
-from ..tensor.mxfp8_tensor import MXFP8Tensor
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
