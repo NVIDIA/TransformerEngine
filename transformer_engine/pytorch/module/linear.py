@@ -524,6 +524,13 @@ class _Linear(torch.autograd.Function):
                     columnwise=columnwise_usage,
                 )
 
+            # Adjust the quantization direction approach depending
+            # on whether dgrad and wgrad calculations will be performed.
+            if not ctx.requires_dgrad and ctx.grad_output_quantizer is not None:
+                ctx.grad_output_quantizer.set_usage(rowwise=False)
+            if not ctx.requires_wgrad and ctx.grad_output_quantizer is not None:
+                ctx.grad_output_quantizer.set_usage(columnwise=False)
+
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
