@@ -970,6 +970,41 @@ def _all_gather_fp8(
     return out, handle
 
 
+def _post_process_fp8_blockwise_gather(
+    out: Float8BlockwiseQTensorBase,
+    quantizer: Float8BlockQuantizer,
+    handle: Optional[torch.distributed.Work] = None,
+) -> Float8BlockwiseQTensorBase:
+    """Post-process FP8 blockwise gather."""
+    if handle is not None:
+        handle.wait()
+        handle = None
+
+    if out.is_gemm_ready_format():
+        return out
+
+    needs_columnwise_data_transpose = (
+        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
+    )
+    need_rowwise_scale_transpose = (
+        quantizer is not None and quantizer.rowwise_usage and not is_non_tn_fp8_gemm_supported()
+    )
+
+    # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
+    # columnwise compact format means doing 128x1 quantization of it
+    # so quantized tensor is 256x1024, scale inv is 2x1024
+    # If we were doing GEMM_READY format, then it's equivalent to do 1x128 quantization
+    # on a transposed 1024x256 tensor, so scale inv is 1024x2, cublas requries 2x1024
+    # Thereforce, it turns out we don't need to transpose the scale inv, only columnwise data
+    if needs_columnwise_data_transpose:
+        out._transpose_columnwise_data()
+        out.set_columnwise_fmt(tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES)
+    if need_rowwise_scale_transpose:
+        out._rowwise_scale_inv = out._rowwise_scale_inv.transpose(-2, -1).contiguous()
+        out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
+    return out
+
+
 def _all_gather_fp8_blockwise(
     inp: torch.Tensor,
     process_group: dist_group_type,
@@ -1111,32 +1146,10 @@ def _all_gather_fp8_blockwise(
     # and then transpose the columnwise data to match the rowwise data
     # Make sure FP8 transpose is populated if needed
 
-    # TODO(zhongbo): to respect the async op, can we make this post gather hook?
-    # then we can leverage more perf increase by overlapping compute and comm
+    if not async_op:
+        # if it's a sync op, we need to do the transpose here as post processing step
+        _post_process_fp8_blockwise_gather(out, quantizer, handle)
 
-    needs_columnwise_data_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
-    need_rowwise_scale_transpose = (
-        quantizer is not None and quantizer.rowwise_usage and not is_non_tn_fp8_gemm_supported()
-    )
-
-    if needs_columnwise_data_transpose or need_rowwise_scale_transpose:
-        if handle is not None:
-            handle.wait()
-            handle = None
-        # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
-        # columnwise compact format means doing 128x1 quantization of it
-        # so quantized tensor is 256x1024, scale inv is 2x1024
-        # If we were doing GEMM_READY format, then it's equivalent to do 1x128 quantization
-        # on a transposed 1024x256 tensor, so scale inv is 1024x2, cublas requries 2x1024
-        # Thereforce, it turns out we don't need to transpose the scale inv, only columnwise data
-        if needs_columnwise_data_transpose:
-            out._transpose_columnwise_data()
-            out.set_columnwise_fmt(tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES)
-        if need_rowwise_scale_transpose:
-            out._rowwise_scale_inv = out._rowwise_scale_inv.transpose(-2, -1).contiguous()
-            out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
     return out, handle
 
 

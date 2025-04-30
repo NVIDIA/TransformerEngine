@@ -108,6 +108,15 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             compact = compact and self._is_columnwise_fmt_compact()
         return compact
 
+    def is_gemm_ready_format(self) -> bool:
+        """Returns True if the format is GEMM_READY for available usage, False otherwise."""
+        gemm_ready = True
+        if self._rowwise_data is not None:
+            gemm_ready = gemm_ready and (not self._is_rowwise_fmt_compact())
+        if self._columnwise_data is not None:
+            gemm_ready = gemm_ready and (not self._is_columnwise_fmt_compact())
+        return gemm_ready
+
     def set_rowwise_fmt(self, rowwise_fmt: RowwiseFmt):
         """Sets the rowwise format."""
         self._rowwise_fmt = rowwise_fmt

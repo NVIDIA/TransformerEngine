@@ -49,6 +49,7 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
+    _post_process_fp8_blockwise_gather,
 )
 from ..cpp_extensions import (
     general_gemm,
