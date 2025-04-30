@@ -318,6 +318,16 @@ void nvte_dqgeglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
 void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor act_input,
                                  NVTETensor output, cudaStream_t stream);
 
+/*! \brief Dequantize the rowwise input, then transpose the result and cast it to fp8 in rowwise.
+ *
+ *  \param[in,out]  tensor              Input and output tensor.
+ *                                      Shape of rowwise data: [N, H].
+ *                                      Shape of columnwise data: [H, N].
+ *  \param[in]      quant_config        Quantization configuration.
+ *  \param[in]      stream              CUDA stream used for the operation.
+*/
+void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig quant_config,
+                              cudaStream_t stream);
 #ifdef __cplusplus
 }  // extern "C"
 #endif

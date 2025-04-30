@@ -60,7 +60,7 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
 // pow_2_scaling: Whether to force the scale to be a power of 2.
 template <typename IType, typename OType>
 __device__ __forceinline__ float compute_scale_from_types(const float amax, const float eps,
-                                                          const float pow_2_scaling) {
+                                                          const bool pow_2_scaling) {
   constexpr float fp8_max = TypeInfo<OType>::max_finite_value;
   // NOTE: We're relying on compute_scale_from_amax to have behavior where it
   // clips the mantissa of the max_finite_value if power of 2 scaling applies.
