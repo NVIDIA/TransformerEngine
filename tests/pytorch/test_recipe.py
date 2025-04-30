@@ -422,7 +422,9 @@ class TestFP8Recipe:
             ),
         ],
     )
-    def test_dynamic_recipe_update(self, target_recipe_class, expected_quantizer_type, available_flag, reason):
+    def test_dynamic_recipe_update(
+        self, target_recipe_class, expected_quantizer_type, available_flag, reason
+    ):
         if not available_flag:
             pytest.skip(reason)
 
@@ -459,7 +461,7 @@ class TestFP8Recipe:
             else:
                 # No warning expected on subsequent iterations
                 with warnings.catch_warnings():
-                    warnings.simplefilter("error") # Raise error if unexpected warning occurs
+                    warnings.simplefilter("error")  # Raise error if unexpected warning occurs
                     with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
                         y = linear(x)
             loss = y.mean()
