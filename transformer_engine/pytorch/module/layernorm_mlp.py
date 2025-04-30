@@ -55,6 +55,7 @@ from ..distributed import (
     use_reentrant_activation_recompute,
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
+    _post_process_fp8_blockwise_gather,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
@@ -66,6 +67,7 @@ from ..tensor.float8_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
@@ -236,19 +238,11 @@ class _LayerNormMLP(torch.autograd.Function):
             and not return_layernorm_output_gathered
             and not debug
         )
-        if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
-            # Kernels not available for norm fusion.
-            with_quantized_norm = False
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
-
-        # TODO(kwyss): Support FP8 allgather of Float8BlockQuantizer recipe
-        force_hp_fc1_input_gather = (
-            fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
-        )  # Perform TP communication in high precision.
 
         # Configure quantizer for norm output
         if fp8:
@@ -258,7 +252,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if (
                 columnwise_usage
                 and sequence_parallel
-                and not isinstance(fc1_input_quantizer, MXFP8Quantizer)
+                and not isinstance(fc1_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer))
             ):
                 columnwise_usage = False
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
@@ -291,13 +285,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    if not force_hp_fc1_input_gather:
-                        ln_out = fc1_input_quantizer(ln_out)
+                    ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
+                        fc1_input_quantizer.set_usage(need_compact=False)
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
                 if fp8 or debug:
-                    if not with_quantized_norm and not force_hp_fc1_input_gather:
+                    if not with_quantized_norm:
                         ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
@@ -313,10 +308,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         quantizer=(fc1_input_quantizer if fp8 or debug else None),
                     )
         else:
-            # NOTE: force_hp_fc1_input_gather is redundant with else, but
-            # here for clarity. We should not quantize ln_out if bwd needs
-            # to gather in hp.
-            if (fp8 or debug) and not with_quantized_norm and not force_hp_fc1_input_gather:
+            if (fp8 or debug) and not with_quantized_norm:
                 ln_out = fc1_input_quantizer(ln_out)
             ln_out_total = ln_out
 
@@ -503,8 +495,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 if not return_layernorm_output:
                     clear_tensor_data(ln_out)
                 ln_out = None
-            elif force_hp_fc1_input_gather:
-                assert not isinstance(ln_out, QuantizedTensor)
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
@@ -533,7 +523,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.force_hp_fc1_input_gather = force_hp_fc1_input_gather
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
@@ -610,7 +599,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
-                shape[0] *= tp_size
+                shape[0] *= tp_size if (sequence_parallel and set_parallel_mode) else 1
                 return fc2_out, ln_out_return.view(shape)
             return fc2_out, ln_out_return.view_as(inp)
         return fc2_out
@@ -752,12 +741,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     else:
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)
-                gather_quantizer = None if ctx.force_hp_fc1_input_gather else quantizer
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,
                     async_op=True,
-                    quantizer=gather_quantizer,
+                    quantizer=quantizer,
                 )
             else:
                 ln_out_total = ln_out
@@ -1013,13 +1001,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
-                if ctx.fc1_input_quantizer is not None and not isinstance(
-                    ln_out_total, QuantizedTensor
-                ):
-                    # Async gather in BF16 does not asynchronously
-                    # call quantizer after gather.
-                    ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
-                    ln_out_total = ctx.fc1_input_quantizer(ln_out_total)
+                    if isinstance(ln_out_total, Float8BlockwiseQTensorBase):
+                        ln_out_total = _post_process_fp8_blockwise_gather(
+                            ln_out_total, ctx.fc1_input_quantizer, None
+                        )
 
                 # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):
@@ -1528,8 +1513,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         super().set_meta_tensor(fwd, recipe)
 
         # customize quantizers based on each recipe & layer configs
-        if FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling():
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        elif recipe.float8_block_scaling():
+            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
     def reset_layer_norm_parameters(self) -> None:
@@ -1871,6 +1859,22 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
+
+    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on blockwise scaling recipe + layernorm_mlp."""
+        assert (
+            recipe.float8_block_scaling()
+        ), "blockwise scaling recipe quantizer customization here"
+        if fwd:
+            if self.sequence_parallel and self.set_parallel_mode:
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
+                    need_compact=True
+                )
+        else:
+            if self.sequence_parallel and self.set_parallel_mode:
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].set_usage(
+                    need_compact=True
+                )
 
     def backward_dw(self):
         """
