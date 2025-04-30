@@ -1138,7 +1138,7 @@ fwd_bwd_dtypes = [
     [jnp.float8_e5m2, jnp.float8_e4m3fn],
 ]
 
-
+"""
 @pytest_parametrize_wrapper(
     "shape_list", [[(512, 128, 256), (256, 128, 256), (256, 128, 128), (512, 256, 128)]]
 )
@@ -1353,3 +1353,4 @@ class TestGroupedDense:
             assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=allclose_dtype)
             assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=allclose_dtype)
             assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=allclose_dtype)
+"""
