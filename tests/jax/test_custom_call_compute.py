@@ -39,7 +39,7 @@ from transformer_engine.jax.quantize import (
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
-from transformer_engine.jax.dense import dense, grouped_dense
+from transformer_engine.jax.dense import dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
