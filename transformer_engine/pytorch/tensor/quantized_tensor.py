@@ -375,7 +375,7 @@ class QuantizedTensor(torch.Tensor):
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
-        
+
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
             tensor = args[0]

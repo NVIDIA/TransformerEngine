@@ -178,7 +178,7 @@ class Float8BlockQuantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False
+        requires_grad: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -379,15 +379,27 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     def empty_like(self, *args, **kwargs):
         """Create a new empty tensor with the same shape and type as this tensor"""
-        new_rowwise_data = torch.empty_like(self._rowwise_data, *args, **kwargs) \
-            if self._rowwise_data is not None else None
-        new_columnwise_data = torch.empty_like(self._columnwise_data, *args, **kwargs) \
-            if self._columnwise_data is not None else None
-        rowwise_scale_inv = torch.empty_like(self._rowwise_scale_inv, *args, **kwargs) \
-            if self._rowwise_scale_inv is not None else None
-        new_columnwise_scale_inv = torch.empty_like(self._columnwise_scale_inv, *args, **kwargs) \
-            if self._columnwise_scale_inv is not None else None
-            
+        new_rowwise_data = (
+            torch.empty_like(self._rowwise_data, *args, **kwargs)
+            if self._rowwise_data is not None
+            else None
+        )
+        new_columnwise_data = (
+            torch.empty_like(self._columnwise_data, *args, **kwargs)
+            if self._columnwise_data is not None
+            else None
+        )
+        rowwise_scale_inv = (
+            torch.empty_like(self._rowwise_scale_inv, *args, **kwargs)
+            if self._rowwise_scale_inv is not None
+            else None
+        )
+        new_columnwise_scale_inv = (
+            torch.empty_like(self._columnwise_scale_inv, *args, **kwargs)
+            if self._columnwise_scale_inv is not None
+            else None
+        )
+
         return Float8BlockwiseQTensor(
             shape=self.shape,
             dtype=self.dtype,

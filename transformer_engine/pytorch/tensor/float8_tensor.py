@@ -95,7 +95,7 @@ class Float8Quantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False
+        requires_grad: bool = False,
     ) -> Float8Tensor:
 
         # Canonicalize tensor attributes
@@ -252,9 +252,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False
+        requires_grad: bool = False,
     ) -> Float8Tensor:
-
 
         # Canonicalize tensor attributes
         if device is None:
@@ -487,10 +486,12 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
     def empty_like(self, *args, **kwargs):
         """Create a new empty tensor with the same shape and type as this tensor"""
-        new_data = torch.empty_like(self._data, *args, **kwargs) \
-            if self._data is not None else None
-        new_transpose = torch.empty_like(self._transpose, *args, **kwargs) \
-            if self._transpose is not None else None
+        new_data = torch.empty_like(self._data, *args, **kwargs) if self._data is not None else None
+        new_transpose = (
+            torch.empty_like(self._transpose, *args, **kwargs)
+            if self._transpose is not None
+            else None
+        )
         new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
         return Float8Tensor(
             shape=self.shape,
@@ -630,6 +631,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
+
                 def copy_tensor(src, dst, tensor_name):
                     src_is_none = getattr(src, tensor_name) is None
                     dst_is_none = getattr(dst, tensor_name) is None
@@ -639,13 +641,14 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                         setattr(dst, tensor_name, None)
                     elif not src_is_none and not dst_is_none:
                         getattr(src, tensor_name).copy_(getattr(dst, tensor_name))
+
                 copy_tensor(src, dst, "_data")
                 copy_tensor(src, dst, "_scale_inv")
                 if src._transpose is not None and dst._data is not None:
                     dst._create_transpose()
                 copy_tensor(src, dst, "_transpose")
                 return
-                
+
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

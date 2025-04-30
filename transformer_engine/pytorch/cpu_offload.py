@@ -339,9 +339,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             self.tensor_tag_to_state[tensor_tag] = tensor
 
-            if (
-                self.current_group < self.num_offload_group
-                and self.tensor_need_offloading_checker(tensor)
+            if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
+                tensor
             ):
                 self.tensor_tag_to_buf[tensor_tag] = tensor
         else:
