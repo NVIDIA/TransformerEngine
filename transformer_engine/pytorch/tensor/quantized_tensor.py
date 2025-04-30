@@ -314,6 +314,15 @@ class QuantizedTensor(torch.Tensor):
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement clear function"
+        )
+
+    def empty_like(self, *args, **kwargs):
+        """Create a new empty tensor with the same shape and type as this tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement empty_like function"
+        )
 
     def __repr__(self, *, tensor_contents=None) -> str:
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
@@ -370,15 +379,7 @@ class QuantizedTensor(torch.Tensor):
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
             tensor = args[0]
-            quantizer = tensor._quantizer # TODO - pgadzinski look if this makes sense
-            dtype = kwargs.get("dtype", tensor.dtype)
-            device = kwargs.get("device", tensor.device)
-            shape = kwargs.get("shape", tensor.shape)
-            pin_memory = kwargs.get("pin_memory", False)
-            rowwise = (getattr(tensor, "_data", None) is not None) or (getattr(tensor, "_rowwise_data", None) is not None)
-            columnwise = (getattr(tensor, "_transpose", None) is not None) or (getattr(tensor, "_columnwise_data", None) is not None)
-
-            return quantizer.make_empty(shape, dtype=dtype, device=device, pin_memory=pin_memory, rowwise=rowwise, columnwise=columnwise)
+            return tensor.empty_like(*args[1:], **kwargs)
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):

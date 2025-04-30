@@ -95,13 +95,8 @@ class Float8Quantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-        rowwise: bool = None,   
-        columnwise: bool = None,
+        requires_grad: bool = False
     ) -> Float8Tensor:
-        rowwise = rowwise if rowwise is not None else self.rowwise_usage
-        columnwise = columnwise if columnwise is not None else self.columnwise_usage
 
         # Canonicalize tensor attributes
         if device is None:
@@ -109,19 +104,18 @@ class Float8Quantizer(Quantizer):
 
         # Allocate FP8 data
         data = None
-        if rowwise:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device)
 
         transpose_shape = shape[-1:] + shape[:-1]
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        if columnwise:
+        if self.columnwise_usage:
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
                 device=device,
-                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -258,13 +252,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        requires_grad: bool = False,
-        pin_memory: bool = False,
-        rowwise: bool = None,
-        columnwise: bool = None,
+        requires_grad: bool = False
     ) -> Float8Tensor:
-        rowwise = rowwise if rowwise is not None else self.rowwise_usage
-        columnwise = columnwise if columnwise is not None else self.columnwise_usage
+
 
         # Canonicalize tensor attributes
         if device is None:
@@ -272,11 +262,11 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         # Allocate FP8 data
         data = None
-        if rowwise:
-            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device)
 
         transpose_shape = None
-        if columnwise:
+        if self.columnwise_usage:
             if len(shape) >= 2:
                 transpose_shape = shape[-1:] + shape[:-1]
             else:
@@ -284,12 +274,11 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        if columnwise:
+        if self.columnwise_usage:
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
                 device=device,
-                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -494,6 +483,23 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 "data": data,
                 "data_transpose": data_transpose,
             },
+        )
+
+    def empty_like(self, *args, **kwargs):
+        """Create a new empty tensor with the same shape and type as this tensor"""
+        new_data = torch.empty_like(self._data, *args, **kwargs) \
+            if self._data is not None else None
+        new_transpose = torch.empty_like(self._transpose, *args, **kwargs) \
+            if self._transpose is not None else None
+        new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
+        return Float8Tensor(
+            shape=self.shape,
+            dtype=self.dtype,
+            data=new_data,
+            fp8_scale_inv=new_scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            data_transpose=new_transpose,
+            quantizer=self._quantizer,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:

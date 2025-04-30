@@ -331,7 +331,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         )
 
         if not torch_stray_tensor:
-
             # obtain a unique tensor tag
             tensor_tag = (self.current_group, self.tensor_count_current_group)
             self.tensor_count_current_group += 1
