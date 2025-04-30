@@ -280,7 +280,7 @@ void runTestCase(const ProcessingMethod processing_method, const std::vector<siz
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
                   opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
-  Tensor output_dbias("output_dbias", {cols}, itype);
+  Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(rows * cols);
@@ -355,7 +355,7 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
                   opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
-  Tensor output_dbias("output_dbias", {cols}, itype);
+  Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(rows * cols);
