@@ -41,10 +41,15 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
             del t
 
 
+@functools.lru_cache
+def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
+    props = torch.cuda.get_device_properties(device)
+    return (props.major, props.minor)
+
+
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return (props.major, props.minor)
+    return _get_device_compute_capability(torch.cuda.current_device())
 
 
 def attention_mask_func(
