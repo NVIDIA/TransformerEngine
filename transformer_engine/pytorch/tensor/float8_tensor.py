@@ -103,17 +103,17 @@ class Float8Quantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = torch.empty(shape, dtype=torch.uint8, device=device)
 
         transpose_shape = shape[-1:] + shape[:-1]
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
+            inner_dim = data.size(-1)
             data_transpose = torch.empty(
-                transpose_shape,
+                inner_dim,
+                data.numel() // inner_dim,
                 dtype=torch.uint8,
                 device=device,
             )
@@ -123,7 +123,7 @@ class Float8Quantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -260,22 +260,15 @@ class Float8CurrentScalingQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = None
-        if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
-
-        transpose_shape = None
-        if self.columnwise_usage:
-            if len(shape) >= 2:
-                transpose_shape = shape[-1:] + shape[:-1]
-            else:
-                transpose_shape = shape
+        data = torch.empty(shape, dtype=torch.uint8, device=device)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
+            inner_dim = data.size(-1)
             data_transpose = torch.empty(
-                transpose_shape,
+                inner_dim,
+                data.numel() // inner_dim,
                 dtype=torch.uint8,
                 device=device,
             )
@@ -285,7 +278,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -317,7 +310,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         if internal:
             return Float8TensorBase(
                 data=data,
-                fp8_scale_inv=torch.empty((), dtype=torch.float32, device=data.device),
+                fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
@@ -327,7 +320,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             shape=data.shape,
             dtype=fake_dtype,
             data=data,
-            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=data.device),
+            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=None,
@@ -647,8 +640,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 if src._transpose is not None and dst._data is not None:
                     dst._create_transpose()
                 copy_tensor(src, dst, "_transpose")
-                return
-
+                return dst
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

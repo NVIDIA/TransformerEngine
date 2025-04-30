@@ -148,9 +148,6 @@ class Quantizer(abc.ABC):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
-        pin_memory: bool = False,
-        rowwise: bool = True,
-        columnwise: bool = True,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
 
