@@ -6,6 +6,7 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable
 import warnings
+import math
 
 import torch
 import transformer_engine_torch as tex
@@ -95,24 +96,32 @@ class Float8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
+        rowwise: bool = None,   
+        columnwise: bool = None,
     ) -> Float8Tensor:
+        rowwise = rowwise if rowwise is not None else self.rowwise_usage
+        columnwise = columnwise if columnwise is not None else self.columnwise_usage
 
         # Canonicalize tensor attributes
         if device is None:
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = None
+        if rowwise:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        transpose_shape = shape[-1:] + shape[:-1]
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        if self.columnwise_usage:
-            inner_dim = data.size(-1)
+        if columnwise:
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -120,7 +129,7 @@ class Float8Quantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -250,24 +259,37 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
+        rowwise: bool = None,
+        columnwise: bool = None,
     ) -> Float8Tensor:
+        rowwise = rowwise if rowwise is not None else self.rowwise_usage
+        columnwise = columnwise if columnwise is not None else self.columnwise_usage
 
         # Canonicalize tensor attributes
         if device is None:
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = None
+        if rowwise:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+
+        transpose_shape = None
+        if columnwise:
+            if len(shape) >= 2:
+                transpose_shape = shape[-1:] + shape[:-1]
+            else:
+                transpose_shape = shape
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
-        if self.columnwise_usage:
-            inner_dim = data.size(-1)
+        if columnwise:
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -275,7 +297,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             shape=shape,
             dtype=dtype,
             data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=device),
+            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=data_transpose,
@@ -307,7 +329,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         if internal:
             return Float8TensorBase(
                 data=data,
-                fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
+                fp8_scale_inv=torch.empty((), dtype=torch.float32, device=data.device),
                 fp8_dtype=self.dtype,
                 requires_grad=requires_grad,
                 data_transpose=None,
@@ -317,7 +339,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             shape=data.shape,
             dtype=fake_dtype,
             data=data,
-            fp8_scale_inv=torch.empty(1, dtype=torch.float32, device=data.device),
+            fp8_scale_inv=torch.empty((), dtype=torch.float32, device=data.device),
             fp8_dtype=self.dtype,
             requires_grad=requires_grad,
             data_transpose=None,
@@ -602,11 +624,22 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
-                dst._data.copy_(src._data.detach())
-                dst._scale_inv.copy_(src._scale_inv.view(dst._scale_inv.size()))
-                if src._transpose is not None or dst._transpose is not None:
+                def copy_tensor(src, dst, tensor_name):
+                    src_is_none = getattr(src, tensor_name) is None
+                    dst_is_none = getattr(dst, tensor_name) is None
+                    if src_is_none and dst_is_none:
+                        return
+                    elif src_is_none and not dst_is_none:
+                        setattr(dst, tensor_name, None)
+                    elif not src_is_none and not dst_is_none:
+                        getattr(src, tensor_name).copy_(getattr(dst, tensor_name))
+                copy_tensor(src, dst, "_data")
+                copy_tensor(src, dst, "_scale_inv")
+                if src._transpose is not None and dst._data is not None:
                     dst._create_transpose()
-                return dst
+                copy_tensor(src, dst, "_transpose")
+                return
+                
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

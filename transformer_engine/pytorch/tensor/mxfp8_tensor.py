@@ -83,6 +83,7 @@ class MXFP8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> MXFP8Tensor:
 
         # Canonicalize tensor attributes
@@ -98,12 +99,13 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
         scale_inv = torch.zeros(
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
             round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
             device=device,
+            pin_memory=pin_memory,
         )
 
         # Allocate FP8 data transpose if needed
@@ -116,6 +118,7 @@ class MXFP8Quantizer(Quantizer):
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor

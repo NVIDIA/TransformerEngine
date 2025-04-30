@@ -148,6 +148,9 @@ class Quantizer(abc.ABC):
         *,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        pin_memory: bool = False,
+        rowwise: bool = True,
+        columnwise: bool = True,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
 
@@ -363,6 +366,19 @@ class QuantizedTensor(torch.Tensor):
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+        
+        # Empty like op
+        if func == torch.ops.aten.empty_like.default:
+            tensor = args[0]
+            quantizer = tensor._quantizer # TODO - pgadzinski look if this makes sense
+            dtype = kwargs.get("dtype", tensor.dtype)
+            device = kwargs.get("device", tensor.device)
+            shape = kwargs.get("shape", tensor.shape)
+            pin_memory = kwargs.get("pin_memory", False)
+            rowwise = (getattr(tensor, "_data", None) is not None) or (getattr(tensor, "_rowwise_data", None) is not None)
+            columnwise = (getattr(tensor, "_transpose", None) is not None) or (getattr(tensor, "_columnwise_data", None) is not None)
+
+            return quantizer.make_empty(shape, dtype=dtype, device=device, pin_memory=pin_memory, rowwise=rowwise, columnwise=columnwise)
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):

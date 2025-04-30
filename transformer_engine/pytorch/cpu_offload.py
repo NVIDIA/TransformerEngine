@@ -9,8 +9,6 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .tensor.float8_tensor import Float8Tensor
-
 __all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
@@ -21,17 +19,13 @@ def mark_activation_offload(*tensors):
     for tensor in tensors:
         if tensor is None:
             continue
-        if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
+        if isinstance(tensor, torch.Tensor):
             tensor.activation_offloading = True
         else:
             data_tensors = tensor.get_data_tensors()
             for tensor in data_tensors:
                 if tensor is not None:
                     tensor.activation_offloading = True
-                    # This is a hack to force clear the tensor after it is offloaded.
-                    # It is needed, because .*TensorBase classes are saved in the ctx,
-                    # and they contain the reference to their data tensors.
-                    tensor.needs_force_clear = True
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -238,14 +232,11 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     def offload(src_tensor, pin_memory=True):
         """Offload."""
 
-        cpu_backup = torch.empty(
-            src_tensor.size(),
-            dtype=src_tensor.dtype,
-            layout=src_tensor.layout,
+        cpu_backup = torch.empty_like(
+            src_tensor,
             device="cpu",
             pin_memory=pin_memory,
         )
-
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
         return state
@@ -309,9 +300,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.num_layers = num_model_group
         # Data Structure to maintain reference to activation tensors
         self.tensor_tag_to_buf = {}
-        # Data structure to hold the FP8/MXFP8 tensor objects
-        self.fp8_tensor_object_map = {}
-        self.float8_transpose_cache_valid = {}
         # Tracking the number of layers offloaded
         self.offloaded_group_count = 0
         # Core data structure that decides the window for offloading
@@ -342,8 +330,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             ),
         )
 
-        is_quantized_tensor = callable(getattr(tensor, "prepare_for_saving", None))
-
         if not torch_stray_tensor:
 
             # obtain a unique tensor tag
@@ -352,36 +338,13 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             assert tensor_tag not in self.tensor_tag_to_state
 
-            if is_quantized_tensor:
-                tensor_list, _ = tensor.prepare_for_saving()
+            self.tensor_tag_to_state[tensor_tag] = tensor
 
-                self.tensor_tag_to_state[tensor_tag] = []
-                self.tensor_tag_to_buf[tensor_tag] = []
-
-                self.fp8_tensor_object_map[tensor_tag] = tensor
-                if isinstance(tensor, Float8Tensor):
-                    self.float8_transpose_cache_valid[tensor_tag] = getattr(
-                        tensor, "_transpose_invalid"
-                    )
-            else:
-                tensor_list = [tensor]
-
-            for t in tensor_list:
-                if is_quantized_tensor:
-                    self.tensor_tag_to_state[tensor_tag].append(t)
-                else:
-                    self.tensor_tag_to_state[tensor_tag] = t
-
-                if (
-                    self.current_group < self.num_offload_group
-                    and self.tensor_need_offloading_checker(t)
-                ):
-                    if is_quantized_tensor:
-                        self.tensor_tag_to_buf[tensor_tag].append(t)
-                        # Need to clear the internal data reference for the quantized tensors
-                        tensor.clear()
-                    else:
-                        self.tensor_tag_to_buf[tensor_tag] = t
+            if (
+                self.current_group < self.num_offload_group
+                and self.tensor_need_offloading_checker(tensor)
+            ):
+                self.tensor_tag_to_buf[tensor_tag] = tensor
         else:
             tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
@@ -393,12 +356,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
-
-        # Handling the quantized tensor case specially here
-        if isinstance(tensor, list):
-            self.fp8_tensor_object_map[tensor_tag].restore_from_saved(tensor)
-            tensor = self.fp8_tensor_object_map.pop(tensor_tag)
-
         self.tensor_tag_to_buf.pop(tensor_tag, None)
 
         # the tensor should have been copied back in on_group_commit_backward()
@@ -414,36 +371,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 if group_id == group_to_offload:
                     assert not isinstance(state, tuple)
 
-                    is_quantized_tensor = isinstance(state, list)
-
-                    if is_quantized_tensor:
-                        tensor_list = state
-                        self.tensor_tag_to_state[tensor_tag] = []
-                    else:
-                        tensor_list = [state]
-
-                    for tensor_on_device in tensor_list:
-                        # `tensor_offloaded` is a hacky way of dealing with columnwise-only
-                        # quantized tensors for CPU offloading. The complication is due to
-                        # the `rowwise_data` being `None`. The offloading checker incorrectly
-                        # returns `False` and the entire `state` ([None, columnwise_tensor])
-                        # is added to the tensor tag state dict. A better design would change
-                        # how quantized tensors are kept track of in the offload handler.
-                        # Currently at every stage it is ensured that a quantized tensor is a
-                        # list whereas a non-quantized tensor is standalone object, which is
-                        # not good! TODO(@sanandaraj5597)
-                        tensor_offloaded = False
-                        # if offload, return the reference to cpu copy
-                        if self.tensor_need_offloading_checker(tensor_on_device):
-                            tensor_offloaded = True
-                            state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
-                        if is_quantized_tensor:
-                            if tensor_offloaded:
-                                self.tensor_tag_to_state[tensor_tag].append(state)
-                            else:
-                                self.tensor_tag_to_state[tensor_tag].append(tensor_on_device)
-                        else:
-                            self.tensor_tag_to_state[tensor_tag] = state
+                    tensor_on_device = state
+                    # if offload, return the reference to cpu copy
+                    if self.tensor_need_offloading_checker(tensor_on_device):
+                        state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
+                    self.tensor_tag_to_state[tensor_tag] = state
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
@@ -463,14 +395,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             torch.cuda.current_stream().wait_stream(self.d2h_stream)
 
             # Time to free the activation memory after usage
-            for tensor_tag, tensor_buf in self.tensor_tag_to_buf.items():
+            for tensor_tag, _ in self.tensor_tag_to_buf.items():
                 if tensor_tag[0] == self.offloaded_group_count:
-                    if hasattr(tensor_buf, "needs_force_clear"):
-                        # Need to clear activation tensor - sometimes references persist in the code.
-                        # This is the case for example with the Float8TensorBase class,
-                        # which is saved directly inside the ctx while its internal tensors are
-                        # saved inside save_for_backward.
-                        tensor_buf.data = torch.Tensor()
                     # Release the pointer to the tensor
                     self.tensor_tag_to_buf[tensor_tag] = None
 
@@ -500,23 +426,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     if isinstance(state, tuple):
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(state)
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
-                    elif isinstance(state, list):
-                        tensor_list = []
-                        for state_tuple in state:
-                            if isinstance(state_tuple, tuple):
-                                tensor_list.append(
-                                    SynchronizedGroupOffloadHandler.reload(state_tuple)
-                                )
-                            else:
-                                tensor_list.append(state_tuple)
-                        _ = self.fp8_tensor_object_map[tensor_label].restore_from_saved(tensor_list)
-                        if isinstance(self.fp8_tensor_object_map[tensor_label], Float8Tensor):
-                            self.fp8_tensor_object_map[tensor_label]._transpose_invalid = (
-                                self.float8_transpose_cache_valid.pop(tensor_label)
-                            )
-                        self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(
-                            tensor_label
-                        )
 
     def on_group_commit_backward(self):
         # first decrement the current group.
