@@ -14,8 +14,6 @@ import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-from .tensor.quantized_tensor import QuantizedTensor
-
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
@@ -34,7 +32,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     for t in tensors:
         if t is not None:
-            if isinstance(t, QuantizedTensor):
+            if hasattr(t, "clear"):
                 t.clear()
             else:
                 t.data = torch.Tensor()
@@ -421,10 +419,10 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
     """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
 
     for tensor in tensors:
-        assert tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0, (
-            "FP8 execution requires 2D input matrices with "
-            "height divisible by 8 and width divisible by 16, "
-            f"but got tensor with dims={list(tensor.size())}"
+        assert math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0, (
+            "FP8 execution requires the product of all dimensions except the last to be divisible"
+            " by 8 and the last dimension to be divisible by 16, but got tensor with"
+            f" dims={list(tensor.size())}"
         )
 
 

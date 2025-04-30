@@ -126,8 +126,7 @@ class _Linear(torch.autograd.Function):
 
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
-        inp_shape = inp.shape
-        assert inp_shape[-1] == in_features, "GEMM not possible"
+        assert inp.shape[-1] == in_features, "GEMM not possible"
 
         tp_world_size = get_distributed_world_size(tp_group)
         backward_needs_input = is_grad_enabled and weight.requires_grad
@@ -135,7 +134,8 @@ class _Linear(torch.autograd.Function):
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
-        inputmat = inp.view(-1, in_features)
+
+        inputmat = inp
         inputmat_total = None
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
@@ -256,7 +256,7 @@ class _Linear(torch.autograd.Function):
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.RS
-            out_shape = [reduce(multiply_op, inp_shape[:-1]) // tp_world_size, out_features]
+            out_shape = [reduce(multiply_op, inp.shape[:-1]) // tp_world_size, out_features]
             rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inputmat_total.device)
 
         elif ub_overlap_ag_fprop:
@@ -365,7 +365,7 @@ class _Linear(torch.autograd.Function):
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp_shape
+            ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_overlap_ag = ub_overlap_ag_dgrad
@@ -377,6 +377,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_dgrad = inp.requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+
             ctx.owns_input = saved_inputmat is not inp
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
@@ -399,7 +400,6 @@ class _Linear(torch.autograd.Function):
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
-        out = out.view(-1, *inp_shape[1:-1], out_features)
         return out
 
     @staticmethod
