@@ -48,7 +48,7 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
   const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
 
   nvte_fp8_block_scaling_partial_cast(inp_cu.data(), out_cu.data(), scale_cu.data(), h, w,
-                                      scale.stride(0), scale.stride(1), start_offset, inp.numel(),
+                                      scale.stride(0), scale.stride(1), start_offset, block_len,
                                       static_cast<NVTEDType>(out_dtype),
                                       at::cuda::getCurrentCUDAStream());
 }
