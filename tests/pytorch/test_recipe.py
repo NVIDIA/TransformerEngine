@@ -6,9 +6,12 @@ from typing import Iterable, Optional
 
 import pytest
 import torch
+import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
@@ -399,3 +402,69 @@ class TestFP8Recipe:
             with pytest.raises(RuntimeError) as excinfo:
                 _ = linear(x)
             assert "Tensor type mismatch" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "target_recipe_class, expected_quantizer_type, available_flag, reason",
+        [
+            pytest.param(
+                MXFP8BlockScaling,
+                MXFP8Quantizer,
+                mxfp8_available,
+                reason_for_no_mxfp8,
+                id="DelayedScaling->MXFP8BlockScaling",
+            ),
+            pytest.param(
+                Float8BlockScaling,
+                Float8BlockQuantizer,
+                fp8_block_scaling_available,
+                reason_for_no_fp8_block_scaling,
+                id="DelayedScaling->Float8BlockScaling",
+            ),
+        ],
+    )
+    def test_dynamic_recipe_update(self, target_recipe_class, expected_quantizer_type, available_flag, reason):
+        if not available_flag:
+            pytest.skip(reason)
+
+        in_features = 32
+        out_features = 32
+        batch_size = 32
+        linear = Linear(in_features, out_features).cuda()
+        initial_recipe = DelayedScaling()
+
+        # Run initial iterations with DelayedScaling
+        for _ in range(3):
+            x = torch.randn(batch_size, in_features, device="cuda")
+            with fp8_autocast(enabled=True, fp8_recipe=initial_recipe):
+                y = linear(x)
+            loss = y.mean()
+            loss.backward()
+
+        for quantizer in linear.quantizers["scaling_fwd"]:
+            assert isinstance(quantizer, Float8Quantizer)
+
+        # Change recipe
+        target_recipe = target_recipe_class()
+
+        # Run subsequent iterations with the target recipe
+        for i in range(3):
+            x = torch.randn(batch_size, in_features, device="cuda")
+            if i == 0:
+                # Expect a warning on the first iteration with the new recipe
+                with pytest.warns(UserWarning, match="Recipe type changed"):
+                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                        y = linear(x)
+                for quantizer in linear.quantizers["scaling_fwd"]:
+                    assert isinstance(quantizer, expected_quantizer_type)
+            else:
+                # No warning expected on subsequent iterations
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error") # Raise error if unexpected warning occurs
+                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                        y = linear(x)
+            loss = y.mean()
+            loss.backward()
+
+        # Final check
+        for quantizer in linear.quantizers["scaling_fwd"]:
+            assert isinstance(quantizer, expected_quantizer_type)
