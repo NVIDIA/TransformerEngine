@@ -14,7 +14,9 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_available, reason_for_no_fp8_block = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_block_available, reason_for_no_fp8_block = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 fp8_recipes = [
     None,  # non-fp8

@@ -444,7 +444,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                     " (scales and columnwise data untouched)."
                 )
             return Float8BlockwiseQTensor.make_like(tensor)
-    
+
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             if isinstance(src, Float8BlockwiseQTensor) and isinstance(dst, Float8BlockwiseQTensor):
