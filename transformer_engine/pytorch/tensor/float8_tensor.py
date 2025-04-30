@@ -6,7 +6,6 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable
 import warnings
-import math
 
 import torch
 import transformer_engine_torch as tex
@@ -104,8 +103,6 @@ class Float8Quantizer(Quantizer):
 
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
-
-        transpose_shape = shape[-1:] + shape[:-1]
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
@@ -624,22 +621,15 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
-
-                def copy_tensor(src, dst, tensor_name):
-                    src_is_none = getattr(src, tensor_name) is None
-                    dst_is_none = getattr(dst, tensor_name) is None
-                    if src_is_none and dst_is_none:
-                        return
-                    elif src_is_none and not dst_is_none:
-                        setattr(dst, tensor_name, None)
-                    elif not src_is_none and not dst_is_none:
-                        getattr(src, tensor_name).copy_(getattr(dst, tensor_name))
-
-                copy_tensor(src, dst, "_data")
-                copy_tensor(src, dst, "_scale_inv")
-                if src._transpose is not None and dst._data is not None:
-                    dst._create_transpose()
-                copy_tensor(src, dst, "_transpose")
+                if dst._data is not None:
+                    dst._data.copy_(src._data)
+                if dst._scale_inv is not None:
+                    dst._scale_inv.copy_(src._scale_inv)
+                if dst._transpose is not None and not dst._transpose_invalid:
+                    if not src._transpose_invalid:
+                        dst._transpose.copy_(src._transpose)
+                    else:
+                        dst._create_transpose()
                 return dst
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
