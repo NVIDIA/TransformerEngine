@@ -457,8 +457,8 @@ class _LayerNormMLP(torch.autograd.Function):
         if ub_overlap_rs:
             ub_obj_fc2out = get_ub("fc2_fprop")
             dim_size = list(act_out.size())
-            dim_size[0] = dim_size[0] // tp_world_size
-            dim_size[1] = fc2_weight.size(0)
+            dim_size[0] //= tp_world_size
+            dim_size[-1] = fc2_weight.size(0)
             reduce_scatter_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
 
         # ------------------------------------------------------

@@ -323,7 +323,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # Output buffer for Userbuffers reduce-scatter
         reduce_scatter_out = None
         if ub_overlap_rs_fprop:
-            out_shape = [reduce(multiply_op, inp_shape[:-1]) // tp_world_size, out_features]
+            out_shape = list(inp_shape)
+            out_shape[0] //= tp_world_size
+            out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(
                 out_shape, dtype=activation_dtype, device=ln_out_total.device
             )
