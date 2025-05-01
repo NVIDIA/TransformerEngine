@@ -116,12 +116,12 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   DType wtype = TypeInfo<WeightType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input", { N, H }, itype);
-  Tensor z("z", { N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
-  Tensor gamma("gamma", { H }, wtype);
-  Tensor beta("beta", { H }, wtype);
-  Tensor mu("mu", { N }, DType::kFloat32);
-  Tensor rsigma("rsigma", { N }, DType::kFloat32);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor z("z", std::vector<size_t>{ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, wtype);
+  Tensor beta("beta", std::vector<size_t>{ H }, wtype);
+  Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor workspace;
 
 
@@ -164,7 +164,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     nvte_enable_zero_centered_gamma_in_weight_dtype(false);
   }
 
-  Tensor dequantized_output("dequantized_output", { N, H }, DType::kFloat32, true, true);
+  Tensor dequantized_output("dequantized_output", std::vector<size_t>{ N, H }, DType::kFloat32, true, true);
 
   dequantize_2x<OutputType, fp8e8m0>(z, dequantized_output, is_training);
 

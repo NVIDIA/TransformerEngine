@@ -516,12 +516,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         del self._transpose  # explicitly deletes the data for safety
         self._transpose = None
 
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._data = torch.Tensor() if self._data is not None else None
-        self._transpose = torch.Tensor() if self._transpose is not None else None
-        self._transpose_invalid = True
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 

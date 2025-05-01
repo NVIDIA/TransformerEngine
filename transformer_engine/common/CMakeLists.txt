@@ -90,6 +90,7 @@ list(APPEND transformer_engine_SOURCES
      fused_rope/fused_rope.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
+     recipe/fp8_block_scaling.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu

@@ -100,8 +100,8 @@ at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
   }
   if (M == 0 || N == 0) return out;
 
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);
-  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), {N, M}, otype);
+  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, N}, otype);
+  auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{N, M}, otype);
 
   nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
 
