@@ -11,6 +11,8 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
+from ..quantized_tensor import QuantizedTensorBase
+
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
@@ -43,7 +45,7 @@ class _FromMXFP8Func(torch.autograd.Function):
         return grad, None
 
 
-class MXFP8TensorBase:
+class MXFP8TensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of MXFP8Tensor.
 
     MXFP8Tensor inherits from the PyTorch tensor class and this mixin

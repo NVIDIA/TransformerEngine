@@ -39,8 +39,6 @@ from ..utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
-from ..tensor.quantization_utils import is_quantized_tensor
-
 from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
@@ -61,6 +59,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
+    QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -167,7 +166,7 @@ class _Linear(torch.autograd.Function):
                         inputmat, tp_group, quantizer=input_quantizer
                     )
                 else:
-                    if not is_quantized_tensor(inputmat):
+                    if not isinstance(inputmat, QuantizedTensorBase):
                         columnwise_usage = backward_needs_input and isinstance(
                             input_quantizer, MXFP8Quantizer
                         )
@@ -194,7 +193,7 @@ class _Linear(torch.autograd.Function):
                         rowwise=True,
                         columnwise=backward_needs_input,
                     )
-                if not is_quantized_tensor(inputmat):
+                if not isinstance(inputmat, QuantizedTensorBase):
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
                 elif backward_needs_input:
@@ -300,7 +299,7 @@ class _Linear(torch.autograd.Function):
             )
 
             if backward_needs_input:
-                if own_quantized_input and is_quantized_tensor(inputmat):
+                if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
@@ -325,7 +324,7 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,
-                weightmat if fp8 and not is_quantized_tensor(weight) else None,
+                weightmat if fp8 and not isinstance(weight, QuantizedTensorBase) else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
@@ -660,9 +659,9 @@ class _Linear(torch.autograd.Function):
                     inputmat_total = ctx.input_quantizer(inputmat_total)
 
                 # Make sure GEMM inputs have required data
-                if is_quantized_tensor(inputmat_total):
+                if isinstance(inputmat_total, QuantizedTensorBase):
                     inputmat_total.update_usage(columnwise_usage=True)
-                if is_quantized_tensor(grad_output):
+                if isinstance(grad_output, QuantizedTensorBase):
                     grad_output.update_usage(columnwise_usage=True)
 
                 # Figure out whether to use split accumulator
@@ -763,7 +762,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not is_quantized_tensor(weight):
+        if ctx.fp8 and not isinstance(weight, QuantizedTensorBase):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,

@@ -12,6 +12,8 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
+from ..quantized_tensor import QuantizedTensorBase
+
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
@@ -50,7 +52,7 @@ class _FromFloat8Func(torch.autograd.Function):
         return grad, None
 
 
-class Float8TensorBase:
+class Float8TensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8Tensor.
 
     Float8Tensor inherits from the PyTorch tensor class and this mixin

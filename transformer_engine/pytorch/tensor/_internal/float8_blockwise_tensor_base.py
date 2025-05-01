@@ -12,12 +12,14 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
+from ..quantized_tensor import QuantizedTensorBase
+
 from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
 
 
-class Float8BlockwiseQTensorBase:
+class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
     Float8BlockwiseQTensor inherits from the PyTorch tensor class and this
