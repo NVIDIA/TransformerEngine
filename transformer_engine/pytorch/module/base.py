@@ -236,9 +236,15 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Increase the workspace by the number of maximum concurrent streams
+    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    if _cublas_workspace is None:
+        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
+        # This ensures we don't do `.repeat()` on an already expanded workspace
+        _cublas_workspace = torch.empty(
+            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
+        ).repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -1130,7 +1136,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 raise ValueError(
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
+
+            if cache_name is not None:
+                # Ensure the tensor in the cache is an instance of torch.Tensor,
+                # as it persists beyond a single forward pass.
+                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+                quantizer_internal = quantizer.internal
+                quantizer.internal = False
             out = quantizer.quantize(tensor, dtype=workspace_dtype)
+            if cache_name is not None:
+                quantizer.internal = quantizer_internal
 
             # Update cache
             if cache_name is not None:

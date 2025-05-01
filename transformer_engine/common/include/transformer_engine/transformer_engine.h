@@ -38,8 +38,8 @@ enum NVTEDType {
  *  \brief Shape of the tensor.
  */
 struct NVTEShape {
-  /*! \brief Shape data, of size ndim. */
-  const size_t *data;
+  /*! \brief Shape data, with ndim valid elements. */
+  size_t data[15];
   /*! \brief Number of dimensions. */
   size_t ndim;
 };
@@ -133,6 +133,15 @@ void *nvte_tensor_data(const NVTETensor tensor);
  *  \return A raw pointer to tensor's columnwise data.
  */
 void *nvte_tensor_columnwise_data(const NVTETensor tensor);
+
+/*! \brief Construct a shape from an array of dimension sizes.
+ *
+ *  \param[data] Pointer to start of shape array.
+ *  \param[data] Number of dimensions (must be <= 14)
+ *
+ *  \return A shape. The shape will own its own copy of the data.
+ */
+NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
 
 /*! \brief Get a tensor's data shape.
  *
@@ -338,6 +347,17 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
  */
 int nvte_is_non_tn_fp8_gemm_supported();
 
+/*! \brief Performs a memset of the data at the given pointer and size in bytes.
+ *
+ *  \param[in] ptr Pointer to the memory to be set.
+ *  \param[in] value Value to set the memory to.
+ *  \param[in] size_in_bytes Size of the memory in bytes.
+ *  \param[in] stream CUDA stream to use for the operation.
+ *
+ *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
+*/
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -423,8 +443,9 @@ class TensorWrapper {
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
                 float *scale_inv_dptr = nullptr, const std::vector<size_t> &scale_inv_shape = {1},
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
-      : TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype, amax_dptr, scale_dptr,
-                      scale_inv_dptr, NVTEShape{scale_inv_shape.data(), scale_inv_shape.size()},
+      : TensorWrapper(dptr, nvte_make_shape(shape.data(), shape.size()), dtype, amax_dptr,
+                      scale_dptr, scale_inv_dptr,
+                      nvte_make_shape(scale_inv_shape.data(), scale_inv_shape.size()),
                       scaling_mode) {}
 
   /*! \brief Constructs new empty TensorWrapper.
@@ -540,7 +561,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_shape(tensor_);
   }
 
@@ -549,7 +572,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape columnwise_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_columnwise_shape(tensor_);
   }
 
@@ -662,7 +687,9 @@ class TensorWrapper {
    *  \return scale_inv_shape of this TensorWrapper.
    */
   const NVTEShape scale_inv_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
 
@@ -678,12 +705,15 @@ class TensorWrapper {
   void zero_(cudaStream_t stream) { nvte_zero_tensor(tensor_, stream); }
 
   static constexpr size_t defaultData = 1;
-  static constexpr NVTEShape defaultShape = {&defaultData, 1};
+  static constexpr NVTEShape defaultShape = {
+      {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
   NVTEShape convertShape(const NVTEShape &s) { return s; }
 
-  NVTEShape convertShape(const std::vector<size_t> &s) { return {s.data(), s.size()}; }
+  NVTEShape convertShape(const std::vector<size_t> &s) {
+    return nvte_make_shape(s.data(), s.size());
+  }
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;

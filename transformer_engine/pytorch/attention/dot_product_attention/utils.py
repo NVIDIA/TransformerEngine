@@ -34,7 +34,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O_CP,
     META_DQKV_CP,
 )
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
@@ -53,6 +53,8 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
+_cu_seqlens_cache = {}
+
 
 class AttentionLogging:
     """
@@ -63,6 +65,7 @@ class AttentionLogging:
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
     fa_logger = logging.getLogger(__name__)
+    _is_logging_setup = False
 
     @staticmethod
     def setup_logging():
@@ -77,6 +80,7 @@ class AttentionLogging:
         AttentionLogging.fa_logger.setLevel(AttentionLogging._log_level)
         if not AttentionLogging.fa_logger.hasHandlers():
             AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
+        AttentionLogging._is_logging_setup = True
 
 
 @functools.lru_cache(maxsize=None)
@@ -85,6 +89,11 @@ def _get_supported_versions(version_min, version_max):
     Calculate version info based on min and max numbers
     """
     return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+
+
+def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
+    """Make tensor contiguous if final stride is not 1."""
+    return tensor.contiguous() if tensor.stride(-1) != 1 else tensor
 
 
 class FlashAttentionUtils:
@@ -1293,9 +1302,6 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
     )
 
     return indices
-
-
-_cu_seqlens_cache = {}
 
 
 def get_full_cu_seqlens(

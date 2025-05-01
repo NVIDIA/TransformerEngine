@@ -366,7 +366,9 @@ def _test_sanity_e2e_T5(block, dtype, config, fp8_recipe, skip_wgrad):
     torch.cuda.synchronize()
 
 
-def _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad):
+def _test_sanity_common(
+    block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching=True
+):
     if skip_dgrad and skip_wgrad:
         pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")
 
@@ -382,7 +384,11 @@ def _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad
 
     use_fp8 = fp8_recipe is not None
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        te_out = block(te_inp)
+        if not microbatching:
+            te_out = block(te_inp)
+        else:
+            _ = block(te_inp, is_first_microbatch=True)
+            te_out = block(te_inp, is_first_microbatch=False)
     if isinstance(te_out, tuple):
         te_out = te_out[0]
     loss = te_out.sum()
@@ -436,8 +442,16 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("microbatching", all_boolean)
 def test_sanity_layernorm_linear(
-    dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad, normalization
+    dtype,
+    fp8_recipe,
+    model,
+    skip_wgrad,
+    zero_centered_gamma,
+    skip_dgrad,
+    normalization,
+    microbatching,
 ):
     config = model_configs[model]
 
@@ -463,7 +477,7 @@ def test_sanity_layernorm_linear(
         params_dtype=dtype,
         device="cuda",
     )
-    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
+    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -471,7 +485,8 @@ def test_sanity_layernorm_linear(
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
-def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
+@pytest.mark.parametrize("microbatching", all_boolean)
+def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microbatching):
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -494,7 +509,7 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
         params_dtype=dtype,
         device="cuda",
     )
-    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
+    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -593,8 +608,17 @@ def test_sanity_grouped_linear(
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("microbatching", all_boolean)
 def test_sanity_layernorm_mlp(
-    dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, skip_dgrad, activation, normalization
+    dtype,
+    fp8_recipe,
+    model,
+    skip_wgrad,
+    zero_centered_gamma,
+    skip_dgrad,
+    activation,
+    normalization,
+    microbatching,
 ):
     config = model_configs[model]
 
@@ -623,7 +647,7 @@ def test_sanity_layernorm_mlp(
         params_dtype=dtype,
         device="cuda",
     )
-    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad)
+    _test_sanity_common(block, dtype, config, fp8_recipe, skip_wgrad, skip_dgrad, microbatching)
 
 
 @pytest.mark.parametrize("dtype", param_types)

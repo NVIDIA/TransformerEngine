@@ -167,8 +167,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
 
   // Workspace
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
@@ -286,12 +286,13 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
       nvte_scaling_modeB);
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
   auto te_D = makeTransformerEngineTensor(
-      D.data_ptr(), {static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
+      D.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
       D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
-  auto te_bias =
-      makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))}, bias_type);
+  auto te_bias = makeTransformerEngineTensor(
+      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
   auto te_counter = makeTransformerEngineTensor(
-      counter.data_ptr(), {static_cast<size_t>(counter.size(0))}, DType::kInt32);
+      counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))}, DType::kInt32);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                               ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
@@ -299,8 +300,8 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
                                                     static_cast<size_t>(pre_gelu_out.size(1))};
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
                           te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
@@ -419,7 +420,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
+                                           std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }
