@@ -111,7 +111,7 @@ class Float8TensorBase(QuantizedTensorBase):
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
         """Prepare the tensor base for saving for backward"""
         tensors = [self._data, self._transpose, self._scale_inv]
         self._data = None
