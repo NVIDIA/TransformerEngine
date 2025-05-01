@@ -242,11 +242,13 @@ def _jax_gemm(
     def _jax_gemm_fp8_impl(lhs, rhs):
         if lhs.scaling_mode.is_tensor_scaling():
             assert (
-                    rhs.scaling_mode == lhs.scaling_mode
-                    ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+                rhs.scaling_mode == lhs.scaling_mode
+            ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
-                    jax.lax.Precision.HIGHEST if QuantizeConfig.FP8_2X_ACC_FPROP else jax.lax.Precision.DEFAULT
-                    )
+                jax.lax.Precision.HIGHEST
+                if QuantizeConfig.FP8_2X_ACC_FPROP
+                else jax.lax.Precision.DEFAULT
+            )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
 
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
