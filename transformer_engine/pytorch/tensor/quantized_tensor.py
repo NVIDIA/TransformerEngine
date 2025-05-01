@@ -14,6 +14,7 @@ from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
 
+
 class QuantizedTensorBase:
     r"""Base class for all *TensorBase classes.
 
@@ -48,7 +49,7 @@ class QuantizedTensorBase:
                            Whether to create or keep the data needed for using the tensor
                            in columnwise fashion (e.g. as A argument in TN GEMM). Leaving it as
                            `None` preserves the original value in the tensor.
-                           
+
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement update_usage function"
@@ -69,11 +70,11 @@ class QuantizedTensorBase:
         )
 
 
-
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorBase],
-) -> Tuple[list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-           list[Optional[QuantizedTensorBase]]]:
+) -> Tuple[
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorBase]]
+]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
     the internal TensorBase types too."""
@@ -94,8 +95,10 @@ def restore_from_saved(
     tensors: list[Optional[Union[torch.Tensor, QuantizedTensorBase]]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
     return_saved_tensors: bool = False,
-) -> list[Optional[torch.Tensor | QuantizedTensorBase]] | \
-          tuple[list[Optional[torch.Tensor | QuantizedTensorBase]], list[Optional[torch.Tensor]]]:
+) -> (
+    list[Optional[torch.Tensor | QuantizedTensorBase]]
+    | tuple[list[Optional[torch.Tensor | QuantizedTensorBase]], list[Optional[torch.Tensor]]]
+):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
     for tensor in tensors:
@@ -300,6 +303,7 @@ def _stride_from_shape(shape: list[int]):
     for d in reversed(shape[1:]):
         rstride.append(rstride[-1] * d)
     return list(reversed(rstride))
+
 
 class QuantizedTensor(torch.Tensor):
     """Abstract base class for tensor with quantized data
