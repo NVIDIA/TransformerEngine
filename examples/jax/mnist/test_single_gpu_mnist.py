@@ -350,6 +350,14 @@ class TestMNIST(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         self.verify(actual)
 
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        self.verify(actual)
+
 
 if __name__ == "__main__":
     train_and_evaluate(mnist_parser(None))

@@ -204,8 +204,8 @@ void performTest_x1(const size_t rows,
     // std::cout << "blocks_X: " << blocks_X << std::endl;
     // std::cout << "scales_stride: " << scales_stride << std::endl;
 
-    Tensor grad("grad", { rows, cols }, itype);
-    Tensor input("input", { rows, cols * 2 }, itype);
+    Tensor grad("grad", std::vector<size_t>{ rows, cols }, itype);
+    Tensor input("input", std::vector<size_t>{ rows, cols * 2 }, itype);
 
     const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
@@ -289,8 +289,8 @@ void performTest_x2(const size_t rows,
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
 
-    Tensor grad("grad", { rows, cols }, itype);
-    Tensor input("input", { rows, cols * 2 }, itype);
+    Tensor grad("grad", std::vector<size_t>{ rows, cols }, itype);
+    Tensor input("input", std::vector<size_t>{ rows, cols * 2 }, itype);
 
     const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 

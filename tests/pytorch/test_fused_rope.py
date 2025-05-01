@@ -1,11 +1,11 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import math
-import pytest
-import torch
 from typing import Callable, Tuple, Union
-from transformer_engine.pytorch.dot_product_attention.rope import (
+import math
+import torch
+import pytest
+from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
 )

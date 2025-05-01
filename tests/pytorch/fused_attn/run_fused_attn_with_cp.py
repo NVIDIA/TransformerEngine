@@ -2,12 +2,16 @@
 #
 # See LICENSE for license information.
 
-import os, sys, logging
+import os
+import sys
+import logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    get_cu_seqlens_on_cp_rank,
+)
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
