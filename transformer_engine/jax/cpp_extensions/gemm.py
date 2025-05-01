@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence, Union, Dict, List
+from typing import Tuple, Sequence, Union, Dict
 from functools import partial, reduce
 import operator
 import jax
@@ -21,7 +21,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm"]
+__all__ = ["gemm"]
 
 
 num_cublas_streams = 4
@@ -338,8 +338,9 @@ def gemm(
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
 
+"""
 def swizzled_scale(scales):
-    """Swizzle the scale tensor for FP8 GEMM"""
+    # Swizzle the scale tensor for FP8 GEMM
     assert scales.ndim == 2
     rows, cols = scales.shape
     scales = scales.reshape(rows // 128, 4, 32, cols // 4, 4)
@@ -354,7 +355,7 @@ def grouped_gemm(
     contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
     bias_list: List[jnp.ndarray] = None,
 ) -> List[jnp.ndarray]:
-    """Grouped GEMM for multiple pairs of tensors."""
+    # Grouped GEMM for multiple pairs of tensors.
     assert (
         len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
     ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
@@ -463,3 +464,4 @@ def grouped_gemm(
     )
 
     return out_list
+"""
