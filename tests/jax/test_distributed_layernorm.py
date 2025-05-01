@@ -29,11 +29,12 @@ NORM_INPUT_SHAPES = {
 }
 
 is_fp8_supported, reason = is_fp8_available()
-is_mxfp8_supported, reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 SUPPORTED_RECIPES = []
 if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
@@ -76,6 +77,8 @@ class TestDistributedLayernorm:
         other_bytes = 0
         if fp8_recipe == recipe.MXFP8BlockScaling() and "dp" in mesh_axes:
             other_bytes = 384  # required for small scale shapes that require padding
+        if fp8_recipe == recipe.Float8CurrentScaling():
+            allreduce_total_bytes += jax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
         )
@@ -86,6 +89,7 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("zero_centered_gamma", [False, True])
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_layernorm(
         self,
         device_count,
@@ -97,7 +101,9 @@ class TestDistributedLayernorm:
         zero_centered_gamma,
         shard_weights,
         fp8_recipe,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "layernorm"
         q_dtype = jnp.float8_e4m3fn
@@ -168,6 +174,7 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_rmsnorm(
         self,
         device_count,
@@ -178,7 +185,9 @@ class TestDistributedLayernorm:
         dtype,
         shard_weights,
         fp8_recipe,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "rmsnorm"
         q_dtype = jnp.float8_e4m3fn

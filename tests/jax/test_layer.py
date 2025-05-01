@@ -39,7 +39,7 @@ def enable_fused_attn():
 
 
 is_fp8_supported, reason = is_fp8_available()
-is_mxfp8_supported, reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 QUANTIZE_RECIPES = []
 """ Find supported scaling modes"""
@@ -218,7 +218,48 @@ ATTRS = [
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_WINDOW_SIZE: None,
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
+    },
+    # attrs23
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
+    },
+    # attrs24
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "no_mask",
+    },
+    # attrs25
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "no_mask",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
+    },
+    # attrs26
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
+    },
+    # attrs27
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: None,
+    },
+    # attrs28
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_WINDOW_SIZE: (2, 2),
     },
 ]
@@ -313,7 +354,7 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if QuantizeConfig.SCALING_MODE == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+                if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
                     _, updated_quantize_meta = flax.core.pop(
                         updated_state[0], QuantizeConfig.COLLECTION_NAME
                     )
@@ -370,13 +411,13 @@ class EncoderRunner(BaseRunner):
         data_rng = jax.random.PRNGKey(2024)
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
 
-        padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
+        mask_shape = (batch, 1, seqlen, seqlen)
+        padded_mask = jnp.zeros(mask_shape, dtype=jnp.uint8)
+        causal_mask = jnp.triu(jnp.ones(mask_shape, dtype=jnp.uint8), k=1)
         if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             mask = causal_mask
         else:
             mask = padded_mask
-
         ref_masks = (1 - mask,)
         test_masks = (None, mask)  # The second arg of Transformer is encoded tokens.
 

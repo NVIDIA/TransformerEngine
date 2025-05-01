@@ -52,92 +52,170 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
+/* Parameters for cuBLAS GEMM
+ *
+ * cuBLAS follows the BLAS convention of column-major ordering. This
+ * is different than the row-major that is typically used in
+ * Transformer Engine.
+ *
+ */
 struct GemmParam {
-  void *A;
-  void *B;
-  cublasOperation_t transA;
-  cublasOperation_t transB;
-  transformer_engine::DType Atype;
-  transformer_engine::DType Btype;
-  void *A_scale_inv;
-  void *B_scale_inv;
-  int lda;
-  int ldb;
-
-  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
-      : A(nullptr),
-        B(nullptr),
-        transA(transA),
-        transB(transB),
-        Atype(transformer_engine::DType::kNumTypes),
-        Btype(transformer_engine::DType::kNumTypes),
-        A_scale_inv(nullptr),
-        B_scale_inv(nullptr),
-        lda(0),
-        ldb(0) {}
+  void *A = nullptr;
+  void *B = nullptr;
+  cublasOperation_t transA = CUBLAS_OP_N;
+  cublasOperation_t transB = CUBLAS_OP_N;
+  transformer_engine::DType Atype = transformer_engine::DType::kNumTypes;
+  transformer_engine::DType Btype = transformer_engine::DType::kNumTypes;
+  void *A_scale_inv = nullptr;
+  void *B_scale_inv = nullptr;
+  int lda = 0;  // A column strides
+  int ldb = 0;  // B column strides
 };
 
+/* Populate parameters for cuBLAS GEMM
+ *
+ * cuBLAS follows the BLAS convention of column-major ordering. This
+ * is different than the row-major that is typically used in
+ * Transformer Engine.
+ *
+ */
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int k, const int lda, const int ldb) {
+                                int m, int n, int k) {
   using namespace transformer_engine;
-  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
-             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(
+      A.scaling_mode == B.scaling_mode ||
+          (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
+          (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
+      "Inputs A and B to GEMM need to have compatible scaling modes!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
-  GemmParam ret(transA, transB);
+  GemmParam ret;
 
-  ret.lda = lda;
-  ret.ldb = ldb;
+  // Transpose mode with column-major ordering
+  bool is_A_transposed = transA == CUBLAS_OP_T;
+  bool is_B_transposed = transB == CUBLAS_OP_T;
 
+  // Configure A matrix
   if (is_tensor_scaling(A.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
     ret.A = A.data.dptr;
+    ret.transA = transA;
+    ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
-    if (transA == CUBLAS_OP_T) {
-      ret.Atype = A.data.dtype;
-    } else {
-      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
-      if (is_fp8_dtype(ret.Atype)) {
-        int arch = cuda::sm_arch(cuda::current_device());
-        if (arch < 100) {
-          // Hopper and Ada - we need to use columnwise_data and change transA
-          NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
-          ret.A = A.columnwise_data.dptr;
-          ret.transA = CUBLAS_OP_T;
-          ret.A_scale_inv = A.columnwise_scale_inv.dptr;
-          ret.lda = k;
-        }
+    ret.lda = is_A_transposed ? k : m;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && !is_A_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (A.has_columnwise_data() && is_fp8_dtype(A.columnwise_data.dtype)) {
+        ret.A = A.columnwise_data.dptr;
+        ret.transA = CUBLAS_OP_T;
+        ret.Atype = A.columnwise_data.dtype;
+        ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+        ret.lda = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
     }
-    ret.B = B.data.dptr;
-    ret.B_scale_inv = B.scale_inv.dptr;
-    if (transB == CUBLAS_OP_T) {
-      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
-      if (is_fp8_dtype(ret.Btype)) {
-        int arch = cuda::sm_arch(cuda::current_device());
-        if (arch < 100) {
-          // Hopper and Ada - we need to use columnwise_data and change transA
-          NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
-          ret.B = B.columnwise_data.dptr;
-          ret.transB = CUBLAS_OP_N;
-          ret.B_scale_inv = B.columnwise_scale_inv.dptr;
-          ret.ldb = k;
-        }
-      }
+  } else if (is_mxfp_scaling(A.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_A_transposed) {
+      NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
-      ret.Btype = B.data.dtype;
+      NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
+    }
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = transA;
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.lda = is_A_transposed ? k : m;
+  } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    // FP8 block scaling
+    // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+    if (is_A_transposed) {
+      NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
+    } else {
+      NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
+    }
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = CUBLAS_OP_T;
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.lda = k;
+
+    // Requirements from https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
+    NVTE_CHECK((ret.lda % 16) == 0,
+               "Inner dimension requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
+    // Divisibility of 8 derived from FP8 (m * CTypeSize) % 16 == 0 requirement.
+    // Smallest supported CType is 2 bytes in this scaling mode.
+    NVTE_CHECK((m % 8) == 0,
+               "Outer dimension requirement on A for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
+  } else {
+    NVTE_ERROR("A has unsupported scaling mode");
+  }
+
+  // Configure B matrix
+  if (is_tensor_scaling(B.scaling_mode)) {
+    // Unscaled or FP8 tensor scaling
+    ret.B = B.data.dptr;
+    ret.transB = transB;
+    ret.Btype = B.data.dtype;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+    if (!nvte_is_non_tn_fp8_gemm_supported() && is_B_transposed) {
+      // Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+      if (B.has_columnwise_data() && is_fp8_dtype(B.columnwise_data.dtype)) {
+        ret.B = B.columnwise_data.dptr;
+        ret.transB = CUBLAS_OP_N;
+        ret.Btype = B.columnwise_data.dtype;
+        ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+        ret.ldb = k;
+      } else {
+        NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
+      }
+    }
+  } else if (is_mxfp_scaling(B.scaling_mode)) {
+    // MXFP8
+    // Note: Row-wise and column-wise data are scaled along different
+    // dimensions (with matrix interpreted in row-major order).
+    if (is_B_transposed) {
+      NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
+    } else {
+      NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    }
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = transB;
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.ldb = is_B_transposed ? n : k;
+  } else if (B.scaling_mode == NVTE_BLOCK_SCALING_1D || B.scaling_mode == NVTE_BLOCK_SCALING_2D) {
+    // FP8 block scaling
+    // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
+    if (is_B_transposed) {
+      NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
+    } else {
+      NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    }
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = CUBLAS_OP_N;
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.ldb = k;
+
+    // Requirements from
+    // https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
+    NVTE_CHECK((ret.ldb % 16) == 0,
+               "B tensor stride requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
+    if (B.scaling_mode == NVTE_BLOCK_SCALING_1D) {
+      // Observed this requirement only present for B tensor is 1D quantized.
+      NVTE_CHECK((n % 8) == 0,
+                 "Outer dimension requirement on B for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
     }
   } else {
-    // If not tensor scaling (which includes also high precision types), we need to
-    // use the proper version of data
-    // We leave the transA/B values as is, since Blackwell supports transposes
-    ret.A = transA ? A.data.dptr : A.columnwise_data.dptr;
-    ret.Atype = transA ? A.data.dtype : A.columnwise_data.dtype;
-    ret.A_scale_inv = transA ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.B = transB ? B.columnwise_data.dptr : B.data.dptr;
-    ret.Btype = transB ? B.columnwise_data.dtype : B.data.dtype;
-    ret.B_scale_inv = transB ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    NVTE_ERROR("B has unsupported scaling mode");
   }
+
   return ret;
 }
 
@@ -148,18 +226,33 @@ namespace transformer_engine {
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
-                 const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
-                 int ldb, int ldd, cublasOperation_t transa, cublasOperation_t transb, bool grad,
-                 void *workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-                 int math_sm_count, int m_split, int n_split, bool gemm_producer,
-                 const Tensor *inputCounter, cudaStream_t stream) {
+                 const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
+                 cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
+                 bool accumulate, bool use_split_accumulator, int math_sm_count, int m_split,
+                 int n_split, bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
+  // Tensor dims in row-major order
+  const int A0 = inputA->flat_first_dim();
+  const int A1 = inputA->flat_last_dim();
+  const int B0 = inputB->flat_first_dim();
+  const int B1 = inputB->flat_last_dim();
+
+  // GEMM dims in column-major order
+  const int m = transa == CUBLAS_OP_T ? A0 : A1;
+  const int n = transb == CUBLAS_OP_T ? B1 : B0;
+  const int k = transa == CUBLAS_OP_T ? A1 : A0;
+  NVTE_CHECK((transb == CUBLAS_OP_T ? B0 : B1) == k,
+             "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
+             ")");
+  const int ldd = m;
+
   // Return immediately if GEMM is trivial
   if (m <= 0 || n <= 0) {
     return;
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, k, lda, ldb);
+  const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+
   void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
   void *D_scale = outputD->scale.dptr;
@@ -221,6 +314,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                param.transA == CUBLAS_OP_N ? k : m, param.lda));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Bdesc, B_type, param.transB == CUBLAS_OP_N ? k : n,
                                                param.transB == CUBLAS_OP_N ? n : k, param.ldb));
+
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescCreate(&operationDesc, gemm_compute_type, CUDA_R_32F));
@@ -246,7 +340,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
     // Scaling factors.
 #if CUDA_VERSION >= 12080
-    cublasLtMatmulMatrixScale_t scaling_mode;
+    cublasLtMatmulMatrixScale_t scaling_mode_a;
+    cublasLtMatmulMatrixScale_t scaling_mode_b;
 #endif
     if ((is_tensor_scaling(inputA->scaling_mode) && is_tensor_scaling(inputB->scaling_mode))) {
       void *A_scale_inverse = param.A_scale_inv;
@@ -258,8 +353,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
 #if CUDA_VERSION >= 12080
-      scaling_mode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
-    } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
+      scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+      scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+    } else if ((is_mxfp_scaling(inputA->scaling_mode) && is_mxfp_scaling(inputB->scaling_mode))) {
       fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
       fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -268,7 +364,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
-      scaling_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+      scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+      scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
       // Workaround for heuristic cache bug in cublasLt. This separates the MXFP8 cache key from non-block scaling.
       // CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE is unused for block scaling so it's safe to set.
       if (cublasLtGetVersion() <= 120803) {
@@ -277,7 +374,32 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
-#endif
+    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
+               (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
+#if CUDA_VERSION >= 12090
+      float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
+      float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                       &A_scale_inverse, sizeof(A_scale_inverse)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                       &B_scale_inverse, sizeof(B_scale_inverse)));
+      NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
+                    inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
+                 "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported, but got 2D by 2D");
+      scaling_mode_a = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D
+                           ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+                           : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
+      scaling_mode_b = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D
+                           ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+                           : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
+#else
+      NVTE_ERROR("FP8 block scaling requires CUDA 12.9+");
+#endif  // CUDA_VERSION >= 12090
+#endif  // CUDA_VERSION >= 12080
     } else {
       NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
                  to_string(inputB->scaling_mode) + ".");
@@ -285,9 +407,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #if CUDA_VERSION >= 12080
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode_a, sizeof(scaling_mode_a)));
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode_b, sizeof(scaling_mode_b)));
 #endif
     if (is_fp8_dtype(outputD->data.dtype)) {
       // Accumulation mode not supported for FP8 output
@@ -297,8 +419,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_AMAX_D_POINTER, &D_amax, sizeof(D_amax)));
 #if CUDA_VERSION >= 12080
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-          operationDesc, CUBLASLT_MATMUL_DESC_D_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+      // NOTE: In all current cases where FP8 output is supported, the input is
+      // scaled identically to the output.
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_D_SCALE_MODE,
+                                                       &scaling_mode_a, sizeof(scaling_mode_a)));
 #endif
       // For FP8 output, cuBLAS requires C_type to match bias_type and
       // be FP16/BF16
@@ -356,6 +481,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
         operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_DATA_TYPE, &aux_type, sizeof(aux_type)));
   }
 
+  if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D) ||
+      (inputA->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
+    NVTE_CHECK((epilogue == CUBLASLT_EPILOGUE_DEFAULT || epilogue == CUBLASLT_EPILOGUE_BIAS ||
+                epilogue == CUBLASLT_EPILOGUE_DGELU),
+               "Epilogue requested outside of the available and tested cuBLAS functionality for "
+               "float8 block scaled GEMM");
+  }
+
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
@@ -403,7 +536,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK(status != CUBLAS_STATUS_NOT_SUPPORTED,
              "Unable to find suitable cuBLAS GEMM algorithm");
   NVTE_CHECK_CUBLAS(status);
-
   if (returnedResults == 0) NVTE_ERROR("Unable to find any suitable algorithms");
 
   // D = alpha * (A * B) + beta * C
@@ -461,35 +593,9 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
   Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
 
-  const size_t A0 = inputA->flat_first_dim();
-  const size_t A1 = inputA->flat_last_dim();
-  const size_t B0 = inputB->flat_first_dim();
-  const size_t B1 = inputB->flat_last_dim();
-
-  const int m = transa ? A0 : A1;
-  const int k = transa ? A1 : A0;
-  const int n = transb ? B1 : B0;
-  int lda, ldb, ldd;
-  if (transa && !transb) {  // TN
-    lda = k;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && !transb) {  // NN
-    lda = m;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && transb) {  // NT
-    lda = m;
-    ldb = n;
-    ldd = m;
-  } else {  // TT
-    NVTE_ERROR("TT layout not allowed.");
-  }
-
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, 0, 0, false, nullptr, stream);
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              accumulate, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -517,31 +623,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
                  is_delayed_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
-
-  const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
-  const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];
-  const int n = transb ? inputB->data.shape[1] : inputB->data.shape[0];
-  int lda, ldb, ldd;
-  if (transa && !transb) {  // TN
-    lda = k;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && !transb) {  // NN
-    lda = m;
-    ldb = k;
-    ldd = m;
-  } else if (!transa && transb) {  // NT
-    lda = m;
-    ldb = n;
-    ldd = m;
-  } else {  // TT
-    NVTE_ERROR("TT layout not allowed.");
-  }
-
-  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, m, n, k, lda, ldb, ldd,
-              (transa) ? CUBLAS_OP_T : CUBLAS_OP_N, (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad,
-              wspace->data.dptr, wspace->data.shape[0], accumulate, use_split_accumulator,
-              math_sm_count, m_split, n_split, gemm_producer, inputCounter, stream);
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              accumulate, use_split_accumulator, math_sm_count, m_split, n_split, gemm_producer,
+              inputCounter, stream);
 }
 
 void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,

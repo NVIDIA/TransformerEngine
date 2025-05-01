@@ -306,8 +306,8 @@ def mnist_parser(args):
 class TestMNIST(unittest.TestCase):
     """MNIST unittests"""
 
-    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.NVTE_DELAYED_TENSOR_SCALING)
-    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     @classmethod
     def setUpClass(cls):
@@ -347,6 +347,14 @@ class TestMNIST(unittest.TestCase):
         """Test Transformer Engine with MXFP8"""
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
+        actual = train_and_evaluate(self.args)
+        self.verify(actual)
+
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
         self.verify(actual)
 

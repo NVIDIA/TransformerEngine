@@ -78,8 +78,8 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
-    const NVTEShape shape = {this->shape.data(), this->shape.size()};
-    return {dptr, static_cast<NVTEDType>(dtype), shape};
+    return {dptr, static_cast<NVTEDType>(dtype),
+            nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
   int numel() const {
@@ -99,6 +99,7 @@ struct Tensor {
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
 
+ public:
   NVTEScalingMode scaling_mode;
 
   Tensor()
@@ -160,6 +161,28 @@ struct Tensor {
           return data.shape;
         }
         break;
+      case NVTE_BLOCK_SCALING_1D:
+      case NVTE_BLOCK_SCALING_2D: {
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> shape;
+          size_t ndim = columnwise_data.shape.size();
+          shape.reserve(ndim);
+          for (size_t i = 0; i + 1 < ndim; ++i) {
+            shape.push_back(columnwise_data.shape[i + 1]);
+          }
+          if (ndim > 0) {
+            shape.push_back(columnwise_data.shape[0]);
+          }
+          return shape;
+        } else {
+          // NOTE: We may have removed the data pointer from
+          // data by setting usage. In that case, we return
+          // the non-null shape. It is our best guess at the most
+          // recent shape.
+          return data.shape;
+        }
+        break;
+      }
       default:
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
         return {};
@@ -200,10 +223,12 @@ struct Tensor {
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
+  NVTETensor noop_tensor = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),  // force_pow_2_scales
-      sizeof(float)  // amax_epsilon
+      sizeof(bool),       // force_pow_2_scales
+      sizeof(float),      // amax_epsilon
+      sizeof(NVTETensor)  // noop_tensor
   };
 };
 
@@ -247,6 +272,36 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
+template <typename T>
+struct TypeExtrema;
+
+template <>
+struct TypeExtrema<fp8e4m3> {
+  static constexpr float max = 448.0f;
+};
+
+template <>
+struct TypeExtrema<fp8e5m2> {
+  static constexpr float max = 57344.0f;
+};
+
+template <>
+struct TypeExtrema<bf16> {
+  // Hex float format of 1.(7 bits of 1) * 2 ^ 127
+  static constexpr float max = 0x1.FEp127;
+};
+
+template <>
+struct TypeExtrema<fp16> {
+  // Hex float format of 1.(10 bits of 1) * 2 ^ 15
+  static constexpr float max = 0x1.FFCp15;
+};
+
+template <typename T>
+struct TypeExtrema {
+  static constexpr float max = std::numeric_limits<T>::max();
+};
+
 }  // namespace detail
 
 template <typename T>
@@ -277,6 +332,7 @@ struct TypeInfo {
 
   constexpr static DType dtype = getType<T>();
   constexpr static size_t size = sizeof(T);
+  constexpr static float max_finite_value = detail::TypeExtrema<T>::max;
   constexpr static const char *name = detail::type_name<T>();
 };
 

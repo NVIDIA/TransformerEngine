@@ -259,11 +259,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             return self
         raise ValueError("MXFP8Tensor does not support different memory formats!")
 
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -302,6 +297,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
+        shape: torch.shape,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
@@ -316,10 +312,11 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
+            shape=shape,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling to remove references to FP8 metadata objects"""
+        """Custom pickling"""
         return (
             MXFP8Tensor._make_in_reduce_ex,
             (
@@ -329,6 +326,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 self._columnwise_scale_inv,
                 self._fp8_dtype,
                 self.dtype,
+                self.shape,
             ),
         )
 

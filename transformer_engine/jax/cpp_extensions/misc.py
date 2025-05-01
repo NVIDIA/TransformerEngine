@@ -19,7 +19,7 @@ from jax.interpreters.mlir import dtype_to_ir_type
 import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..quantize import ScalingMode, ScaledTensorFactory, QuantizeAxis
+from ..quantize import ScaledTensorFactory, QuantizeLayout
 
 TEDType = transformer_engine_jax.DType
 
@@ -107,37 +107,37 @@ def normalize_axis_boundary(axis, ndim):
     return axis if axis >= 0 else ndim + axis
 
 
-def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis_boundary=-1):
+def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis=-1):
     """
     te_cast_transpose_p multi-dims transpose
 
     static_axis_boundary: int, Indicate those axes <= static_axis_boundary would not be
         involved into transpose, -1 means all axes involve into transpose.
-    transpose_axis_boundary: int, Indicate how to split multi-dimensions tensors to 2D matrix for
-        transpose. Note, transpose_axis_boundary should be greater than static_axis_boundary
+    transpose_axis: int, Indicate how to split multi-dimensions tensors to 2D matrix for
+        transpose. Note, transpose_axis should be greater than static_axis_boundary
 
     examples:
         X in shape (dim0, dim1, dim2, dim3, dim4)
 
-        static_axis_boundary == -1, transpose_axis_boundary == 2
+        static_axis_boundary == -1, transpose_axis == 2
             Xt = (dim2, dim3, dim4, dim0, dim1)
 
-        static_axis_boundary == 0, transpose_axis_boundary == 2
+        static_axis_boundary == 0, transpose_axis == 2
             Xt = (dim0, dim2, dim3, dim4, dim1)
 
-        static_axis_boundary == 0, transpose_axis_boundary == 3
+        static_axis_boundary == 0, transpose_axis == 3
             Xt = (dim0, dim3, dim4, dim1. dim2)
     """
     if static_axis_boundary < 0:
         static_axis_boundary = -1  # means no static axes
     assert static_axis_boundary < len(shape) - 2  # at least 2 remaining for transpose.
     transpose_start_idx = static_axis_boundary + 1
-    transpose_axis_boundary = normalize_axis_boundary(transpose_axis_boundary, len(shape))
-    assert transpose_start_idx < transpose_axis_boundary
+    transpose_axis = normalize_axis_boundary(transpose_axis, len(shape))
+    assert transpose_start_idx < transpose_axis
     return (
         *shape[:transpose_start_idx],
-        *shape[transpose_axis_boundary:],
-        *shape[transpose_start_idx:transpose_axis_boundary],
+        *shape[transpose_axis:],
+        *shape[transpose_start_idx:transpose_axis],
     )
 
 
@@ -195,13 +195,13 @@ def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quant
             break
     return (
         quantizer is not None
-        and quantizer.q_axis == QuantizeAxis.ROWWISE
+        and quantizer.q_layout == QuantizeLayout.ROWWISE
         and arch_l_100
         and is_dbias
     )
 
 
-def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
+def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, **kwargs):
     """
     Applies a workaround for delayed scaling 2x and can be used when the TE common kernels do not yet support 2x delayed scaling.
     It will call the given function 'f' with the given arguments and quantizer as 1x and calculate the colwise output by transposing result.
@@ -215,23 +215,26 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
     @return: the output of 'f' with the colwise output calculated
     """
     should_apply_war = (
-        quantizer is not None
-        and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING
-        and quantizer.is_2x2x()
+        quantizer is not None and quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
     )
     if not should_apply_war:
         return None
 
     # 2x is not supported by TE kernels for delayed scaling
     # so revert to 1x and transpose in JAX
-    quantizer.q_axis = QuantizeAxis.ROWWISE
+    quantizer.q_layout = QuantizeLayout.ROWWISE
     rowwise = f(*args, **kwargs, quantizer=quantizer)
     other_outputs = None
     if isinstance(rowwise, tuple):
         other_outputs = rowwise[1:]
         rowwise = rowwise[0]
-    quantizer.q_axis = QuantizeAxis.ROWWISE_COLWISE
-    colwise_data = jnp.transpose(rowwise.data, (-1, *range(rowwise.data.ndim - 1)))
+    quantizer.q_layout = QuantizeLayout.ROWWISE_COLWISE
+    if flatten_axis < 0:
+        flatten_axis += rowwise.data.ndim
+    assert 0 < flatten_axis < rowwise.data.ndim, "flatten_axis is out of bounds"
+    colwise_data = jnp.transpose(
+        rowwise.data, (*range(flatten_axis, rowwise.data.ndim), *range(flatten_axis))
+    )
     output_2x = ScaledTensorFactory.create(
         data=rowwise.data,
         scale_inv=rowwise.scale_inv,
@@ -239,8 +242,9 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
         colwise_scale_inv=rowwise.scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=rowwise.dq_dtype,
-        q_axis=QuantizeAxis.ROWWISE_COLWISE,
-        layout=quantizer.get_layout(),
+        q_layout=QuantizeLayout.ROWWISE_COLWISE,
+        data_layout=quantizer.get_data_layout(),
+        flatten_axis=flatten_axis,
     )
     if other_outputs is not None:
         return (output_2x,) + other_outputs

@@ -28,8 +28,11 @@
 #include "common/util/logging.h"
 #include "extensions/ffi.h"
 #include "extensions/misc.h"
+#include "extensions/utils.h"
 #include "transformer_engine/activation.h"
-#include "utils.h"
+
+// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 
 namespace transformer_engine {
 namespace jax {
@@ -40,6 +43,12 @@ inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == D
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
+
+pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                   DType in_dtype, DType out_dtype,
+                                                   JAXX_Scaling_Mode scaling_mode, bool is_2x);
+
 // Normalization
 XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardHandler);
 
@@ -47,7 +56,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardHandler);
 
 pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
                                              DType w_dtype, DType out_dtype,
-                                             NVTE_Norm_Type norm_type, int scaling_mode,
+                                             NVTE_Norm_Type norm_type,
+                                             JAXX_Scaling_Mode scaling_mode,
                                              bool zero_centered_gamma, float epsilon, int sm_margin,
                                              bool is_training);
 
@@ -61,13 +71,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                               DType in_dtype, DType out_dtype);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
-
-pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                   DType in_dtype, DType out_dtype,
-                                                   int scaling_mode, bool is_2x);
+                                               DType in_dtype, DType out_dtype,
+                                               JAXX_Scaling_Mode scaling_mode,
+                                               QuantizeLayout q_layout);
 
 // Softmax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);

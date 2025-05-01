@@ -17,6 +17,7 @@
 #include "extensions.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#include "util.h"
 
 namespace {
 
@@ -166,8 +167,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
 
   // Workspace
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
@@ -175,8 +176,15 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
+  // Keep the swizzled scaling factor tensors alive during the GEMM.
+  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
+    // Optionally swizzle the scaling factors
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
+    swizzled_scale_inverses_list.emplace_back(
+        std::move(swizzle_scaling_factors(B_tensor, !transb)));
+
     if (comm_overlap) {
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
@@ -278,12 +286,13 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
       nvte_scaling_modeB);
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
   auto te_D = makeTransformerEngineTensor(
-      D.data_ptr(), {static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
+      D.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
       D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
-  auto te_bias =
-      makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))}, bias_type);
+  auto te_bias = makeTransformerEngineTensor(
+      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
   auto te_counter = makeTransformerEngineTensor(
-      counter.data_ptr(), {static_cast<size_t>(counter.size(0))}, DType::kInt32);
+      counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))}, DType::kInt32);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                               ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
@@ -291,8 +300,8 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
                                                     static_cast<size_t>(pre_gelu_out.size(1))};
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
                           te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
@@ -313,17 +322,18 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       te_pre_gelu_out_vector, te_workspace_vector;
   std::vector<TensorWrapper> wrappers;
   std::vector<at::Tensor> D_vectors;
+  // Keep the swizzled scaling factor tensors alive during the GEMMs.
+  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
   auto none = py::none();
 
   std::vector<size_t> single_output_begins;
   std::vector<size_t> single_output_ends;
-  int slicing_dim;
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
 
-  void* output_data_ptr;
+  void* output_data_ptr = nullptr;
   if (single_output) {
     output_data_ptr = (*D)[0].data_ptr();
   }
@@ -380,6 +390,10 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       continue;
     }
 
+    // Optionally swizzle the scaling factors
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
+
     auto te_D = makeTransformerEngineTensor(out_tensor);
     auto te_bias = makeTransformerEngineTensor(bias[i]);
     auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
@@ -406,7 +420,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
+                                           std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }

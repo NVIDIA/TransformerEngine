@@ -16,7 +16,7 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
-from ...utils import non_tn_fp8_gemm_supported
+from ...utils import is_non_tn_fp8_gemm_supported
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -29,12 +29,14 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        dtype = torch_to_transformer_engine_dtype[dtype]
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
+            if tensor._data.numel() == 0:
+                return torch.empty_like(tensor._data, dtype=dtype)
             # Cast from FP8
-            return tex.dequantize(tensor, dtype)
+            return tex.dequantize(tensor, te_dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
@@ -90,6 +92,13 @@ class Float8TensorBase:
 
         return instance
 
+    def clear(self):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
+        for t in (self._data, self._transpose, self._scale_inv):
+            if t is not None:
+                t.data = torch.Tensor()
+        self._transpose_invalid = True
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -102,7 +111,10 @@ class Float8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
         """Prepare the tensor base for saving for backward"""
-        tensors = [self._data, self._transpose]
+        tensors = [self._data, self._transpose, self._scale_inv]
+        self._data = None
+        self._transpose = None
+        self._scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -111,7 +123,8 @@ class Float8TensorBase:
         """Restore the tensor base data from the saved tensors list"""
         self._data = tensors[0]
         self._transpose = tensors[1]
-        return tensors[2:]
+        self._scale_inv = tensors[2]
+        return tensors[3:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
@@ -150,12 +163,15 @@ class Float8TensorBase:
         rowwise_usage: Optional[bool] = None,
         columnwise_usage: Optional[bool] = None,
     ):
-        # Figure out what data is available and what is required
+        """
+        Generate or remove FP8 data based on provided usage. For
+        FP8, data cannot be generated even if transpose is available.
+        """
         has_data = self._data is not None
         has_data_transpose = self._transpose is not None and not self._transpose_invalid
         needs_data = has_data
         needs_data_transpose = has_data_transpose
-        if non_tn_fp8_gemm_supported():
+        if is_non_tn_fp8_gemm_supported():
             if rowwise_usage is not None and rowwise_usage:
                 needs_data = True
             if columnwise_usage is not None and columnwise_usage:

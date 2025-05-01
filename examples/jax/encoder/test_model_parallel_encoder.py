@@ -57,13 +57,14 @@ class Net(nn.Module):
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
             enable_sequence_parallel=self.enable_seq_paral,
+            mlp_activations=("gelu", "linear"),
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
         x = x.reshape(x.shape[0], -1)
 
         if self.enable_seq_paral:
-            # Trigger all-gather to collect a complete tensor alone seqence on each device.
+            # Trigger all-gather to collect a complete tensor alone sequence on each device.
             x = jax.lax.with_sharding_constraint(
                 x, jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             )
@@ -257,6 +258,8 @@ def get_state_sharding(state, params_sharding):
 def train_and_evaluate(args):
     """Execute model training and evaluation loop."""
     print(args)
+    jax.config.update("jax_use_shardy_partitioner", args.enable_shardy)
+
     train_ds, test_ds, num_embed = get_datasets(args.max_seq_len)
 
     num_gpu = jax.local_device_count()
@@ -440,6 +443,9 @@ def encoder_parser(args):
     parser.add_argument(
         "--enable-sp", action="store_true", default=False, help="Enable sequence parallelism."
     )
+    parser.add_argument(
+        "--enable-shardy", action="store_true", default=False, help="Enable Shardy (experimental)."
+    )
 
     return parser.parse_args(args)
 
@@ -447,19 +453,18 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.NVTE_DELAYED_TENSOR_SCALING)
-    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+    is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
-    @classmethod
-    def setUpClass(cls):
+    def setUp(self):
         """Run 3 epochs for testing"""
-        cls.args = encoder_parser(["--epochs", "3"])
+        self.args = encoder_parser(["--epochs", "3"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -467,7 +472,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -475,14 +480,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_with_sp(self):
         """Test Transformer Engine with BF16 + SP"""
         self.args.enable_sp = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp(self):
@@ -491,7 +496,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8_with_sp(self):
@@ -500,7 +505,35 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.50 and actual[1] > 0.76
+        assert actual[0] < 0.455 and actual[1] > 0.785
+
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    def test_te_bf16_shardy(self):
+        """Test Transformer Engine with BF16"""
+        self.args.enable_shardy = True
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.455 and actual[1] > 0.785
+
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_delayed_scaling_fp8_shardy(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "DelayedScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.455 and actual[1] > 0.785
+
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_delayed_scaling_fp8_with_sp_shardy(self):
+        """Test Transformer Engine with DelayedScaling FP8 + SP"""
+        self.args.enable_shardy = True
+        self.args.enable_sp = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "DelayedScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.455 and actual[1] > 0.785
+
+    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 
 
 if __name__ == "__main__":

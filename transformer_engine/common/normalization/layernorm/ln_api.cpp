@@ -27,23 +27,28 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
-      !is_block_scaling(z->scaling_mode)) {
+      !is_mxfp_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 
-  NVTE_CHECK(x.data.shape.size() == 2);
-  NVTE_CHECK(gamma.data.shape == beta.data.shape);
-  NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
+  NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
+  NVTE_CHECK(gamma.data.shape == beta.data.shape, "Gamma and Beta must have the same shape.");
+  NVTE_CHECK(gamma.data.dtype == beta.data.dtype,
+             "Gamma and Beta must have the same dtype. Gamma dtype: " +
+                 to_string(gamma.data.dtype) + ", Beta dtype: " + to_string(beta.data.dtype));
+  NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0], "Gamma must have the same hidden size.");
 
-  NVTE_CHECK(epsilon >= 0.f);
+  NVTE_CHECK(epsilon >= 0.f, "Epsilon must be non-negative.");
 
-  NVTE_CHECK(z->data.shape == x.data.shape);
+  NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(mu->data.shape == std::vector<size_t>{x.data.shape[0]});
-  NVTE_CHECK(mu->data.dtype == DType::kFloat32);
+  NVTE_CHECK(mu->data.shape == std::vector<size_t>{x.data.shape[0]},
+             "Mu must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(mu->data.dtype == DType::kFloat32, "Mu must be a float32 tensor.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
-  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
+  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+             "RSigma must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
   if (!workspace->data.shape.empty()) {
     CheckInputTensor(x, "x");
@@ -57,7 +62,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH
