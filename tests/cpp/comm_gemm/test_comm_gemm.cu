@@ -195,10 +195,10 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
 
     bool grad = false;
     bool accumulate = false;
-    CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias, &aux, transa, transb, grad, accumulate,
+    CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias.t, &aux.t, transa, transb, grad, accumulate,
              0 /*comm_sm_count*/, stream);
     auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias, &gaux, transa, transb, grad, &workspace.t,
+    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias.t, &gaux.t, transa, transb, grad, &workspace.t,
                      accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
