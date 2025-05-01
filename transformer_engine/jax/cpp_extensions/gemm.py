@@ -142,6 +142,10 @@ def _calculate_remaining_shape(shape, contracting_dims):
     return tuple(shape[dim] for dim in range(len(shape)) if dim not in contracting_dims)
 
 
+def _transpose_contract_dims(ndim, contracting_dims):
+    return tuple(ndim - i - 1 for i in contracting_dims)
+
+
 def _dequantize(x, scale_inv, dq_dtype):
     return x.astype(dq_dtype) * scale_inv.astype(dq_dtype)
 
@@ -154,11 +158,12 @@ def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
     lhs_dq = _dequantize(lhs.data, lhs.scale_inv, lhs.dq_dtype)
     rhs_dq = _dequantize(rhs.data, rhs.scale_inv, rhs.dq_dtype)
 
+    # import pdb; pdb.set_trace()
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
-        lhs_contract = _calculate_remaining_shape(lhs_dq.shape, lhs_contract)
+        lhs_contract = _transpose_contract_dims(lhs_dq.ndim, lhs_contract)
     if rhs.data_layout == "T":
-        rhs_contract = _calculate_remaining_shape(rhs_dq.shape, rhs_contract)
+        rhs_contract = _transpose_contract_dims(rhs_dq.ndim, rhs_contract)
 
     dim_nums = (lhs_contract, rhs_contract), (lhs_batch, rhs_batch)
 
@@ -237,8 +242,8 @@ def _jax_gemm(
     def _jax_gemm_fp8_impl(lhs, rhs):
         if lhs.scaling_mode.is_tensor_scaling():
             assert (
-                    rhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-                    ), "rhs does not have delayed tensor scaling mode"
+                    rhs.scaling_mode == lhs.scaling_mode
+                    ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                     jax.lax.Precision.HIGHEST if QuantizeConfig.FP8_2X_ACC_FPROP else jax.lax.Precision.DEFAULT
                     )
