@@ -442,7 +442,9 @@ def get_delayed_scaling():
     delay_scaling : DelayedScaling
         an instance of  DelayedScaling which is set via fp8_autocast.
     """
-    warnings.warn("This function will be deprecated in the future, please use get_te_recipe() instead")
+    warnings.warn(
+        "This function will be deprecated in the future, please use get_te_recipe() instead"
+    )
     amax_compute_algo = (
         "max" if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX else "most_recent"
     )
