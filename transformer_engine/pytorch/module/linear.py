@@ -688,10 +688,7 @@ class _Linear(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if (
-                    ctx.ub_overlap_ag
-                    and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer)
-                ):
+                if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
                     # UB does not support overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
@@ -773,10 +770,10 @@ class _Linear(torch.autograd.Function):
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     if (
-                            wgrad_gemm_kwargs["ub"] is not None
-                            or wgrad_gemm_kwargs["ub_type"] is not None
-                            or wgrad_gemm_kwargs["extra_output"] is not None
-                            or wgrad_gemm_kwargs["bulk_overlap"]
+                        wgrad_gemm_kwargs["ub"] is not None
+                        or wgrad_gemm_kwargs["ub_type"] is not None
+                        or wgrad_gemm_kwargs["extra_output"] is not None
+                        or wgrad_gemm_kwargs["bulk_overlap"]
                     ):
                         raise NotImplementedError(
                             "Delayed weight grad computation is not supported "
