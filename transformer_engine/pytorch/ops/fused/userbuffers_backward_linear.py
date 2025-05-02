@@ -405,10 +405,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         if weight_requires_grad:
 
             # Initialize grad output
-            if (
-                tensor_parallel_mode == "row"
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            ):
+            if tensor_parallel_mode == "row" and isinstance(grad_output_quantizer, MXFP8Quantizer):
                 # UB does not support overlapping grad output
                 # all-gather with wgrad GEMM. Also, MXFP8 does not
                 # allow reusing the grad output that was gathered for
