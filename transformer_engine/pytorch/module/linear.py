@@ -306,12 +306,12 @@ class _Linear(torch.autograd.Function):
                     if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 if force_hp_input_gather:
-                    assert not isinstance(inputmat, QuantizedTensor)
+                    assert not isinstance(inputmat, QuantizedTensorBase)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensor):
+                if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -591,7 +591,7 @@ class _Linear(torch.autograd.Function):
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
 
-                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensor):
+                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
                     weight_fp8.update_usage(
                         rowwise_usage=ctx.weight_quantizer.rowwise_usage,
                         columnwise_usage=ctx.weight_quantizer.columnwise_usage,
@@ -651,7 +651,7 @@ class _Linear(torch.autograd.Function):
                     inputmat_total_work.wait()
                     inputmat_total_work = None
                 if ctx.input_quantizer is not None and not isinstance(
-                    inputmat_total, QuantizedTensor
+                    inputmat_total, QuantizedTensorBase
                 ):
                     # Async gather in BF16 does not asynchronously
                     # call quantizer after gather.
