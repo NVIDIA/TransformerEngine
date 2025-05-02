@@ -34,7 +34,7 @@ __all__ = [
     "is_fp8_available",
     "update_collections",
     "get_delayed_scaling",
-    "get_te_recipe",
+    "create_te_recipe",
     "NVTE_FP8_COLLECTION_NAME",
 ]
 
@@ -443,8 +443,8 @@ def get_delayed_scaling():
         an instance of  DelayedScaling which is set via fp8_autocast.
     """
     warnings.warn(
-        "This function will be deprecated in the future, please use get_te_recipe() instead"
-    )
+            "This function will be deprecated in the future, please use create_te_recipe() instead"
+            )
     amax_compute_algo = (
         "max" if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX else "most_recent"
     )
@@ -456,7 +456,7 @@ def get_delayed_scaling():
     )
 
 
-def get_te_recipe(recipe_name: str = "DelayedScaling"):
+def create_te_recipe(recipe_name: str = "DelayedScaling"):
     r"""
     Obtain an instance of  TE recipe which is used subsequently in fp8_autocast.
 

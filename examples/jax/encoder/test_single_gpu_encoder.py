@@ -19,7 +19,7 @@ from flax.training import train_state
 from common import is_bf16_supported
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, get_te_recipe
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, create_te_recipe
 
 
 PARAMS_KEY = "params"
@@ -215,7 +215,7 @@ def train_and_evaluate(args):
     label_shape = [args.batch_size]
 
     if args.use_fp8:
-        fp8_recipe = get_te_recipe(args.fp8_recipe)
+        fp8_recipe = create_te_recipe(args.fp8_recipe)
     else:
         fp8_recipe = None
 

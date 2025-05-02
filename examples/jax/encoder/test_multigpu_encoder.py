@@ -253,7 +253,7 @@ def train_and_evaluate(args):
         ), "Test batch size needs to be multiple of 32 for MXFP8"
 
     if args.use_fp8:
-        fp8_recipe = get_te_recipe(args.fp8_recipe)
+        fp8_recipe = create_te_recipe(args.fp8_recipe)
     else:
         fp8_recipe = None
 
