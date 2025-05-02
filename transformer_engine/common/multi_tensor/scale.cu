@@ -77,7 +77,7 @@ struct ScaleFunctor {
       for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
 #pragma unroll
         for (int ii = 0; ii < ILP; ii++) {
-          r_in[ii] = 0;
+          r_in[ii] = 0.f;
           int i = i_start + threadIdx.x + ii * blockDim.x;
           if (i < n && i < chunk_size) r_in[ii] = in[i];
         }
