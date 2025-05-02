@@ -136,7 +136,7 @@ struct L2NormFunctor {
     x_t r_x[ILP];
     for (int i = 0; i < ILP; i++) {
       vals[i] = 0.f;
-      r_x[i] = 0;
+      r_x[i] = 0.f;
     }
 
     // to make things simple, we put aligned case in a different code path
@@ -206,7 +206,7 @@ struct UnscaleL2NormFunctor {
     x_t r_x[ILP];
     for (int i = 0; i < ILP; i++) {
       vals[i] = 0.f;
-      r_x[i] = 0;
+      r_x[i] = 0.f;
     }
 
     // to make things simple, we put aligned case in a different code path
