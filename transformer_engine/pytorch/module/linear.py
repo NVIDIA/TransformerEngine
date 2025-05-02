@@ -693,8 +693,8 @@ class _Linear(torch.autograd.Function):
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
-                    # for the dgrad GEMM. Need blocking all-gather for
-                    # column-scaled MXFP8 data.
+                    # for the dgrad GEMM. We work around with blocking
+                    # all-gather for column-scaled MXFP8 data.
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     grad_output, _ = gather_along_first_dim(
                         grad_output_arg,

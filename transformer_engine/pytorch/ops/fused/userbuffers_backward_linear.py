@@ -298,27 +298,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             elif dy_local.dtype != dtype:
                 dy_local = dy_local.to(dtype=dtype)
 
-        # NCCL communication for MXFP8 grad output tensor
-        # Note: UB does not support overlapping grad output all-gather
-        # with wgrad GEMM. Also, MXFP8 does not allow reusing the grad
-        # output that was gathered for the dgrad GEMM. We work around
-        # this by all-gathering the grad output with NCCL and
-        # overlapping with the dgrad GEMM.
-        dy_wgrad = None
-        dy_wgrad_async = None
-        if (
-            tensor_parallel_mode == "row"
-            and weight_requires_grad
-            and isinstance(grad_output_quantizer, MXFP8Quantizer)
-        ):
-            grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-            dy_wgrad, dy_wgrad_async = gather_along_first_dim(
-                dy_local,
-                tensor_parallel_group,
-                async_op=True,
-                quantizer=grad_output_quantizer,
-            )
-
         # Cast weight tensor dtype if needed
         if weight is None:
             raise ValueError("Weight tensor is required to compute input grad")
@@ -426,12 +405,22 @@ class UserbuffersBackwardLinear(FusedOperation):
         if weight_requires_grad:
 
             # Initialize grad output
-            if dy_wgrad is not None:
-                if dy_wgrad_async is not None:
-                    dy_wgrad_async.wait()
-                    dy_wgrad_async = None
-                dy = dy_wgrad
-            elif tensor_parallel_mode == "column":
+            if (
+                tensor_parallel_mode == "row"
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            ):
+                # UB does not support overlapping grad output
+                # all-gather with wgrad GEMM. Also, MXFP8 does not
+                # allow reusing the grad output that was gathered for
+                # the dgrad GEMM. We work around with blocking
+                # all-gather for column-scaled MXFP8 data.
+                grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                dy, _ = gather_along_first_dim(
+                    grad_output,
+                    tensor_parallel_group,
+                    quantizer=grad_output_quantizer,
+                )
+            if tensor_parallel_mode == "column":
                 dy = dy_local
             if dy is None:
                 raise RuntimeError(
@@ -489,10 +478,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             db_async.wait()
         if bias_requires_grad:
             extra_outputs["grad_bias"] = db
-
-        # Clean up
-        if dy_wgrad_async is not None:
-            dy_wgrad_async.wait()
 
         return dx_local, dw, extra_outputs
 
