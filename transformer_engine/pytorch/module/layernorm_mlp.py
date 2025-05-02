@@ -710,29 +710,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_bulk_dgrad = ctx.fc1_weight_requires_grad and ctx.ub_bulk_dgrad
             ctx.ub_bulk_wgrad = ctx.fc1_weight_requires_grad and ctx.ub_bulk_wgrad
 
-            # UB+NCCL communication with MXFP8 data
-            # Note: UB does not support overlapping grad output
-            # all-gather with wgrad GEMM. Also, we can't convert
-            # row-scaled MXFP8 to column-scaled, so we can't reuse
-            # the grad output that was gathered for the dgrad
-            # GEMM. We work around by overlapping dgrad GEMM +
-            # row-scaled all-gather (UB) + column-scaled
-            # all-gather (NCCL).
-            fc2_wgrad_grad_output = None
-            fc2_wgrad_grad_output_work = None
-            if (
-                ctx.ub_overlap_ag
-                and ctx.fc2_weight_requires_grad
-                and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
-            ):
-                ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                fc2_wgrad_grad_output, fc2_wgrad_grad_output_work = gather_along_first_dim(
-                    grad_outputs[0],
-                    ctx.tp_group,
-                    async_op=True,
-                    quantizer=ctx.fc2_grad_output_quantizer,
-                )
-
             # Configure quantizer for FC2 grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
@@ -874,17 +851,28 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
-                if fc2_wgrad_grad_output_work is not None:
-                    fc2_wgrad_grad_output_work.wait()
-                    fc2_wgrad_grad_output_work = None
-                if fc2_wgrad_grad_output is None:
-                    fc2_wgrad_grad_output = grad_output
+                if (
+                    ctx.ub_overlap_ag
+                    and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer)
+                ):
+                    # UB does not support overlapping grad output
+                    # all-gather with wgrad GEMM. Also, we can't
+                    # convert row-scaled MXFP8 to column-scaled, so we
+                    # can't reuse the grad output that was gathered
+                    # for the dgrad GEMM. Need blocking all-gather for
+                    # column-scaled MXFP8 data.
+                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                    grad_output, _ = gather_along_first_dim(
+                        grad_outputs[0],
+                        ctx.tp_group,
+                        quantizer=ctx.fc2_grad_output_quantizer,
+                    )
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(fc2_wgrad_grad_output, QuantizedTensor):
-                        fc2_wgrad_grad_output.update_usage(columnwise_usage=True)
+                    if isinstance(grad_output, QuantizedTensor):
+                        grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        fc2_wgrad_grad_output = ctx.fc2_grad_output_quantizer(fc2_wgrad_grad_output)
+                        grad_output = ctx.fc2_grad_output_quantizer(grad_output)
 
                 # Whether to set grad arg in general_gemm
                 grad_arg = True
@@ -911,7 +899,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 def fc2_wgrad_gemm(
                     x: torch.Tensor,
                     dy: torch.Tensor,
-                    _is_delayed: bool = True,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                     """Perform FC2 WGRAD GEMM
 
@@ -924,15 +911,11 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([act_out, fc2_wgrad_grad_output], fc2_wgrad_gemm)
+                    ctx.wgrad_store.put([act_out, grad_output], fc2_wgrad_gemm)
                 else:
 
                     # Call wgrad GEMM now
-                    fc2_wgrad, fc2_bias_grad_ = fc2_wgrad_gemm(
-                        act_out,
-                        fc2_wgrad_grad_output,
-                        _is_delayed=False,
-                    )
+                    fc2_wgrad, fc2_bias_grad_ = fc2_wgrad_gemm(act_out, grad_output)
 
                     # Update grad bias if needed
                     if fc2_bias_grad is None:
@@ -1166,26 +1149,21 @@ class _LayerNormMLP(torch.autograd.Function):
                     some advanced communication/compute overlapping.
 
                     """
-
-                    # Check for invalid configurations
-                    if _is_delayed:
-                        if (
-                            fc1_wgrad_gemm_kwargs["ub"] is not None
-                            or fc1_wgrad_gemm_kwargs["ub_type"] is not None
-                            or fc1_wgrad_gemm_kwargs["extra_output"] is not None
-                            or fc1_wgrad_gemm_kwargs["bulk_overlap"]
-                        ):
-                            raise NotImplementedError(
-                                "Delayed weight grad computation is not supported "
-                                "with Userbuffers (tensor-parallel communication overlapping)"
-                            )
-
-                    # Perform GEMM
                     dw, db, *_ = general_gemm(x, dy, **fc1_wgrad_gemm_kwargs)
                     return dw, db
 
                 # Choose whether to call wgrad GEMM now or delay
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
+                    if (
+                            fc1_wgrad_gemm_kwargs["ub"] is not None
+                            or fc1_wgrad_gemm_kwargs["ub_type"] is not None
+                            or fc1_wgrad_gemm_kwargs["extra_output"] is not None
+                            or fc1_wgrad_gemm_kwargs["bulk_overlap"]
+                    ):
+                        raise NotImplementedError(
+                            "Delayed weight grad computation is not supported "
+                            "with Userbuffers (tensor-parallel communication overlapping)"
+                        )
                     ctx.wgrad_store.put([ln_out_total, dact], fc1_wgrad_gemm)
                     fc1_wgrad = None
                     if fuse_gemm_and_bias_fc1_wgrad:
@@ -1193,11 +1171,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 else:
 
                     # Call wgrad GEMM now
-                    fc1_wgrad_outputs = fc1_wgrad_gemm(
-                        ln_out_total,
-                        dact,
-                        _is_delayed=False,
-                    )
+                    fc1_wgrad_outputs = fc1_wgrad_gemm(ln_out_total, dact)
                     if fuse_gemm_and_bias_fc1_wgrad:
                         fc1_wgrad, fc1_bias_grad = fc1_wgrad_outputs
                     else:
@@ -1223,9 +1197,6 @@ class _LayerNormMLP(torch.autograd.Function):
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
-            if fc2_wgrad_grad_output_work is not None:
-                fc2_wgrad_grad_output_work.wait()
-                fc2_wgrad_grad_output_work = None
             if fc1_dgrad_work is not None:
                 fc1_dgrad_work.wait()
                 fc1_dgrad_work = None
