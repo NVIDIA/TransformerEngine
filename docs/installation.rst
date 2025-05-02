@@ -11,13 +11,15 @@ Prerequisites
 .. |driver link| replace:: NVIDIA Driver
 .. _driver link: https://www.nvidia.com/drivers
 
+Before the installation process, ensure the following requirements are met:
+
 1. Linux x86_64
 2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 12.1 or later.
 4. `cuDNN 9.3 <https://developer.nvidia.com/cudnn>`__ or later.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
-installation path, e.g. within `CUDA_HOME`, set
+installation path, for example, within `CUDA_HOME`, set
 `NVTE_CUDA_INCLUDE_PATH` in the environment.
 
 Transformer Engine in NGC Containers
@@ -30,13 +32,13 @@ on `NVIDIA GPU Cloud <https://ngc.nvidia.com>`_.
 pip - from PyPI
 -----------------------
 
-Transformer Engine can be directly installed from `our PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+Transformer Engine can be directly installed from `our PyPI <https://pypi.org/project/transformer-engine/>`_, for example,
 
 .. code-block:: bash
 
     pip3 install --no-build-isolation transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (for example, [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
 
 pip - from GitHub
 -----------------------
@@ -56,7 +58,7 @@ Execute the following command to install the latest stable version of Transforme
 
   pip3 install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (for example, `NVTE_FRAMEWORK=jax,pytorch`).
 
 Installation (development build)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -64,7 +66,7 @@ Installation (development build)
 .. warning::
 
    While the development build of Transformer Engine could contain new features not available in
-   the official build yet, it is not supported and so its usage is not recommended for general
+   the official build, those features are not supported, so their usage is not recommended for general
    use.
 
 Execute the following command to install the latest development build of Transformer Engine:
@@ -73,9 +75,9 @@ Execute the following command to install the latest development build of Transfo
 
   pip3 install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@main
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
+This automatically detects if any supported deep learning frameworks are installed and builds Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (for example, `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
 
-In order to install a specific PR, execute (after changing NNN to the PR number):
+To install a specific PR, execute (after changing NNN to the PR number):
 
 .. code-block:: bash
 
