@@ -220,6 +220,8 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {
+    case transformer_engine::DType::kInt16:
+      return torch::kInt16;
     case transformer_engine::DType::kInt32:
       return torch::kInt32;
     case transformer_engine::DType::kInt64:
@@ -257,6 +259,8 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
       return transformer_engine::DType::kByte;
     case torch::kByte:
       return transformer_engine::DType::kByte;
+    case torch::kInt16:
+      return transformer_engine::DType::kInt16;
     case torch::kInt32:
       return transformer_engine::DType::kInt32;
     case torch::kInt64:

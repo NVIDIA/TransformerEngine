@@ -238,6 +238,7 @@ constexpr T DIVUP(const T &x, const T &y) {
 }
 
 using byte = uint8_t;
+using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
@@ -260,6 +261,7 @@ constexpr inline const char *type_name() noexcept;
     return #T;                                           \
   }
 TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
+TRANSFORMER_ENGINE_TYPE_NAME(int16_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int64_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
@@ -306,7 +308,7 @@ struct TypeExtrema {
 
 template <typename T>
 struct TypeInfo {
-  using types = std::tuple<byte, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
 
   template <typename U, DType current>
   struct Helper {
@@ -341,6 +343,10 @@ struct TypeInfo {
     using namespace transformer_engine;                      \
     case DType::kByte: {                                     \
       using type = unsigned char;                            \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case DType::kInt16: {                                    \
+      using type = int16_t;                                  \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kInt32: {                                    \
