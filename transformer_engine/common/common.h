@@ -576,6 +576,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
 
 bool is_supported_by_CC_100();
 
+Tensor **convert_tensor_array(NVTETensor **nvte_tensors, size_t outer_size, size_t inner_size);
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_
