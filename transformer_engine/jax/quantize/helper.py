@@ -43,7 +43,7 @@ _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
 
-def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
+def _check_tensor_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     """Check if delayed scaling FP8 is supported on the given GPU architecture.
 
     Args:
@@ -97,7 +97,7 @@ def _check_fp8_support(scaling_mode, gpu_id) -> Tuple[bool, str]:
     """
     gpu_arch = get_device_compute_capability(gpu_id)
     if scaling_mode.is_tensor_scaling():
-        return _check_delayed_scaling_fp8_support(gpu_arch)
+        return _check_tensor_scaling_fp8_support(gpu_arch)
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         return _check_block_scaling_fp8_support(gpu_arch)
     return (False, "Unsupported scaling_mode!")
