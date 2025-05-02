@@ -158,7 +158,6 @@ def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
     lhs_dq = _dequantize(lhs.data, lhs.scale_inv, lhs.dq_dtype)
     rhs_dq = _dequantize(rhs.data, rhs.scale_inv, rhs.dq_dtype)
 
-    # import pdb; pdb.set_trace()
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
         lhs_contract = _transpose_contract_dims(lhs_dq.ndim, lhs_contract)
@@ -167,10 +166,9 @@ def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
 
     dim_nums = (lhs_contract, rhs_contract), (lhs_batch, rhs_batch)
 
-    out = jax.lax.dot_general(
+    return jax.lax.dot_general(
         lhs_dq, rhs_dq, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
     )
-    return out
 
 
 @partial(jax.jit, static_argnums=(2,))
