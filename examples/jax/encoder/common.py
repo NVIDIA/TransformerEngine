@@ -28,16 +28,3 @@ def is_mxfp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     return gpu_arch >= 100
-
-
-def get_fp8_recipe_from_name_string(name: str):
-    """Query recipe from a given name string"""
-    match name:
-        case "DelayedScaling":
-            return recipe.DelayedScaling()
-        case "MXFP8BlockScaling":
-            return recipe.MXFP8BlockScaling()
-        case "Float8CurrentScaling":
-            return recipe.Float8CurrentScaling()
-        case _:
-            raise ValueError(f"Invalid fp8_recipe, got {name}")

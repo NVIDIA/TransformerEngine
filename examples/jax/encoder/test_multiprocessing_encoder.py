@@ -25,11 +25,10 @@ from common import (
     is_bf16_supported,
     is_fp8_supported,
     is_mxfp8_supported,
-    get_fp8_recipe_from_name_string,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, get_fp8_recipe
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -372,7 +371,7 @@ def train_and_evaluate(args):
         ), "Test batch size needs to be multiple of 32 for MXFP8"
 
     if args.use_fp8:
-        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+        fp8_recipe = get_fp8_recipe(args.fp8_recipe)
     else:
         fp8_recipe = None
 

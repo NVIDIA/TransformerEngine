@@ -10,6 +10,7 @@ in JAX, including support for different scaling modes and datatypes.
 from contextlib import contextmanager
 from enum import Enum
 from typing import Optional, Tuple, Dict, Union
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +34,7 @@ __all__ = [
     "is_fp8_available",
     "update_collections",
     "get_delayed_scaling",
+    "get_fp8_recipe",
     "NVTE_FP8_COLLECTION_NAME",
 ]
 
@@ -440,6 +442,7 @@ def get_delayed_scaling():
     delay_scaling : DelayedScaling
         an instance of  DelayedScaling which is set via fp8_autocast.
     """
+    warnings.warn("This function will be deprecated in the future, please use get_fp8_recipe() instead")
     amax_compute_algo = (
         "max" if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX else "most_recent"
     )
@@ -449,6 +452,31 @@ def get_delayed_scaling():
         amax_history_len=QuantizeConfig.AMAX_HISTORY_LEN,
         amax_compute_algo=amax_compute_algo,
     )
+
+
+def get_fp8_recipe(recipe_name: str = "DelayedScaling"):
+    r"""
+    Obtain an instance of  TE recipe which is used subsequently in fp8_autocast.
+
+    Args:
+        recipe_name: str, default = "DelayedScaling".
+                 Other values for recipe_name are "MXFP8BlockScaling", "Float8CurrentScaling"
+
+    Returns:
+        recipe.Recipe: an instance of TE recipe
+
+    Raises:
+        ValueError: If the recipe_name is Unsupported.
+    """
+    match recipe_name:
+        case "DelayedScaling":
+            return recipe.DelayedScaling()
+        case "MXFP8BlockScaling":
+            return recipe.MXFP8BlockScaling()
+        case "Float8CurrentScaling":
+            return recipe.Float8CurrentScaling()
+        case _:
+            raise ValueError(f"Invalid fp8_recipe, got {recipe_name}")
 
 
 def update_collections(new: Collection, original: Collection) -> Collection:
