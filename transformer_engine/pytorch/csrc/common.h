@@ -300,7 +300,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>
-makeTransformerEngineTensor(std::vector<std::vector<at::Tensor>> at_tensor_lists);
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists);
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer);
 

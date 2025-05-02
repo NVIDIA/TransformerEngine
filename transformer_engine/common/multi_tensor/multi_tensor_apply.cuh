@@ -14,53 +14,6 @@
 
 // This header is the one-stop shop for all your multi-tensor apply needs.
 
-// Change device if needed.
-class OptionalCUDAGuard {
- public:
-  explicit OptionalCUDAGuard(int new_device) {
-    if (new_device < 0) return;
-
-    int current_device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-
-    if (new_device != current_device) {
-      NVTE_CHECK_CUDA(cudaSetDevice(new_device));
-      device_changed_ = true;
-      prev_device_ = current_device;
-    }
-  }
-
-  OptionalCUDAGuard(const OptionalCUDAGuard &) = delete;
-  OptionalCUDAGuard &operator=(const OptionalCUDAGuard &) = delete;
-
-  OptionalCUDAGuard(OptionalCUDAGuard &&other) noexcept
-      : prev_device_(other.prev_device_), device_changed_(other.device_changed_) {
-    other.device_changed_ = false;
-  }
-
-  OptionalCUDAGuard &operator=(OptionalCUDAGuard &&other) noexcept {
-    if (this != &other) {
-      if (device_changed_) {
-        cudaSetDevice(prev_device_);
-      }
-      prev_device_ = other.prev_device_;
-      device_changed_ = other.device_changed_;
-      other.device_changed_ = false;
-    }
-    return *this;
-  }
-
-  ~OptionalCUDAGuard() {
-    if (device_changed_) {
-      NVTE_CHECK_CUDA(cudaSetDevice(prev_device_));
-    }
-  }
-
- private:
-  int prev_device_;
-  bool device_changed_ = false;
-};
-
 // TODO:  Kernel arg size limit may be <4KB for some other cards (ie Jetson)
 constexpr int depth_to_max_tensors[6] = {110, 64, 48, 36, 30, 24};
 constexpr int depth_to_max_blocks[6] = {320, 320, 320, 320, 320, 320};
@@ -93,9 +46,11 @@ __global__ void multi_tensor_apply_kernel(int64_t chunk_size, volatile int *noop
 template <int depth, bool USE_FP8 = false, typename T, typename... ArgTypes>
 void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
                         const transformer_engine::Tensor &noop_flag,
-                        transformer_engine::Tensor **tensor_lists, const size_t num_tensor_lists,
-                        const size_t num_tensors_per_list, T callable, const int device_id,
-                        cudaStream_t stream, ArgTypes... args) {
+                        std::vector<std::vector<transformer_engine::Tensor *>> tensor_lists,
+                        T callable, cudaStream_t stream, ArgTypes... args) {
+  const size_t num_tensor_lists = tensor_lists.size();
+  const size_t num_tensors_per_list = tensor_lists[0].size();
+
   if constexpr (USE_FP8) {
     NVTE_CHECK(num_tensor_lists == depth + 3,
                "tensor_lists.size() != depth + 3, tensor_lists should have 3 more tensors (scale, "
@@ -106,21 +61,20 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
 
   TensorListMetadata<depth, USE_FP8> tl;
 
-  const OptionalCUDAGuard device_guard(device_id);
-
   tl.start_tensor_this_launch = 0;
   int loc_block_info = 0;
   int loc_tensor_info = 0;
   for (int t = 0; t < num_tensors_per_list; t++) {
-    tl.sizes[loc_tensor_info] = tensor_lists[0][t].numel();
-    for (int d = 0; d < depth; d++) tl.addresses[d][loc_tensor_info] = tensor_lists[d][t].data.dptr;
+    tl.sizes[loc_tensor_info] = tensor_lists[0][t]->numel();
+    for (int d = 0; d < depth; d++)
+      tl.addresses[d][loc_tensor_info] = tensor_lists[d][t]->data.dptr;
     if constexpr (USE_FP8) {
       for (int i = 0; i < 3; i++)
-        tl.fp8_meta_addresses[i][loc_tensor_info] = tensor_lists[depth + i][t].data.dptr;
+        tl.fp8_meta_addresses[i][loc_tensor_info] = tensor_lists[depth + i][t]->data.dptr;
     }
     loc_tensor_info++;
 
-    auto chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1) / chunk_size;
+    auto chunks_this_tensor = (tensor_lists[0][t]->numel() + chunk_size - 1) / chunk_size;
 
     for (auto chunk = 0; chunk < chunks_this_tensor; chunk++) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;

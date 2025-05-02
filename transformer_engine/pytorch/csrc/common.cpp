@@ -99,7 +99,7 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
 
 std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
            std::vector<NVTETensor*>, size_t, size_t>
-makeTransformerEngineTensor(std::vector<std::vector<at::Tensor>> at_tensor_lists) {
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists) {
   size_t num_lists = at_tensor_lists.size();
 
   NVTE_CHECK(num_lists > 0, "List of tensors is empty.");
@@ -119,10 +119,8 @@ makeTransformerEngineTensor(std::vector<std::vector<at::Tensor>> at_tensor_lists
     te_list.reserve(num_tensors);
 
     for (const auto& at_tensor : at_list) {
-      transformer_engine::TensorWrapper tensorWrapper = makeTransformerEngineTensor(at_tensor);
-      NVTETensor te_tensor = tensorWrapper.data();
-      tensorWrappers.push_back(std::move(tensorWrapper));
-      te_list.push_back(std::move(te_tensor));
+      tensorWrappers.push_back(makeTransformerEngineTensor(at_tensor));
+      te_list.push_back(tensorWrappers.back().data());
     }
 
     nvte_tensor_lists.push_back(std::move(te_list));

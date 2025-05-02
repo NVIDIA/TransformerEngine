@@ -193,18 +193,16 @@ bool is_supported_by_CC_100() {
   return deviceComputeCapability >= 100;
 }
 
-Tensor **convert_tensor_array(NVTETensor **nvte_tensors, size_t outer_size, size_t inner_size) {
-  Tensor **tensors = new Tensor *[outer_size];
-
+std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
+                                                        size_t outer_size, size_t inner_size) {
+  std::vector<std::vector<Tensor *>> ret;
   for (size_t i = 0; i < outer_size; ++i) {
-    tensors[i] = new Tensor[inner_size];
-
+    ret.emplace_back();
     for (size_t j = 0; j < inner_size; ++j) {
-      tensors[i][j] = *reinterpret_cast<Tensor *>(nvte_tensors[i][j]);
+      ret.back().push_back(reinterpret_cast<Tensor *>(nvte_tensors[i][j]));
     }
   }
-
-  return tensors;
+  return ret;
 }
 
 }  // namespace transformer_engine

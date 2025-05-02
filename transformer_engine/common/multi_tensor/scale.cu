@@ -102,16 +102,15 @@ struct ScaleFunctor {
   }
 };
 
-void multi_tensor_scale_cuda(int chunk_size, Tensor noop_flag, Tensor **tensor_lists,
-                             const size_t num_tensor_lists, const size_t num_tensors_per_list,
-                             float scale, const int device_id, cudaStream_t stream) {
+void multi_tensor_scale_cuda(int chunk_size, Tensor noop_flag,
+                             std::vector<std::vector<Tensor *>> tensor_lists, float scale,
+                             cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      tensor_lists[0][0].dtype(), p_in_type,
+      tensor_lists[0][0]->dtype(), p_in_type,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          tensor_lists[1][0].dtype(), g_in_type,
-          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists, num_tensor_lists,
-                                num_tensors_per_list, ScaleFunctor<p_in_type, g_in_type>(),
-                                device_id, stream, scale);))
+          tensor_lists[1][0]->dtype(), g_in_type,
+          multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                ScaleFunctor<p_in_type, g_in_type>(), stream, scale);))
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -120,12 +119,11 @@ void multi_tensor_scale_cuda(int chunk_size, Tensor noop_flag, Tensor **tensor_l
 
 void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
-                                  float scale, const int device_id, cudaStream_t stream) {
+                                  float scale, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_scale_cuda);
   using namespace transformer_engine;
 
   multi_tensor_scale::multi_tensor_scale_cuda(
       chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
-      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), num_tensor_lists,
-      num_tensors_per_list, scale, device_id, stream);
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), scale, stream);
 }
