@@ -98,7 +98,7 @@ Execute the following commands to install Transformer Engine from source:
   export NVTE_FRAMEWORK=pytorch         # Optionally set framework
   pip3 install --no-build-isolation .   # Build and install
 
-If the Git repository has already been cloned, make sure to also clone the submodules:
+If the Git repository has already been cloned, make sure to clone the submodules as well:
 
 .. code-block:: bash
 
@@ -110,7 +110,7 @@ Extra dependencies for testing can be installed by setting the "test" option:
 
   pip3 install --no-build-isolation .[test]
 
-To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
+To build the C++ extensions with debug symbols, for example, with the `-g` flag:
 
 .. code-block:: bash
 
