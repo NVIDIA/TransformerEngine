@@ -194,7 +194,6 @@ def _jax_gemm_mxfp8_1d(
         f"RHS with unexpected quantize dimension.\nExpect is_colwise={expected_rhs_is_colwise}, got"
         f" {rhs.is_colwise}"
     )
-    from jax._src.cudnn.scaled_matmul_stablehlo import scaled_matmul_wrapper
 
     # Reshape + Transpose (if needed)
     # [..., M, K] -> [1, reduce(..., M), K]
@@ -212,7 +211,7 @@ def _jax_gemm_mxfp8_1d(
     # * Expected shape:
     # * lhs_data  (B, M, K)           * rhs_data  (B, N, K)
     # * lhs_scale (B, M, K_block)     * rhs_scale (B, N, K_block)
-    out_3d = scaled_matmul_wrapper(
+    out_3d = jax.nn.scaled_matmul(
         lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d, preferred_element_type=lhs.dq_dtype
     )
     # Reshape [1, reduce(..., M), N] -> [..., M, N]
