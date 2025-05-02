@@ -821,8 +821,12 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
         )
 
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        # Ensure dz and x are partitioned the same way.
+        arg_shardings[0] = NamedSharding(
+            mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]), desc="DActLuDBiasQuantizePrimitive.dz"
+        )
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
