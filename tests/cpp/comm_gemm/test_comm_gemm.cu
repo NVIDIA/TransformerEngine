@@ -53,6 +53,7 @@ template <typename T>
 test::Tensor Make(size_t m, size_t n, float scale) {
   test::Tensor ret("", {n, m}, TypeInfo<T>::dtype);
   ret.set_scale(scale);
+  ret.set_scale_inv(1.0 / scale);
   return ret;
 }
 
@@ -61,6 +62,7 @@ test::Tensor MakeFromData(const std::vector<T>& data, size_t mstart, size_t nsta
                           size_t nsize, size_t ld, float scale) {
   test::Tensor ret("", {nsize, msize}, TypeInfo<T>::dtype);
   ret.set_scale(scale);
+  ret.set_scale_inv(1.0 / scale);
   auto local = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
   NVTE_CHECK_CUDA(cudaMemcpy(ret.rowwise_dptr(), local.data(), local.size() * sizeof local[0],
                              cudaMemcpyDefault));
