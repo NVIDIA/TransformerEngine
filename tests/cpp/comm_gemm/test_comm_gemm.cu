@@ -11,11 +11,10 @@
 #include <string>
 #include <vector>
 
+#include "../test_common.h"
 #include "common.h"
 
 using transformer_engine::DType;
-using transformer_engine::SimpleTensor;
-using transformer_engine::Tensor;
 using transformer_engine::TypeInfo;
 
 #define CHECK_MPI(expr)                                              \
@@ -51,46 +50,22 @@ std::vector<T> CopyMatrix(const std::vector<T>& data, size_t mstart, size_t nsta
 }
 
 template <typename T>
-SimpleTensor MakeSimple(const std::vector<size_t> dims, const std::vector<T>& values) {
-  void* dptr{};
-  NVTE_CHECK_CUDA(cudaMalloc(&dptr, values.size() * sizeof values[0]));
-  NVTE_CHECK_CUDA(
-      cudaMemcpy(dptr, values.data(), values.size() * sizeof values[0], cudaMemcpyDefault));
-  return {dptr, dims, TypeInfo<T>::dtype};
+test::Tensor Make(size_t m, size_t n, float scale) {
+  test::Tensor ret("", {n, m}, TypeInfo<T>::dtype);
+  ret.set_scale(scale);
+  return ret;
 }
 
-struct TensorHolder {
-  template <typename T>
-  static TensorHolder Make(size_t m, size_t n, float scale) {
-    TensorHolder ret;
-    ret.t.data = MakeSimple({n, m}, std::vector<T>(m * n));
-    ret.t.amax = MakeSimple<float>({1}, {0.0f});
-    ret.t.scale = MakeSimple<float>({1}, {scale});
-    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f / scale});
-    return ret;
-  }
-
-  template <typename T>
-  static TensorHolder MakeFromData(const std::vector<T>& data, size_t mstart, size_t nstart,
-                                   size_t msize, size_t nsize, size_t ld, float scale) {
-    auto values = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
-    TensorHolder ret;
-    ret.t.data = MakeSimple({nsize, msize}, values);
-    ret.t.amax = MakeSimple<float>({1}, {0.0f});
-    ret.t.scale = MakeSimple<float>({1}, {scale});
-    ret.t.scale_inv = MakeSimple<float>({1}, {1.0f / scale});
-    return ret;
-  }
-
-  Tensor t;
-
-  ~TensorHolder() {
-    cudaFree(t.data.dptr);
-    cudaFree(t.amax.dptr);
-    cudaFree(t.scale.dptr);
-    cudaFree(t.scale_inv.dptr);
-  }
-};
+template <typename T>
+test::Tensor MakeFromData(const std::vector<T>& data, size_t mstart, size_t nstart, size_t msize,
+                          size_t nsize, size_t ld, float scale) {
+  test::Tensor ret("", {nsize, msize}, TypeInfo<T>::dtype);
+  ret.set_scale(scale);
+  auto local = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
+  NVTE_CHECK_CUDA(cudaMemcpy(ret.rowwise_dptr(), local.data(), local.size() * sizeof local[0],
+                             cudaMemcpyDefault));
+  return ret;
+}
 
 template <typename T>
 float GetScale(float amax) {
@@ -168,45 +143,43 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
       return static_cast<BiasType>(dist(rng) * bias_scale);
     });
 
-    auto ga = transa ? TensorHolder::MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
-                     : TensorHolder::MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
-    auto gb = transb ? TensorHolder::MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
-                     : TensorHolder::MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
-    auto gbias = TensorHolder::MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
-    auto gd = TensorHolder::Make<DType>(m, n, d_scale);
-    auto gaux = TensorHolder::Make<DType>(m, n, d_scale);
+    auto ga = transa ? MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
+                     : MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
+    auto gb = transb ? MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
+                     : MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
+    auto gbias = MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
+    auto gd = Make<DType>(m, n, d_scale);
+    auto gaux = Make<DType>(m, n, d_scale);
 
     auto dims = DistributeTensors(m, n, k);
-    auto a = transa
-                 ? TensorHolder::MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
-                                                     dims.a_rows_num, dims.a_cols_num, k, a_scale)
-                 : TensorHolder::MakeFromData<AType>(adata, dims.a_cols_start, dims.a_rows_start,
-                                                     dims.a_cols_num, dims.a_rows_num, m, a_scale);
-    auto b = transb
-                 ? TensorHolder::MakeFromData<BType>(bdata, dims.b_cols_start, dims.b_rows_start,
-                                                     dims.b_cols_num, dims.b_rows_num, n, b_scale)
-                 : TensorHolder::MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
-                                                     dims.b_rows_num, dims.b_cols_num, k, b_scale);
-    auto bias =
-        TensorHolder::MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
-                                             dims.d_rows_num, dims.d_cols_num, m, bias_scale);
-    auto d = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
-    auto aux = TensorHolder::Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+    auto a = transa ? MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
+                                          dims.a_rows_num, dims.a_cols_num, k, a_scale)
+                    : MakeFromData<AType>(adata, dims.a_cols_start, dims.a_rows_start,
+                                          dims.a_cols_num, dims.a_rows_num, m, a_scale);
+    auto b = transb ? MakeFromData<BType>(bdata, dims.b_cols_start, dims.b_rows_start,
+                                          dims.b_cols_num, dims.b_rows_num, n, b_scale)
+                    : MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
+                                          dims.b_rows_num, dims.b_cols_num, k, b_scale);
+    auto bias = MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
+                                       dims.d_rows_num, dims.d_cols_num, m, bias_scale);
+    auto d = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+    auto aux = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
     bool grad = false;
     bool accumulate = false;
-    CommGemm(m, n, k, &a.t, &b.t, &d.t, &bias.t, &aux.t, transa, transb, grad, accumulate,
-             0 /*comm_sm_count*/, stream);
-    auto workspace = TensorHolder::Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(&ga.t, &gb.t, &gd.t, &gbias.t, &gaux.t, transa, transb, grad, &workspace.t,
-                     accumulate, false /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+    CommGemm(m, n, k, a.data(), b.data(), d.data(), bias.data(), aux.data(), transa, transb, grad,
+             accumulate, 0 /*comm_sm_count*/, stream);
+    auto workspace = Make<uint8_t>(1, 32 << 20, 1.0);
+    nvte_cublas_gemm(ga.data(), gb.data(), gd.data(), gbias.data(), gaux.data(), transa, transb,
+                     grad, workspace.data(), accumulate, false /* use_split_accumulator */,
+                     0 /* math_sm_count */, stream);
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
     std::vector<DType> out(dims.d_rows_num * dims.d_cols_num);
     NVTE_CHECK_CUDA(
-        cudaMemcpy(out.data(), d.t.data.dptr, out.size() * sizeof out[0], cudaMemcpyDefault));
+        cudaMemcpy(out.data(), d.rowwise_dptr(), out.size() * sizeof out[0], cudaMemcpyDefault));
     std::vector<DType> out_golden_global(m * n);
-    NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.t.data.dptr,
+    NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.rowwise_dptr(),
                                out_golden_global.size() * sizeof out_golden_global[0],
                                cudaMemcpyDefault));
 
