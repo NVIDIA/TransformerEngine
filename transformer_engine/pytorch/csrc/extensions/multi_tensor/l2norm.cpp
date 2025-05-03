@@ -33,6 +33,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     output_per_tensor = at::zeros({ntensors * max_chunks_per_tensor}, float_options);
     ret_per_tensor = at::empty({ntensors}, float_options);
   } else {
+    output_per_tensor = at::empty({0}, float_options);
     ret_per_tensor = at::empty({0}, float_options);
   }
 
@@ -80,8 +81,10 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     output_per_tensor = at::zeros({ntensors * max_chunks_per_tensor}, float_options);
     ret_per_tensor = at::empty({ntensors}, float_options);
   } else {
+    output_per_tensor = at::empty({0}, float_options);
     ret_per_tensor = at::empty({0}, float_options);
   }
+
   auto ret = at::empty({1}, output.options());
 
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
