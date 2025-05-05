@@ -529,17 +529,24 @@ QUANTIZE_OUTPUT_DTYPES = {
     "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
 }
 
-ALL_QUANTIZE_TEST_SHAPES = [
-    (32, 64),
-    (2, 64, 32),
+ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = [
+    ((32, 64), -1),
+    ((2, 64, 32), -1),
+    ((2, 64, 32), -2),
+    ((32, 256, 128), -1),
+    ((32, 256, 128), -2),
+    ((64, 32, 32, 256), -1),
+    ((64, 32, 32, 256), -2),
+    ((64, 32, 32, 256), -3),
 ]
 
-QUANTIZE_TEST_SHAPES = {
+QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = {
     "L0": [
-        (32, 256, 128),
-        (64, 32, 32, 256),
+        ((32, 64), -1),
+        ((2, 64, 32), -1),
+        ((2, 64, 32), -2),
     ],
-    "L2": ALL_QUANTIZE_TEST_SHAPES,
+    "L2": ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES,
 }
 
 QUANTIZATION_INPUT_DTYPE = {
@@ -551,9 +558,8 @@ QUANTIZATION_INPUT_DTYPE = {
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-@pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
+@pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
@@ -606,12 +612,11 @@ class TestFusedQuantize:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("input_shape", QUANTIZE_TEST_SHAPES)
+    @pytest_parametrize_wrapper("input_shape,flatten_axis", QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
     def test_quantize_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, flatten_axis
     ):
