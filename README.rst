@@ -175,9 +175,9 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.01-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.04-py3
 
-Where 25.01 (corresponding to January 2025 release) is the container version.
+Where 25.04 (corresponding to April 2025 release) is the container version.
 
 **Benefits of using NGC containers:**
 

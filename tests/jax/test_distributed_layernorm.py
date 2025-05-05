@@ -78,7 +78,7 @@ class TestDistributedLayernorm:
         if fp8_recipe == recipe.MXFP8BlockScaling() and "dp" in mesh_axes:
             other_bytes = 384  # required for small scale shapes that require padding
         if fp8_recipe == recipe.Float8CurrentScaling():
-            allreduce_total_bytes += 4  # 1 * FP32 for the amax reduction
+            allreduce_total_bytes += jax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
         )
