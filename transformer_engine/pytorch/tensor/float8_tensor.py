@@ -623,7 +623,9 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             elif args[0]._transpose is not None:
                 return args[0]._transpose.is_pinned()
             else:
-                raise RuntimeError("Cannot check if pinned for Float8Tensor with no data and no transpose.")
+                raise RuntimeError(
+                    "Cannot check if pinned for Float8Tensor with no data and no transpose."
+                )
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
