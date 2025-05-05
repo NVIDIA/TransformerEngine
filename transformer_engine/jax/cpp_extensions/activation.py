@@ -501,6 +501,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         ir_hidden_size = dz_aval.shape[-1]
         gi_hidden_size = act_len * x_aval.shape[-1]
         assert act_len * ir_hidden_size == gi_hidden_size
+        assert (
+            x_aval.shape[:-2] == dz_aval.shape[:-1]
+        ), "dz and x should have the same leading dimensions"
         out_shape = x_aval.shape
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
 

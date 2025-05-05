@@ -210,36 +210,6 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
   return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
 }
 
-void checkDActShapes(Buffer_Type input_buf, Buffer_Type act_input_buf, Result_Type output_buf) {
-  auto const &input_dims = input_buf.dimensions();
-  auto const &act_input_dims = act_input_buf.dimensions();
-  auto const &output_dims = output_buf->dimensions();
-
-  // Check act_input_buf and output_buf have the same shape
-  NVTE_CHECK(act_input_dims.size() == output_dims.size(),
-             "act_input_buf must have the same number of dimensions as output_buf, got ",
-             act_input_dims.size(), " and ", output_dims.size());
-  for (size_t i = 0; i < act_input_dims.size() - 2; ++i) {
-    NVTE_CHECK(act_input_dims[i] == output_dims[i], "act_input_dims[", i,
-               "] must have the same shape as output_dims[", i, "], got ", act_input_dims[i],
-               " and ", output_dims[i]);
-  }
-
-  // Check act_input_buf shape matches input_buf shape except for the activation dimension
-  NVTE_CHECK(act_input_dims.size() - 1 == input_dims.size(),
-             "act_input_buf must have the same number of dimensions as output_buf, except for the "
-             "activation dim, got ",
-             act_input_dims.size() - 1, " and ", input_dims.size());
-  for (size_t i = 0; i < input_dims.size() - 2; ++i) {
-    NVTE_CHECK(act_input_dims[i] == input_dims[i], "act_input_dims[", i,
-               "] must have the same shape as input_dims[", i, "], got ", act_input_dims[i],
-               " and ", input_dims[i]);
-  }
-  NVTE_CHECK(act_input_dims[act_input_dims.size() - 1] == input_dims[input_dims.size() - 1],
-             "act_input_buf must have the same last dimension as input_buf, got ",
-             act_input_dims[act_input_dims.size() - 1], " and ", input_dims[input_dims.size() - 1]);
-}
-
 Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   Buffer_Type act_input_buf, Buffer_Type scale_buf,
                                   Result_Type output_buf, Result_Type colwise_output_buf,
@@ -279,7 +249,6 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
              "The value of the activation dimension (axis=-2) must be 1 for non-gated or 2 for "
              "gated activation, got ",
              act_len);
-  checkDActShapes(input_buf, act_input_buf, output_buf);
 
   auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
   auto n = input_dims.back();
