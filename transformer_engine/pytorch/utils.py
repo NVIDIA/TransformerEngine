@@ -9,9 +9,10 @@ import math
 import os
 from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
-
 import torch
+
 import transformer_engine.pytorch.cpp_extensions as ext
+from . import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -596,3 +597,16 @@ def canonicalize_process_group(
     if group is None:
         return torch.distributed.distributed_c10d._get_default_group()
     return group
+
+
+def torch_get_autocast_gpu_dtype() -> torch.dtype:
+    """Get PyTorch autocast GPU dtype."""
+    if torch_version() >= (2, 4, 0):
+        return torch.get_autocast_dtype("cuda")
+    return torch.get_autocast_gpu_dtype()
+
+
+if torch_version() >= (2, 4, 0):
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+else:
+    gpu_autocast_ctx = torch.cuda.amp.autocast
