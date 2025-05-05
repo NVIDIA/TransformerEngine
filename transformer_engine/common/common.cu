@@ -193,4 +193,16 @@ bool is_supported_by_CC_100() {
   return deviceComputeCapability >= 100;
 }
 
+std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
+                                                        size_t outer_size, size_t inner_size) {
+  std::vector<std::vector<Tensor *>> ret;
+  for (size_t i = 0; i < outer_size; ++i) {
+    ret.emplace_back();
+    for (size_t j = 0; j < inner_size; ++j) {
+      ret.back().push_back(reinterpret_cast<Tensor *>(nvte_tensors[i][j]));
+    }
+  }
+  return ret;
+}
+
 }  // namespace transformer_engine
