@@ -23,14 +23,15 @@ extern "C" {
  */
 enum NVTEDType {
   kNVTEByte = 0,       /*!< Byte */
-  kNVTEInt32 = 1,      /*!< 32-bit integer */
-  kNVTEInt64 = 2,      /*!< 64-bit integer */
-  kNVTEFloat32 = 3,    /*!< 32-bit float */
-  kNVTEFloat16 = 4,    /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 5,   /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 6, /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 7, /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 8, /*!< 8-bit float (E8M0) */
+  kNVTEInt16 = 1,      /*!< 16-bit integer */
+  kNVTEInt32 = 2,      /*!< 32-bit integer */
+  kNVTEInt64 = 3,      /*!< 64-bit integer */
+  kNVTEFloat32 = 4,    /*!< 32-bit float */
+  kNVTEFloat16 = 5,    /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,   /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7, /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8, /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9, /*!< 8-bit float (E8M0) */
   kNVTENumTypes        /*!< Number of supported types */
 };
 
@@ -373,14 +374,15 @@ namespace transformer_engine {
  */
 enum class DType {
   kByte = 0,
-  kInt32 = 1,
-  kInt64 = 2,
-  kFloat32 = 3,
-  kFloat16 = 4,
-  kBFloat16 = 5,
-  kFloat8E4M3 = 6,
-  kFloat8E5M2 = 7,
-  kFloat8E8M0 = 8,
+  kInt16 = 1,
+  kInt32 = 2,
+  kInt64 = 3,
+  kFloat32 = 4,
+  kFloat16 = 5,
+  kBFloat16 = 6,
+  kFloat8E4M3 = 7,
+  kFloat8E5M2 = 8,
+  kFloat8E8M0 = 9,
   kNumTypes
 };
 
