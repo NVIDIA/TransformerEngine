@@ -30,6 +30,7 @@ __all__ = [
     "QuantizerSet",
     "DelayedScaleQuantizer",
     "BlockScaleQuantizer",
+    "GroupedQuantizer",
     "QuantizerFactory",
     "noop_quantizer_set",
 ]

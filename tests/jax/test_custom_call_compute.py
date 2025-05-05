@@ -550,14 +550,54 @@ class TestQuantize:
 @pytest_parametrize_wrapper("input_shape", [(8, 64, 32)])
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
+@pytest_parametrize_wrapper("flatten_axis", [-1])
 @pytest_parametrize_wrapper(
-    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
     ):
+        n_groups, m, n = input_shape
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+
+        # *32 so that the input shapes works for MXFP8
+        input_shape = (m * 32, n)
+
+        if with_group_sizes:
+            group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+            group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+            group_sizes = jnp.diff(group_sizes)
+            assert group_sizes.sum() == m
+            group_sizes = group_sizes * 32
+        else:
+            group_sizes = None
+            input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
+
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
+
+        grouped_quantizer = QuantizerFactory.create(
+            scaling_mode=scaling_mode,
+            q_dtype=q_dtype,
+            q_layout=q_layout,
+            n_groups=n_groups,
+        )
+
+        scaled_tensor = tex.grouped_quantize(
+            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+        )
+
+        assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
+"""
+    def test_grouped_qdq(
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+    ):
+        if with_group_sizes and q_layout in (QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE):
+            pytest.skip("Skip as NotImplemented!")
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
@@ -590,7 +630,7 @@ class TestGroupedQuantize:
 
         # Dequantize and compare with original
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
-
+"""
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 class TestFusedQuantize:

@@ -151,7 +151,6 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del data_shape, is_colwise
         return (1,)
 
-    @abstractmethod
     def get_grouped_scale_shape(
         self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
@@ -167,6 +166,7 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
             The shape for scale tensors
         """
         del data_shape, group_axis, is_colwise
+        assert isinstance(n_groups, int)
         return (n_groups,)
 
     def get_shardy_sharding_rules(
@@ -323,6 +323,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The shape for scale tensors
         """
+        assert isinstance(n_groups, int)
         block_alignment = self._block_alignment if is_padded else (1, 1)
 
         if is_colwise:
@@ -375,7 +376,6 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             n_block_y = DIVUP(n_block_y, alignment_y) * alignment_y
 
         return (n_block_x * n_block_y,)
-
 
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis

@@ -63,5 +63,10 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
   }
 }
 
+constexpr struct BlockSize { size_t x; size_t y; } MXFP8_BLOCK_SIZE{1, 32};
+constexpr struct Alignment { size_t x; size_t y; } MXFP8_ALIGNMENT{128, 4};
+
+std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
+
 }  // namespace jax
 }  // namespace transformer_engine

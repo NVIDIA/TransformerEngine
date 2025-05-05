@@ -230,7 +230,6 @@ class ScaledTensor1x(ScaledTensor):
         # axis_names were given for N layout, so needs to be transpose for T layout
         if self.data_layout == "T":
             assert self.flatten_axis > 0
-            flatten_axis = -self.flatten_axis
             axis_names = (*logical_axis_names[flatten_axis:], *logical_axis_names[:flatten_axis])
         else:
             axis_names = logical_axis_names
@@ -288,13 +287,15 @@ class GroupedScaledTensor1x(ScaledTensor1x):
                 f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
                 )
 
-        # Only need to correct the group_axis for the lhs input case
-        if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
-            self.group_axis = self.flatten_axis
+        if self.data_layout == "T":
+            self.original_shape = (*self.original_shape[flatten_axis:], *self.original_shape[:flatten_axis])
+            flatten_axis = len(self.original_shape) - flatten_axis
+            self.group_axis = flatten_axis
 
+        self.flatten_axis = flatten_axis
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
             self.original_shape,
-            self.group_sizes,
+            self.group_sizes.size,
             self.group_axis,
             self.is_colwise,
             is_padded=True,
@@ -561,6 +562,20 @@ class ScaledTensorFactory:
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
+        if is_colwise:
+            return ScaledTensorFactory.create_1x(
+                    colwise_data,
+                    colwise_scale_inv,
+                    scaling_mode,
+                    dq_dtype,
+                    is_colwise=is_colwise,
+                    data_layout=data_layout[0],
+                    flatten_axis=flatten_axis,
+                    group_sizes=group_sizes,
+                    original_shape=original_shape,
+                    group_axis=group_axis,
+                    )
+
         return ScaledTensorFactory.create_1x(
             data,
             scale_inv,

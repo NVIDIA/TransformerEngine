@@ -147,7 +147,9 @@ def _grouped_dequantize(grouped_scaled_tensor):
     flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    matrix_sizes = group_sizes * math.prod(other_sizes)
+    non_group_shape = tuple(original_shape[i] for i in range(len(original_shape)) if i != group_axis)
+    matrix_sizes = group_sizes * math.prod(non_group_shape)
+
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
 
     scale_inv_ptr = 0
@@ -174,6 +176,7 @@ def _grouped_dequantize(grouped_scaled_tensor):
             is_colwise=grouped_scaled_tensor.is_colwise,
             flatten_axis=grouped_scaled_tensor.flatten_axis,
         )
+        # import pdb; pdb.set_trace()
         output.append(out_i)
         scale_inv_ptr += scale_shape_i_size
 
