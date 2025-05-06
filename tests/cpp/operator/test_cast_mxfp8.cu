@@ -261,28 +261,46 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(grad.data(),
-                                      input.data(),
-                                      output_c.data(),
-                                      output_dbias.data(),
-                                      workspace.data(),
-                                      0);
+            auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
+            if constexpr (OP == &dsilu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
+            else if (OP == &drelu)      { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
+            else if (OP == &dqgelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
+            else if (OP == &dsrelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
+
+            nvte_quantize_dbias_dact(grad.data(),
+                                     input.data(),
+                                     output_c.data(),
+                                     output_dbias.data(),
+                                     workspace.data(),
+                                     0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(grad.data(),
-                                      input.data(),
-                                      output_c.data(),
-                                      output_dbias.data(),
-                                      workspace.data(),
-                                      0);
+            nvte_quantize_dbias_dact(grad.data(),
+                                     input.data(),
+                                     output_c.data(),
+                                     output_dbias.data(),
+                                     workspace.data(),
+                                     0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(grad.data(), input.data(), output_c.data(), 0);
+            auto nvte_dact = &nvte_dgelu;
+            if constexpr (OP == &dsilu) { nvte_dact = &nvte_dsilu; }
+            else if (OP == &drelu)      { nvte_dact = &nvte_drelu; }
+            else if (OP == &dqgelu)     { nvte_dact = &nvte_dqgelu; }
+            else if (OP == &dsrelu)     { nvte_dact = &nvte_dsrelu; }
+
+            nvte_dact(grad.data(), input.data(), output_c.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
-            nvte_gelu(input.data(), output_c.data(), 0);
+            auto nvte_act = &nvte_gelu;
+            if constexpr (OP == &silu) { nvte_act = &nvte_silu; }
+            else if (OP == &relu)      { nvte_act = &nvte_relu; }
+            else if (OP == &qgelu)     { nvte_act = &nvte_qgelu; }
+            else if (OP == &srelu)     { nvte_act = &nvte_srelu; }
+
+            nvte_act(input.data(), output_c.data(), 0);
             break;
         }
     }
@@ -401,28 +419,46 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(grad.data(),
-                                      input.data(),
-                                      output.data(),
-                                      output_dbias.data(),
-                                      workspace.data(),
-                                      0);
+            auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
+            if constexpr (OP == &dsilu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
+            else if (OP == &drelu)      { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
+            else if (OP == &dqgelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
+            else if (OP == &dsrelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
+
+            nvte_quantize_dbias_dact(grad.data(),
+                                     input.data(),
+                                     output.data(),
+                                     output_dbias.data(),
+                                     workspace.data(),
+                                     0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(grad.data(),
-                                      input.data(),
-                                      output.data(),
-                                      output_dbias.data(),
-                                      workspace.data(),
-                                      0);
+            nvte_quantize_dbias_dact(grad.data(),
+                                     input.data(),
+                                     output.data(),
+                                     output_dbias.data(),
+                                     workspace.data(),
+                                     0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(grad.data(), input.data(), output.data(), 0);
+            auto nvte_dact = &nvte_dgelu;
+            if constexpr (OP == &dsilu) { nvte_dact = &nvte_dsilu; }
+            else if (OP == &drelu)      { nvte_dact = &nvte_drelu; }
+            else if (OP == &dqgelu)     { nvte_dact = &nvte_dqgelu; }
+            else if (OP == &dsrelu)     { nvte_dact = &nvte_dsrelu; }
+
+            nvte_dact(grad.data(), input.data(), output.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
-            nvte_gelu(input.data(), output.data(), 0);
+            auto nvte_act = &nvte_gelu;
+            if constexpr (OP == &silu) { nvte_act = &nvte_silu; }
+            else if (OP == &relu)      { nvte_act = &nvte_relu; }
+            else if (OP == &qgelu)     { nvte_act = &nvte_qgelu; }
+            else if (OP == &srelu)     { nvte_act = &nvte_srelu; }
+
+            nvte_act(input.data(), output.data(), 0);
             break;
         }
     }
