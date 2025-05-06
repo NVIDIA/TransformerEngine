@@ -351,7 +351,7 @@ Integrations
 
 Transformer Engine has been integrated with popular LLM frameworks such as:
 
-* `DeepSpeed <https://github.com/microsoft/DeepSpeed/pull/3731>`_
+* `DeepSpeed <https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/runtime/half_precision/test_fp8.py>`_
 * `Hugging Face Accelerate <https://huggingface.co/docs/accelerate/main/en/usage_guides/low_precision_training#configuring-transformersengine>`_
 * `Lightning <https://github.com/Lightning-AI/lightning/issues/17172>`_
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_
