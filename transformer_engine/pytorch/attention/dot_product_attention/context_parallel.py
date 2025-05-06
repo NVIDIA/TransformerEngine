@@ -13,6 +13,7 @@ from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
     nvtx_range_push,
+    get_device_compute_capability,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
@@ -476,7 +477,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(cp_group)
         send_dst = cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
+        device_compute_capability = get_device_compute_capability()
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
+            device_compute_capability < (10, 0) and cp_size == 2
+        )
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
@@ -1243,7 +1247,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
                             out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
@@ -1273,7 +1277,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if causal and rank < (cp_size - 1):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
-        softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
@@ -1436,7 +1439,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         rank = get_distributed_rank(ctx.cp_group)
         send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
-        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0"))
+        device_compute_capability = get_device_compute_capability()
+        batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (
+            device_compute_capability < (10, 0) and cp_size == 2
+        )
 
         q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded, *other_tensors = (
             restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
