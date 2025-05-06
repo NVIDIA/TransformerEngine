@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
+
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
@@ -57,6 +58,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
+    QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -264,8 +266,31 @@ class _Linear(torch.autograd.Function):
             if weight_quantizer is not None:
                 weight_quantizer.calibrate(weight)
 
+<<<<<<< HEAD
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP
+=======
+        ub_obj = None
+        ub_type = None
+        rs_out = None
+        out_dtype = activation_dtype
+        if ub_overlap_rs_fprop:
+            ub_obj = get_ub(ub_name + "_fprop")
+            ub_type = tex.CommOverlapType.RS
+            out_shape = [reduce(multiply_op, inp.shape[:-1]) // tp_world_size, out_features]
+            rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
+
+        elif ub_overlap_ag_fprop:
+            ub_obj = get_ub(ub_name + "_fprop")
+            ub_type = tex.CommOverlapType.AG
+            if fp8:
+                assert ub_obj.is_fp8_ubuf(), "AG overlap with FP8 GEMM inputs requires FP8 buffer."
+            ub_obj.copy_into_buffer(inputmat_total, input_quantizer, local_chunk=True)
+            inputmat_total = ub_obj.get_buffer(input_quantizer)
+
+        nvtx_range_push(f"{nvtx_label}.gemm")
+        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
+>>>>>>> main
         if fp8:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
@@ -344,17 +369,22 @@ class _Linear(torch.autograd.Function):
             )
 
             if backward_needs_input:
-                if own_quantized_input and isinstance(inputmat, QuantizedTensor):
+                if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
                     if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+<<<<<<< HEAD
+=======
+                if force_hp_input_gather:
+                    assert not isinstance(inputmat, QuantizedTensorBase)
+>>>>>>> main
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensor):
+                if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -367,7 +397,7 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,
-                weightmat if fp8 and not isinstance(weight, QuantizedTensor) else None,
+                weightmat if fp8 and not isinstance(weight, QuantizedTensorBase) else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
@@ -606,6 +636,7 @@ class _Linear(torch.autograd.Function):
                     if hasattr(recipe, "fp8_gemm_dgrad"):
                         use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
+<<<<<<< HEAD
                 # Update grad input quantizer
                 if ctx.grad_input_quantizer is not None:
                     ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -616,6 +647,12 @@ class _Linear(torch.autograd.Function):
                 if ctx.ub_overlap_rs_dgrad:
                     reduce_scatter_out = torch.empty(
                         dgrad_shape, dtype=ctx.activation_dtype, device=grad_output.device
+=======
+                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
+                    weight_fp8.update_usage(
+                        rowwise_usage=ctx.weight_quantizer.rowwise_usage,
+                        columnwise_usage=ctx.weight_quantizer.columnwise_usage,
+>>>>>>> main
                     )
                 elif ctx.ub_bulk_wgrad:
                     gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
@@ -678,6 +715,7 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
+<<<<<<< HEAD
                 if ctx.fp8 or ctx.debug:
                     if isinstance(inputmat_total, QuantizedTensor):
                         inputmat_total.update_usage(columnwise_usage=True)
@@ -707,6 +745,21 @@ class _Linear(torch.autograd.Function):
                     else:
                         ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                         grad_output = ctx.grad_output_quantizer(grad_output)
+=======
+                if ctx.input_quantizer is not None and not isinstance(
+                    inputmat_total, QuantizedTensorBase
+                ):
+                    # Async gather in BF16 does not asynchronously
+                    # call quantizer after gather.
+                    ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    inputmat_total = ctx.input_quantizer(inputmat_total)
+
+                # Make sure GEMM inputs have required data
+                if isinstance(inputmat_total, QuantizedTensorBase):
+                    inputmat_total.update_usage(columnwise_usage=True)
+                if isinstance(grad_output, QuantizedTensorBase):
+                    grad_output.update_usage(columnwise_usage=True)
+>>>>>>> main
 
                 # Figure out whether to use split accumulator
                 use_split_accumulator = _2X_ACC_WGRAD
@@ -848,7 +901,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensor):
+        if ctx.fp8 and not isinstance(weight, QuantizedTensorBase):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
@@ -1396,7 +1449,7 @@ class Linear(TransformerEngineBaseModule):
         grad_output_quantizer = None
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        input_quantizer.internal = False
+        input_quantizer.internal = True
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = False
         if fp8_output:

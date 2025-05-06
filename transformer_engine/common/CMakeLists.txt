@@ -53,6 +53,11 @@ list(APPEND transformer_engine_SOURCES
      cudnn_utils.cpp
      transformer_engine.cpp
      common.cu
+     multi_tensor/adam.cu
+     multi_tensor/compute_scale.cu
+     multi_tensor/l2norm.cu
+     multi_tensor/scale.cu
+     multi_tensor/sgd.cu
      transpose/cast_transpose.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu
@@ -163,6 +168,11 @@ target_include_directories(transformer_engine PRIVATE
 set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_upper_triang_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                            multi_tensor/adam.cu
+                            multi_tensor/compute_scale.cu
+                            multi_tensor/l2norm.cu
+                            multi_tensor/scale.cu
+                            multi_tensor/sgd.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
