@@ -331,7 +331,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } else {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
+                const IType2 in_cached_2x = {in_cached[w].data.elt[e],
+                                             in_cached[w].data.elt[e + 1]};
                 ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
             }

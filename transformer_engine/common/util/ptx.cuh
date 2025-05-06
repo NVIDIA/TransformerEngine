@@ -188,7 +188,8 @@ static_assert(sizeof(fp8e4m3x2) == 2);
 static_assert(sizeof(fp8e5m2x2) == 2);
 
 // SIMD like "Fused" cast + multiplication (x2)
-__device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in, const floatx2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
+                                           const floatx2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -203,7 +204,8 @@ __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in, co
         "l"(reinterpret_cast<const uint64_t &>(scale)));
 }
 
-__device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in, const floatx2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x(fp8e5m2x2 &out, const floatx2 &in,
+                                           const floatx2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"

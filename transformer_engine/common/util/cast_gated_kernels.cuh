@@ -594,7 +594,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if constexpr (IS_DGATED) {
           OType2 out_pair;
           ptx::floatx2 in_pair = {after_act_colwise[i], after_gate_colwise[i]};
-          const ptx::floatx2 block_scale_inverse_2x_pair = {block_scale_inverse_act, block_scale_inverse_gate};
+          const ptx::floatx2 block_scale_inverse_2x_pair = {block_scale_inverse_act,
+                                                            block_scale_inverse_gate};
           ptx::mul_cvt_2x(out_pair, in_pair, block_scale_inverse_2x_pair);
           out_act_colwise_sh[shmem_offset_elt] = out_pair.x;
           out_gate_colwise_sh[shmem_offset_elt] = out_pair.y;
@@ -652,10 +653,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } else {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x_act = {in_cached_act[w].data.elt[e], in_cached_act[w].data.elt[e + 1]};
+                const IType2 in_cached_2x_act = {in_cached_act[w].data.elt[e],
+                                                 in_cached_act[w].data.elt[e + 1]};
                 ptx::abs_max_2x(thread_amax_2x_act, thread_amax_2x_act, in_cached_2x_act);
                 if constexpr (IS_DGATED) {
-                  const IType2 in_cached_2x_gate = {in_cached_gate[w].data.elt[e], in_cached_gate[w].data.elt[e + 1]};
+                  const IType2 in_cached_2x_gate = {in_cached_gate[w].data.elt[e],
+                                                    in_cached_gate[w].data.elt[e + 1]};
                   ptx::abs_max_2x(thread_amax_2x_gate, thread_amax_2x_gate, in_cached_2x_gate);
                 }
               }
@@ -745,7 +748,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
-      const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act, block_scale_inverse_act};
+      const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act,
+                                                       block_scale_inverse_act};
 
       float block_scale_inverse_gate;
       ptx::floatx2 block_scale_inverse_2x_gate;
