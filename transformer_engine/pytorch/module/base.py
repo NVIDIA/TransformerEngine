@@ -39,6 +39,7 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..utils import torch_get_autocast_gpu_dtype
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -700,7 +701,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch_get_autocast_gpu_dtype()
             return
 
         # All checks after this have already been performed once, thus skip
@@ -1106,7 +1107,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 raise ValueError(
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
+
+            if cache_name is not None:
+                # Ensure the tensor in the cache is an instance of torch.Tensor,
+                # as it persists beyond a single forward pass.
+                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+                quantizer_internal = quantizer.internal
+                quantizer.internal = False
             out = quantizer.quantize(tensor, dtype=workspace_dtype)
+            if cache_name is not None:
+                quantizer.internal = quantizer_internal
 
             # Update cache
             if cache_name is not None:

@@ -432,11 +432,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             return self
         raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
 
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
-
     @classmethod
     def _make_in_reduce_ex(
         cls,

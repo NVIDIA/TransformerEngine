@@ -96,6 +96,17 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfig config,
                                   cudaStream_t stream);
 
+void nvte_fp8_block_scaling_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h,
+                                                 size_t w, size_t amax_stride_h,
+                                                 size_t amax_stride_w, size_t start_offset,
+                                                 size_t block_len, cudaStream_t stream);
+
+void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
+                                         const NVTETensor scale, size_t h, size_t w,
+                                         size_t scale_stride_h, size_t scale_stride_w,
+                                         size_t start_offset, size_t block_len,
+                                         const NVTEDType out_dtype, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

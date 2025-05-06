@@ -5,16 +5,61 @@
  ************************************************************************/
 #pragma once
 
-#include <ATen/ATen.h>
-#include <ATen/AccumulateType.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/Exceptions.h>
 #include <assert.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
+#include <transformer_engine/multi_tensor.h>
+#include <transformer_engine/transformer_engine.h>
 
-#include "common/common.h"
+#include "../common.h"
 
 // This header is the one-stop shop for all your multi-tensor apply needs.
+
+// Change device if needed.
+class OptionalCUDAGuard {
+ public:
+  explicit OptionalCUDAGuard(int new_device) {
+    if (new_device < 0) return;
+
+    int current_device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+
+    if (new_device != current_device) {
+      NVTE_CHECK_CUDA(cudaSetDevice(new_device));
+      device_changed_ = true;
+      prev_device_ = current_device;
+    }
+  }
+
+  OptionalCUDAGuard(const OptionalCUDAGuard &) = delete;
+  OptionalCUDAGuard &operator=(const OptionalCUDAGuard &) = delete;
+
+  OptionalCUDAGuard(OptionalCUDAGuard &&other) noexcept
+      : prev_device_(other.prev_device_), device_changed_(other.device_changed_) {
+    other.device_changed_ = false;
+  }
+
+  OptionalCUDAGuard &operator=(OptionalCUDAGuard &&other) noexcept {
+    if (this != &other) {
+      if (device_changed_) {
+        cudaSetDevice(prev_device_);
+      }
+      prev_device_ = other.prev_device_;
+      device_changed_ = other.device_changed_;
+      other.device_changed_ = false;
+    }
+    return *this;
+  }
+
+  ~OptionalCUDAGuard() {
+    if (device_changed_) {
+      NVTE_CHECK_CUDA(cudaSetDevice(prev_device_));
+    }
+  }
+
+ private:
+  int prev_device_;
+  bool device_changed_ = false;
+};
 
 // TODO:  Kernel arg size limit may be <4KB for some other cards (ie Jetson)
 constexpr int depth_to_max_tensors[6] = {110, 64, 48, 36, 30, 24};
@@ -46,61 +91,39 @@ __global__ void multi_tensor_apply_kernel(int64_t chunk_size, volatile int *noop
 }
 
 template <int depth, bool USE_FP8 = false, typename T, typename... ArgTypes>
-void multi_tensor_apply(int64_t block_size, int64_t chunk_size, const at::Tensor &noop_flag,
-                        const std::vector<std::vector<at::Tensor>> &tensor_lists, T callable,
-                        ArgTypes... args) {
+void multi_tensor_apply(int64_t block_size, int64_t chunk_size,
+                        const transformer_engine::Tensor &noop_flag,
+                        std::vector<std::vector<transformer_engine::Tensor *>> tensor_lists,
+                        T callable, const int device_id, cudaStream_t stream, ArgTypes... args) {
+  const size_t num_tensor_lists = tensor_lists.size();
+  const size_t num_tensors_per_list = tensor_lists[0].size();
+
   if constexpr (USE_FP8) {
-    TORCH_CHECK(tensor_lists.size() == depth + 3,
-                "tensor_lists.size() != depth + 3, tensor_lists should have 3 more tensors (scale, "
-                "amax, scale_inv) for fp8");
+    NVTE_CHECK(num_tensor_lists == depth + 3,
+               "tensor_lists.size() != depth + 3, tensor_lists should have 3 more tensors (scale, "
+               "amax, scale_inv) for fp8");
   } else {
-    TORCH_CHECK(tensor_lists.size() == depth, "tensor_lists.size() != depth");
+    NVTE_CHECK(num_tensor_lists == depth, "tensor_lists.size() != depth");
   }
-  int len0 = tensor_lists[0].size();
-  TORCH_CHECK(len0 > 0, "tensor_lists[0].size() is not > 0");
-  auto ref_device = tensor_lists[0][0].device();
-  TORCH_CHECK(ref_device.type() == at::kCUDA, "expected input to be on cuda");
-  for (int l = 0; l < depth; l++) {  // No range-based for because I need indices
-    TORCH_CHECK(tensor_lists[l].size() == len0, "Size mismatch among tensor lists");
-    for (int t = 0; t < tensor_lists[l].size(); t++) {
-      // TODO:  Print which tensor fails.
-      bool contiguous_memory = tensor_lists[l][t].is_contiguous();
-      contiguous_memory =
-          (contiguous_memory || tensor_lists[l][t].is_contiguous(at::MemoryFormat::ChannelsLast) ||
-           tensor_lists[l][t].is_contiguous(at::MemoryFormat::ChannelsLast3d));
-      TORCH_CHECK(contiguous_memory, "A tensor was not contiguous.");
-      TORCH_CHECK(tensor_lists[l][t].device() == ref_device,
-                  "A tensor was not on the same device as the first tensor");
-      TORCH_CHECK(tensor_lists[l][t].numel() == tensor_lists[0][t].numel(), "Size mismatch");
-    }
-  }
-
-  if constexpr (USE_FP8) {
-    TORCH_CHECK(tensor_lists[depth].size() == len0 && tensor_lists[depth + 1].size() == len0,
-                "Size mismatch among tensor lists");
-  }
-
-  int ntensors = tensor_lists[0].size();
 
   TensorListMetadata<depth, USE_FP8> tl;
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(tensor_lists[0][0]));
-  auto stream = at::cuda::getCurrentCUDAStream();
+  const OptionalCUDAGuard device_guard(device_id);
 
   tl.start_tensor_this_launch = 0;
   int loc_block_info = 0;
   int loc_tensor_info = 0;
-  for (int t = 0; t < ntensors; t++) {
-    tl.sizes[loc_tensor_info] = tensor_lists[0][t].numel();
+  for (int t = 0; t < num_tensors_per_list; t++) {
+    tl.sizes[loc_tensor_info] = tensor_lists[0][t]->numel();
     for (int d = 0; d < depth; d++)
-      tl.addresses[d][loc_tensor_info] = tensor_lists[d][t].data_ptr();
+      tl.addresses[d][loc_tensor_info] = tensor_lists[d][t]->data.dptr;
     if constexpr (USE_FP8) {
       for (int i = 0; i < 3; i++)
-        tl.fp8_meta_addresses[i][loc_tensor_info] = tensor_lists[depth + i][t].data_ptr();
+        tl.fp8_meta_addresses[i][loc_tensor_info] = tensor_lists[depth + i][t]->data.dptr;
     }
     loc_tensor_info++;
 
-    auto chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1) / chunk_size;
+    auto chunks_this_tensor = (tensor_lists[0][t]->numel() + chunk_size - 1) / chunk_size;
 
     for (auto chunk = 0; chunk < chunks_this_tensor; chunk++) {
       tl.block_to_tensor[loc_block_info] = loc_tensor_info - 1;
@@ -110,12 +133,12 @@ void multi_tensor_apply(int64_t block_size, int64_t chunk_size, const at::Tensor
       bool tensors_full =
           (loc_tensor_info == depth_to_max_tensors[depth - 1] && chunk == chunks_this_tensor - 1);
       bool blocks_full = (loc_block_info == depth_to_max_blocks[depth - 1]);
-      bool last_chunk = (t == ntensors - 1 && chunk == chunks_this_tensor - 1);
+      bool last_chunk = (t == num_tensors_per_list - 1 && chunk == chunks_this_tensor - 1);
       if (tensors_full || blocks_full || last_chunk) {
         multi_tensor_apply_kernel<<<loc_block_info, block_size, 0, stream>>>(
-            chunk_size, noop_flag.data_ptr<int>(), tl, callable, args...);
+            chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr), tl, callable, args...);
 
-        AT_CUDA_CHECK(cudaGetLastError());
+        NVTE_CHECK_CUDA(cudaGetLastError());
 
         // Reset.  The control flow possibilities here make my brain hurt.
         loc_block_info = 0;

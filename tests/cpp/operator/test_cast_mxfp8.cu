@@ -230,7 +230,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     Tensor input("input", shape, itype);
     Tensor grad("grad", shape, itype);
     Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias("output_dbias", { cols }, itype);
+    Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
@@ -368,7 +368,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     Tensor input("input", shape, itype);
     Tensor grad("grad", shape, itype);
     Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias("output_dbias", { cols }, itype);
+    Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);

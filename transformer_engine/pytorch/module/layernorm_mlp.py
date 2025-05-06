@@ -612,7 +612,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 shape = list(inp_shape)
                 shape[0] *= tp_size
                 return fc2_out, ln_out_return.view(shape)
-            return fc2_out, ln_out_return.view_as(inp)
+            return fc2_out, ln_out_return.view(inp_shape)
         return fc2_out
 
     @staticmethod

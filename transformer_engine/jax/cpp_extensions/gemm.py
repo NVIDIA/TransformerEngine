@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence, Union, Dict, List
+from typing import Tuple, Sequence, Union, Dict
 from functools import partial, reduce
 import operator
 import jax
@@ -21,7 +21,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm"]
+__all__ = ["gemm"]
 
 
 num_cublas_streams = 4
@@ -142,65 +142,36 @@ def _calculate_remaining_shape(shape, contracting_dims):
     return tuple(shape[dim] for dim in range(len(shape)) if dim not in contracting_dims)
 
 
+def _transpose_contract_dims(ndim, contracting_dims):
+    return tuple(ndim - i - 1 for i in contracting_dims)
+
+
 def _dequantize(x, scale_inv, dq_dtype):
     return x.astype(dq_dtype) * scale_inv.astype(dq_dtype)
 
 
 # Apply jit to guarantee correctness of FP8 GEMM.
-@partial(
-    jax.jit,
-    static_argnums=(
-        2,
-        3,
-        4,
-    ),
-)
-def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
+@partial(jax.jit, static_argnums=(2, 3))
+def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
     # Need to hard-code the dequantize here instead of calling lhs.dequantize() for pattern matching
+    """FP8 GEMM for XLA pattern match"""
     lhs_dq = _dequantize(lhs.data, lhs.scale_inv, lhs.dq_dtype)
     rhs_dq = _dequantize(rhs.data, rhs.scale_inv, rhs.dq_dtype)
 
-    # Reshape + Transpose
-    # [..., M, K] -> [B, M, K]
-    # [..., K, M] -> [B, M, K]
-    lhs_3d = _shape_normalization(lhs_dq, lhs_dn, lhs.data_layout == "N")
-    rhs_3d = _shape_normalization(rhs_dq, rhs_dn, rhs.data_layout == "T")
-
-    dim_nums = (((2,), (2,)), ((0,), (0,)))
-    out_3d = jax.lax.dot_general(
-        lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
-    )
-    return out_3d
-
-
-def _jax_gemm_tensor_scaling_fp8(
-    lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
-):
-    """FP8 GEMM for XLA pattern match"""
-    assert rhs.scaling_mode.is_tensor_scaling(), "rhs does not have tensor scaling mode"
-
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
-        lhs_contract = tuple((lhs.data.ndim - 1 - i) % lhs.data.ndim for i in lhs_contract)
+        lhs_contract = _transpose_contract_dims(lhs_dq.ndim, lhs_contract)
     if rhs.data_layout == "T":
-        rhs_contract = tuple((rhs.data.ndim - 1 - i) % rhs.data.ndim for i in rhs_contract)
+        rhs_contract = _transpose_contract_dims(rhs_dq.ndim, rhs_contract)
 
-    lhs_dn = (lhs_contract, lhs_batch)
-    rhs_dn = (rhs_contract, rhs_batch)
+    dim_nums = (lhs_contract, rhs_contract), (lhs_batch, rhs_batch)
 
-    lhs_remain_shape = _calculate_remaining_shape(lhs.data.shape, lhs_contract)
-    rhs_remain_shape = _calculate_remaining_shape(rhs.data.shape, rhs_contract)
-
-    precision = (
-        jax.lax.Precision.HIGHEST if QuantizeConfig.FP8_2X_ACC_FPROP else jax.lax.Precision.DEFAULT
+    return jax.lax.dot_general(
+        lhs_dq, rhs_dq, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
     )
-    out_3d = __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision)
-
-    # Reshape [B, M, N] -> [..., M, N]
-    out = out_3d.reshape(*lhs_remain_shape, *rhs_remain_shape)
-    return out
 
 
+@partial(jax.jit, static_argnums=(2,))
 def _jax_gemm_mxfp8_1d(
     lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
 ):
@@ -210,7 +181,6 @@ def _jax_gemm_mxfp8_1d(
     assert (
         rhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING
     ), "rhs does not have MXFP8 1D scaling mode"
-    from jax._src.cudnn.scaled_matmul_stablehlo import scaled_matmul_wrapper
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
 
@@ -241,7 +211,7 @@ def _jax_gemm_mxfp8_1d(
     # * Expected shape:
     # * lhs_data  (B, M, K)           * rhs_data  (B, N, K)
     # * lhs_scale (B, M, K_block)     * rhs_scale (B, N, K_block)
-    out_3d = scaled_matmul_wrapper(
+    out_3d = jax.nn.scaled_matmul(
         lhs_3d, rhs_3d, lhs_scale_3d, rhs_scale_3d, preferred_element_type=lhs.dq_dtype
     )
     # Reshape [1, reduce(..., M), N] -> [..., M, N]
@@ -268,9 +238,16 @@ def _jax_gemm(
     dim_nums = (contracting_dims, ((), ()))
 
     def _jax_gemm_fp8_impl(lhs, rhs):
-
         if lhs.scaling_mode.is_tensor_scaling():
-            return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums)
+            assert (
+                rhs.scaling_mode == lhs.scaling_mode
+            ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
+            precision = (
+                jax.lax.Precision.HIGHEST
+                if QuantizeConfig.FP8_2X_ACC_FPROP
+                else jax.lax.Precision.DEFAULT
+            )
+            return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
 
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             return _jax_gemm_mxfp8_1d(lhs, rhs, dim_nums)
@@ -338,8 +315,9 @@ def gemm(
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
 
+"""
 def swizzled_scale(scales):
-    """Swizzle the scale tensor for FP8 GEMM"""
+    # Swizzle the scale tensor for FP8 GEMM
     assert scales.ndim == 2
     rows, cols = scales.shape
     scales = scales.reshape(rows // 128, 4, 32, cols // 4, 4)
@@ -354,7 +332,7 @@ def grouped_gemm(
     contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
     bias_list: List[jnp.ndarray] = None,
 ) -> List[jnp.ndarray]:
-    """Grouped GEMM for multiple pairs of tensors."""
+    # Grouped GEMM for multiple pairs of tensors.
     assert (
         len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
     ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
@@ -463,3 +441,4 @@ def grouped_gemm(
     )
 
     return out_list
+"""

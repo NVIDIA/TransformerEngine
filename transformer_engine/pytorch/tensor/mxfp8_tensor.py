@@ -304,11 +304,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             return self
         raise ValueError("MXFP8Tensor does not support different memory formats!")
 
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
