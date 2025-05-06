@@ -282,14 +282,6 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
-template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-constexpr __device__ __forceinline__ bool is_cached_act_op() {
-  return (OP == gelu<float, float>) || (OP == dgelu<float, float>) ||
-         (OP == sigmoid<float, float>) || (OP == dsigmoid<float, float>) ||
-         (OP == qgelu<float, float>) || (OP == dqgelu<float, float>) ||
-         (OP == silu<float, float>) || (OP == dsilu<float, float>);
-}
-
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
           bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t THREADS_PER_CHUNK>
@@ -305,18 +297,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
                             const size_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  using IType2 =
-      std::conditional_t<std::is_same_v<IType, float>, float2,
-                         std::conditional_t<std::is_same_v<IType, bf16>, ptx::bf16x2, ptx::fp16x2>>;
-
-  using OType2 = std::conditional_t<std::is_same_v<OType, fp8e4m3>, ptx::fp8e4m3x2, ptx::fp8e5m2x2>;
-  static_assert(sizeof(OType2) == 2);
+  using IType2 = typename ptx::FPx2<IType>;
+  using OType2 = typename ptx::FPx2<OType>;
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
 
-  constexpr bool IS_CACHED_ACT_OP =
-      ROWWISE_SCALING && COLWISE_SCALING && is_cached_act_op<ParamOP, ActOP>();
+  constexpr bool IS_CACHED_ACT_OP = ROWWISE_SCALING && COLWISE_SCALING;
   constexpr bool ONLY_COLWISE_SCALING = COLWISE_SCALING && (!ROWWISE_SCALING);
 
   // # of rows covered by one wave. Equal to the # of columnwise threads in Y dimension.
@@ -606,10 +593,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * BUFF_DIM_X;
         if constexpr (IS_DGATED) {
           OType2 out_pair;
-          float2 in_pair = {after_act_colwise[i], after_gate_colwise[i]};
-          const float2 block_scale_inverse_2x_pair =
-              make_float2(block_scale_inverse_act, block_scale_inverse_gate);
-          ptx::mul_cvt_2x<OType2, float2>(out_pair, in_pair, block_scale_inverse_2x_pair);
+          ptx::floatx2 in_pair = {after_act_colwise[i], after_gate_colwise[i]};
+          const ptx::floatx2 block_scale_inverse_2x_pair = {block_scale_inverse_act, block_scale_inverse_gate};
+          ptx::mul_cvt_2x(out_pair, in_pair, block_scale_inverse_2x_pair);
           out_act_colwise_sh[shmem_offset_elt] = out_pair.x;
           out_gate_colwise_sh[shmem_offset_elt] = out_pair.y;
         } else {
@@ -666,14 +652,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } else {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x_act = {in_cached_act[w].data.elt[e],
-                                                 in_cached_act[w].data.elt[e + 1]};
-                ptx::abs_max_2x<IType2>(thread_amax_2x_act, thread_amax_2x_act, in_cached_2x_act);
+                const IType2 in_cached_2x_act = {in_cached_act[w].data.elt[e], in_cached_act[w].data.elt[e + 1]};
+                ptx::abs_max_2x(thread_amax_2x_act, thread_amax_2x_act, in_cached_2x_act);
                 if constexpr (IS_DGATED) {
-                  const IType2 in_cached_2x_gate = {in_cached_gate[w].data.elt[e],
-                                                    in_cached_gate[w].data.elt[e + 1]};
-                  ptx::abs_max_2x<IType2>(thread_amax_2x_gate, thread_amax_2x_gate,
-                                          in_cached_2x_gate);
+                  const IType2 in_cached_2x_gate = {in_cached_gate[w].data.elt[e], in_cached_gate[w].data.elt[e + 1]};
+                  ptx::abs_max_2x(thread_amax_2x_gate, thread_amax_2x_gate, in_cached_2x_gate);
                 }
               }
             }
@@ -762,11 +745,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
-      const float2 block_scale_inverse_2x_act =
-          make_float2(block_scale_inverse_act, block_scale_inverse_act);
+      const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act, block_scale_inverse_act};
 
       float block_scale_inverse_gate;
-      float2 block_scale_inverse_2x_gate;
+      ptx::floatx2 block_scale_inverse_2x_gate;
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
             float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
@@ -775,8 +757,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
         block_scale_inverse_gate = exp2f_rcp(biased_exponent_gate);
-        block_scale_inverse_2x_gate =
-            make_float2(block_scale_inverse_gate, block_scale_inverse_gate);
+        block_scale_inverse_2x_gate = {block_scale_inverse_gate, block_scale_inverse_gate};
       }
 
 // 3. Scale elements
@@ -797,7 +778,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             in_act.x = after_act_rowwise[j];
             in_act.y = after_act_rowwise[j + 1];
           }
-          ptx::mul_cvt_2x<OType2, IType2>(out_act_pair, in_act, block_scale_inverse_2x_act);
+          ptx::mul_cvt_2x(out_act_pair, in_act, block_scale_inverse_2x_act);
 
           if constexpr (IS_DGATED) {
             IType2 in_gate;
@@ -811,7 +792,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               in_gate.x = after_gate_rowwise[j];
               in_gate.y = after_gate_rowwise[j + 1];
             }
-            ptx::mul_cvt_2x<OType2, IType2>(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
+            ptx::mul_cvt_2x(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
           }
         }
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;

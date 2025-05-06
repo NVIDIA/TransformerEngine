@@ -43,14 +43,6 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
-template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-constexpr __device__ __forceinline__ bool is_cached_act_op() {
-  return (OP == gelu<float, float>) || (OP == dgelu<float, float>) ||
-         (OP == sigmoid<float, float>) || (OP == dsigmoid<float, float>) ||
-         (OP == qgelu<float, float>) || (OP == dqgelu<float, float>) ||
-         (OP == silu<float, float>) || (OP == dsilu<float, float>);
-}
-
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
@@ -67,12 +59,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
-  using IType2 =
-      std::conditional_t<std::is_same_v<IType, float>, float2,
-                         std::conditional_t<std::is_same_v<IType, bf16>, ptx::bf16x2, ptx::fp16x2>>;
-
-  using OType2 = std::conditional_t<std::is_same_v<OType, fp8e4m3>, ptx::fp8e4m3x2, ptx::fp8e5m2x2>;
-  static_assert(sizeof(OType2) == 2);
+  using IType2 = typename ptx::FPx2<IType>;
+  using OType2 = typename ptx::FPx2<OType>;
 
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
@@ -90,8 +78,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
 
-  constexpr bool IS_CACHED_ACT_OP =
-      COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING && is_cached_act_op<ParamOP, OP>();
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
   const int block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -273,7 +260,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales_colwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = exp2f_rcp(biased_exponent);
-      const float2 block_scale_inverse_2x = make_float2(block_scale_inverse, block_scale_inverse);
+      const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
 #pragma unroll
@@ -312,7 +299,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
 #pragma unroll
           for (int e = 0; e < PACK_SIZE / 2; ++e) {
-            ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+            ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
           }
         }
         thread_amax =
@@ -344,9 +331,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } else {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x = {in_cached[w].data.elt[e],
-                                             in_cached[w].data.elt[e + 1]};
-                ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_cached_2x);
+                const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e + 1]};
+                ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
             }
           }
@@ -412,7 +398,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales_rowwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = exp2f_rcp(biased_exponent);
-      const float2 block_scale_inverse_2x = make_float2(block_scale_inverse, block_scale_inverse);
+      const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
       // 3. Scale elements
 #pragma unroll
@@ -432,7 +418,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             in.x = in_compute_rowwise[j];
             in.y = in_compute_rowwise[j + 1];
           }
-          ptx::mul_cvt_2x<OType2, IType2>(out_pair, in, block_scale_inverse_2x);
+          ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
         }
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
