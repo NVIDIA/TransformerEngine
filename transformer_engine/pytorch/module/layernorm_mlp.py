@@ -69,6 +69,7 @@ from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
+    QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -506,9 +507,9 @@ class _LayerNormMLP(torch.autograd.Function):
         if is_grad_enabled:
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if isinstance(fc1_weight_final, QuantizedTensor):
+            if isinstance(fc1_weight_final, QuantizedTensorBase):
                 fc1_weight_final.update_usage(columnwise_usage=True)
-            if isinstance(fc2_weight_final, QuantizedTensor):
+            if isinstance(fc2_weight_final, QuantizedTensorBase):
                 fc2_weight_final.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
@@ -794,9 +795,9 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             # Make sure required data is available
-            if isinstance(grad_output, QuantizedTensor):
+            if isinstance(grad_output, QuantizedTensorBase):
                 grad_output.update_usage(rowwise_usage=True)
-            if ctx.fc2_weight_quantizer is not None and isinstance(ctx.fc2_weight, QuantizedTensor):
+            if ctx.fc2_weight_quantizer is not None and isinstance(ctx.fc2_weight, QuantizedTensorBase):
                 ctx.fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM
@@ -842,7 +843,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(act_out, QuantizedTensor):
+                    if isinstance(act_out, QuantizedTensorBase):
                         act_out.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -865,7 +866,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         quantizer=ctx.fc2_grad_output_quantizer,
                     )
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(grad_output, QuantizedTensor):
+                    if isinstance(grad_output, QuantizedTensorBase):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -1019,7 +1020,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensor
+                ctx.fc1_weight_quantizer, QuantizedTensorBase
             ):
                 ctx.fc1_weight.update_usage(columnwise_usage=True)
 
@@ -1090,7 +1091,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ln_out_total_work.wait()
                     ln_out_total_work = None
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(ln_out_total, QuantizedTensor):
+                    if isinstance(ln_out_total, QuantizedTensorBase):
                         ln_out_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -1100,7 +1101,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.fp8 or ctx.debug:
-                    if isinstance(dact, QuantizedTensor):
+                    if isinstance(dact, QuantizedTensorBase):
                         dact.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
@@ -1858,16 +1859,17 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ) = [None] * 12
         if self.fp8:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-            fc1_input_quantizer.internal = False  # temporary
+            fc1_input_quantizer.internal = True
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-            fc1_weight_quantizer.internal = False
+            fc1_weight_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
                 columnwise=isinstance(fc2_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)),
             )
+            fc1_input_quantizer.internal = True
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
-            fc2_weight_quantizer.internal = False
+            fc2_weight_quantizer.internal = True
             if fp8_output:
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
@@ -1876,11 +1878,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ]
-                fc2_grad_output_quantizer.internal = False
+                fc2_grad_output_quantizer.internal = True
                 fc1_grad_output_quantizer = self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ]
-                fc1_grad_output_quantizer.internal = False
+                fc1_grad_output_quantizer.internal = True
 
         return (
             fc1_input_quantizer,
