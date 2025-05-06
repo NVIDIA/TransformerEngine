@@ -13,10 +13,10 @@
 #include <utility>
 #include <vector>
 
-#include <cal.h>
 #include <cublasmp.h>
 #include <cuda_runtime.h>
 #include <mpi.h>
+#include <nccl.h>
 #include <nvshmem.h>
 
 #include "../common.h"
@@ -29,14 +29,6 @@ namespace {
 // TODO: log warnings on failures of the *Destroy calls below, once TE has such ability.
 // For now, just silently ignoring the errors, since the only diag available in TE is throwing
 // exceptions, but these calls will typically be made from destructors, so cannot throw.
-
-using CalComm = std::unique_ptr<std::remove_pointer_t<cal_comm_t>, decltype(&cal_comm_destroy)>;
-
-CalComm CalCommCreate(const cal_comm_create_params_t& params) {
-  cal_comm_t raw{};
-  NVTE_CHECK_CAL(cal_comm_create(params, &raw));
-  return CalComm(raw, cal_comm_destroy);
-}
 
 template <typename HandlePtr, typename CreateFn, typename DestroyFn, typename... Args>
 auto CreateWithCudaCheck(CreateFn create_fn, DestroyFn destroy_fn, Args&&... args) {
@@ -83,7 +75,7 @@ using CublasMpGrid =
     std::unique_ptr<std::remove_pointer_t<cublasMpGrid_t>, decltype(&cublasMpGridDestroy)>;
 
 CublasMpGrid CublasMpGridCreate(int64_t nprow, int64_t npcol, cublasMpGridLayout_t layout,
-                                cal_comm_t comm) {
+                                ncclComm_t comm) {
   return CreateWithCublasMpCheck<true, cublasMpGrid_t>(cublasMpGridCreate, cublasMpGridDestroy,
                                                        nprow, npcol, layout, comm);
 }
@@ -107,33 +99,12 @@ CublasMpMatmulDesc CublasMpMatmulDescCreate(cublasComputeType_t compute_type) {
       cublasMpMatmulDescriptorCreate, cublasMpMatmulDescriptorDestroy, compute_type);
 }
 
-calError_t allgather(void* src_buf, void* recv_buf, size_t size, void* /* data */, void** request) {
-  MPI_Request req{};
-  int err = MPI_Iallgather(src_buf, size, MPI_BYTE, recv_buf, size, MPI_BYTE, MPI_COMM_WORLD, &req);
-  if (err != MPI_SUCCESS) {
-    return CAL_ERROR;
-  }
-  *request = (void*)req;
-  return CAL_OK;
-}
-
-calError_t request_test(void* request) {
-  MPI_Request req = (MPI_Request)request;
-  int completed;
-  int err = MPI_Test(&req, &completed, MPI_STATUS_IGNORE);
-  if (err != MPI_SUCCESS) {
-    return CAL_ERROR;
-  }
-  return completed ? CAL_OK : CAL_ERROR_INPROGRESS;
-}
-
-calError_t request_free(void* request) { return CAL_OK; }
 }  // namespace
 
 struct CommGemmCtx {
   int64_t nranks;
   int64_t rank;
-  CalComm cal_comm;
+  ncclComm_t comm;
   CudaStream stream;
   CudaEvent event;
   CublasMp cublas_mp;
@@ -453,25 +424,13 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
 
 }  // namespace
 
-CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
-  cal_comm_create_params_t params{
-      .allgather = allgather,
-      .req_test = request_test,
-      .req_free = request_free,
-      .nranks = nranks,
-      .rank = rank,
-      .local_device = local_device,
-  };
-  auto cal_comm = CalCommCreate(params);
-
+CommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, int local_device) {
   auto stream = CudaStreamCreate();
   auto event = CudaEventCreate(cudaEventDisableTiming);
   auto cublas_mp = CublasMpCreate(stream.get());
 
-  auto col_major =
-      CublasMpGridCreate(params.nranks, 1, CUBLASMP_GRID_LAYOUT_COL_MAJOR, cal_comm.get());
-  auto row_major =
-      CublasMpGridCreate(1, params.nranks, CUBLASMP_GRID_LAYOUT_ROW_MAJOR, cal_comm.get());
+  auto col_major = CublasMpGridCreate(nranks, 1, CUBLASMP_GRID_LAYOUT_COL_MAJOR, comm);
+  auto row_major = CublasMpGridCreate(1, nranks, CUBLASMP_GRID_LAYOUT_ROW_MAJOR, comm);
 
   // Pre-creating matrix descriptors here, will be initialized with the actual params later.
   auto a_desc = CublasMpMatrixDescCreate(1, 1, 1, 1, 0, 0, 1, CUDA_R_16F, row_major.get());
@@ -483,7 +442,7 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
   return new CommGemmCtx{
       .nranks = nranks,
       .rank = rank,
-      .cal_comm = std::move(cal_comm),
+      .comm = comm,
       .stream = std::move(stream),
       .event = std::move(event),
       .cublas_mp = std::move(cublas_mp),
@@ -498,7 +457,6 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
 
 void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) {
     nvshmemx_sync_all_on_stream(ctx->stream.get());
-    NVTE_CHECK_CAL(cal_comm_barrier(ctx->cal_comm.get(), ctx->stream.get()));
     delete ctx;
 }
 
