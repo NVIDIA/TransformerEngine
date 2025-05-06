@@ -24,7 +24,7 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
 
   // empty tensor wrappers are okay just to get workspace size
   auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, in_dtype);
+  auto gamma_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
   auto rsigma_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
@@ -98,7 +98,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto workspace_shape = std::vector<size_t>{workspace_size};
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
-  auto gamma_tensor = TensorWrapper(gamma, gamma_shape, in_dtype);
+  auto gamma_tensor = TensorWrapper(gamma, gamma_shape, w_dtype);
 
   auto rsigma_tensor = TensorWrapper(rsigma, intermediates_shape, DType::kFloat32);
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - _sm_margin;
@@ -106,6 +106,11 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
+
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
 
   if (is_fp8_dtype(out_dtype)) {
     output_tensor.set_rowwise_scale_inv(
@@ -118,7 +123,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING && is_fp8_dtype(out_dtype)) {
     output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-    cudaMemsetAsync(amax, 0, sizeof(float), stream);
+    nvte_memset(amax, 0, sizeof(float), stream);
     output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
   }
 
@@ -134,6 +139,8 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   }
 
   if (_norm_type == NVTE_Norm_Type::LayerNorm) {
+    NVTE_CHECK(w_dtype == convert_ffi_datatype_to_te_dtype(beta_buf.element_type()),
+               "gamma and beta must have the same data type.");
     auto beta_tensor = TensorWrapper(beta, gamma_shape, w_dtype);
     auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
 

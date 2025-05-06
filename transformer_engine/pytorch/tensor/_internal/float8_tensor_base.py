@@ -27,12 +27,14 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        dtype = torch_to_transformer_engine_dtype[dtype]
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
+            if tensor._data.numel() == 0:
+                return torch.empty_like(tensor._data, dtype=dtype)
             # Cast from FP8
-            return tex.dequantize(tensor, dtype)
+            return tex.dequantize(tensor, te_dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
@@ -88,6 +90,13 @@ class Float8TensorBase:
 
         return instance
 
+    def clear(self):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
+        for t in (self._data, self._transpose, self._scale_inv):
+            if t is not None:
+                t.data = torch.Tensor()
+        self._transpose_invalid = True
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -100,7 +109,10 @@ class Float8TensorBase:
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
         """Prepare the tensor base for saving for backward"""
-        tensors = [self._data, self._transpose]
+        tensors = [self._data, self._transpose, self._scale_inv]
+        self._data = None
+        self._transpose = None
+        self._scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -109,7 +121,8 @@ class Float8TensorBase:
         """Restore the tensor base data from the saved tensors list"""
         self._data = tensors[0]
         self._transpose = tensors[1]
-        return tensors[2:]
+        self._scale_inv = tensors[2]
+        return tensors[3:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""

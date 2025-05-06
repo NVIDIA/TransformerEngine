@@ -10,6 +10,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
+import logging
 from types import MethodType
 
 import torch
@@ -18,7 +19,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
-from ._common import _ParameterInitMeta
+from ._common import _ParameterInitMeta, noop_cat
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
@@ -38,7 +39,11 @@ from ..tensor import QuantizedTensor, Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..utils import torch_get_autocast_gpu_dtype
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ...common.recipe import Recipe
+from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -226,9 +231,15 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Increase the workspace by the number of maximum concurrent streams
+    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
     global _cublas_workspace
-    _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    if _cublas_workspace is None:
+        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
+    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
+        # This ensures we don't do `.repeat()` on an already expanded workspace
+        _cublas_workspace = torch.empty(
+            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
+        ).repeat(_NUM_MAX_UB_STREAMS)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -413,6 +424,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        self.name = None
         self.fp8_initialized = False
         self.fp8 = False
         self.fp8_calibration = False
@@ -431,6 +443,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
+
+        if not TEDebugState.debug_enabled:
+            TEDebugState.initialize()
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
@@ -686,7 +701,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch_get_autocast_gpu_dtype()
             return
 
         # All checks after this have already been performed once, thus skip
@@ -848,7 +863,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8:
+        if not ctx.fp8 and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
@@ -858,6 +873,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return grad_output, None
 
         # FP8 with all-gather: unfused bgrad, fused cast + transpose
+        # Also supports debug quantization, which is handled inside gather_along_first_dim.
         if gather_grad_output:
             grad_bias = None
             if ctx.use_bias:
@@ -884,6 +900,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     ctx.tp_group,
                     quantizer=quantizer,
                 )
+            return grad_output, grad_bias
+
+        # Debug without all-gather: unfused cast and bgrad
+        # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
+        if ctx.debug:
+            grad_output_ = quantizer(grad_output)
+            if (
+                isinstance(
+                    grad_output_.get_tensor(True),
+                    (QuantizedTensor, Float8TensorBase, MXFP8TensorBase),
+                )
+                and ctx.use_bias
+            ):
+                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+            else:
+                grad_bias = None
+            grad_output = grad_output_
             return grad_output, grad_bias
 
         # FP8 without all-gather: fused bgrad + cast + transpose
@@ -1002,6 +1035,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
+        workspace_dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -1024,6 +1058,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
+        workspace_dtype: torch.dtype, default = None
+            If weight workspace contains high-precision tensor - for example
+            for debug quantization, this is dtype of the tensor.
         """
 
         # FP8 primary weights
@@ -1037,6 +1074,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Try getting workspace from cache
         out = None
+
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
             if quantizer is not None and isinstance(out, MXFP8TensorBase):
@@ -1046,6 +1084,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 elif quantizer.columnwise_usage and out._columnwise_data is None:
                     out = None
                     del self._fp8_workspaces[cache_name]
+
+            is_debug = isinstance(quantizer, DebugQuantizer)
+            is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)
+            if is_debug != is_out_debug_tensor:
+                out = None
 
         # Gather cached Fp8 workspace if it's distributed
         # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
@@ -1064,7 +1107,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 raise ValueError(
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
-            out = quantizer(tensor)
+
+            if cache_name is not None:
+                # Ensure the tensor in the cache is an instance of torch.Tensor,
+                # as it persists beyond a single forward pass.
+                # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+                quantizer_internal = quantizer.internal
+                quantizer.internal = False
+            out = quantizer.quantize(tensor, dtype=workspace_dtype)
+            if cache_name is not None:
+                quantizer.internal = quantizer_internal
 
             # Update cache
             if cache_name is not None:
@@ -1081,7 +1133,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
                 tex.quantize(tensor, quantizer, out, skip_update_flag)
-
         return out
 
     def _load_from_state_dict(
@@ -1104,3 +1155,68 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
+
+    def backward_dw(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
+        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+            return
+        with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
+            (wgrad, grad_bias_, _, _), _ = self.wgrad_store.pop()
+            if not self.fuse_wgrad_accumulation:
+                unfused_weights = [getattr(self, name) for name in self.weight_names]
+                weight_tensor = noop_cat(unfused_weights)
+                if weight_tensor.grad is None:
+                    weight_tensor.grad = wgrad.to(weight_tensor.dtype)
+            if self.use_bias:
+                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+                if bias_tensor.grad is None:
+                    bias_tensor.grad = grad_bias_.to(bias_tensor.dtype)
+            del grad_bias_
+            del wgrad
+
+    def _validate_name(self):
+        """
+        Validate name passed to the module.
+        This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
+        If no name is assigned, it creates a default name with layer count as the variable.
+        """
+        assert TEDebugState.debug_enabled
+        import nvdlfw_inspect.api as debug_api
+
+        if self.name is None:
+            debug_api.log_message(
+                "Names are not provided to debug modules. ",
+                "Creating and using generic names. Pass names to debug modules for better"
+                " insight. ",
+                level=logging.WARNING,
+            )
+            self.name = f"Layer_{TEDebugState.get_layer_count()}"
+
+    def _turn_off_unsupported_features_in_debug(self):
+        if (
+            getattr(self, "ub_bulk_wgrad", False)
+            or getattr(self, "ub_bulk_dgrad", False)
+            or getattr(self, "ub_overlap_ag", False)
+            or getattr(self, "ub_overlap_rs_dgrad", False)
+            or getattr(self, "ub_overlap_rs", False)
+        ):
+            import nvdlfw_inspect.api as debug_api
+
+            debug_api.log_message(
+                "UserBuffers are not supported in debug module. "
+                "Using UB optimization will not affect the debug module. ",
+                level=logging.WARNING,
+            )
+            if hasattr(self, "ub_bulk_wgrad"):
+                self.ub_bulk_wgrad = None
+            if hasattr(self, "ub_bulk_dgrad"):
+                self.ub_bulk_dgrad = None
+            if hasattr(self, "ub_overlap_ag"):
+                self.ub_overlap_ag = None
+            if hasattr(self, "ub_overlap_rs_dgrad"):
+                self.ub_overlap_rs_dgrad = None
+            if hasattr(self, "ub_overlap_rs"):
+                self.ub_overlap_rs = None

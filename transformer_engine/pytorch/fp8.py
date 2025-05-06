@@ -513,8 +513,8 @@ class FP8GlobalStateManager:
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
-        fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history
-        fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale
+        fp8_meta["updated_amax_history_fwd"] = fp8_meta["scaling_fwd"].amax_history.clone()
+        fp8_meta["updated_scale_fwd"] = fp8_meta["scaling_fwd"].scale.clone()
 
         # Retrieve stashed amaxes and scales from phase 1 pre forward.
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"

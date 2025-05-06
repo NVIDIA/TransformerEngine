@@ -99,8 +99,8 @@ class BlockScaleDequantizer(Dequantizer):
             int(data_shape[-1] / scale_shape[-1]),
         )
 
-        # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         scale_inv = jnp.expand_dims(scale_inv, axis=(flatten_axis + 2 - 2, -1))
+
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         return jnp.asarray(data * jnp.power(2, scale_inv - 127), dq_dtype).reshape(data_shape)
 
@@ -129,6 +129,7 @@ class BlockScaleDequantizer(Dequantizer):
 
 ScalingModeToDequantizerMap = {
     ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
+    ScalingMode.CURRENT_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
 }
 
@@ -141,6 +142,8 @@ def _grouped_dequantize(grouped_scaled_tensor):
     other_sizes = grouped_scaled_tensor.other_sizes
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
+    original_shape = grouped_scaled_tensor.original_shape
+    group_axis = grouped_scaled_tensor.group_axis
 
     data_ndim = 1 + len(other_sizes)
 
@@ -178,11 +181,9 @@ def _grouped_dequantize(grouped_scaled_tensor):
             is_colwise=grouped_scaled_tensor.is_colwise,
             flatten_axis=grouped_scaled_tensor.flatten_axis,
         )
-        # import pdb; pdb.set_trace()
         output.append(out_i)
         scale_inv_ptr += scale_shape_i_size
 
-    # TODO(Phuong): Stack the output to a single ndarray !?
     return output
 
 

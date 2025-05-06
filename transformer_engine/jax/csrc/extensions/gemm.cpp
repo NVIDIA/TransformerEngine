@@ -109,7 +109,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
     auto rhs_sinv_shape = std::vector<size_t>{1, 1};
 
     if (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
-        scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+        scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+        scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING) {
       float *amax_dptr = nullptr;
       float *scale_dptr = nullptr;
       auto lhs_i_ = TensorWrapper(lhs_ptr, lhs_shape, lhs_dtype, amax_dptr, scale_dptr,

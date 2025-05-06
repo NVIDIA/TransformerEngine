@@ -119,6 +119,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         ctx,
         t: torch.Tensor,
         freqs: torch.Tensor,
+        start_positions: Union[torch.Tensor, None] = None,
         tensor_format: str = "sbhd",
         interleaved: bool = False,
         cu_seqlens: Union[torch.Tensor, None] = None,
@@ -126,6 +127,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         cp_rank: int = 0,
     ) -> torch.Tensor:
         """Fused RoPE forward."""
+
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         assert tensor_format in (
@@ -134,7 +136,14 @@ class FusedRoPEFunc(torch.autograd.Function):
             "thd",
         ), f"Unsupported tensor_format: {tensor_format}."
         output = tex.fused_rope_forward(
-            t, freqs, QKVFormat[tensor_format], interleaved, cu_seqlens, cp_size, cp_rank
+            t,
+            freqs,
+            start_positions,
+            QKVFormat[tensor_format],
+            interleaved,
+            cu_seqlens,
+            cp_size,
+            cp_rank,
         )
         ctx.save_for_backward(freqs, cu_seqlens)
         ctx.tensor_format = tensor_format
@@ -158,7 +167,7 @@ class FusedRoPEFunc(torch.autograd.Function):
             ctx.cp_rank,
         )
 
-        return grad_input, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None
 
 
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
@@ -185,6 +194,7 @@ def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
 def _apply_rotary_pos_emb_base(
     t: torch.Tensor,
     freqs: torch.Tensor,
+    start_positions: torch.Tensor = None,
     tensor_format: str = "sbhd",
     interleaved: bool = False,
 ) -> torch.Tensor:
@@ -199,6 +209,9 @@ def _apply_rotary_pos_emb_base(
     freqs: torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
+    start_positions: torch.Tensor, default = None.
+        Tokens in a sequence `i` should be applied with position encoding offset by
+        `start_positions[i]`. If `start_positions=None`, there's no offset.
     tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
         Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is of shape
         `[seq, bs, ...]`.
@@ -208,14 +221,31 @@ def _apply_rotary_pos_emb_base(
     max_seq_len = freqs.shape[0]
     cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
 
+    # In case `start_positions` are provided, create a staggered `freqs` tensor
+    # offset by the values in `start_positions`.
+    # `start_positions` is only supported for `cp_size=1` and inference.
+    if start_positions is not None:
+        max_offset = torch.max(start_positions)
+        assert (
+            max_offset + cur_seq_len <= max_seq_len
+        ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
+
+        # Stack staggered rope embeddings along the batch dimension
+        freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
+
+        # Note that from this point, `freqs` has a shape `(s,b,1,d)`.
+
     # Only apply the rotary embeddings up to the sequence length of the running
     # input.
     assert (
         cur_seq_len <= max_seq_len
     ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
     freqs = freqs[:cur_seq_len]
+
+    # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
+    # [seq, b, 1, dim] -> [b, seq, 1, dim]
     if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+        freqs = freqs.transpose(0, 1)
     # cos/sin first then dtype conversion for better precision
     cos_ = torch.cos(freqs).to(t.dtype)
     sin_ = torch.sin(freqs).to(t.dtype)
@@ -252,13 +282,14 @@ def _get_freqs_on_this_cp_rank(
         )
 
     # cp_size == 1
-    return freqs[:seqlen]
+    return freqs
 
 
 def apply_rotary_pos_emb(
     t: torch.Tensor,
     freqs: torch.Tensor,
     tensor_format: str = "sbhd",
+    start_positions: Union[torch.Tensor, None] = None,
     interleaved: bool = False,
     fused: bool = False,
     cu_seqlens: Union[torch.Tensor, None] = None,
@@ -268,6 +299,19 @@ def apply_rotary_pos_emb(
     """
     Apply rotary positional embedding tensor to the input tensor.
 
+    Support matrix:
+    Fused/Unfused:
+        Training:
+            qkv_formats:            "thd", "bshd", "sbhd"
+            context parallel:       yes
+            start_positions:        no
+            interleaving:           yes
+        Inference:
+            qkv_formats:            "thd", "bshd", "sbhd"
+            context parallelism:    no
+            start_positions:        yes
+            interleaving:            yes
+
     Parameters
     ----------
     t: torch.Tensor
@@ -276,6 +320,9 @@ def apply_rotary_pos_emb(
     freqs: torch.Tensor
         Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
         with `s2 >= s` and `d2 <= d`.
+    start_positions: torch.Tensor, default = None.
+        Tokens in a sequence `i` should be applied with position encoding offset by
+        `start_positions[i]`. If `start_positions=None`, there's no offset.
     tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
         is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
         of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
@@ -292,27 +339,43 @@ def apply_rotary_pos_emb(
     cp_rank: int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
+
+    # `start_positions` is only supported for `cp_size=1` and inference.
+    assert not (
+        cp_size > 1 and start_positions is not None
+    ), """start_positions != None with CP SIZE > 1 is not supported!"""
+
     assert (
         tensor_format != "thd" or cu_seqlens is not None
     ), "cu_seqlens must not be None when tensor_format is 'thd'."
 
     if fused:
         return FusedRoPEFunc.apply(
-            t, freqs, tensor_format, interleaved, cu_seqlens, cp_size, cp_rank
+            t, freqs, start_positions, tensor_format, interleaved, cu_seqlens, cp_size, cp_rank
         )
 
     # Unfused THD format
     if tensor_format == "thd":
         cu_seqlens = cu_seqlens // cp_size
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+
+        # The following code essentially splits the `thd` tensor into corresponding
+        # `s1hd` tensors (for each sequence) and applies rotary embedding to
+        # those sequences individually.
+        # Note that if `start_positions` is not `None`, then for each sequence,
+        # it's corresponding rope offset is also supplied from `start_positions`
+        # individually.
         return torch.cat(
             [
                 _apply_rotary_pos_emb_base(
                     x.unsqueeze(1),
                     _get_freqs_on_this_cp_rank(freqs, x.size(0), cp_size, cp_rank),
+                    start_positions=(
+                        start_positions[idx : idx + 1] if start_positions is not None else None
+                    ),
                     interleaved=interleaved,
                 )
-                for x in torch.split(t, seqlens)
+                for idx, x in enumerate(torch.split(t, seqlens))
             ]
         ).squeeze(1)
 
@@ -326,6 +389,7 @@ def apply_rotary_pos_emb(
     return _apply_rotary_pos_emb_base(
         t,
         _get_freqs_on_this_cp_rank(freqs, seqlen, cp_size, cp_rank),
+        start_positions,
         tensor_format,
         interleaved=interleaved,
     )

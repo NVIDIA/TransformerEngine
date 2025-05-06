@@ -17,7 +17,7 @@ fi
 # Download Megatron-LM if needed
 if [ ! -d "${MCORE_PATH}" ]; then
     pushd $(dirname ${MCORE_PATH})
-    git clone -b core_r0.9.0 https://github.com/NVIDIA/Megatron-LM.git Megatron-LM
+    git clone -b core_r0.12.0 https://github.com/NVIDIA/Megatron-LM.git Megatron-LM
     popd
 fi
 

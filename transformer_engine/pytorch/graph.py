@@ -536,7 +536,9 @@ def _make_graphed_callables(
                                     # Only Set the FP8 meta for the modules included by forward
                                     continue
                                 fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                                from transformer_engine.pytorch.attention import DotProductAttention
+                                from transformer_engine.pytorch.attention.dot_product_attention import (
+                                    DotProductAttention,
+                                )
 
                                 if (
                                     isinstance(m, DotProductAttention)

@@ -220,11 +220,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if mask is not None:
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+            if mask is not None:
+                return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.CAUSAL_MASK:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
-                if mask is not None:
-                    return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.NO_MASK:
                 return SoftmaxType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
@@ -446,6 +446,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+
+       attn_mask_type       mask/sequence_descriptor       SWA          softmax type
+       --------------------------------------------------------------------------------------------
+       no_mask              None                           None         SCALED
+       causal               None                           None         SCALED_UPPER_TRIANG_MASKED
+       causal               None                           Yes          SCALED_MASKED
+       padding              Required                       Yes/No       SCALED_MASKED
+       padding_causal       Required                       Yes/No       SCALED_MASKED
 
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
