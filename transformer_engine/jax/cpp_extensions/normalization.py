@@ -502,7 +502,16 @@ class NormFwdPrimitive(BasePrimitive):
         )
         amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="NormFwdPrimitive.amax")
 
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        # Enforce no sharding of hidden dim for x, gamma and beta
+        arg_shardings[0] = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.x")
+        arg_shardings[2] = NamedSharding(
+            mesh, PartitionSpec(*g_spec[:-1], None), desc="NormFwdPrimitive.gamma"
+        )
+        arg_shardings[3] = NamedSharding(
+            mesh, PartitionSpec(*b_spec[:-1], None), desc="NormFwdPrimitive.beta"
+        )
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,

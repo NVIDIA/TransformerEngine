@@ -4,19 +4,20 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <ATen/ATen.h>
-#include <ATen/AccumulateType.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/Exceptions.h>
-// Another possibility:
-// #include <torch/all.h>
-
 #include <assert.h>
+#include <cuda_fp8.h>
 // Stringstream is a big hammer, but I want to rely on operator<< for dtype.
+#include <transformer_engine/multi_tensor.h>
+#include <transformer_engine/transformer_engine.h>
+
+#include <iostream>
 #include <sstream>
 
+#include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
-#include "type_shim.h"
+
+namespace transformer_engine {
+namespace multi_tensor_scale {
 
 #define BLOCK_SIZE 512
 #define ILP 4
@@ -66,7 +67,7 @@ struct ScaleFunctor {
 #pragma unroll
         for (int ii = 0; ii < ILP; ii++) {
           r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(r_in[ii]);
+          finite = finite && isfinite(static_cast<float>(r_in[ii]));
         }
         // store
         load_store(out, r_out, i_start, 0);
@@ -76,7 +77,7 @@ struct ScaleFunctor {
       for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
 #pragma unroll
         for (int ii = 0; ii < ILP; ii++) {
-          r_in[ii] = 0;
+          r_in[ii] = 0.f;
           int i = i_start + threadIdx.x + ii * blockDim.x;
           if (i < n && i < chunk_size) r_in[ii] = in[i];
         }
@@ -88,7 +89,7 @@ struct ScaleFunctor {
 #pragma unroll
         for (int ii = 0; ii < ILP; ii++) {
           r_out[ii] = static_cast<float>(r_in[ii]) * scale;
-          finite = finite && isfinite(r_in[ii]);
+          finite = finite && isfinite(static_cast<float>(r_in[ii]));
         }
 #pragma unroll
         for (int ii = 0; ii < ILP; ii++) {
@@ -101,20 +102,29 @@ struct ScaleFunctor {
   }
 };
 
-void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
-                             std::vector<std::vector<at::Tensor>> tensor_lists, float scale) {
-  using namespace at;
-  // The output (downscaled) type is always float.
-  // If build times suffer, think about where to put this dispatch,
-  // and what logic should be moved out of multi_tensor_apply.
-
-  DISPATCH_FLOAT_HALF_AND_BFLOAT(
-      tensor_lists[0][0].scalar_type(), 0, "multi_tensor_scale_cuda",
-      DISPATCH_FLOAT_HALF_AND_BFLOAT(
-          tensor_lists[1][0].scalar_type(), 1, "multi_tensor_scale_cuda",
+void multi_tensor_scale_cuda(int chunk_size, Tensor noop_flag,
+                             std::vector<std::vector<Tensor *>> tensor_lists, float scale,
+                             const int device_id, cudaStream_t stream) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      tensor_lists[0][0]->dtype(), p_in_type,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          tensor_lists[1][0]->dtype(), g_in_type,
           multi_tensor_apply<2>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                ScaleFunctor<scalar_t_0, scalar_t_1>(), scale);))
-  AT_CUDA_CHECK(cudaGetLastError());
+                                ScaleFunctor<p_in_type, g_in_type>(), device_id, stream, scale);))
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
-  // AT_CUDA_CHECK(cudaDeviceSynchronize());
+}  // namespace multi_tensor_scale
+}  // namespace transformer_engine
+
+void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+                                  const size_t num_tensor_lists, const size_t num_tensors_per_list,
+                                  float scale, const int device_id, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_scale_cuda);
+  using namespace transformer_engine;
+
+  multi_tensor_scale::multi_tensor_scale_cuda(
+      chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), scale, device_id,
+      stream);
 }

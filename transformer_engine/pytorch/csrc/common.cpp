@@ -97,6 +97,43 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor)
   return makeTransformerEngineTensor(tensor.data_ptr(), shape, dtype);
 }
 
+std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
+           std::vector<NVTETensor*>, size_t, size_t>
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists) {
+  size_t num_lists = at_tensor_lists.size();
+
+  NVTE_CHECK(num_lists > 0, "List of tensors is empty.");
+
+  size_t num_tensors = at_tensor_lists[0].size();
+
+  std::vector<std::vector<NVTETensor>> nvte_tensor_lists;
+  std::vector<NVTETensor*> nvte_tensor_list_ptrs;
+  std::vector<transformer_engine::TensorWrapper> tensorWrappers;
+  nvte_tensor_lists.reserve(num_lists);
+  nvte_tensor_list_ptrs.reserve(num_lists);
+  tensorWrappers.reserve(num_lists * num_tensors);
+
+  for (const auto& at_list : at_tensor_lists) {
+    NVTE_CHECK(at_list.size() == num_tensors, "Wrong number of tensors");
+    std::vector<NVTETensor> te_list;
+    te_list.reserve(num_tensors);
+
+    for (const auto& at_tensor : at_list) {
+      tensorWrappers.push_back(makeTransformerEngineTensor(at_tensor));
+      te_list.push_back(tensorWrappers.back().data());
+    }
+
+    nvte_tensor_lists.push_back(std::move(te_list));
+  }
+
+  for (auto& te_tensor_list : nvte_tensor_lists) {
+    nvte_tensor_list_ptrs.push_back(te_tensor_list.data());
+  }
+
+  return std::make_tuple(std::move(tensorWrappers), std::move(nvte_tensor_lists),
+                         std::move(nvte_tensor_list_ptrs), num_lists, num_tensors);
+}
+
 transformer_engine::TensorWrapper makeTransformerEngineTensor(
     void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
     void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape,
