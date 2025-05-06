@@ -37,22 +37,22 @@ using 8-bit floating point (FP8) precision on Hopper, Ada, and Blackwell GPUs, t
 performance with lower memory utilization in both training and inference. TE provides a collection
 of highly optimized building blocks for popular Transformer architectures and an automatic mixed
 precision-like API that can be used seamlessly with your framework-specific code. TE also includes a
-framework agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
+framework-agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
 support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for
-architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
+architectures such as BERT, GPT, and T5 become very memory and compute-intensive. Most deep learning
 frameworks train with FP32 by default. This is not essential, however, to achieve full accuracy for
 many deep learning models. Using mixed-precision training, which combines single-precision (FP32)
-with lower precision (e.g. FP16) format when training a model, results in significant speedups with
+with lower precision (for example, FP16) format when training a model results in significant speedups with
 minimal differences in accuracy as compared to FP32 training. With Hopper GPU
-architecture FP8 precision was introduced, which offers improved performance over FP16 with no
+architecture, FP8 precision was introduced, which offers improved performance over FP16 with no
 degradation in accuracy. Although all major deep learning frameworks support FP16, FP8 support is
 not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
 Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8
+layer as well as a framework-agnostic library in C++, including structs and kernels needed for FP8
 support. Modules provided by TE internally maintain scaling factors and other values needed for FP8
 training, greatly simplifying mixed precision training for users.
 
@@ -60,7 +60,7 @@ Highlights
 ==========
 
 * Easy-to-use modules for building Transformer layers with FP8 support
-* Optimizations (e.g. fused kernels) for Transformer models
+* Optimizations (for example, fused kernels) for Transformer models
 * Support for FP8 on NVIDIA Hopper, Ada, and Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
@@ -135,7 +135,7 @@ Flax
       variables = model.init(init_rng, inp)
       other_variables, params = flax.core.pop(variables, 'params')
 
-      # Construct the forward and backward function
+      # Construct the forward and backward functions
       fwd_bwd_fn = jax.value_and_grad(loss_fn, argnums=(0, 1))
 
       for _ in range(10):
@@ -171,7 +171,7 @@ Docker (Recommended)
 ^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
-For example to use the NGC PyTorch container interactively,
+For example, to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
@@ -220,7 +220,7 @@ When installing from GitHub, you can explicitly specify frameworks using the env
 Source Installation
 ^^^^^^^^^^^^^^^^^^^
 
-`See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
+`Refer to the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
 
 Environment Variables
 ^^^^^^^^^^^^^^^^^^^
@@ -229,7 +229,7 @@ These environment variables can be set before installation to customize the buil
 * **CUDA_PATH**: Path to CUDA installation
 * **CUDNN_PATH**: Path to cuDNN installation
 * **CXX**: Path to C++ compiler
-* **NVTE_FRAMEWORK**: Comma-separated list of frameworks to build for (e.g., ``pytorch,jax``)
+* **NVTE_FRAMEWORK**: Comma-separated list of frameworks to build for (for example, ``pytorch,jax``)
 * **MAX_JOBS**: Limit number of parallel build jobs (default varies by system)
 * **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
 
@@ -243,7 +243,7 @@ You can verify which FlashAttention version is being used by setting these envir
 
     NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 python your_script.py
 
-It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
+It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (refer to `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which can lead to out-of-memory errors during the installation of Transformer Engine. Try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 
 .. troubleshooting-begin-marker-do-not-remove
 Troubleshooting
@@ -259,8 +259,8 @@ Troubleshooting
 
 2. **Missing Headers or Libraries:**
 
-   * **Symptoms:** CMake errors about missing headers (``cudnn.h``, ``cublas_v2.h``, ``filesystem``, etc.)
-   * **Solution:** Install missing development packages or set environment variables to point to correct locations:
+   * **Symptoms:** CMake errors about missing headers (``cudnn.h``, ``cublas_v2.h``, ``filesystem``, and so on)
+   * **Solution:** Install missing development packages or set environment variables to point to the correct locations:
 
      .. code-block:: bash
 
@@ -295,13 +295,13 @@ Breaking Changes
 
 v1.7: Padding mask definition for PyTorch
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-In an effort to unify the definition and usage of the attention mask across all three frameworks in Transformer Engine, the padding mask has changed from `True` meaning inclusion of the corresponding position in attention to exclusion of that position in our PyTorch implementation. Since v1.7, all attention mask types follow the same definition where `True` means masking out the corresponding position and `False` means including that position in attention calculation.
+In an effort to unify the definition and usage of the attention mask across all three frameworks in Transformer Engine, the padding mask has changed from `True`, meaning inclusion of the corresponding position in attention, to exclusion of that position in our PyTorch implementation. Since v1.7, all attention mask types follow the same definition, where `True` means masking out the corresponding position and `False` means including that position in attention calculation.
 
 An example of this change is,
 
 .. code-block:: bash
 
-    # for a batch of 3 sequences where `a`s, `b`s and `c`s are the useful tokens
+    # for a batch of 3 sequences where `a`s, `b`s, and `c`s are the useful tokens
     # and `0`s are the padding tokens,
     [a, a, a, 0, 0,
      b, b, 0, 0, 0,
@@ -318,7 +318,7 @@ An example of this change is,
 FP8 Convergence
 ===============
 
-FP8 has been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
+FP8 has been tested extensively across different model architectures and configurations, and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (for example, LAMBADA and WikiText). The following are examples of models tested for convergence across different frameworks.
 
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | Model      | Framework        | Source                                                                                                  |
