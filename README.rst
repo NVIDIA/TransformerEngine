@@ -141,6 +141,8 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
+For a more comprehensive tutorial, check out our `Quickstart Notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/quickstart.ipynb>`_.
+
 .. overview-end-marker-do-not-remove
 
 Installation
