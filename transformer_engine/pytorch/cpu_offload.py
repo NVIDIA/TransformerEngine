@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from .tensor.quantized_tensor import QuantizedTensorBase
+
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -342,7 +344,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             ),
         )
 
-        is_quantized_tensor = callable(getattr(tensor, "prepare_for_saving", None))
+        is_quantized_tensor = isinstance(tensor, QuantizedTensorBase)
 
         if not torch_stray_tensor:
 
