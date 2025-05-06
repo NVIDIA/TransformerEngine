@@ -9,6 +9,8 @@
 
 #include <stdint.h>
 
+#include <nccl.h>
+
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
@@ -17,7 +19,7 @@ extern "C" {
 
 typedef struct CommGemmCtx CommGemmCtx;
 
-CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device);
+CommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, int local_device);
 void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx);
 
 void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
