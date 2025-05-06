@@ -592,6 +592,8 @@ class TestGroupedQuantize:
         )
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
+
+
 """
     def test_grouped_qdq(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
@@ -631,6 +633,7 @@ class TestGroupedQuantize:
         # Dequantize and compare with original
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 """
+
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 class TestFusedQuantize:

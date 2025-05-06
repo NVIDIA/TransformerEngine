@@ -7,9 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 
-#include <vector>
-#include <mutex>
 #include <transformer_engine/multi_streams.h>
+
+#include <mutex>
+#include <vector>
 
 #include "cuda_runtime.h"
 #include "logging.h"

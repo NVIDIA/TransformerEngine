@@ -11,13 +11,13 @@
 
 #include <cfloat>
 #include <limits>
-#include <string>
 #include <mutex>
+#include <string>
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
-#include "../util/vectorized_pointwise.h"
 #include "../util/multi_streams.h"
+#include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 #include "cast_kernels.cuh"
 #include "dequantize_kernels.cuh"
@@ -160,8 +160,8 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
                             reinterpret_cast<Tensor *>(output), stream);
 }
 
-void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output,
-    const int num_groups, cudaStream_t stream) {
+void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const int num_groups,
+                           cudaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_quantize);
   using namespace transformer_engine;
 
@@ -184,8 +184,8 @@ void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output,
 
   for (int i = 0; i < num_groups; i++) {
     detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-        input[i], grad, output[i], dbias, workspace, nullptr, detail::compute_streams[i % num_streams]
-        );
+        input[i], grad, output[i], dbias, workspace, nullptr,
+        detail::compute_streams[i % num_streams]);
   }
 
   // record events on compute streams
@@ -197,4 +197,3 @@ void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output,
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::events[s]));
   }
 }
-

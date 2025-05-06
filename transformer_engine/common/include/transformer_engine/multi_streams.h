@@ -11,7 +11,6 @@
 #ifndef TRANSFORMER_ENGINE_MULTI_STREAM_H
 #define TRANSFORMER_ENGINE_MULTI_STREAM_H
 
-
 /*! \namespace transformer_engine
  */
 namespace transformer_engine {

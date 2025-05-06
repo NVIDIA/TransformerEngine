@@ -283,12 +283,15 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         group_axis = (
             len(self.original_shape) + self.group_axis if self.group_axis < 0 else self.group_axis
         )
-        assert 0 <= group_axis < data_ndim, (
-                f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
-                )
+        assert (
+            0 <= group_axis < data_ndim
+        ), f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
 
         if self.data_layout == "T":
-            self.original_shape = (*self.original_shape[flatten_axis:], *self.original_shape[:flatten_axis])
+            self.original_shape = (
+                *self.original_shape[flatten_axis:],
+                *self.original_shape[:flatten_axis],
+            )
             flatten_axis = len(self.original_shape) - flatten_axis
             self.group_axis = flatten_axis
 
@@ -564,17 +567,17 @@ class ScaledTensorFactory:
         is_colwise = q_layout == QuantizeLayout.COLWISE
         if is_colwise:
             return ScaledTensorFactory.create_1x(
-                    colwise_data,
-                    colwise_scale_inv,
-                    scaling_mode,
-                    dq_dtype,
-                    is_colwise=is_colwise,
-                    data_layout=data_layout[0],
-                    flatten_axis=flatten_axis,
-                    group_sizes=group_sizes,
-                    original_shape=original_shape,
-                    group_axis=group_axis,
-                    )
+                colwise_data,
+                colwise_scale_inv,
+                scaling_mode,
+                dq_dtype,
+                is_colwise=is_colwise,
+                data_layout=data_layout[0],
+                flatten_axis=flatten_axis,
+                group_sizes=group_sizes,
+                original_shape=original_shape,
+                group_axis=group_axis,
+            )
 
         return ScaledTensorFactory.create_1x(
             data,

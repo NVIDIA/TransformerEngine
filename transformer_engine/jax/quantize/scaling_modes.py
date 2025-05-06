@@ -372,7 +372,9 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
                 max_scale_size = max_padded_rows * max_padded_cols
         """
         if is_padded:
-            n_block_x = (n_groups - 1) * alignment_x + DIVUP(n_block_x - n_groups + 1, alignment_x) * alignment_x
+            n_block_x = (n_groups - 1) * alignment_x + DIVUP(
+                n_block_x - n_groups + 1, alignment_x
+            ) * alignment_x
             n_block_y = DIVUP(n_block_y, alignment_y) * alignment_y
 
         return (n_block_x * n_block_y,)

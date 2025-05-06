@@ -221,14 +221,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeHandler, DequantizeFFI,
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scales,
-                            Buffer_Type group_sizes,
-                            Result_Type outputs, Result_Type colwise_outputs,
-                            Result_Type scale_invs, Result_Type colwise_scale_invs,
-                            Result_Type amaxs,
-                            JAXX_Scaling_Mode scaling_mode, int64_t quantize_layout_enum,
-                            int64_t flatten_axis) {
+                              Buffer_Type group_sizes, Result_Type outputs,
+                              Result_Type colwise_outputs, Result_Type scale_invs,
+                              Result_Type colwise_scale_invs, Result_Type amaxs,
+                              JAXX_Scaling_Mode scaling_mode, int64_t quantize_layout_enum,
+                              int64_t flatten_axis) {
   NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::NO_SCALING,
-      "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
+             "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
 
   auto in_dtype = convert_ffi_datatype_to_te_dtype(inputs.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(outputs->element_type());
@@ -242,16 +241,16 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
 
   auto *input_ptr = reinterpret_cast<uint8_t *>(inputs.untyped_data());
   auto *scale_ptr = reinterpret_cast<uint8_t *>(scales.untyped_data());
-  auto *output_ptr = reinterpret_cast<uint8_t*>(outputs->untyped_data());
-  auto *colwise_output_ptr = reinterpret_cast<uint8_t*>(colwise_outputs->untyped_data());
-  auto *sinv_ptr = reinterpret_cast<uint8_t*>(scale_invs->untyped_data());
-  auto *colwise_sinv_ptr = reinterpret_cast<uint8_t*>(colwise_scale_invs->untyped_data());
+  auto *output_ptr = reinterpret_cast<uint8_t *>(outputs->untyped_data());
+  auto *colwise_output_ptr = reinterpret_cast<uint8_t *>(colwise_outputs->untyped_data());
+  auto *sinv_ptr = reinterpret_cast<uint8_t *>(scale_invs->untyped_data());
+  auto *colwise_sinv_ptr = reinterpret_cast<uint8_t *>(colwise_scale_invs->untyped_data());
   auto *amax_ptr = reinterpret_cast<uint8_t *>(amaxs->untyped_data());
 
   bool has_rowwise = quantize_layout == QuantizeLayout::ROWWISE ||
-    quantize_layout == QuantizeLayout::ROWWISE_COLWISE;
+                     quantize_layout == QuantizeLayout::ROWWISE_COLWISE;
   bool has_colwise = quantize_layout == QuantizeLayout::COLWISE ||
-    quantize_layout == QuantizeLayout::ROWWISE_COLWISE;
+                     quantize_layout == QuantizeLayout::ROWWISE_COLWISE;
   bool is_delayed_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING;
 
   size_t input_dtype_bytes = te_dtype_bytes(in_dtype);
@@ -286,37 +285,41 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   std::vector<int32_t> dim_list_host(num_groups);
   auto *group_size_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
   cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-      stream);
+                  stream);
   // Note: This may break cudaGraph.
 
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes, "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m, input_dims[0]);
+  NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
+             "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m,
+             input_dims[0]);
 
   if (is_fp8_dtype(out_dtype) && scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
-    NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups, ", got ", amaxs->dimensions()[0]);
+    NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups,
+               ", got ", amaxs->dimensions()[0]);
     NVTE_CHECK(amax_dtype == DType::kFloat32 && scale_dtype == DType::kFloat32);
     cudaMemsetAsync(amax_ptr, 0, sizeof(float) * num_groups, stream);
   }
 
   size_t sinv_size = 0;
   size_t colwise_sinv_size = 0;
-  size_t non_group_m = flatten_axis > 1 ? product(input_dims, 1, flatten_axis): 1;
+  size_t non_group_m = flatten_axis > 1 ? product(input_dims, 1, flatten_axis) : 1;
   for (size_t i = 0; i < num_groups; i++) {
     size_t m_i = dim_list_host[i] * non_group_m;
     auto shape_i = std::vector<size_t>{m_i, n};
     auto shape_trans_i = std::vector<size_t>{n, m_i};
 
-    auto inp_i = TensorWrapper(static_cast<void*>(input_ptr), shape_i, in_dtype);
+    auto inp_i = TensorWrapper(static_cast<void *>(input_ptr), shape_i, in_dtype);
     auto out_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
 
-    if (has_rowwise){
-      out_i.set_rowwise_data(static_cast<void*>(output_ptr), out_dtype, shape_i);
+    if (has_rowwise) {
+      out_i.set_rowwise_data(static_cast<void *>(output_ptr), out_dtype, shape_i);
 
       if (is_fp8_dtype(out_dtype)) {
-        if (is_delayed_scaling){
+        if (is_delayed_scaling) {
           out_i.set_scale(static_cast<void *>(scale_ptr), DType::kFloat32, std::vector<size_t>{1});
           out_i.set_amax(static_cast<void *>(amax_ptr), DType::kFloat32, std::vector<size_t>{1});
-          out_i.set_rowwise_scale_inv(static_cast<void *>(sinv_ptr), sinv_dtype, std::vector<size_t>{1});
+          out_i.set_rowwise_scale_inv(static_cast<void *>(sinv_ptr), sinv_dtype,
+                                      std::vector<size_t>{1});
           sinv_size = 1;
         } else {
           auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, false /*is_colwise*/);
@@ -326,21 +329,21 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
       }
     }
 
-    if (has_colwise){
+    if (has_colwise) {
       auto &tmp_shape = is_delayed_scaling ? shape_trans_i : shape_i;
-      out_i.set_columnwise_data(static_cast<void*>(colwise_output_ptr), out_dtype, tmp_shape);
+      out_i.set_columnwise_data(static_cast<void *>(colwise_output_ptr), out_dtype, tmp_shape);
       // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
-      auto &tmp_sinv_ptr = (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
-        ? sinv_ptr
-        : colwise_sinv_ptr;
+      auto &tmp_sinv_ptr =
+          (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) ? sinv_ptr : colwise_sinv_ptr;
 
-      if (is_delayed_scaling){
-        out_i.set_columnwise_scale_inv(
-            static_cast<void*>(tmp_sinv_ptr), sinv_dtype, std::vector<size_t>{1});
+      if (is_delayed_scaling) {
+        out_i.set_columnwise_scale_inv(static_cast<void *>(tmp_sinv_ptr), sinv_dtype,
+                                       std::vector<size_t>{1});
         colwise_sinv_size = 1;
       } else {
         auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, true /*is_colwise*/);
-        out_i.set_columnwise_scale_inv(static_cast<void *>(colwise_sinv_ptr), sinv_dtype, sinv_shape_i);
+        out_i.set_columnwise_scale_inv(static_cast<void *>(colwise_sinv_ptr), sinv_dtype,
+                                       sinv_shape_i);
         colwise_sinv_size = product(sinv_shape_i);
       }
     }
