@@ -13,7 +13,6 @@
 #include <nvrtc.h>
 
 #ifdef NVTE_WITH_CUBLASMP
-#include <cal.h>
 #include <cublasmp.h>
 #endif  // NVTE_WITH_CUBLASMP
 
@@ -102,14 +101,6 @@
     if (status != CUBLASMP_STATUS_SUCCESS) {                  \
       NVTE_ERROR("cuBLASMp Error: ", std::to_string(status)); \
     }                                                         \
-  } while (false)
-
-#define NVTE_CHECK_CAL(expr)                             \
-  do {                                                   \
-    const calError_t status = (expr);                    \
-    if (status != CAL_OK) {                              \
-      NVTE_ERROR("CAL Error: ", std::to_string(status)); \
-    }                                                    \
   } while (false)
 
 #define NVTE_CHECK_MPI(expr)                         \

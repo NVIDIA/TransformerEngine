@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
+#include <nccl.h>
 #include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/transformer_engine.h>
@@ -26,6 +27,14 @@ using transformer_engine::TypeInfo;
       MPI_Error_string(err, err_str, &_len);                         \
       EXPECT_TRUE(false) << "MPI error: " << err << ": " << err_str; \
     }                                                                \
+  } while (false)
+
+#define CHECK_NCCL(expr)                                                              \
+  do {                                                                                \
+    ncclResult_t err = (expr);                                                        \
+    if (err != ncclSuccess) {                                                         \
+      EXPECT_TRUE(false) << "NCCL error: " << err << ": " << ncclGetErrorString(err); \
+    }                                                                                 \
   } while (false)
 
 int main(int argc, char* argv[]) {
@@ -94,9 +103,16 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
     int local_device = rank_;
     NVTE_CHECK_CUDA(cudaSetDevice(rank_));
-    ctx_ = nvte_comm_gemm_ctx_create(nranks_, rank_, local_device);
+    ncclUniqueId id{};
+    if (rank_ == 0) CHECK_NCCL(ncclGetUniqueId(&id));
+    CHECK_MPI(MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
+    CHECK_NCCL(ncclCommInitRank(&comm_, nranks_, id, rank_));
+    ctx_ = nvte_comm_gemm_ctx_create(comm_, nranks_, rank_, local_device);
   }
-  ~CommGemmFixure() { nvte_comm_gemm_ctx_destroy(ctx_); }
+  ~CommGemmFixure() {
+    nvte_comm_gemm_ctx_destroy(ctx_);
+    ncclCommDestroy(comm_);
+  }
 
   struct PatternDims {
     int64_t a_rows_start;
@@ -200,6 +216,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
   CommGemmCtx* ctx_{};
   int nranks_{};
   int rank_{};
+  ncclComm_t comm_{};
 };
 
 struct AgGemm : public CommGemmFixure {
@@ -384,13 +401,14 @@ INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
                                                 DType::kFloat16, true, false, 64, 128, 256, 5e-2}),
                          &ParamSuffix);
 
-INSTANTIATE_TEST_SUITE_P(GemmAr, GemmAr,
+INSTANTIATE_TEST_SUITE_P(
+    GemmAr, GemmAr,
     testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64,
                            64 * 4, 64 * 4, 5e-3},
                     Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
                            64 * 4, 64 * 4, 1e-2},
-                    Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false,
-                           64, 64 * 4, 64 * 4, 5e-3},
-                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
-                           64, 64 * 4, 64 * 4, 5e-3}),
+                    Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false, 64,
+                           64 * 4, 64 * 4, 5e-3},
+                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false, 64,
+                           64 * 4, 64 * 4, 5e-3}),
     &ParamSuffix);
