@@ -198,7 +198,7 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_ub_all_gather:
             if input_quantizer is not None:
                 if not isinstance(x_local, QuantizedTensorBase):
-                    input_quantizer.set_usage(rowwise=True)
+                    input_quantizer.set_usage(rowwise=True, columnwise=True)
                     if isinstance(input_quantizer, Float8Quantizer):
                         input_quantizer.set_usage(columnwise=False)
                     x_local = input_quantizer(x_local)

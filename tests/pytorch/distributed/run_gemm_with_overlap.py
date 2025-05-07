@@ -518,15 +518,13 @@ def _main(opts):
                 )
     elif opts.quantization == "mxfp8":
         fp8_dtype = tex.DType.kFloat8E4M3
-        inp_quantizer = MXFP8Quantizer(fp8_dtype)
+        inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         ker_quantizer = MXFP8Quantizer(fp8_dtype)
         if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-            bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype)
+            bulk_inp_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
         elif ub_obj2 is not None:
-            inp2_quantizer = MXFP8Quantizer(fp8_dtype)
+            inp2_quantizer = MXFP8Quantizer(fp8_dtype, columnwise=False)
             ker2_quantizer = MXFP8Quantizer(fp8_dtype)
-            if opts.fp8_output:
-                out2_quantizer = MXFP8Quantizer(fp8_dtype)
 
     # Quantize tensors
     if with_quantized_compute:
