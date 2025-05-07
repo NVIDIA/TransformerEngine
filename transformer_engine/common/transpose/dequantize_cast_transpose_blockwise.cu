@@ -16,7 +16,7 @@ namespace detail {
 
 #define warp_size 32
 #define FP8_MAX 448.0f
-#define EPS 1e-6
+#define EPS 1e-5
 
 __device__ __host__ inline float cast_to_e8(float x) {
   uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&x);
@@ -34,7 +34,7 @@ __device__ inline void swap_fp8(FP8_TYPE &a, FP8_TYPE &b) {
 
 template <typename T>
 __device__ inline float warp_max_reduce_on_float(T &val) {
-  float val_float = float(val);
+  float val_float = abs(float(val));
   // 使用 butterfly pattern
   val_float = max(val_float, __shfl_xor_sync(0xffffffff, val_float, 16));
   val_float = max(val_float, __shfl_xor_sync(0xffffffff, val_float, 8));
@@ -58,6 +58,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
   // define the meta
   auto warp_id = threadIdx.x / 32;
   auto lane_id = threadIdx.x % 32;
+  auto warp_num = blockDim.x / 32;
   float *input_fp32 = (float *)input;
   float *output_fp32 = (float *)output;
   auto block_offset_x = blockIdx.x * kTileDim;
@@ -79,7 +80,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
   auto offset_col = (block_offset_y / 4 + lane_id);
   auto offset_row = (block_offset_x + 4 * warp_id);
   for (auto w = warp_id; w < kTileDim / 4 && offset_row < seq_len;
-       w += blockDim.x / 32, offset_row += 4) {
+       w += warp_num, offset_row += 4 * warp_num) {
     float buffer_fp32[4];
     FP8_TYPE *buffer_fp8 = (FP8_TYPE *)buffer_fp32;
 
@@ -112,7 +113,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
   float *scale_buffer_fp32 = (float *)&scale_buffer_fp128;
   float buffer_fp32;
   __half dequantized[4];
-  for (auto w = warp_id; w < kTileDim; w += blockDim.x / 32) {
+  for (auto w = warp_id; w < kTileDim; w += warp_num) {
     // 4. Dequantize on the tile on smem column, each warp will hold a line of 128 elements
     auto offset_row = (block_offset_y + w);
     auto offset_col = (block_offset_x / 4 + lane_id);
@@ -123,12 +124,7 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
 // Dequantize the local fp8 matrix, each column is shared the same scaling factor
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      dequantized[i] = float(buffer_fp8[i]) / scale_buffer_fp32[i];
-    }
-
-    // store the transposed fp8 tile on smem to the global memory
-    if (is_valid) {
-      output_fp32[(offset_row) * (seq_len / 4) + offset_col] = buffer_fp32;
+      dequantized[i] = float(buffer_fp8[i]) * scale_buffer_fp32[i];
     }
 
     // 5. Reduce on line, find the new scaling factor on a row
@@ -136,15 +132,26 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[1]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[2]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[3]));
+    float new_scale = cast_to_e8(FP8_MAX / (max_val + EPS));
+    // 6. Re quantize the fp8 tile on smem
+    #pragma unroll
+    for(int i = 0; i < 4; i++){
+        buffer_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
+    }
 
+    // Store the transposed requantized fp8 tile on smem to the global memory
+    if(is_valid){
+        output_fp32[ (offset_row) * (seq_len / 4) + offset_col] = buffer_fp32;
+    }
+    // Store the new scaling factor to the shared memory
     __syncwarp();
-    if (lane_id == 0) {
-      smem_scale[w] = cast_to_e8(FP8_MAX / (max_val + EPS));
+    if(lane_id == 0){
+        smem_scale[w] = 1.0f / new_scale;
     }
   }
   __syncthreads();
 
-  // 6. store the new scaling factor to the global memory.
+  // 7. store the new scaling factor to the global memory.
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     if ((block_offset_y + i < hidden_dim))
       output_scale_inv[blockIdx.x * hidden_dim + block_offset_y + i] = smem_scale[i];
@@ -157,6 +164,7 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
                                                        const int hidden_dim, const int seq_len) {
   auto warp_id = threadIdx.x / 32;
   auto lane_id = threadIdx.x % 32;
+  auto warp_num = blockDim.x / 32;
   auto block_offset_x = blockIdx.x * kTileDim;
   auto block_offset_y = blockIdx.y * kTileDim;
   __shared__ float smem_scale[kTileDim];
@@ -172,7 +180,7 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
 
   // 2. load the fp8 activation from global memory, then transpose on the smem
   // Each warp will load 1x128 row
-  for (auto x = warp_id; (x < kTileDim); x += blockDim.x / 32) {
+  for (auto x = warp_id; (x < kTileDim); x += warp_num) {
     for (auto y = lane_id; (block_offset_y + y < hidden_dim) && (y < kTileDim); y += warp_size) {
       if ((block_offset_x + x < seq_len) && (block_offset_y + y < hidden_dim))
         transposed[y][x] = input[(block_offset_x + x) * hidden_dim + (block_offset_y + y)];
@@ -186,36 +194,46 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   float4 sacle_buffer_fp128 = smem_scale_fp128[lane_id];
   float *scale_buffer_fp32 = (float *)&sacle_buffer_fp128;
   __half dequantized[4];
-  for (auto x = warp_id; x < kTileDim; x += blockDim.x / 32) {
-    float data_fp32 = reinterpret_cast<float *>(transposed[x])[lane_id];
+  for (auto w = warp_id; w < kTileDim; w += warp_num) {
+    float data_fp32 = reinterpret_cast<float *>(transposed[w])[lane_id];
     FP8_TYPE *data_fp8 = reinterpret_cast<FP8_TYPE *>(&data_fp32);
 
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      dequantized[i] = float(data_fp8[i]) / scale_buffer_fp32[i];
+      dequantized[i] = float(data_fp8[i]) * scale_buffer_fp32[i];
     }
 
     float max_val = warp_max_reduce_on_float(dequantized[0]);
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[1]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[2]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[3]));
+    float new_scale = cast_to_e8(FP8_MAX / (max_val + EPS));    
 
+    // 4. Re quantize the fp8 tile on smem
+    #pragma unroll
+    for(int i = 0; i < 4; i++){
+        data_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
+    }
+
+    // Store the transposed requantized activation to the global memory
+    reinterpret_cast<float *>(transposed[w])[lane_id] = data_fp32;
+    // Store the new scaling factor to the shared memory
     __syncwarp();
-    if (lane_id == 0) {
-      smem_scale[x] = cast_to_e8(FP8_MAX / (max_val + EPS));
+    if(lane_id == 0){
+        smem_scale[w] = 1.0f / new_scale;
     }
   }
   __syncthreads();
 
-  // 4. store the new scaling factor to the global memory
+  // 5. store the new scaling factor to the global memory
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     if ((block_offset_y + i < hidden_dim))
       output_scale_inv[blockIdx.x * hidden_dim + block_offset_y + i] = smem_scale[i];
   }
 
-  // 5. store the transposed fp16 activation to the global memory
+  // 6. store the transposed fp16 activation to the global memory
   for (auto x = warp_id; (block_offset_y + x < hidden_dim) && (x < kTileDim);
-       x += blockDim.x / 32) {
+       x += warp_num) {
     auto dest_row = block_offset_y + x;
     for (auto y = lane_id; (block_offset_x + y < seq_len) && (y < kTileDim); y += warp_size) {
       auto dest_col = block_offset_x + y;

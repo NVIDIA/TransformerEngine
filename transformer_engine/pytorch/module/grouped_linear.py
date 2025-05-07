@@ -50,6 +50,7 @@ from ..tensor.quantized_tensor import (
 )
 
 from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 
 __all__ = ["GroupedLinear"]
 
@@ -96,14 +97,14 @@ class _GroupedLinear(torch.autograd.Function):
             rowwise_mats = torch.split(inp._rowwise_data.view(-1, in_features), m_splits)
             scale_in_features = inp._rowwise_scale_inv.shape[0]
             rowwise_scale_inv_mats = torch.split(
-                inp._rowwise_scale_inv.view(-1, scale_in_features), m_splits, dim=0
+                inp._rowwise_scale_inv.view(scale_in_features, -1), m_splits, dim=1
             )
             inputmats = []
             for i in range(num_gemms):
                 new_rowwise_data = rowwise_mats[i]
-                new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
+                new_rowwise_scale_inv = rowwise_scale_inv_mats[i].contiguous()
                 new_columnwise_data = torch.empty(
-                    new_rowwise_data.T.shape, device=new_rowwise_data.device
+                    new_rowwise_data.T.shape, device=new_rowwise_data.device, dtype=new_rowwise_data.dtype
                 )
                 new_columnwise_scale_inv_shape = [
                     (new_columnwise_data.shape[1] + 128 - 1) // 128,
@@ -290,17 +291,17 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 rowwise_scale_inv_mats = torch.split(
                     grad_output._rowwise_scale_inv.view(
-                        -1, grad_output._rowwise_scale_inv.shape[0]
+                        grad_output._rowwise_scale_inv.shape[0], -1
                     ),
                     ctx.m_splits,
-                    dim=0,
+                    dim=1,
                 )
                 grad_output_mats = []
                 for i in range(ctx.num_gemms):
                     new_rowwise_data = rowwise_mats[i]
-                    new_rowwise_scale_inv = rowwise_scale_inv_mats[i].T.contiguous()
+                    new_rowwise_scale_inv = rowwise_scale_inv_mats[i].contiguous()
                     new_columnwise_data = torch.empty(
-                        new_rowwise_data.T.shape, device=new_rowwise_data.device
+                        new_rowwise_data.T.shape, device=new_rowwise_data.device, dtype=new_rowwise_data.dtype
                     )
                     new_columnwise_scale_inv_shape = [
                         (new_columnwise_data.shape[1] + 128 - 1) // 128,
@@ -352,7 +353,6 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 else:  # input grad_output is blockwise
                     grad_output = tex.fp8_blockwise_transpose(grad_output_mats)
-                    grad_output = grad_output_mats
             else:
                 grad_output = grad_output_mats
             if ctx.is_first_microbatch is not None:
@@ -427,7 +427,6 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
-
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
                             grad_biases[i] = grad_biases_[i]
