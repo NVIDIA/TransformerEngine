@@ -46,6 +46,7 @@ struct BytesToType<8> {
 };
 
 using byte = uint8_t;
+using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
@@ -58,6 +59,7 @@ using fp8e8m0 = uint8_t;
 template <typename T>
 struct TypeInfo{
     using types = std::tuple<byte,
+                             int16,
                              int32,
                              int64,
                              fp32,

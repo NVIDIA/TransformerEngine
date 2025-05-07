@@ -159,7 +159,7 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
         normab = torch.cat((a.norm().view(1), b.norm().view(1)))
         norm_per_tensor = norm_per_tensor.view(-1, 2)
     else:
-        norm, _ = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], True)
+        norm, _ = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], False)
 
     reference = torch.full(
         [(sizea + sizeb) * repeat], val, dtype=torch.float32, device=device

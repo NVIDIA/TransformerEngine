@@ -4,18 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <ATen/ATen.h>
-#include <ATen/AccumulateType.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/Exceptions.h>
-#include <c10/cuda/CUDAGuard.h>
-// Another possibility:
-// #include <torch/all.h>
-
 #include <assert.h>
+#include <cuda_fp8.h>
+#include <transformer_engine/multi_tensor.h>
+#include <transformer_engine/transformer_engine.h>
 
+#include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
-#include "type_shim.h"
+
+namespace transformer_engine {
+namespace multi_tensor_l2norm {
 
 #define BLOCK_SIZE 512
 #define ILP 4
@@ -29,6 +27,88 @@ template <typename T>
 __device__ __forceinline__ void load_store(T *dst, T *src, int dst_offset, int src_offset) {
   typedef typename std::aligned_storage<ILP * sizeof(T), ILP * alignof(T)>::type LT;
   ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
+}
+
+template <typename T>
+__device__ __forceinline__ T
+reduce_block_into_lanes(T *x, T val, int lanes = 1,
+                        bool share_result = false) {  // lanes is intended to be <= 32.
+  int tid = threadIdx.x + threadIdx.y * blockDim.x;
+  int blockSize = blockDim.x * blockDim.y;  // blockSize is intended to be a multiple of 32.
+
+  if (blockSize >= 64) {
+    x[tid] = val;
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int i = (blockSize >> 1); i >= 64; i >>= 1) {
+    if (tid < i) x[tid] = x[tid] + x[tid + i];
+    __syncthreads();
+  }
+
+  T final;
+
+  if (tid < 32) {
+    if (blockSize >= 64)
+      final = x[tid] + x[tid + 32];
+    else
+      final = val;
+      // __SYNCWARP();
+
+#pragma unroll
+    for (int i = 16; i >= lanes; i >>= 1) final = final + __shfl_down_sync(0xffffffff, final, i);
+  }
+
+  if (share_result) {
+    if (tid < lanes) x[tid] = final;  // EpilogueOp
+    // Make sure the smem result is visible to all warps.
+  }
+  __syncthreads();
+  // Avoid potential write before read race when reduce_block_into_lanes is called back to back
+
+  return final;
+}
+
+template <typename T>
+__device__ __forceinline__ T
+reduce_block_into_lanes_max_op(T *x, T val, int lanes = 1,
+                               bool share_result = false) {  // lanes is intended to be <= 32.
+  int tid = threadIdx.x + threadIdx.y * blockDim.x;
+  int blockSize = blockDim.x * blockDim.y;  // blockSize is intended to be a multiple of 32.
+
+  if (blockSize >= 64) {
+    x[tid] = val;
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int i = (blockSize >> 1); i >= 64; i >>= 1) {
+    if (tid < i) x[tid] = fmaxf(fabsf(x[tid]), fabsf(x[tid + i]));
+    __syncthreads();
+  }
+
+  T final;
+
+  if (tid < 32) {
+    if (blockSize >= 64)
+      final = fmaxf(fabsf(x[tid]), fabsf(x[tid + 32]));
+    else
+      final = val;
+      // __SYNCWARP();
+
+#pragma unroll
+    for (int i = 16; i >= lanes; i >>= 1)
+      final = fmaxf(fabsf(final), fabsf(__shfl_down_sync(0xffffffff, final, i)));
+  }
+
+  if (share_result) {
+    if (tid < lanes) x[tid] = final;  // EpilogueOp
+    // Make sure the smem result is visible to all warps.
+    __syncthreads();
+  }
+
+  return final;
 }
 
 template <typename x_t>
@@ -56,7 +136,7 @@ struct L2NormFunctor {
     x_t r_x[ILP];
     for (int i = 0; i < ILP; i++) {
       vals[i] = 0.f;
-      r_x[i] = 0;
+      r_x[i] = 0.f;
     }
 
     // to make things simple, we put aligned case in a different code path
@@ -126,7 +206,7 @@ struct UnscaleL2NormFunctor {
     x_t r_x[ILP];
     for (int i = 0; i < ILP; i++) {
       vals[i] = 0.f;
-      r_x[i] = 0;
+      r_x[i] = 0.f;
     }
 
     // to make things simple, we put aligned case in a different code path
@@ -310,103 +390,96 @@ __global__ void cleanup_v2(float *output, float *output_per_tensor, float *ret,
   }
 }
 
-std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
-    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
-    at::optional<bool> per_tensor_python) {
-  bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
+void multi_tensor_l2norm_cuda(int chunk_size, Tensor noop_flag,
+                              std::vector<std::vector<Tensor *>> tensor_lists, Tensor output,
+                              Tensor output_per_tensor, Tensor ret, Tensor ret_per_tensor,
+                              bool per_tensor, int max_chunks_per_tensor, const int device_id,
+                              cudaStream_t stream) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      tensor_lists[0][0]->dtype(), dtype,
+      multi_tensor_apply<1>(
+          BLOCK_SIZE, chunk_size, noop_flag, tensor_lists, L2NormFunctor<dtype>(), device_id,
+          stream, reinterpret_cast<float *>(output.data.dptr),
+          per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr, per_tensor,
+          max_chunks_per_tensor);)
 
-  auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
-  auto output = at::zeros({320}, float_options);
-
-  at::Tensor output_per_tensor;
-  at::Tensor ret_per_tensor;
-
-  int ntensors = tensor_lists[0].size();
-  int max_chunks_per_tensor = -1;
-
-  if (per_tensor) {
-    for (int t = 0; t < ntensors; t++) {
-      int max_chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1) / chunk_size;
-      if (max_chunks_this_tensor > max_chunks_per_tensor)
-        max_chunks_per_tensor = max_chunks_this_tensor;
-    }
-    output_per_tensor = at::zeros({ntensors * max_chunks_per_tensor}, float_options);
-    ret_per_tensor = at::empty({ntensors}, float_options);
-  } else {
-    ret_per_tensor = at::empty({0}, float_options);
-  }
-
-  DISPATCH_FLOAT_HALF_AND_BFLOAT(
-      tensor_lists[0][0].scalar_type(), 0, "multi_tensor_l2norm_cuda",
-      multi_tensor_apply<1>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                            L2NormFunctor<scalar_t_0>(), output.data_ptr<float>(),
-                            per_tensor ? output_per_tensor.data_ptr<float>() : nullptr, per_tensor,
-                            max_chunks_per_tensor);)
-
-  AT_CUDA_CHECK(cudaGetLastError());
-  // AT_CUDA_CHECK(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(cudaGetLastError());
 
   // This involves one more small kernel launches, but will be negligible end to end.
   // I could get rid of these by hacking the functor + multi tensor harness with persistence
   // logic, but keeping it simple for now
-  auto ret = at::empty({1}, output.options());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
-  auto stream = at::cuda::getCurrentCUDAStream();
-  cleanup<<<per_tensor ? ntensors : 1, 512, 0, stream>>>(
-      output.data_ptr<float>(), per_tensor ? output_per_tensor.data_ptr<float>() : nullptr,
-      ret.data_ptr<float>(), per_tensor ? ret_per_tensor.data_ptr<float>() : nullptr, per_tensor,
+  const OptionalCUDAGuard device_guard(device_id);
+  cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
+      reinterpret_cast<float *>(output.data.dptr),
+      per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
+      reinterpret_cast<float *>(ret.data.dptr),
+      per_tensor ? reinterpret_cast<float *>(ret_per_tensor.data.dptr) : nullptr, per_tensor,
       max_chunks_per_tensor);
-
-  return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
 }
 
-std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
-    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
-    at::Tensor inv_scale, at::optional<bool> per_tensor_python) {
-  bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
+void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
+                                      std::vector<std::vector<Tensor *>> tensor_lists,
+                                      Tensor output, Tensor output_per_tensor, Tensor ret,
+                                      Tensor ret_per_tensor, Tensor inv_scale, bool per_tensor,
+                                      int max_chunks_per_tensor, const int device_id,
+                                      cudaStream_t stream) {
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      tensor_lists[0][0]->dtype(), dtype,
+      multi_tensor_apply<1>(
+          BLOCK_SIZE, chunk_size, noop_flag, tensor_lists, UnscaleL2NormFunctor<dtype>(), device_id,
+          stream, reinterpret_cast<float *>(inv_scale.data.dptr),
+          reinterpret_cast<float *>(output.data.dptr),
+          per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr, per_tensor,
+          max_chunks_per_tensor);)
 
-  auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
-  auto output = at::zeros({320}, float_options);
-
-  at::Tensor output_per_tensor;
-  at::Tensor ret_per_tensor;
-
-  int ntensors = tensor_lists[0].size();
-  int max_chunks_per_tensor = -1;
-
-  if (per_tensor) {
-    for (int t = 0; t < ntensors; t++) {
-      int max_chunks_this_tensor = (tensor_lists[0][t].numel() + chunk_size - 1) / chunk_size;
-      if (max_chunks_this_tensor > max_chunks_per_tensor)
-        max_chunks_per_tensor = max_chunks_this_tensor;
-    }
-    output_per_tensor = at::zeros({ntensors * max_chunks_per_tensor}, float_options);
-    ret_per_tensor = at::empty({ntensors}, float_options);
-  } else {
-    ret_per_tensor = at::empty({0}, float_options);
-  }
-
-  DISPATCH_FLOAT_HALF_AND_BFLOAT(
-      tensor_lists[0][0].scalar_type(), 0, "multi_tensor_unscale_l2norm_cuda",
-      multi_tensor_apply<1>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                            UnscaleL2NormFunctor<scalar_t_0>(), inv_scale.data_ptr<float>(),
-                            output.data_ptr<float>(),
-                            per_tensor ? output_per_tensor.data_ptr<float>() : nullptr, per_tensor,
-                            max_chunks_per_tensor);)
-
-  AT_CUDA_CHECK(cudaGetLastError());
-  // AT_CUDA_CHECK(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(cudaGetLastError());
 
   // This involves one more small kernel launches, but will be negligible end to end.
   // I could get rid of these by hacking the functor + multi tensor harness with persistence
   // logic, but keeping it simple for now
-  auto ret = at::empty({1}, output.options());
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
-  auto stream = at::cuda::getCurrentCUDAStream();
-  cleanup<<<per_tensor ? ntensors : 1, 512, 0, stream>>>(
-      output.data_ptr<float>(), per_tensor ? output_per_tensor.data_ptr<float>() : nullptr,
-      ret.data_ptr<float>(), per_tensor ? ret_per_tensor.data_ptr<float>() : nullptr, per_tensor,
+  const OptionalCUDAGuard device_guard(device_id);
+  cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
+      reinterpret_cast<float *>(output.data.dptr),
+      per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
+      reinterpret_cast<float *>(ret.data.dptr),
+      per_tensor ? reinterpret_cast<float *>(ret_per_tensor.data.dptr) : nullptr, per_tensor,
       max_chunks_per_tensor);
+}
 
-  return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
+}  // namespace multi_tensor_l2norm
+}  // namespace transformer_engine
+
+void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
+                                   NVTETensor output, NVTETensor output_per_tensor, NVTETensor ret,
+                                   NVTETensor ret_per_tensor, int per_tensor,
+                                   int max_chunks_per_tensor, const int device_id,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_l2norm_cuda);
+  using namespace transformer_engine;
+
+  multi_tensor_l2norm::multi_tensor_l2norm_cuda(
+      chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
+      *reinterpret_cast<Tensor *>(output), *reinterpret_cast<Tensor *>(output_per_tensor),
+      *reinterpret_cast<Tensor *>(ret), *reinterpret_cast<Tensor *>(ret_per_tensor), per_tensor,
+      max_chunks_per_tensor, device_id, stream);
+}
+
+void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
+                                           NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                           const size_t num_tensors_per_list, NVTETensor output,
+                                           NVTETensor output_per_tensor, NVTETensor ret,
+                                           NVTETensor ret_per_tensor, NVTETensor inv_scale,
+                                           int per_tensor, int max_chunks_per_tensor,
+                                           const int device_id, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_unscale_l2norm_cuda);
+  using namespace transformer_engine;
+
+  multi_tensor_l2norm::multi_tensor_unscale_l2norm_cuda(
+      chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
+      convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
+      *reinterpret_cast<Tensor *>(output), *reinterpret_cast<Tensor *>(output_per_tensor),
+      *reinterpret_cast<Tensor *>(ret), *reinterpret_cast<Tensor *>(ret_per_tensor),
+      *reinterpret_cast<Tensor *>(inv_scale), per_tensor, max_chunks_per_tensor, device_id, stream);
 }

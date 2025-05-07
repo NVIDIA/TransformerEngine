@@ -97,16 +97,16 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
-def parameterize_by_test_level(param_dict: dict, id_prefix: str = ""):
+def get_parameters_for_test_level(param_dict: dict):
     """
     Takes an input dictionary of parameters keyed by test type "L0", etc.
-    Returns a list of pytest parameters to be used in a parameterized test for the current test type
+    Returns the parameters for the test level specified in the environment variable
     """
     DEFAULT_TEST_LEVEL = "L0"
     test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", DEFAULT_TEST_LEVEL)
     if test_level not in param_dict:
         raise ValueError("Unsupported test level")
-    return values_to_named_params(param_dict[test_level], id_prefix)
+    return param_dict[test_level]
 
 
 def value_to_test_name_str(value):
@@ -139,14 +139,18 @@ def pytest_parametrize_wrapper(param_name, param_values):
     A wrapper for pytest.mark.parametrize to allow for automatic
     naming of tests based on the parameter values.
     """
-    id_prefix = param_name
     if isinstance(param_values, dict):
-        param_values = parameterize_by_test_level(param_values, id_prefix=param_name)
-    elif "," not in param_name:
-        param_values = values_to_named_params(param_values, id_prefix=id_prefix)
+        # If the values are split into a dictionary of test-levels, e.g. "L0", etc.,
+        # unwrap the selected level before proceeding.
+        param_values = get_parameters_for_test_level(param_values)
 
-    # Currently comma separated parameters in one parametrize call aren't supported for automatic naming
-    # and will just be passed through with default pytest names
+    if "," not in param_name:
+        # Multi-parameterize annotations are not supported in this wrapper
+        # and are just a passthrough to default pytest.mark.parametrize.
+        # E.g. @pytest_parametrize_wrapper("a,b", ((a_value1, b_value1), (a_value2, b_value2)))
+        # will be passed through to pytest.mark.parametrize as-is without pytest.param ids.
+        param_values = values_to_named_params(param_values, id_prefix=param_name)
+
     def decorator(func):
         return pytest.mark.parametrize(param_name, param_values)(func)
 

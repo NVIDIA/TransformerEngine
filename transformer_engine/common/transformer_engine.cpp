@@ -49,11 +49,11 @@ std::string to_string(const DType type) {
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
-      return "Delayed Tensor Scaling";
+      return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
-      return "MXFP8 1D Scaling";
+      return "NVTE_MXFP8_1D_SCALING";
     case NVTE_INVALID_SCALING:
-      return "Invalid Scaling";
+      return "NVTE_INVALID_SCALING";
   }
   return "Invalid Scaling";
 }
