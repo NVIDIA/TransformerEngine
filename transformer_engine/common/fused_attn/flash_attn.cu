@@ -79,7 +79,7 @@ void prepare_flash_attn_fwd(Tensor qkvi, Tensor qkv, cudaStream_t stream) {
   NVTE_CHECK(qkvi_shape[3] == load_size);
 
   // [s, b, n, h * 3] -> [3, b, s, n, h]
-  std::vector<int64_t> shape = {3, qkvi_shape[1], qkvi_shape[0], qkvi_shape[2], qkvi_shape[3]};
+  std::vector<uint64_t> shape = {3, qkvi_shape[1], qkvi_shape[0], qkvi_shape[2], qkvi_shape[3]};
 
   size_t warps = qkvi_shape[0] * qkvi_shape[1];
   size_t warps_per_block = block_size / warp_size;
@@ -100,7 +100,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
   NVTE_CHECK(q.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(k.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(v.dim() == 4, "Expected 4-dim tensor.");
-  NVTE_CHECK(q.dtype() == DType::Half || q.dtype() == DType::BFloat16);
+  NVTE_CHECK(q.dtype() == DType::kFloat16 || q.dtype() == DType::kBFloat16);
   NVTE_CHECK(k.dtype() == q.dtype());
   NVTE_CHECK(v.dtype() == q.dtype());
 
@@ -116,7 +116,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
   NVTE_CHECK(v_shape[3] == load_size);
 
   // 3 x [s, b, n, h] -> [b, s, n, 3 * h]
-  std::vector<int64_t> shape = {q_shape[1], q_shape[0], q_shape[2], 3 * q_shape[3]};
+  std::vector<uint64_t> shape = {q_shape[1], q_shape[0], q_shape[2], 3 * q_shape[3]};
 
   size_t warps = q_shape[0] * q_shape[1];
   size_t warps_per_block = block_size / warp_size;
@@ -129,7 +129,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
       prepare_kernel_bwd<dtype><<<grid, threads, 0, stream>>>(
           reinterpret_cast<dtype *>(q.data.dptr), reinterpret_cast<dtype *>(k.data.dptr),
           reinterpret_cast<dtype *>(v.data.dptr), reinterpret_cast<dtype *>(qkv.data.dptr),
-          q.size(0), q.size(1), q.size(2), q.size(3)););
+          q_shape[0], q_shape[1], q_shape[2], q_shape[3]););
 }
 
 }  // namespace flash_attention

@@ -612,7 +612,7 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
                            NVTETensor v_cache, NVTETensor page_table, NVTETensor cu_new_lens,
                            NVTETensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
                            int max_ctx_len, int max_seq_len, int max_pages_per_seq,
-                           int is_non_paged);
+                           int is_non_paged, cudaStream_t stream);
 
 void nvte_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
                                NVTETensor &half, int half_idx, cudaStream_t stream);
@@ -630,8 +630,8 @@ void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, con
                              int only_second_half, int lse_packed, cudaStream_t stream);
 
 void nvte_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
-                              const NVTETensor &cu_seqlens, const std::string &first_half,
-                              const std::string &second_half, cudaStream_t stream);
+                              const NVTETensor &cu_seqlens, const char *first_half,
+                              const char *second_half, cudaStream_t stream);
 
 void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
                                       int total_tokens, int world_size, int rank,

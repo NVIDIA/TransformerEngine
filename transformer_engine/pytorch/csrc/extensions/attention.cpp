@@ -721,8 +721,8 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
   auto grad_cu = makeTransformerEngineTensor(grad);
   auto grad_per_step_cu = makeTransformerEngineTensor(grad_per_step);
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  nvte_thd_out_correction(grad_cu.data(), grad_per_step_cu.data(), cu_seqlens_cu.data(), first_half,
-                          second_half, at::cuda::getCurrentCUDAStream());
+  nvte_thd_grad_correction(grad_cu.data(), grad_per_step_cu.data(), cu_seqlens_cu.data(),
+                           first_half.data(), second_half.data(), at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************
@@ -830,5 +830,6 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
 
   nvte_copy_to_kv_cache(new_k_cu.data(), new_v_cu.data(), k_cache_cu.data(), v_cache_cu.data(),
                         page_table_cu.data(), cu_new_lens_cu.data(), cu_cached_lens_cu.data(),
-                        qkv_format, b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
+                        qkv_format, b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged,
+                        at::cuda::getCurrentCUDAStream());
 }

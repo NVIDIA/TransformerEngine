@@ -235,7 +235,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] += (p_per_step[k] == 0 ? 0 : p_per_step[k] * lse_corrected_exp);
+          p[k] += (float(p_per_step[k]) == 0.f ? 0 : float(p_per_step[k]) * lse_corrected_exp);
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
@@ -378,8 +378,6 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
   thd_read_half_tensor_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
       half.data.dptr, tensor.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
       hidden_size_in_bytes, half_idx, tensor_shape[seq_dim]);
-
-  return half;
 }
 
 /***************************************************************************************************
@@ -725,10 +723,12 @@ void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
 void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
                          int max_seq_len, cudaStream_t stream) {
   using namespace transformer_engine;
+
+  auto tensor_shape = tensor.shape();
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
       new_tensor.dtype(), dtype,
-      convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d,
-                                          stream););
+      convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len,
+                                          tensor_shape[1], tensor_shape[2], stream););
 }
 
 /***************************************************************************************************
@@ -740,16 +740,20 @@ void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
                                   int max_seq_len, int h, int d, cudaStream_t stream) {
   using namespace transformer_engine;
   convert_bshd_to_thd_kernel<<<16, 256, 0, stream>>>(
-      reinterpret_cast<scalar_t *>(tensor.data.dptr), reinterpret_cast<scalar_t *>(new_tensor.dptr),
-      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d, stream);
+      reinterpret_cast<scalar_t *>(tensor.data.dptr),
+      reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
 
 void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
                          cudaStream_t stream) {
   using namespace transformer_engine;
+
+  auto tensor_shape = tensor.shape();
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
       tensor.dtype(), dtype,
-      convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d,
+      convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, tensor_shape[0],
+                                          tensor_shape[1], tensor_shape[2], tensor_shape[3],
                                           stream););
 }
 
@@ -801,14 +805,17 @@ void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, con
 }
 
 void nvte_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
-                              const NVTETensor &cu_seqlens, const std::string &first_half,
-                              const std::string &second_half, cudaStream_t stream) {
+                              const NVTETensor &cu_seqlens, const char *first_half,
+                              const char *second_half, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_grad_correction);
   using namespace transformer_engine;
 
+  std::string first_half_str(first_half);
+  std::string second_half_str(second_half);
+
   thd::thd_grad_correction(
       *reinterpret_cast<Tensor *>(grad), *reinterpret_cast<Tensor *>(grad_per_step),
-      *reinterpret_cast<Tensor *>(cu_seqlens), first_half, second_half, stream);
+      *reinterpret_cast<Tensor *>(cu_seqlens), first_half_str, second_half_str, stream);
 }
 
 void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
