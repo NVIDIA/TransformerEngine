@@ -8,7 +8,7 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version
+from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs
 
 
 def setup_pytorch_extension(
@@ -26,12 +26,13 @@ def setup_pytorch_extension(
     ] + all_files_in_dir(extensions_dir)
 
     # Header files
-    include_dirs = [
+    include_dirs = get_cuda_include_dirs()
+    include_dirs.extend([
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
         csrc_header_files,
-    ]
+    ])
 
     # Compiler flags
     cxx_flags = [
