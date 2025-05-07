@@ -1644,8 +1644,10 @@ def get_cu_seqlens_on_cp_rank(
     cu_seqlens_on_cp_rank.cumsum_(dim=0)
     return cu_seqlens_on_cp_rank
 
+
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
+
 
 @jit_fuser
 def get_seq_chunk_ids_for_reordering_before_attn(cp_size, device):
@@ -2948,7 +2950,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if not ctx.use_fused_attention:
                 out = out.view(ctx.batch_size, -1, *out.shape[-2:])
                 dout = dout.view(*out.shape)
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, out.device)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(
+                cp_size_a2a, out.device
+            )
             out, dout = flash_attn_a2a_communicate(
                 [out, dout],
                 chunk_ids_for_a2a,
