@@ -21,6 +21,9 @@ from .tensor import ScaledTensor1x, ScaledTensor2x, ScaledTensorFactory
 from .helper import (
     QuantizeConfig,
     AmaxComputeAlgo,
+    UsageContext,
+    UsageType,
+    QuantizerParams,
 )
 
 __all__ = [
@@ -607,10 +610,8 @@ class QuantizerFactory:
 
     @staticmethod
     def create(
+        q_params: QuantizerParams,
         n_quantizers: int = 1,
-        scaling_mode: ScalingMode = None,
-        q_dtype: jnp.dtype = None,
-        q_layout: QuantizeLayout = None,
         **kwargs,
     ) -> Quantizer:
         """Create one or more quantizers with specified parameters.
@@ -627,23 +628,31 @@ class QuantizerFactory:
             A single quantizer or tuple of quantizers
         """
         # (Phuong): add this assert back when NVTE_NO_SCALING is fully implememted
-        assert isinstance(scaling_mode, ScalingMode), "Invalid scaling_mode type"
+        assert isinstance(q_params.scaling_mode, ScalingMode), "Invalid scaling_mode type"
         # import pdb; pdb.set_trace()
-        if scaling_mode == ScalingMode.NO_SCALING:
+        if q_params.scaling_mode == ScalingMode.NO_SCALING:
             quantizers = [None] * n_quantizers
         else:
             quantizers = []
             for _ in range(n_quantizers):
-                quantizer_type = QuantizerFactory.quantizer_type_map.get(scaling_mode)
+                quantizer_type = QuantizerFactory.quantizer_type_map.get(q_params.scaling_mode)
                 quantizers.append(
                     quantizer_type(
-                        q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout, **kwargs
+                        q_dtype=q_params.q_dtype,
+                        scaling_mode=q_params.scaling_mode,
+                        q_layout=q_params.q_layout,
+                        **kwargs,
                     )
                 )
         return quantizers[0] if len(quantizers) == 1 else tuple(quantizers)
 
     @staticmethod
-    def _create_set(scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, **kwargs) -> QuantizerSet:
+    def _create_set(
+        q_x_params: QuantizerParams,
+        q_kernel_params: QuantizerParams,
+        q_dgrad_params: Optional[QuantizerParams] = None,
+        **kwargs,
+    ) -> QuantizerSet:
         """Create a set of quantizers for forward and backward passes.
 
         Args:
@@ -656,12 +665,6 @@ class QuantizerFactory:
         Returns:
             A QuantizerSet instance
         """
-        if is_2x2x:
-            q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE_COLWISE
-        else:
-            q_layout_x = QuantizeLayout.ROWWISE
-            q_layout_kernel = QuantizeLayout.COLWISE
-            q_layout_dgrad = None
 
         if "quantize_meta_set" in kwargs:
             quantize_meta_set = kwargs.get("quantize_meta_set")
@@ -680,11 +683,9 @@ class QuantizerFactory:
         else:
             args_x = args_kernel = args_grad = {}
 
-        q_x = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_x, **args_x)
-        q_kernel = QuantizerFactory.create(
-            1, scaling_mode, fwd_dtype, q_layout_kernel, **args_kernel
-        )
-        q_dgrad = QuantizerFactory.create(1, scaling_mode, bwd_dtype, q_layout_dgrad, **args_grad)
+        q_x = QuantizerFactory.create(q_x_params, **args_x)
+        q_kernel = QuantizerFactory.create(q_kernel_params, **args_kernel)
+        q_dgrad = QuantizerFactory.create(q_dgrad_params, **args_grad)
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
     @staticmethod
@@ -700,27 +701,70 @@ class QuantizerFactory:
 
         Args:
             n_quantizer_sets: Number of quantizer sets to create
-            scaling_mode: Scaling mode to use, default is QuantizeConfig.SCALING_MODE
-            fwd_dtype: Data type for forward pass, default is QuantizeConfig.FWD_DTYPE
-            bwd_dtype: Data type for backward pass, default is QuantizeConfig.BWD_DTYPE
+            scaling_mode: Scaling mode to use, default is specified by QuantizeConfig.RECIPE_MANAGER
+            fwd_dtype: Data type for forward pass, default is specified by QuantizeConfig.RECIPE_MANAGER
+            bwd_dtype: Data type for backward pass, default is specified by QuantizeConfig.RECIPE_MANAGER
             is_2x2x: Whether to use 2x2x quantization, default is QuantizeConfig.IF_QUANTIZE_2X
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
             A single quantizer set or tuple of quantizer sets
         """
-        scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
-        fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
-        bwd_dtype = bwd_dtype or QuantizeConfig.BWD_DTYPE
-        is_2x2x = is_2x2x or QuantizeConfig.IF_QUANTIZE_2X
+        # Default quantizer parameters
+        if QuantizeConfig.RECIPE_MANAGER is not None:
+            q_x_params = QuantizeConfig.RECIPE_MANAGER.get_quantizer_params(
+                UsageContext(UsageType.X)
+            )
+            q_kernel_params = QuantizeConfig.RECIPE_MANAGER.get_quantizer_params(
+                UsageContext(UsageType.KERNEL)
+            )
+            q_dgrad_params = QuantizeConfig.RECIPE_MANAGER.get_quantizer_params(
+                UsageContext(UsageType.DGRAD)
+            )
+        else:
+            # Outside of fp8_autocast, use noop quantizer params
+            q_x_params = QuantizerParams.create_noop_params()
+            q_kernel_params = QuantizerParams.create_noop_params()
+            q_dgrad_params = QuantizerParams.create_noop_params()
 
+        # Override with parameters provided by the user
+        if scaling_mode is not None:
+            q_x_params.scaling_mode = scaling_mode
+            q_kernel_params.scaling_mode = scaling_mode
+            q_dgrad_params.scaling_mode = scaling_mode
+
+        if fwd_dtype is not None:
+            q_x_params.q_dtype = fwd_dtype
+            q_kernel_params.q_dtype = fwd_dtype
+
+        if bwd_dtype is not None:
+            q_dgrad_params.q_dtype = bwd_dtype
+
+        if is_2x2x is not None:
+            if is_2x2x:
+                q_x_params.q_layout = QuantizeLayout.ROWWISE_COLWISE
+                q_kernel_params.q_layout = QuantizeLayout.ROWWISE_COLWISE
+                q_dgrad_params.q_layout = QuantizeLayout.ROWWISE_COLWISE
+            else:
+                q_x_params.q_layout = QuantizeLayout.ROWWISE
+                q_kernel_params.q_layout = QuantizeLayout.COLWISE
+                q_dgrad_params.q_layout = None  # Default layout for quantizer
+
+        # Create the quantizer sets
         q_set = []
         for _ in range(n_quantizer_sets):
             q_set.append(
-                QuantizerFactory._create_set(scaling_mode, fwd_dtype, bwd_dtype, is_2x2x, **kwargs)
+                QuantizerFactory._create_set(
+                    q_x_params=q_x_params,
+                    q_kernel_params=q_kernel_params,
+                    q_dgrad_params=q_dgrad_params,
+                    **kwargs,
+                )
             )
 
         return q_set[0] if len(q_set) == 1 else tuple(q_set)
 
 
-noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING)
+noop_quantizer_set = QuantizerFactory.create_set(
+    scaling_mode=ScalingMode.NO_SCALING, fwd_dtype=jnp.float32, bwd_dtype=jnp.float32, is_2x2x=False
+)
