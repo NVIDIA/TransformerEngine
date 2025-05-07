@@ -1,0 +1,204 @@
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+#include "transformer_engine/transformer_engine.h"
+#include "transformer_engine/fused_attn.h"
+
+/***************************************************************************************************
+ * KV Cache: Copy new KV tokens to the KV cache
+ *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *      in current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
+ *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
+ *      Set is_non_paged = True/False to indicate as such.
+ *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
+ *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
+ *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
+ *      preserved for the next layer in the same iteration.
+ *   5. Only supports same page_table for k_cache and v_cache
+ *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
+ *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
+ **************************************************************************************************/
+
+namespace transformer_engine {
+namespace kv_cache {
+
+
+template <typename dtype>
+__global__ void reindex_kv_cache_kernel(dtype *k_cache, dtype *v_cache, int *batch_indices,
+                                        int *cu_new_lens, int *cu_cached_lens, int h_kv, int d_k,
+                                        int d_v, int b, int max_seq_len) {
+  // k_cache, v_cache: bshd
+  // batch_indices: [b]; cu_new_lens, cu_cached_lens: [b + 1]
+  int actual_b = b;
+  for (int i = 0; i < b - 1; i++) {
+    if (batch_indices[i + 1] < batch_indices[i]) {
+      actual_b = i + 1;
+    }
+  }
+  for (int batch_idx = 0; batch_idx < actual_b; batch_idx++) {
+    int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+    int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
+    for (int token_idx = blockIdx.x; token_idx < cached_len - new_len; token_idx += gridDim.x) {
+      int num_elts_k = h_kv * d_k;
+      int num_elts_v = h_kv * d_v;
+      int k_cache_src_offset = (batch_indices[batch_idx] * max_seq_len + token_idx) * h_kv * d_k;
+      int k_cache_des_offset = (batch_idx * max_seq_len + token_idx) * h_kv * d_k;
+      int v_cache_src_offset = (batch_indices[batch_idx] * max_seq_len + token_idx) * h_kv * d_v;
+      int v_cache_des_offset = (batch_idx * max_seq_len + token_idx) * h_kv * d_v;
+      for (int i = threadIdx.x; i < num_elts_k; i += blockDim.x) {
+        *(k_cache + k_cache_des_offset + i) = *(k_cache + k_cache_src_offset + i);
+      }
+      for (int i = threadIdx.x; i < num_elts_v; i += blockDim.x) {
+        *(v_cache + v_cache_des_offset + i) = *(v_cache + v_cache_src_offset + i);
+      }
+    }
+  }
+}
+
+template <typename dtype>
+__global__ void copy_to_kv_cache_kernel(dtype *new_k, dtype *new_v, dtype *k_cache,
+                                        dtype *v_cache, int *page_table, int *cu_new_lens,
+                                        int *cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
+                                        int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
+                                        int max_pages_per_seq, bool is_non_paged) {
+  // new_k, new_v: qkv_format; k_cache, v_cache: bshd
+  // cu_new_lens, cu_cached_lens: [b + 1]
+  // page_table: [b, max_pages_per_seq]
+  int page_size = max_seq_len / max_pages_per_seq;
+  if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
+      int new_token_offset = batch_idx * max_ctx_len;
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
+      for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
+        for (int j = 0; j < h_kv * d_k; j++) {
+          *(k_cache + token_idx * h_kv * d_k + j) =
+              *(new_k + (new_token_offset + i) * h_kv * d_k + j);
+        }
+        for (int j = 0; j < h_kv * d_v; j++) {
+          *(v_cache + token_idx * h_kv * d_v + j) =
+              *(new_v + (new_token_offset + i) * h_kv * d_v + j);
+        }
+      }
+    }
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
+      for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
+        for (int j = 0; j < h_kv * d_k; j++) {
+          *(k_cache + token_idx * h_kv * d_k + j) = *(new_k + (i * b + batch_idx) * h_kv * d_k + j);
+        }
+        for (int j = 0; j < h_kv * d_v; j++) {
+          *(v_cache + token_idx * h_kv * d_v + j) = *(new_v + (i * b + batch_idx) * h_kv * d_v + j);
+        }
+      }
+    }
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
+      for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
+        for (int j = 0; j < h_kv * d_k; j++) {
+          *(k_cache + token_idx * h_kv * d_k + j) =
+              *(new_k + (cu_new_lens[batch_idx] + i) * h_kv * d_k + j);
+        }
+        for (int j = 0; j < h_kv * d_v; j++) {
+          *(v_cache + token_idx * h_kv * d_v + j) =
+              *(new_v + (cu_new_lens[batch_idx] + i) * h_kv * d_v + j);
+        }
+      }
+    }
+  }
+}
+
+template <typename dtype>
+void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache,
+                               Tensor v_cache, Tensor page_table, Tensor cu_new_lens,
+                               Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
+                               int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
+                               int max_pages_per_seq, bool is_non_paged, cudaStream_t stream) {
+  if (new_k.has_data() != nullptr && new_v.has_data() != nullptr && k_cache.has_data() != nullptr &&
+      v_cache.has_data() != nullptr) {
+    if (is_non_paged) {
+      reindex_kv_cache_kernel<<<16, 256, 0, stream>>>(
+              reinterpret_cast<dtype *>(k_cache.data.ptr),
+              reinterpret_cast<dtype *>(v_cache.data.ptr),
+              reinterpret_cast<int *>(page_table.data.ptr),
+              reinterpret_cast<int *>(cu_new_lens.data.ptr),
+              reinterpret_cast<int *>(cu_cached_lens.data.ptr),
+              h_kv, d_k, d_v, b, max_seq_len);
+    }
+    copy_to_kv_cache_kernel<<<16, 256, 0, stream>>>(
+            reinterpret_cast<dtype *>(new_k.data.ptr),
+            reinterpret_cast<dtype *>(new_v.data.ptr),            
+            reinterpret_cast<dtype *>(k_cache.data.ptr),
+            reinterpret_cast<dtype *>(v_cache.data.ptr),            
+            reinterpret_cast<int *>(page_table.data.ptr),
+            reinterpret_cast<int *>(cu_new_lens.data.ptr),
+            reinterpret_cast<int *>(cu_cached_lens.data.ptr),            
+            qkv_format, h_kv, d_k, d_v,
+            b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
+  }
+}
+
+void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache,
+                      Tensor page_table, Tensor cu_new_lens, Tensor cu_cached_lens,
+                      NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged) {
+  int h_kv = new_k.size(-2);
+  int d_k = new_k.size(-1);
+  int d_v = new_v.size(-1);
+  NVTE_CHECK(k_cache.dtype() == v_cache.dtype() &&
+             new_k.dtype() == new_v.dtype() &&
+             new_k.dtype() == k_cache.dtype(),
+             "new_k, new_v, k_cache and v_cache must be of the same data type.");
+  NVTE_CHECK(qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
+                 qkv_format == NVTE_QKV_Format::NVTE_THD,
+             "qkv_format must be {BSHD, SBHD, THD}.");
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
+    k_cache.dtype(), dtype,
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);   
+  );
+}
+
+}  // namespace kv_cache
+}  // namespace transformer_engine
+
+void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cache, NVTETensor v_cache,
+    NVTETensor page_table, NVTETensor cu_new_lens, NVTETensor cu_cached_lens,
+    NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
+    int max_pages_per_seq, int is_non_paged) {
+    NVTE_API_CALL(nvte_copy_to_kv_cache);
+    using namespace transformer_engine;
+
+    kv_cache::copy_to_kv_cache(
+      *reinterpret_cast<Tensor *>(new_k),
+      *reinterpret_cast<Tensor *>(new_v),
+      *reinterpret_cast<Tensor *>(k_cache),
+      *reinterpret_cast<Tensor *>(v_cache),
+      *reinterpret_cast<Tensor *>(page_table),
+      *reinterpret_cast<Tensor *>(cu_new_lens),
+      *reinterpret_cast<Tensor *>(cu_cached_lens),
+      qkv_format, b, max_ctx_len, max_seq_len,
+      max_pages_per_seq, is_non_paged
+    );
+}
+
