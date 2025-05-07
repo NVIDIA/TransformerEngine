@@ -23,7 +23,8 @@ recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scal
     "M, N",
     [
         (128, 128),
-        (144, 144)
+        (144, 144),
+        (148, 148),
     ],
 )
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn], ids=str)
@@ -71,7 +72,8 @@ def test_dequantize_cast_transpose(
         return x_casted._rowwise_data, x_casted._rowwise_scale_inv
     res_base_data, res_base_scale_inv = dequantize_cast_transpose_naive(x_fp8_base, quantizer)
     # Fused implementation
-    [res_ref] = tex.fp8_blockwise_transpose([x_fp8_ref])
+    print("x_fp8_ref: ", x_fp8_ref.dtype)
+    res_ref = tex.fp8_blockwise_transpose(x_fp8_ref, quantizer)
     res_ref_data, res_ref_scale_inv = res_ref._columnwise_data, res_ref._columnwise_scale_inv
 
     # Check results
