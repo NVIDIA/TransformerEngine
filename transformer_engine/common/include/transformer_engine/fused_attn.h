@@ -622,7 +622,7 @@ void nvte_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_p
                                          cudaStream_t stream);
 
 void nvte_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
-                                   Tensor &half_lse, int lse_packed, int second_half_lse_seqlen,
+                                   NVTETensor &half_lse, int lse_packed, int second_half_lse_seqlen,
                                    cudaStream_t stream);
 
 void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, const NVTETensor &lse,
@@ -630,7 +630,7 @@ void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, con
                              int only_second_half, int lse_packed, cudaStream_t stream);
 
 void nvte_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
-                              const Tensor &cu_seqlens, const std::string &first_half,
+                              const NVTETensor &cu_seqlens, const std::string &first_half,
                               const std::string &second_half, cudaStream_t stream);
 
 void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
@@ -640,8 +640,8 @@ void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor o
 void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
                               int b, int max_seq_len, cudaStream_t stream);
 
-void nvte_convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
-                              cudaStream_t stream);
+void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int t, cudaStream_t stream);
 
 void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t stream);
 

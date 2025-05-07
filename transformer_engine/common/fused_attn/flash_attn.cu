@@ -4,8 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/transformer_engine.h"
+#include "../common.h"
 #include "transformer_engine/fused_attn.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace flash_attention {
@@ -66,13 +67,11 @@ __launch_bounds__(block_size) __global__
   }
 }
 
-
 void prepare_flash_attn_fwd(Tensor qkvi, Tensor qkv, cudaStream_t stream) {
   using namespace transformer_engine;
 
   NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
-  NVTE_CHECK(qkvi.dtype() == DType::kFloat16 ||
-             qkvi.dtype() == DType::kBFloat16);
+  NVTE_CHECK(qkvi.dtype() == DType::kFloat16 || qkvi.dtype() == DType::kBFloat16);
 
   auto qkvi_shape = qkvi.shape();
 
@@ -89,13 +88,10 @@ void prepare_flash_attn_fwd(Tensor qkvi, Tensor qkv, cudaStream_t stream) {
   int threads = block_size;
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-    qkvi.dtype(), dtype,
-    prepare_kernel_fwd<dtype>
-        <<<grid, threads, 0, stream>>>(
-            reinterpret_cast<dtype *>(qkvi.data.dptr),
-            reinterpret_cast<dtype *>(qkv.data.dptr),
-            shape[1], shape[2], shape[3], shape[4]);
-  );
+      qkvi.dtype(), dtype,
+      prepare_kernel_fwd<dtype><<<grid, threads, 0, stream>>>(
+          reinterpret_cast<dtype *>(qkvi.data.dptr), reinterpret_cast<dtype *>(qkv.data.dptr),
+          shape[1], shape[2], shape[3], shape[4]););
 }
 
 void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream_t stream) {
@@ -104,8 +100,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
   NVTE_CHECK(q.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(k.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(v.dim() == 4, "Expected 4-dim tensor.");
-  NVTE_CHECK(q.dtype() == DType::Half ||
-             q.dtype() == DType::BFloat16);
+  NVTE_CHECK(q.dtype() == DType::Half || q.dtype() == DType::BFloat16);
   NVTE_CHECK(k.dtype() == q.dtype());
   NVTE_CHECK(v.dtype() == q.dtype());
 
@@ -130,39 +125,30 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
   int threads = block_size;
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-    q.dtype(), dtype,
-    prepare_kernel_bwd<dtype>
-        <<<grid, threads, 0, stream>>>(
-            reinterpret_cast<dtype *>(q.data.dptr),
-            reinterpret_cast<dtype *>(k.data.dptr),
-            reinterpret_cast<dtype *>(v.data.dptr),
-            reinterpret_cast<dtype *>(qkv.data.dptr),
-            q.size(0), q.size(1), q.size(2), q.size(3));
-  );
-
+      q.dtype(), dtype,
+      prepare_kernel_bwd<dtype><<<grid, threads, 0, stream>>>(
+          reinterpret_cast<dtype *>(q.data.dptr), reinterpret_cast<dtype *>(k.data.dptr),
+          reinterpret_cast<dtype *>(v.data.dptr), reinterpret_cast<dtype *>(qkv.data.dptr),
+          q.size(0), q.size(1), q.size(2), q.size(3)););
 }
 
 }  // namespace flash_attention
 }  // namespace transformer_engine
 
-
 void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t stream) {
   NVTE_API_CALL(nvte_prepare_flash_attn_fwd);
   using namespace transformer_engine;
 
-  flash_attention::prepare_flash_attn_fwd(
-    *reinterpret_cast<Tensor *>(qkvi), *reinterpret_cast<Tensor *>(qkv), stream
-  );
+  flash_attention::prepare_flash_attn_fwd(*reinterpret_cast<Tensor *>(qkvi),
+                                          *reinterpret_cast<Tensor *>(qkv), stream);
 }
 
-
-void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv, cudaStream_t stream) {
+void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
+                                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_prepare_flash_attn_bwd);
   using namespace transformer_engine;
 
   flash_attention::prepare_flash_attn_bwd(
-    *reinterpret_cast<Tensor *>(q), *reinterpret_cast<Tensor *>(k),
-    *reinterpret_cast<Tensor *>(v), *reinterpret_cast<Tensor *>(qkv),
-    stream
-  );
+      *reinterpret_cast<Tensor *>(q), *reinterpret_cast<Tensor *>(k),
+      *reinterpret_cast<Tensor *>(v), *reinterpret_cast<Tensor *>(qkv), stream);
 }

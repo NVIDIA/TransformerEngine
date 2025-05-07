@@ -8,8 +8,9 @@
 #include <cuda.h>
 #include <cuda_bf16.h>
 
-#include "transformer_engine/transformer_engine.h"
+#include "../common.h"
 #include "transformer_engine/fused_attn.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace thd {
@@ -59,7 +60,6 @@ struct AddFunctor {
     reinterpret_cast<float4 *>(token)[idx] = d_;
   }
 };
-
 
 /***************************************************************************************************
  * Support THD format for Context Parallel: Binary search an array for a target value
@@ -300,7 +300,6 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
   }
 }
 
-
 /***************************************************************************************************
  * Format conversions: THD <-> BSDH
  **************************************************************************************************/
@@ -377,10 +376,8 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
   }
   dim3 grid = {grid_x, grid_y};
   thd_read_half_tensor_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-      half.data.dptr, tensor.data.dptr,
-      reinterpret_cast<int *>(cu_seqlens.data.dptr),
-      batch, hidden_size_in_bytes,
-      half_idx, tensor_shape[seq_dim]);
+      half.data.dptr, tensor.data.dptr, reinterpret_cast<int *>(cu_seqlens.data.dptr), batch,
+      hidden_size_in_bytes, half_idx, tensor_shape[seq_dim]);
 
   return half;
 }
@@ -390,7 +387,8 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
  **************************************************************************************************/
 
 void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
-                                    const Tensor &cu_seqlens, bool lse_packed, cudaStream_t stream) {
+                                    const Tensor &cu_seqlens, bool lse_packed,
+                                    cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(lse.dtype() == DType::kFloat32);
   NVTE_CHECK(lse_per_step.dtype() == DType::kFloat32);
@@ -434,25 +432,20 @@ void thd_second_half_lse_correction(Tensor lse, const Tensor &lse_per_step,
   dim3 grid = {grid_x, grid_y};
 
   if (lse_packed) {
-    thd_lse_kernel<true, LseCorrectionFunctor>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch, num_heads, lse_seqlen, second_half_lse_seqlen);
+    thd_lse_kernel<true, LseCorrectionFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(lse_per_step.data.dptr),
+        reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
+        second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<false, LseCorrectionFunctor>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch, num_heads, lse_seqlen, second_half_lse_seqlen);
+    thd_lse_kernel<false, LseCorrectionFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(lse_per_step.data.dptr),
+        reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
+        second_half_lse_seqlen);
   }
 }
 
-
 void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tensor &half_lse,
-                                    bool lse_packed, int second_half_lse_seqlen, cudaStream_t stream) {
+                              bool lse_packed, int second_half_lse_seqlen, cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(lse.dtype() == DType::kFloat32);
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
@@ -488,21 +481,15 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
   dim3 grid = {grid_x, grid_y};
 
   if (lse_packed) {
-    thd_lse_kernel<true, ReadLseFunctor>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(half_lse.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch,
-            num_heads, lse_seqlen, second_half_lse_seqlen);
+    thd_lse_kernel<true, ReadLseFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(half_lse.data.dptr),
+        reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
+        second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<false, ReadLseFunctor>
-        <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
-            reinterpret_cast<float *>(lse.data.dptr),
-            reinterpret_cast<float *>(half_lse.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch,
-            num_heads, lse_seqlen, second_half_lse_seqlen);
+    thd_lse_kernel<false, ReadLseFunctor><<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr), reinterpret_cast<float *>(half_lse.data.dptr),
+        reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, lse_seqlen,
+        second_half_lse_seqlen);
   }
 }
 
@@ -511,9 +498,9 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
  **************************************************************************************************/
 
 template <typename dtype, int only_second_half>
-static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step,
-                                      const Tensor &lse, const Tensor &lse_per_step,
-                                      const Tensor &cu_seqlens, bool lse_packed, cudaStream_t stream) {
+static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step, const Tensor &lse,
+                                      const Tensor &lse_per_step, const Tensor &cu_seqlens,
+                                      bool lse_packed, cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(out.dtype() == out_per_step.dtype());
   NVTE_CHECK(lse.dtype() == DType::kFloat32);
@@ -569,9 +556,8 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step,
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
             reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch, num_heads,
-            dim_per_head, lse_seqlen, lse_per_step_seqlen);
+            reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
+            lse_seqlen, lse_per_step_seqlen);
   } else {
     thd_out_correction_kernel<dtype, only_second_half, tile, false>
         <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
@@ -579,29 +565,25 @@ static void thd_out_correction_helper(Tensor out, const Tensor &out_per_step,
             reinterpret_cast<dtype *>(out_per_step.data.dptr),
             reinterpret_cast<float *>(lse.data.dptr),
             reinterpret_cast<float *>(lse_per_step.data.dptr),
-            reinterpret_cast<int *>(cu_seqlens.data.dptr),
-            batch, num_heads,
-            dim_per_head, lse_seqlen, lse_per_step_seqlen);
+            reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, num_heads, dim_per_head,
+            lse_seqlen, lse_per_step_seqlen);
   }
 }
 
-
 void thd_out_correction(Tensor out, const Tensor &out_per_step, const Tensor &lse,
-                        const Tensor &lse_per_step, const Tensor &cu_seqlens,
-                        bool only_second_half, bool lse_packed, cudaStream_t stream) {
+                        const Tensor &lse_per_step, const Tensor &cu_seqlens, bool only_second_half,
+                        bool lse_packed, cudaStream_t stream) {
   using namespace transformer_engine;
   if (only_second_half) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      out.dtype(), dtype,
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-        lse_packed, stream);
-    );
+        out.dtype(), dtype,
+        thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                            lse_packed, stream););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      out.dtype(), dtype,
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
-        lse_packed, stream);
-    );
+        out.dtype(), dtype,
+        thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                            lse_packed, stream););
   }
 }
 
@@ -658,27 +640,26 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
       <<<grid, block, sizeof(int) * (batch + 1), stream>>>(
           reinterpret_cast<dtype *>(grad.data.dptr),
           reinterpret_cast<dtype *>(grad_per_step.data.dptr),
-          reinterpret_cast<int *>(cu_seqlens.data.dptr),
-          batch, hidden_size, total_tokens);
+          reinterpret_cast<int *>(cu_seqlens.data.dptr), batch, hidden_size, total_tokens);
 }
 
 template <typename dtype>
-static void thd_grad_dispatcher(Tensor grad, const Tensor &grad_per_step,
-                                const Tensor &cu_seqlens, const std::string &first_half,
-                                const std::string &second_half, cudaStream_t stream) {
+static void thd_grad_dispatcher(Tensor grad, const Tensor &grad_per_step, const Tensor &cu_seqlens,
+                                const std::string &first_half, const std::string &second_half,
+                                cudaStream_t stream) {
   using namespace transformer_engine;
   if (first_half == "add" && second_half == "none") {
     thd_grad_correction_helper<dtype, AddFunctor<dtype>, EmptyFunctor, 0>(grad, grad_per_step,
                                                                           cu_seqlens, stream);
   } else if (first_half == "copy" && second_half == "none") {
-    thd_grad_correction_helper<dtype, CopyFunctor, EmptyFunctor, 0>(grad, grad_per_step,
-                                                                    cu_seqlens, stream);
+    thd_grad_correction_helper<dtype, CopyFunctor, EmptyFunctor, 0>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
   } else if (first_half == "none" && second_half == "add") {
     thd_grad_correction_helper<dtype, EmptyFunctor, AddFunctor<dtype>, 1>(grad, grad_per_step,
                                                                           cu_seqlens, stream);
   } else if (first_half == "none" && second_half == "copy") {
-    thd_grad_correction_helper<dtype, EmptyFunctor, CopyFunctor, 1>(grad, grad_per_step,
-                                                                    cu_seqlens, stream);
+    thd_grad_correction_helper<dtype, EmptyFunctor, CopyFunctor, 1>(grad, grad_per_step, cu_seqlens,
+                                                                    stream);
   } else if (first_half == "add" && second_half == "copy") {
     thd_grad_correction_helper<dtype, AddFunctor<dtype>, CopyFunctor, 2>(grad, grad_per_step,
                                                                          cu_seqlens, stream);
@@ -690,15 +671,14 @@ static void thd_grad_dispatcher(Tensor grad, const Tensor &grad_per_step,
   }
 }
 
-
-void thd_grad_correction(Tensor grad, const Tensor &grad_per_step,
-                         const Tensor &cu_seqlens, const std::string &first_half,
-                         const std::string &second_half, cudaStream_t stream) {
+void thd_grad_correction(Tensor grad, const Tensor &grad_per_step, const Tensor &cu_seqlens,
+                         const std::string &first_half, const std::string &second_half,
+                         cudaStream_t stream) {
   using namespace transformer_engine;
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-    grad.dtype(), dtype,
-    thd_grad_dispatcher<dtype>(grad, grad_per_step, cu_seqlens, first_half, second_half, stream);
-  );
+      grad.dtype(), dtype,
+      thd_grad_dispatcher<dtype>(grad, grad_per_step, cu_seqlens, first_half, second_half,
+                                 stream););
 }
 
 /***************************************************************************************************
@@ -706,7 +686,7 @@ void thd_grad_correction(Tensor grad, const Tensor &grad_per_step,
  **************************************************************************************************/
 
 void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int total_tokens,
-                                       int world_size, int rank, cudaStream_t stream) {
+                                 int world_size, int rank, cudaStream_t stream) {
   using namespace transformer_engine;
   NVTE_CHECK(cu_seqlens.dtype() == DType::kInt32);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -723,10 +703,8 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
 
   constexpr unsigned int block = 256;
   unsigned int grid = (output_shape[0] + block - 1) / block;
-  thd_partition_indices_kernel<<<
-      grid, block, sizeof(int) * (batch + 1), stream>>>(
-      reinterpret_cast<int *>(output.data.dptr),
-      reinterpret_cast<int *>(cu_seqlens.data.dptr),
+  thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1), stream>>>(
+      reinterpret_cast<int *>(output.data.dptr), reinterpret_cast<int *>(cu_seqlens.data.dptr),
       batch, total_tokens, world_size, rank);
 }
 
@@ -735,22 +713,22 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
  **************************************************************************************************/
 
 template <typename scalar_t>
-void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens,
-                                  int b, int max_seq_len, int h, int d, cudaStream_t stream) {
+void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
+                                  int max_seq_len, int h, int d, cudaStream_t stream) {
   using namespace transformer_engine;
   convert_thd_to_bshd_kernel<<<16, 256, 0, stream>>>(
-    reinterpret_cast<scalar_t *>(tensor.data.dptr),
-    reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
-    reinterpret_cast<int *>(cu_seqlens.data.dptr),
-    b, max_seq_len, h, d);
+      reinterpret_cast<scalar_t *>(tensor.data.dptr),
+      reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
 
-void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b, int max_seq_len, cudaStream_t stream) {
+void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
+                         int max_seq_len, cudaStream_t stream) {
   using namespace transformer_engine;
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
-    new_tensor.dtype(), dtype,
-    convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d, stream);
-  );
+      new_tensor.dtype(), dtype,
+      convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d,
+                                          stream););
 }
 
 /***************************************************************************************************
@@ -758,127 +736,108 @@ void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
  **************************************************************************************************/
 
 template <typename scalar_t>
-void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens,
-                                  int b, int max_seq_len, int h, int d, cudaStream_t stream) {
+void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
+                                  int max_seq_len, int h, int d, cudaStream_t stream) {
   using namespace transformer_engine;
   convert_bshd_to_thd_kernel<<<16, 256, 0, stream>>>(
-    reinterpret_cast<scalar_t *>(tensor.data.dptr),
-    reinterpret_cast<scalar_t *>(new_tensor.dptr),
-    reinterpret_cast<int *>(cu_seqlens.data.dptr),
-    b, max_seq_len, h, d, stream);
+      reinterpret_cast<scalar_t *>(tensor.data.dptr), reinterpret_cast<scalar_t *>(new_tensor.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d, stream);
 }
 
-void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t, cudaStream_t stream) {
+void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
+                         cudaStream_t stream) {
   using namespace transformer_engine;
   TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
-    tensor.dtype(), dtype,
-    convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d, stream);
-  );
+      tensor.dtype(), dtype,
+      convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len, h, d,
+                                          stream););
 }
 
 }  // namespace thd
 }  // namespace transformer_engine
 
-
-void nvte_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens, NVTETensor &half,
-                               int half_idx, cudaStream_t stream) {
+void nvte_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
+                               NVTETensor &half, int half_idx, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_half_tensor);
   using namespace transformer_engine;
 
-  thd::thd_read_half_tensor(
-    *reinterpret_cast<Tensor *>(tensor), *reinterpret_cast<Tensor *>(cu_seqlens),
-    *reinterpret_cast<Tensor *>(half), half_idx, stream
-  );
+  thd::thd_read_half_tensor(*reinterpret_cast<Tensor *>(tensor),
+                            *reinterpret_cast<Tensor *>(cu_seqlens),
+                            *reinterpret_cast<Tensor *>(half), half_idx, stream);
 }
 
 void nvte_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
-                                    const NVTETensor &cu_seqlens, int lse_packed, cudaStream_t stream) {
+                                         const NVTETensor &cu_seqlens, int lse_packed,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_second_half_lse_correction);
   using namespace transformer_engine;
 
-  thd::thd_second_half_lse_correction(
-    *reinterpret_cast<Tensor *>(lse),
-    *reinterpret_cast<Tensor *>(lse_per_step),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    lse_packed, stream
-  );
+  thd::thd_second_half_lse_correction(*reinterpret_cast<Tensor *>(lse),
+                                      *reinterpret_cast<Tensor *>(lse_per_step),
+                                      *reinterpret_cast<Tensor *>(cu_seqlens), lse_packed, stream);
 }
 
-void nvte_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens, Tensor &half_lse,
-                                    int lse_packed, int second_half_lse_seqlen, cudaStream_t stream) {
+void nvte_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
+                                   NVTETensor &half_lse, int lse_packed, int second_half_lse_seqlen,
+                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_second_half_lse);
   using namespace transformer_engine;
 
   thd::thd_read_second_half_lse(
-    *reinterpret_cast<Tensor *>(lse),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    *reinterpret_cast<Tensor *>(half_lse),
-    lse_packed, second_half_lse_seqlen, stream
-  );
+      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(cu_seqlens),
+      *reinterpret_cast<Tensor *>(half_lse), lse_packed, second_half_lse_seqlen, stream);
 }
 
 void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, const NVTETensor &lse,
-                        const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
-                        int only_second_half, int lse_packed, cudaStream_t stream) {
+                             const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
+                             int only_second_half, int lse_packed, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_out_correction);
   using namespace transformer_engine;
 
   thd::thd_out_correction(
-    *reinterpret_cast<Tensor *>(out),
-    *reinterpret_cast<Tensor *>(out_per_step),
-    *reinterpret_cast<Tensor *>(lse),
-    *reinterpret_cast<Tensor *>(lse_per_step),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    only_second_half, lse_packed, stream
-  );
+      *reinterpret_cast<Tensor *>(out), *reinterpret_cast<Tensor *>(out_per_step),
+      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(lse_per_step),
+      *reinterpret_cast<Tensor *>(cu_seqlens), only_second_half, lse_packed, stream);
 }
 
 void nvte_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
-                         const Tensor &cu_seqlens, const std::string &first_half,
-                         const std::string &second_half, cudaStream_t stream) {
+                              const NVTETensor &cu_seqlens, const std::string &first_half,
+                              const std::string &second_half, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_grad_correction);
   using namespace transformer_engine;
 
   thd::thd_grad_correction(
-    *reinterpret_cast<Tensor *>(grad),
-    *reinterpret_cast<Tensor *>(grad_per_step),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    first_half, second_half, stream
-  );
+      *reinterpret_cast<Tensor *>(grad), *reinterpret_cast<Tensor *>(grad_per_step),
+      *reinterpret_cast<Tensor *>(cu_seqlens), first_half, second_half, stream);
 }
 
-void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output, int total_tokens,
-                                       int world_size, int rank, cudaStream_t stream) {
+void nvte_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
+                                      int total_tokens, int world_size, int rank,
+                                      cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_get_partitioned_indices);
   using namespace transformer_engine;
 
-  thd::thd_get_partitioned_indices(
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    *reinterpret_cast<Tensor *>(output),
-    total_tokens, world_size, rank, stream
-  );
+  thd::thd_get_partitioned_indices(*reinterpret_cast<Tensor *>(cu_seqlens),
+                                   *reinterpret_cast<Tensor *>(output), total_tokens, world_size,
+                                   rank, stream);
 }
 
-void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor, int b, int max_seq_len, cudaStream_t stream) {
+void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int b, int max_seq_len, cudaStream_t stream) {
   NVTE_API_CALL(nvte_convert_thd_to_bshd);
   using namespace transformer_engine;
 
-  thd::convert_thd_to_bshd(
-    *reinterpret_cast<Tensor *>(tensor),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    *reinterpret_cast<Tensor *>(new_tensor),
-    b, max_seq_len, stream
-  );
+  thd::convert_thd_to_bshd(*reinterpret_cast<Tensor *>(tensor),
+                           *reinterpret_cast<Tensor *>(cu_seqlens),
+                           *reinterpret_cast<Tensor *>(new_tensor), b, max_seq_len, stream);
 }
 
-void nvte_convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t, cudaStream_t stream) {
+void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_convert_bshd_to_thd);
   using namespace transformer_engine;
 
-  thd::convert_bshd_to_thd(
-    *reinterpret_cast<Tensor *>(tensor),
-    *reinterpret_cast<Tensor *>(cu_seqlens),
-    *reinterpret_cast<Tensor *>(new_tensor),
-    t, stream
-  );
+  thd::convert_bshd_to_thd(*reinterpret_cast<Tensor *>(tensor),
+                           *reinterpret_cast<Tensor *>(cu_seqlens),
+                           *reinterpret_cast<Tensor *>(new_tensor), t, stream);
 }

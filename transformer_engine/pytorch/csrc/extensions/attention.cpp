@@ -36,7 +36,7 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
   size_t element_size = at::elementSize(self.dtype());
   int32_t start_row = start_index.data_ptr<int32_t>()[0];
-  void* base_ptr = static_cast<char*>(self.get_rowwise_data().data_ptr) + 
+  void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
                    static_cast<size_t>(start_row) * fcd_size * element_size;
   size_t num_rows_to_zero = max_tokens - start_row;
   size_t total_bytes = num_rows_to_zero * fcd_size * element_size;
@@ -45,7 +45,9 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 }
 
 void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
-  nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val, arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_, at::cuda::getCurrentCUDAStream());
+  nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
+                               arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
+                               at::cuda::getCurrentCUDAStream());
 }
 
 // extract PhiloxCudaState from CUDA random number generator
@@ -482,8 +484,10 @@ std::vector<py::object> fused_attn_bwd(
   return {py_dQ, py_dK, py_dV, py::cast(dBias)};
 }
 
-
 at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(qkvi.scalar_type() == at::ScalarType::Half ||
              qkvi.scalar_type() == at::ScalarType::BFloat16);
@@ -507,6 +511,9 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
 }
 
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(q.is_contiguous());
   NVTE_CHECK(k.is_contiguous());
   NVTE_CHECK(v.is_contiguous());
@@ -534,7 +541,8 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   auto v_cu = makeTransformerEngineTensor(v);
   auto qkv_cu = makeTransformerEngineTensor(qkv);
 
-  nvte_prepare_flash_attn_fwd(q_cu.data(), k_cu.data(), v_cu.data(), qkv_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_prepare_flash_attn_fwd(q_cu.data(), k_cu.data(), v_cu.data(), qkv_cu.data(),
+                              at::cuda::getCurrentCUDAStream());
 
   return qkv;
 }
@@ -545,6 +553,9 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(tensor.dim() == 3 || tensor.dim() == 4);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -574,7 +585,8 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto half_cu = makeTransformerEngineTensor(half);
 
-  nvte_thd_read_half_tensor(tensor_cu.data(), cu_seqlens_cu.data(), half_cu.data(), half_idx, at::cuda::getCurrentCUDAStream());
+  nvte_thd_read_half_tensor(tensor_cu.data(), cu_seqlens_cu.data(), half_cu.data(), half_idx,
+                            at::cuda::getCurrentCUDAStream());
 
   return half;
 }
@@ -585,6 +597,9 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
                                     const at::Tensor &cu_seqlens, bool lse_packed) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
@@ -622,11 +637,15 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   auto lse_per_step_cu = makeTransformerEngineTensor(lse_per_step);
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
 
-  nvte_thd_second_half_lse_correction(lse_cu.data(), lse_per_step_cu.data(), cu_seqlens_cu.data(), lse_packed, at::cuda::getCurrentCUDAStream());
+  nvte_thd_second_half_lse_correction(lse_cu.data(), lse_per_step_cu.data(), cu_seqlens_cu.data(),
+                                      lse_packed, at::cuda::getCurrentCUDAStream());
 }
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
                                     bool lse_packed, int second_half_lse_seqlen) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -663,7 +682,8 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto half_lse_cu = makeTransformerEngineTensor(half_lse);
 
-  nvte_thd_read_second_half_lse(lse_cu.data(), cu_seqlens_cu.data(), half_lse_cu.data(), lse_packed, second_half_lse_seqlen, at::cuda::getCurrentCUDAStream());
+  nvte_thd_read_second_half_lse(lse_cu.data(), cu_seqlens_cu.data(), half_lse_cu.data(), lse_packed,
+                                second_half_lse_seqlen, at::cuda::getCurrentCUDAStream());
 
   return half_lse;
 }
@@ -675,13 +695,17 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
                         bool only_second_half, bool lse_packed) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   auto out_cu = makeTransformerEngineTensor(out);
   auto out_per_step_cu = makeTransformerEngineTensor(out_per_step);
   auto lse_cu = makeTransformerEngineTensor(lse);
   auto lse_per_step_cu = makeTransformerEngineTensor(lse_per_step);
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  nvte_thd_out_correction(out_cu.data(), out_per_step_cu.data(), lse_cu.data(), lse_per_step_cu.data(), cu_seqlens_cu.data(),
-                          only_second_half, lse_packed, at::cuda::getCurrentCUDAStream());
+  nvte_thd_out_correction(out_cu.data(), out_per_step_cu.data(), lse_cu.data(),
+                          lse_per_step_cu.data(), cu_seqlens_cu.data(), only_second_half,
+                          lse_packed, at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************
@@ -691,11 +715,14 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
                          const std::string &second_half) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   auto grad_cu = makeTransformerEngineTensor(grad);
   auto grad_per_step_cu = makeTransformerEngineTensor(grad_per_step);
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  nvte_thd_out_correction(grad_cu.data(), grad_per_step_cu.data(), cu_seqlens_cu.data(),
-                          first_half, second_half, at::cuda::getCurrentCUDAStream());
+  nvte_thd_out_correction(grad_cu.data(), grad_per_step_cu.data(), cu_seqlens_cu.data(), first_half,
+                          second_half, at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************
@@ -704,6 +731,9 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
   NVTE_CHECK(cu_seqlens.size(0) >= 2);
@@ -719,7 +749,8 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  nvte_thd_get_partitioned_indices(cu_seqlens_cu.data(), output_cu.data(), total_tokens, world_size, rank, at::cuda::getCurrentCUDAStream());
+  nvte_thd_get_partitioned_indices(cu_seqlens_cu.data(), output_cu.data(), total_tokens, world_size,
+                                   rank, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
@@ -729,6 +760,9 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
  **************************************************************************************************/
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   int h = tensor.size(1);
   int d = tensor.size(2);
   std::vector<int64_t> shape = {b, max_seq_len, h, d};
@@ -738,7 +772,8 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto new_tensor_cu = makeTransformerEngineTensor(new_tensor);
 
-  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), b, max_seq_len, at::cuda::getCurrentCUDAStream());
+  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), b,
+                           max_seq_len, at::cuda::getCurrentCUDAStream());
 
   return new_tensor;
 }
@@ -748,6 +783,9 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
  **************************************************************************************************/
 
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   int max_seq_len = tensor.size(1);
   int h = tensor.size(2);
   int d = tensor.size(3);
@@ -758,7 +796,8 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) 
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto new_tensor_cu = makeTransformerEngineTensor(new_tensor);
 
-  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), t, at::cuda::getCurrentCUDAStream());
+  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), t,
+                           at::cuda::getCurrentCUDAStream());
 
   return new_tensor;
 }
@@ -767,6 +806,9 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
                       at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
                       NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
                       int max_pages_per_seq, bool is_non_paged) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
   int h_kv = new_k.size(-2);
   int d_k = new_k.size(-1);
   int d_v = new_v.size(-1);
@@ -786,8 +828,7 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
   auto cu_new_lens_cu = makeTransformerEngineTensor(cu_new_lens);
   auto cu_cached_lens_cu = makeTransformerEngineTensor(cu_cached_lens);
 
-  nvte_copy_to_kv_cache(
-    new_k_cu.data(), new_v_cu.data(), k_cache_cu.data(), v_cache_cu.data(), page_table_cu.data(), cu_new_lens_cu.data(), cu_cached_lens_cu.data(),
-    qkv_format, b, max_ctx_len, max_seq_len,
-    max_pages_per_seq, is_non_paged);
+  nvte_copy_to_kv_cache(new_k_cu.data(), new_v_cu.data(), k_cache_cu.data(), v_cache_cu.data(),
+                        page_table_cu.data(), cu_new_lens_cu.data(), cu_cached_lens_cu.data(),
+                        qkv_format, b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
 }
