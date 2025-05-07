@@ -34,14 +34,14 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
   NVTE_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
 
-  size_t element_size = at::elementSize(self.dtype());
+  size_t element_size = transformer_engine::pytorch::typeToSize(self.dtype());
   int32_t start_row = start_index.data_ptr<int32_t>()[0];
   void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
                    static_cast<size_t>(start_row) * fcd_size * element_size;
   size_t num_rows_to_zero = max_tokens - start_row;
   size_t total_bytes = num_rows_to_zero * fcd_size * element_size;
 
-  nvte_memset(base_ptr, 0, size_in_bytes, at::cuda::getCurrentCUDAStream());
+  nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream());
 }
 
 void unpack(at::PhiloxCudaState arg, int64_t *rng_state_ptr) {
@@ -491,8 +491,6 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
   NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(qkvi.scalar_type() == at::ScalarType::Half ||
              qkvi.scalar_type() == at::ScalarType::BFloat16);
-  NVTE_CHECK(qkvi.size(3) % flash_attention::load_size == 0);
-  NVTE_CHECK(qkvi.size(3) == flash_attention::load_size);
   NVTE_CHECK(qkvi.stride(3) == 1, "Wrong stride.");
   NVTE_CHECK(qkvi.stride(2) == 3 * qkvi.size(3), "Wrong stride.");
   NVTE_CHECK(qkvi.stride(1) == 3 * qkvi.size(3) * qkvi.size(2), "Wrong stride.");
@@ -524,15 +522,8 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
              q.scalar_type() == at::ScalarType::BFloat16);
   NVTE_CHECK(k.scalar_type() == q.scalar_type());
   NVTE_CHECK(v.scalar_type() == q.scalar_type());
-  NVTE_CHECK(q.size(3) % flash_attention::load_size == 0);
-  NVTE_CHECK(q.size(3) == flash_attention::load_size);
-  NVTE_CHECK(k.size(3) % flash_attention::load_size == 0);
-  NVTE_CHECK(k.size(3) == flash_attention::load_size);
-  NVTE_CHECK(v.size(3) % flash_attention::load_size == 0);
-  NVTE_CHECK(v.size(3) == flash_attention::load_size);
 
   // 3 x [s, b, n, h] -> [b, s, n, 3 * h]
-
   std::vector<int64_t> shape = {q.size(1), q.size(0), q.size(2), 3 * q.size(3)};
   at::Tensor qkv = at::empty(shape, at::CUDA(q.scalar_type()));
 
@@ -541,7 +532,7 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   auto v_cu = makeTransformerEngineTensor(v);
   auto qkv_cu = makeTransformerEngineTensor(qkv);
 
-  nvte_prepare_flash_attn_fwd(q_cu.data(), k_cu.data(), v_cu.data(), qkv_cu.data(),
+  nvte_prepare_flash_attn_bwd(q_cu.data(), k_cu.data(), v_cu.data(), qkv_cu.data(),
                               at::cuda::getCurrentCUDAStream());
 
   return qkv;
@@ -796,7 +787,7 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) 
   auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
   auto new_tensor_cu = makeTransformerEngineTensor(new_tensor);
 
-  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), t,
+  nvte_convert_bshd_to_thd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), t,
                            at::cuda::getCurrentCUDAStream());
 
   return new_tensor;

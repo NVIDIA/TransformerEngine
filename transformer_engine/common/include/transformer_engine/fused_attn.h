@@ -615,14 +615,14 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
                            int is_non_paged, cudaStream_t stream);
 
 void nvte_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
-                               NVTETensor &half, int half_idx, cudaStream_t stream);
+                               NVTETensor half, int half_idx, cudaStream_t stream);
 
 void nvte_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
                                          const NVTETensor &cu_seqlens, int lse_packed,
                                          cudaStream_t stream);
 
 void nvte_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
-                                   NVTETensor &half_lse, int lse_packed, int second_half_lse_seqlen,
+                                   NVTETensor half_lse, int lse_packed, int second_half_lse_seqlen,
                                    cudaStream_t stream);
 
 void nvte_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, const NVTETensor &lse,

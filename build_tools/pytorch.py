@@ -27,12 +27,14 @@ def setup_pytorch_extension(
 
     # Header files
     include_dirs = get_cuda_include_dirs()
-    include_dirs.extend([
-        common_header_files,
-        common_header_files / "common",
-        common_header_files / "common" / "include",
-        csrc_header_files,
-    ])
+    include_dirs.extend(
+        [
+            common_header_files,
+            common_header_files / "common",
+            common_header_files / "common" / "include",
+            csrc_header_files,
+        ]
+    )
 
     # Compiler flags
     cxx_flags = [

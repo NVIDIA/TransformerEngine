@@ -235,7 +235,9 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] += (float(p_per_step[k]) == 0.f ? 0 : float(p_per_step[k]) * lse_corrected_exp);
+          p[k] += (static_cast<float>(p_per_step[k]) == 0.f
+                       ? 0
+                       : static_cast<float>(p_per_step[k]) * lse_corrected_exp);
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
@@ -761,7 +763,7 @@ void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
 }  // namespace transformer_engine
 
 void nvte_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
-                               NVTETensor &half, int half_idx, cudaStream_t stream) {
+                               NVTETensor half, int half_idx, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_half_tensor);
   using namespace transformer_engine;
 
@@ -782,7 +784,7 @@ void nvte_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_p
 }
 
 void nvte_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
-                                   NVTETensor &half_lse, int lse_packed, int second_half_lse_seqlen,
+                                   NVTETensor half_lse, int lse_packed, int second_half_lse_seqlen,
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_second_half_lse);
   using namespace transformer_engine;
