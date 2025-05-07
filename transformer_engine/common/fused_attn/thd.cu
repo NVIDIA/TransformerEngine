@@ -54,7 +54,7 @@ struct AddFunctor {
 
 #pragma unroll
     for (int i = 0; i < sizeof(float4) / sizeof(dtype); i++) {
-      p_[i] += p[i];
+      p_[i] = p_[i] + p[i];
     }
 
     reinterpret_cast<float4 *>(token)[idx] = d_;
@@ -235,9 +235,10 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
         dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
-          p[k] += (static_cast<float>(p_per_step[k]) == 0.f
-                       ? 0
-                       : static_cast<float>(p_per_step[k]) * lse_corrected_exp);
+          p[k] = p[k] +
+                 (p_per_step[k] == static_cast<dtype>(0.f)
+                      ? static_cast<dtype>(0.f)
+                      : static_cast<dtype>(static_cast<float>(p_per_step[k]) * lse_corrected_exp));
         }
         reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
