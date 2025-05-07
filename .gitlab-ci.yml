@@ -980,14 +980,6 @@ L0_jax_unittest--H100_1GPU:
     - .L0_test
     - .H100_1GPU
 
-L0_jax_unittest--B200_1GPU:
-    variables:
-      FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
-    extends:
-    - .L0_test_on_cluster
-    - .B200_1GPU
-
 L0_jax_unittest--L40_1GPU:
     variables:
       FRAMEWORK: jax
@@ -1035,6 +1027,38 @@ L1_jax_distributed_unittest--B200_8GPU:
     extends:
     - .L1_test_on_cluster
     - .B200_8GPU
+
+L2_jax_unittest--A100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L2_test
+    - .A100_1GPU
+
+L2_jax_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L2_test
+    - .H100_1GPU
+
+L2_jax_unittest--L40_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L2_test
+    - .L40_1GPU
+
+L2_jax_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L2_test_on_cluster
+    - .B200_1GPU
 
 docs:
     variables:
