@@ -328,7 +328,7 @@ class _LayerNormLinear(torch.autograd.Function):
             out_shape[0] //= tp_world_size
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(
-                out_shape, dtype=activation_dtype, device=ln_out_total.device
+                out_shape, dtype=activation_dtype, device=inp.device
             )
 
         # ------------------------------------------------------
@@ -689,7 +689,7 @@ class _LayerNormLinear(torch.autograd.Function):
             reduce_scatter_out = None
             if ctx.ub_overlap_rs_dgrad:
                 reduce_scatter_out = torch.empty(
-                    dgrad_shape, dtype=ctx.activation_dtype, device=grad_output.device
+                    dgrad_shape, dtype=ctx.activation_dtype, device=grad_outputs[0].device
                 )
             elif ctx.ub_bulk_wgrad:
                 gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
@@ -804,7 +804,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_bulk_wgrad and ub_obj_wgrad.is_fp8_ubuf():
                     reduce_scatter_out = torch.empty(
-                        dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
+                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_outputs[0].device
                     )
 
                 # Arguments to include in wgrad GEMM closure

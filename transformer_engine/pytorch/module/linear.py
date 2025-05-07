@@ -283,7 +283,7 @@ class _Linear(torch.autograd.Function):
             out_shape[0] //= tp_world_size
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(
-                out_shape, dtype=activation_dtype, device=inputmat_total.device
+                out_shape, dtype=activation_dtype, device=inp.device
             )
 
         # ------------------------------------------------------
@@ -444,8 +444,6 @@ class _Linear(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
-        grad_output_arg = grad_output
-
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.backward"
         if ctx.ub_name is not None:
@@ -518,6 +516,9 @@ class _Linear(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             # --------------------------------------------------
+
+            # Unmodified grad output tensor
+            grad_output_arg = grad_output
 
             # Configure quantizer for grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
@@ -618,7 +619,7 @@ class _Linear(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_overlap_rs_dgrad:
                     reduce_scatter_out = torch.empty(
-                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_output.device
+                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_output_arg.device
                     )
                 elif ctx.ub_bulk_wgrad:
                     gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
@@ -731,7 +732,7 @@ class _Linear(torch.autograd.Function):
                 reduce_scatter_out = None
                 if ctx.ub_bulk_wgrad and ub_obj_wgrad.is_fp8_ubuf():
                     reduce_scatter_out = torch.empty(
-                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_output.device
+                        dgrad_shape, dtype=ctx.activation_dtype, device=grad_output_arg.device
                     )
 
                 # Arguments to include in wgrad GEMM closure

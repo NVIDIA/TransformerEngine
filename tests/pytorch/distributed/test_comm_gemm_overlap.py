@@ -51,7 +51,7 @@ os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 torch._dynamo.reset()
 
 
-def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8):
+def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, quantization):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -67,10 +67,11 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8):
     if bulk:
         test_cmd.append("--bulk-overlap")
     else:
-        if fp8:
-            if not fp8_available:
-                pytest.skip(reason_for_no_fp8)
-            test_cmd.append("--fp8")
+        if quantization == "fp8" and not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if quantization == "mxfp8" and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+        test_cmd.append(f"--quantization={quantization}")
         if p2p:
             test_cmd.append("--p2p")
         if atomic:
@@ -133,51 +134,34 @@ def _run_layer_with_overlap(
         raise AssertionError(result.stderr.decode())
 
 
-@pytest.mark.parametrize(
-    "fp8",
-    (False, True),
-    ids=[" BF16 - RING-EXCHANGE ", " FP8  - RING-EXCHANGE "],
-)
-def test_split_all_gather_overlaps(fp8):
+@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+def test_split_all_gather_overlaps(quantization):
     """
     Test (split GEMM -> all-gather) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("AG", False, True, False, fp8)
+    _run_gemm_with_overlap("AG", False, True, False, quantization)
 
 
-@pytest.mark.parametrize(
-    "fp8,p2p",
-    [
-        (False, False),
-        (False, True),
-        (True, False),
-        (True, True),
-    ],
-    ids=[
-        " BF16 - PIPELINE ",
-        " BF16 - RING-EXCHANGE ",
-        " FP8  - PIPELINE ",
-        " FP8  - RING-EXCHANGE ",
-    ],
-)
-def test_split_reduce_scatter_overlaps(fp8, p2p):
+@pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
+@pytest.mark.parametrize("p2p", (False, True))
+def test_split_reduce_scatter_overlaps(quantization, p2p):
     """
     Test (reduce-scatter -> split GEMM) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("RS", False, p2p, False, fp8)
+    _run_gemm_with_overlap("RS", False, p2p, False, quantization)
 
 
 @pytest.mark.parametrize(
-    "comm_type, fp8, connections",
+    "comm_type, quantization, connections",
     [
-        ("AG", False, 1),
-        ("RS", False, 1),
-        ("RS", True, 1),
-        ("AG", False, 8),
-        ("RS", False, 8),
-        ("RS", True, 8),
+        ("AG", "none", 1),
+        ("RS", "none", 1),
+        ("RS", "fp8", 1),
+        ("AG", "none", 8),
+        ("RS", "none", 8),
+        ("RS", "fp8", 8),
     ],
     ids=[
         "ALL-GATHER     - BF16 - 1 connections",
@@ -188,7 +172,7 @@ def test_split_reduce_scatter_overlaps(fp8, p2p):
         "REDUCE-SCATTER - FP8  - 8 connections",
     ],
 )
-def test_bulk_overlaps(comm_type, fp8, connections):
+def test_bulk_overlaps(comm_type, quantization, connections):
     """
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
@@ -199,10 +183,10 @@ def test_bulk_overlaps(comm_type, fp8, connections):
                 " 9.0 (HOPPER ARCH)."
             )
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
-        _run_gemm_with_overlap(comm_type, True, False, False, fp8)
+        _run_gemm_with_overlap(comm_type, True, False, False, quantization)
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     else:
-        _run_gemm_with_overlap(comm_type, True, False, False, fp8)
+        _run_gemm_with_overlap(comm_type, True, False, False, quantization)
 
 
 @pytest.mark.parametrize(

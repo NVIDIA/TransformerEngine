@@ -36,7 +36,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor import QuantizedTensor, Quantizer
+from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quantizer
 from ..tensor.float8_tensor import (
     Float8Tensor,
     Float8Quantizer,
@@ -430,7 +430,7 @@ def fill_userbuffers_buffer_for_all_gather(
     local_tensor: torch.Tensor,
     quantizer: Optional[Quantizer],
     process_group,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor | QuantizedTensorBase, torch.Tensor | QuantizedTensorBase]:
     """Fill local shard of Userbuffers buffer with data for all-gather
 
     Returns the full tensor and the local shard, both using the
@@ -454,7 +454,7 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unquantized data
     if quantizer is None:
-        if isinstance(local_tensor, QuantizedTensor):
+        if isinstance(local_tensor, QuantizedTensorBase):
             local_tensor = local_tensor.dequantize()
         if comm.is_fp8_ubuf():
             raise RuntimeError(
@@ -468,7 +468,7 @@ def fill_userbuffers_buffer_for_all_gather(
     # FP8 data
     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
         if not isinstance(local_tensor, Float8TensorBase):
-            if isinstance(local_tensor, QuantizedTensor):
+            if isinstance(local_tensor, QuantizedTensorBase):
                 local_tensor.dequantize()
             quantizer.set_usage(rowwise=True, columnwise=False)
             local_tensor = quantizer(local_tensor)
@@ -479,13 +479,10 @@ def fill_userbuffers_buffer_for_all_gather(
             )
         comm.copy_into_buffer(local_tensor._data, local_chunk=True)
         global_tensor_data = comm.get_buffer(shape=global_shape)
-        global_tensor = Float8Tensor(
-            shape=global_shape,
-            dtype=local_tensor.dtype,
+        global_tensor = Float8TensorBase(
             data=global_tensor_data,
             fp8_scale_inv=local_tensor._scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
-            requires_grad=False,
             quantizer=quantizer,
         )
         return global_tensor, local_tensor
@@ -495,7 +492,7 @@ def fill_userbuffers_buffer_for_all_gather(
 
         # Cast to MXFP8 if needed
         if not isinstance(local_tensor, MXFP8TensorBase):
-            if isinstance(local_tensor, QuantizedTensor):
+            if isinstance(local_tensor, QuantizedTensorBase):
                 local_tensor.dequantize()
             local_tensor = quantizer(local_tensor)
         if not comm.is_fp8_ubuf():
@@ -550,16 +547,13 @@ def fill_userbuffers_buffer_for_all_gather(
             rowwise_data, rowwise_scale_inv = global_data, global_scale_inv
         else:
             columnwise_data, columnwise_scale_inv = global_data, global_scale_inv
-        global_tensor = MXFP8Tensor(
-            shape=global_shape,
-            dtype=local_tensor.dtype,
+        global_tensor = MXFP8TensorBase(
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
-            requires_grad=False,
         )
         return global_tensor, local_tensor
 
