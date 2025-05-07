@@ -971,8 +971,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
           forward pass.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
-    layer_number: int, default = `None`
-        The layer number of the module.
 
     Parallelism parameters
     ----------------------
@@ -1069,7 +1067,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
-        self.layer_number = layer_number
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers

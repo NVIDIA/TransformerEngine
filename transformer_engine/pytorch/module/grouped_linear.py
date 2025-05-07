@@ -454,8 +454,6 @@ class GroupedLinear(TransformerEngineBaseModule):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    layer_number: int, default = `None`
-        The layer number of the module.
 
     Optimization parameters
     -----------------------
@@ -518,7 +516,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
-        self.layer_number = layer_number
 
         assert (
             not ub_overlap_rs and not ub_overlap_ag

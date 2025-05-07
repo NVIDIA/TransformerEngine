@@ -837,8 +837,6 @@ class Linear(TransformerEngineBaseModule):
           forward pass.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
-    layer_number: int, default = `None`
-        The layer number of the module.
 
     Parallelism parameters
     ----------------------
@@ -926,7 +924,6 @@ class Linear(TransformerEngineBaseModule):
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
         self.name = name
-        self.layer_number = layer_number
 
         if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
