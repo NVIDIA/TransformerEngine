@@ -534,7 +534,9 @@ class BasicLinear(BasicOperation):
 
         # Configure input tensor for backward pass
         if with_quantized_compute and isinstance(x_local, QuantizedTensor):
-            x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+            if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                # FP8 does not support all-gather of transpose data
+                x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         return y, x_local, w
 

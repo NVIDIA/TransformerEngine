@@ -20,8 +20,9 @@ from ...module.base import (
     get_workspace,
     _2X_ACC_FPROP,
 )
-from ...tensor.quantized_tensor import QuantizedTensor, Quantizer
+from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
@@ -196,7 +197,7 @@ class UserbuffersForwardLinear(FusedOperation):
         x = None
         if with_ub_all_gather:
             if input_quantizer is not None:
-                if not isinstance(x_local, QuantizedTensor):
+                if not isinstance(x_local, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True)
                     if isinstance(input_quantizer, Float8Quantizer):
                         input_quantizer.set_usage(columnwise=False)
@@ -210,11 +211,11 @@ class UserbuffersForwardLinear(FusedOperation):
             )
         else:
             if with_quantized_compute:
-                if not isinstance(x_local, QuantizedTensor):
+                if not isinstance(x_local, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True, columnwise=True)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensor):
+                if isinstance(x_local, QuantizedTensorBase):
                     x_local = x_local.dequantize(dtype=dtype)
                 if x_local.dtype != dtype:
                     x_local = x_local.to(dtype=dtype)
@@ -222,7 +223,7 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Initialize weight tensor
         w = weight
-        w_is_quantized = isinstance(w, QuantizedTensor)
+        w_is_quantized = isinstance(w, QuantizedTensorBase)
         if with_quantized_compute and not w_is_quantized:
             weight_quantizer.set_usage(rowwise=True)
             w = weight_quantizer(w)
@@ -256,6 +257,18 @@ class UserbuffersForwardLinear(FusedOperation):
             y_local = reduce_scatter_output
         else:
             y_local = gemm_output
+
+        # Detach input tensor if needed
+        # Note: PyTorch autograd produces esoteric errors if we save
+        # input tensor as context for backward pass.
+        if x_local is input:
+            x_local = x_local.detach()
+
+        # Configure input tensor for backward pass
+        if with_quantized_compute and isinstance(x_local, QuantizedTensorBase):
+            if not (isinstance(x_local, Float8TensorBase) and with_ub_all_gather):
+                # FP8 does not support all-gather of transpose data
+                x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         # Return cast tensors
         extra_outputs = {"input": x_local, "weight": w}
