@@ -15,6 +15,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import torch_version
+
 from .base import (
     get_workspace,
     get_ub,
@@ -58,6 +59,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
+    QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
@@ -164,7 +166,7 @@ class _Linear(torch.autograd.Function):
                         inputmat, tp_group, quantizer=input_quantizer
                     )
                 else:
-                    if not isinstance(inputmat, QuantizedTensor):
+                    if not isinstance(inputmat, QuantizedTensorBase):
                         columnwise_usage = backward_needs_input and isinstance(
                             input_quantizer, MXFP8Quantizer
                         )
@@ -191,7 +193,7 @@ class _Linear(torch.autograd.Function):
                         rowwise=True,
                         columnwise=backward_needs_input,
                     )
-                if not isinstance(inputmat, QuantizedTensor):
+                if not isinstance(inputmat, QuantizedTensorBase):
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
                 elif backward_needs_input:
@@ -257,7 +259,7 @@ class _Linear(torch.autograd.Function):
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.RS
             out_shape = [reduce(multiply_op, inp.shape[:-1]) // tp_world_size, out_features]
-            rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inputmat_total.device)
+            rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
         elif ub_overlap_ag_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
@@ -297,19 +299,19 @@ class _Linear(torch.autograd.Function):
             )
 
             if backward_needs_input:
-                if own_quantized_input and isinstance(inputmat, QuantizedTensor):
+                if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
                     if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 if force_hp_input_gather:
-                    assert not isinstance(inputmat, QuantizedTensor)
+                    assert not isinstance(inputmat, QuantizedTensorBase)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if isinstance(weightmat, QuantizedTensor):
+                if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading and saved_inputmat is not None:
@@ -322,7 +324,7 @@ class _Linear(torch.autograd.Function):
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,
-                weightmat if fp8 and not isinstance(weight, QuantizedTensor) else None,
+                weightmat if fp8 and not isinstance(weight, QuantizedTensorBase) else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
@@ -589,7 +591,7 @@ class _Linear(torch.autograd.Function):
                             recipe.fp8_gemm_dgrad.use_split_accumulator
                         )
 
-                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensor):
+                if ctx.weight_quantizer is not None and isinstance(weight_fp8, QuantizedTensorBase):
                     weight_fp8.update_usage(
                         rowwise_usage=ctx.weight_quantizer.rowwise_usage,
                         columnwise_usage=ctx.weight_quantizer.columnwise_usage,
@@ -649,7 +651,7 @@ class _Linear(torch.autograd.Function):
                     inputmat_total_work.wait()
                     inputmat_total_work = None
                 if ctx.input_quantizer is not None and not isinstance(
-                    inputmat_total, QuantizedTensor
+                    inputmat_total, QuantizedTensorBase
                 ):
                     # Async gather in BF16 does not asynchronously
                     # call quantizer after gather.
@@ -657,9 +659,9 @@ class _Linear(torch.autograd.Function):
                     inputmat_total = ctx.input_quantizer(inputmat_total)
 
                 # Make sure GEMM inputs have required data
-                if isinstance(inputmat_total, QuantizedTensor):
+                if isinstance(inputmat_total, QuantizedTensorBase):
                     inputmat_total.update_usage(columnwise_usage=True)
-                if isinstance(grad_output, QuantizedTensor):
+                if isinstance(grad_output, QuantizedTensorBase):
                     grad_output.update_usage(columnwise_usage=True)
 
                 # Figure out whether to use split accumulator
@@ -760,7 +762,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensor):
+        if ctx.fp8 and not isinstance(weight, QuantizedTensorBase):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
@@ -1308,7 +1310,7 @@ class Linear(TransformerEngineBaseModule):
         grad_output_quantizer = None
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        input_quantizer.internal = False
+        input_quantizer.internal = True
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         if fp8_output:
