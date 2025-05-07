@@ -1644,25 +1644,42 @@ def get_cu_seqlens_on_cp_rank(
     cu_seqlens_on_cp_rank.cumsum_(dim=0)
     return cu_seqlens_on_cp_rank
 
+_seq_chunk_ids_cache_for_reordering_before_attn = {}
+_seq_chunk_ids_cache_for_reordering_after_attn = {}
 
-@torch.compile
-def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
+@jit_fuser
+def get_seq_chunk_ids_for_reordering_before_attn(cp_size, device):
     """
     Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
-    To make sure tokens are ordered correctly for compute, we need to reorder sequence chunks
-    before or after CP communications (e.g., all-gather, all-to-all). This function is to compute
-    sequence chunk ids for reordering.
+    To make sure tokens are ordered correctly for compute, we need to reorder sequence chunks to
+    be contigupus before attention compute. This function is to compute sequence chunk ids for
+    reordering.
     """
-    chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device=device)
-    if to_contiguous:
+    global _seq_chunk_ids_cache_for_reordering_before_attn
+    if (cp_size, device) not in _seq_chunk_ids_cache_for_reordering_before_attn:
+        chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device=device)
         for rank in range(cp_size):
             chunk_ids[rank] = 2 * rank
             chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
-    else:
+        _seq_chunk_ids_cache_for_reordering_before_attn[(cp_size, device)] = chunk_ids
+    return _seq_chunk_ids_cache_for_reordering_before_attn[(cp_size, device)]
+
+
+@jit_fuser
+def get_seq_chunk_ids_for_reordering_after_attn(cp_size, device):
+    """
+    Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
+    We need to reorder sequence chunks back to discontiguous after attention compute. This function
+    is to compute sequence chunk ids for reordering.
+    """
+    global _seq_chunk_ids_cache_for_reordering_after_attn
+    if (cp_size, device) not in _seq_chunk_ids_cache_for_reordering_after_attn:
+        chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device=device)
         for rank in range(cp_size):
             chunk_ids[2 * rank] = rank
             chunk_ids[2 * rank + 1] = 2 * cp_size - rank - 1
-    return chunk_ids
+        _seq_chunk_ids_cache_for_reordering_after_attn[(cp_size, device)] = chunk_ids
+    return _seq_chunk_ids_cache_for_reordering_after_attn[(cp_size, device)]
 
 
 @torch.compile
@@ -1948,7 +1965,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if cp_size_a2a > 1:
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, True)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, q.device)
 
             q, k, v = flash_attn_a2a_communicate(
                 [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
@@ -2701,7 +2718,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.batch_size = out.shape[1]
 
         if cp_size_a2a > 1:
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, False)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
             out = flash_attn_a2a_communicate(
                 out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False
             )
@@ -2931,7 +2948,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if not ctx.use_fused_attention:
                 out = out.view(ctx.batch_size, -1, *out.shape[-2:])
                 dout = dout.view(*out.shape)
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, True)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size_a2a, out.device)
             out, dout = flash_attn_a2a_communicate(
                 [out, dout],
                 chunk_ids_for_a2a,
@@ -3641,7 +3658,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         dk, dv = dkv[0], dkv[1]
 
         if cp_size_a2a > 1:
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, False)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, q.device)
             dq, dk, dv = flash_attn_a2a_communicate(
                 [dq, dk, dv],
                 chunk_ids_for_a2a,
@@ -3821,7 +3838,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # [cp, s, b, np, hn] -> [cp*2, s//2, b, np, hn]
         k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
         v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering(cp_size, k.device, True)
+        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
         k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
         v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
         # [cp*2, s//2, b, np, hn] -> [cp*s, b, np, hn]
@@ -4010,7 +4027,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # [cp, s, b, np, hn] -> [cp*2, s//2, b, np, hn]
         k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
         v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering(cp_size, k.device, True)
+        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
         k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
         v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
         # [cp*2, s//2, b, np, hn] -> [cp*s, b, np, hn]
@@ -4146,7 +4163,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         # [cp*s, b, np, hn] -> [cp*2, s//2, b, np, hn]
         dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
         dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering(cp_size, dk.device, False)
+        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dk.device)
         dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
         dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
         # [cp*2, s//2, b, np, hn] -> [cp*s, b, np, hn]
@@ -4311,7 +4328,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fp8_meta_kwargs = {}
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, q.device, True)
+        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate(
             [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, True
         )
@@ -4382,7 +4399,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 rng_state = fa_outputs[3] if not _use_flash_attn_3 else None
             aux_ctx_tensors = [softmax_lse, rng_state]
 
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, out.device, False)
+        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out.device)
         out = flash_attn_a2a_communicate(
             out, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, False
         )
@@ -4533,7 +4550,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
 
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, out.device, True)
+        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, out.device)
         out, dout = flash_attn_a2a_communicate(
             [out, dout], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, True
         )
@@ -4656,7 +4673,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fa_backward_kwargs,
             )
 
-        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, q.device, False)
+        chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, q.device)
         dq, dk, dv = flash_attn_a2a_communicate(
             [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, False
         )
