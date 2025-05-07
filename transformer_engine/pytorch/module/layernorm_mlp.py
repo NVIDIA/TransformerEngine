@@ -797,7 +797,9 @@ class _LayerNormMLP(torch.autograd.Function):
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorBase):
                 grad_output.update_usage(rowwise_usage=True)
-            if ctx.fc2_weight_quantizer is not None and isinstance(ctx.fc2_weight, QuantizedTensorBase):
+            if ctx.fc2_weight_quantizer is not None and isinstance(
+                ctx.fc2_weight, QuantizedTensorBase
+            ):
                 ctx.fc2_weight.update_usage(columnwise_usage=True)
 
             # Perform GEMM

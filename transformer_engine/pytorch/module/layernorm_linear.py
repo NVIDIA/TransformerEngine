@@ -327,9 +327,7 @@ class _LayerNormLinear(torch.autograd.Function):
             out_shape = list(inp_shape)
             out_shape[0] //= tp_world_size
             out_shape[-1] = out_features
-            reduce_scatter_out = torch.empty(
-                out_shape, dtype=activation_dtype, device=inp.device
-            )
+            reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
         # ------------------------------------------------------
         # Forward GEMM
