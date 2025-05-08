@@ -12,12 +12,16 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
+from ..quantized_tensor import QuantizedTensorBase
+
 from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
 
+from ...utils import _empty_tensor
 
-class Float8BlockwiseQTensorBase:
+
+class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
     Float8BlockwiseQTensor inherits from the PyTorch tensor class and this
@@ -57,6 +61,17 @@ class Float8BlockwiseQTensorBase:
 
         return instance
 
+    def clear(self):
+        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
+        for t in (
+            self._rowwise_data,
+            self._columnwise_data,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+        ):
+            if t is not None:
+                t.data = _empty_tensor()
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -74,14 +89,17 @@ class Float8BlockwiseQTensorBase:
     ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
         """
         Prepare the tensor base for saving for backward
-
-        This does not clear the tensors currently, because with PP config
-        that clears the weight cache between micro-batches. If the rowwise
-        data is not required for backward, this is a possible memory
-        pessimization, but is consistent with the other quantized tensor
-        classes.
         """
-        tensors = [self._rowwise_data, self._columnwise_data]
+        tensors = [
+            self._rowwise_data,
+            self._columnwise_data,
+            self._rowwise_scale_inv,
+            self._columnwise_scale_inv,
+        ]
+        self._rowwise_data = None
+        self._columnwise_data = None
+        self._rowwise_scale_inv = None
+        self._columnwise_scale_inv = None
         return tensors, self
 
     def restore_from_saved(
@@ -90,7 +108,9 @@ class Float8BlockwiseQTensorBase:
         """Restore the tensor base data from the saved tensors list."""
         self._rowwise_data = tensors[0]
         self._columnwise_data = tensors[1]
-        return tensors[2:]
+        self._rowwise_scale_inv = tensors[2]
+        self._columnwise_scale_inv = tensors[3]
+        return tensors[4:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
@@ -277,3 +297,55 @@ class Float8BlockwiseQTensorBase:
             f"fp8_dtype={self._fp8_dtype}, "
             f"{descriptor}_scaled_data={data}"
         )
+
+    def update_usage(
+        self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
+    ):
+        """
+        update_usage can be used to clear out one of two possible copies of the data.
+        """
+
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
+        assert (
+            columnwise_usage or rowwise_usage
+        ), "Must retain some data either columnwise or rowwise"
+
+        if columnwise_usage and rowwise_usage:
+            if not self._is_2D_scaled:
+                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
+                # data/scale_inv because their scale values are different.
+                assert (
+                    self._rowwise_data is not None
+                    and self._rowwise_scale_inv is not None
+                    and self._columnwise_data is not None
+                    and self._columnwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage."
+            else:
+                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
+                # rowwise data/scale_inv.
+                assert (
+                    self._rowwise_data is not None and self._rowwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+                if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                    self._create_columnwise()
+            return
+
+        if rowwise_usage:
+            assert (
+                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+            ), "Cannot update to rowwise usage."
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+            return
+        if columnwise_usage:
+            assert (
+                self._columnwise_data is not None and self._columnwise_scale_inv is not None
+            ), "Cannot update to columnwise usage."
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+            return
+
+        return

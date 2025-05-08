@@ -34,6 +34,7 @@ is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 SUPPORTED_RECIPES = []
 if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
@@ -76,6 +77,8 @@ class TestDistributedLayernorm:
         other_bytes = 0
         if fp8_recipe == recipe.MXFP8BlockScaling() and "dp" in mesh_axes:
             other_bytes = 384  # required for small scale shapes that require padding
+        if fp8_recipe == recipe.Float8CurrentScaling():
+            allreduce_total_bytes += jax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
         )

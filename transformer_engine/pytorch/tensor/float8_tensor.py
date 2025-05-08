@@ -11,7 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..utils import canonicalize_process_group, devices_match, is_non_tn_fp8_gemm_supported
+from ..utils import canonicalize_process_group, devices_match
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..constants import dist_group_type
@@ -422,43 +422,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return Float8Tensor.make_like(self)
 
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        # Figure out what data is available and what is required
-        has_data = self._data is not None
-        has_data_transpose = self._transpose is not None and not self._transpose_invalid
-        needs_data = has_data
-        needs_data_transpose = has_data_transpose
-        if is_non_tn_fp8_gemm_supported():
-            if rowwise_usage is not None and rowwise_usage:
-                needs_data = True
-            if columnwise_usage is not None and columnwise_usage:
-                needs_data = True
-            needs_data_transpose = False
-        else:
-            if rowwise_usage is not None:
-                needs_data = rowwise_usage
-            if columnwise_usage is not None:
-                needs_data_transpose = columnwise_usage
-
-        # Generate data that is required
-        if needs_data and not has_data:
-            raise RuntimeError("Cannot generate FP8 data, even from FP8 data transpose")
-        if needs_data_transpose and not has_data_transpose:
-            if not has_data:
-                raise RuntimeError("FP8 data is required to generate FP8 data transpose")
-            self._create_transpose()
-
-        # Delete data that is not required
-        if not needs_data:
-            self._data = None
-        if not needs_data_transpose:
-            self._transpose = None
-            self._transpose_invalid = True
-
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         assert self._data is not None
@@ -515,12 +478,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose_invalid = True
         del self._transpose  # explicitly deletes the data for safety
         self._transpose = None
-
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._data = torch.Tensor() if self._data is not None else None
-        self._transpose = torch.Tensor() if self._transpose is not None else None
-        self._transpose_invalid = True
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

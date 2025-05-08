@@ -217,51 +217,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         # TODO(ksivamani): Fix the detach bug
         return MXFP8Tensor.make_like(self)
 
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        """
-        For MXFP8, columnwise scaled output is only produced by x2
-        scaling kernels, so this function only disables usages.
-        """
-
-        # Default usage is based on available data
-        if rowwise_usage is None:
-            rowwise_usage = self._rowwise_data is not None
-        if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None
-
-        # Update row-scaled data
-        if rowwise_usage:
-            if self._rowwise_data is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
-                )
-            if self._rowwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
-                )
-        else:
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-
-        # Update column-scaled data
-        if columnwise_usage:
-            if self._columnwise_data is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
-                )
-            if self._columnwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
-                )
-        else:
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
-
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
         assert self._rowwise_data is not None
@@ -303,11 +258,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         ):
             return self
         raise ValueError("MXFP8Tensor does not support different memory formats!")
-
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

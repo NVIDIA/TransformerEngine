@@ -309,58 +309,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return Float8BlockwiseQTensor.make_like(self)
 
-    def update_usage(
-        self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
-    ):
-        """
-        update_usage can be used to clear out one of two possible copies of the data.
-        """
-
-        if rowwise_usage is None:
-            rowwise_usage = self._rowwise_data is not None
-        if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None
-        assert (
-            columnwise_usage or rowwise_usage
-        ), "Must retain some data either columnwise or rowwise"
-
-        if columnwise_usage and rowwise_usage:
-            if not self._is_2D_scaled:
-                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
-                # data/scale_inv because their scale values are different.
-                assert (
-                    self._rowwise_data is not None
-                    and self._rowwise_scale_inv is not None
-                    and self._columnwise_data is not None
-                    and self._columnwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage."
-            else:
-                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
-                # rowwise data/scale_inv.
-                assert (
-                    self._rowwise_data is not None and self._rowwise_scale_inv is not None
-                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
-                if self._columnwise_data is None or self._columnwise_scale_inv is None:
-                    self._create_columnwise()
-            return
-
-        if rowwise_usage:
-            assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
-            ), "Cannot update to rowwise usage."
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
-            return
-        if columnwise_usage:
-            assert (
-                self._columnwise_data is not None and self._columnwise_scale_inv is not None
-            ), "Cannot update to columnwise usage."
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-            return
-
-        return
-
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         rowwise_data = None
@@ -431,11 +379,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         ):
             return self
         raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
-
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
     def _make_in_reduce_ex(
