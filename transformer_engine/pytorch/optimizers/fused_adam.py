@@ -374,7 +374,7 @@ class FusedAdam(torch.optim.Optimizer):
         if store_param_remainders:
             data = torch.zeros_like(param, dtype=torch.int16)
         else:
-            data = torch.empty_like(param.dequantize(), dtype=dtype)
+            data = torch.empty_like(param.detach().dequantize(), dtype=dtype)
         if zero_buffer:
             data.zero_()
 
