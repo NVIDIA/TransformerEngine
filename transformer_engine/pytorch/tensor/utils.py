@@ -5,7 +5,7 @@
 """Helper functions for using fp8 tensors as weights"""
 
 import torch
-
+import functools
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
@@ -14,6 +14,12 @@ from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQu
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
+
+
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor()
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):

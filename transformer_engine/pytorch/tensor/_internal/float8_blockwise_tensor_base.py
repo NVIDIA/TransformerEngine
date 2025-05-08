@@ -18,7 +18,7 @@ from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
 
-
+from ...utils import _empty_tensor
 class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
@@ -68,7 +68,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             self._columnwise_scale_inv,
         ):
             if t is not None:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""

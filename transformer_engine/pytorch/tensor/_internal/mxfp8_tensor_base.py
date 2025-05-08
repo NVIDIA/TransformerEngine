@@ -17,7 +17,7 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
-
+from ...utils import _empty_tensor
 class _FromMXFP8Func(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""
 
@@ -92,7 +92,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
             self._columnwise_scale_inv,
         ):
             if t is not None:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
