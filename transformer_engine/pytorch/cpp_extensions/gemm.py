@@ -3,13 +3,13 @@
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
-import functools
+
 from typing import Iterable, Optional, Tuple, Union, List
 import os
 import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..utils import get_sm_count
+from ..utils import get_sm_count, _empty_tensor
 
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -19,12 +19,6 @@ __all__ = [
     "general_gemm",
     "general_grouped_gemm",
 ]
-
-
-@functools.lru_cache(maxsize=None)
-def _empty_tensor() -> torch.Tensor:
-    """Get tensor with no entries and no data"""
-    return torch.Tensor().cuda()
 
 
 def general_gemm(
