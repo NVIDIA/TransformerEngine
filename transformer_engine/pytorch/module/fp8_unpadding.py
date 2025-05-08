@@ -97,7 +97,7 @@ class _Fp8Unpadding(torch.autograd.Function):
                     columnwise_data=None,
                     columnwise_scale_inv=None,
                     fp8_dtype=grad_output._fp8_dtype,
-                    quantizer=None,
+                    quantizer=grad_output._get_quantizer(),
                     is_2D_scaled=False,
                     requires_grad=grad_output.requires_grad,
                 )
