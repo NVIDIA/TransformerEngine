@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
-import functools
+
 from typing import Iterable, Optional, Tuple, Union, List
 import os
 import torch
