@@ -19,6 +19,8 @@ from ...constants import TE_DType_To_Torch
 from ..quantized_tensor import Quantizer
 
 from ...utils import _empty_tensor
+
+
 class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 

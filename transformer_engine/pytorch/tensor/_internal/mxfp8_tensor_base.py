@@ -18,6 +18,8 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ..quantized_tensor import Quantizer
 
 from ...utils import _empty_tensor
+
+
 class _FromMXFP8Func(torch.autograd.Function):
     """Cast from MXFP8 to other dtype"""
 
