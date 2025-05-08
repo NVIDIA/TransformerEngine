@@ -20,5 +20,6 @@ class TestDummyFeature(TEConfigAPIMapper):
 
     @api_method
     def inspect_tensor_enabled(self, *_args, **_kwargs):
-        """API call used to determine whether to run look_at_tensor_before_process in the forward."""
+        """API call used to determine whether to run look_at_tensor_before_process
+         in the forward pass."""
         return True
