@@ -676,7 +676,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
-            if not self.fp8:
+            if not self.fp8 and any(isinstance(w, QuantizedTensor) for w in weight_tensors):
                 warnings.warn(
                     "You are using quantized weights without quantized compute. "
                     "Please make sure this is intentional."
