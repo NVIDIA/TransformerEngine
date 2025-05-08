@@ -683,7 +683,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
         elif qkv_format in ["bshd", "sbhd"]:
             p2p_comm_buffers[0] = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
-        else: # qkv_format == "thd"
+        else:  # qkv_format == "thd"
             p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         send_recv_reqs = [[], []]
 
@@ -736,12 +736,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
                                 if enable_mla:
                                     # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
-                                    k_part = k_part.view(
-                                        k_part.shape[0], -1, *k_part.shape[-2:]
-                                    )
-                                    v_part = v_part.view(
-                                        v_part.shape[0], -1, *v_part.shape[-2:]
-                                    )
+                                    k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
+                                    v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
                                 else:
                                     # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -752,12 +748,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
                                 if enable_mla:
                                     # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                    k_part = k_part.view(
-                                        -1, k_part.shape[2], *k_part.shape[-2:]
-                                    )
-                                    v_part = v_part.view(
-                                        -1, v_part.shape[2], *v_part.shape[-2:]
-                                    )
+                                    k_part = k_part.view(-1, k_part.shape[2], *k_part.shape[-2:])
+                                    v_part = v_part.view(-1, v_part.shape[2], *v_part.shape[-2:])
                                 else:
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -1054,12 +1046,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q[:, 1, ...]
                                 if enable_mla:
                                     # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
-                                    k_part = k_part.view(
-                                        k_part.shape[0], -1, *k_part.shape[-2:]
-                                    )
-                                    v_part = v_part.view(
-                                        v_part.shape[0], -1, *v_part.shape[-2:]
-                                    )
+                                    k_part = k_part.view(k_part.shape[0], -1, *k_part.shape[-2:])
+                                    v_part = v_part.view(v_part.shape[0], -1, *v_part.shape[-2:])
                                 else:
                                     # [b, 2, sk//2, 2, np, hn] -> [b, sk, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -1070,12 +1058,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q[1]
                                 if enable_mla:
                                     # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                    k_part = k_part.view(
-                                        -1, k_part.shape[2], *k_part.shape[-2:]
-                                    )
-                                    v_part = v_part.view(
-                                        -1, v_part.shape[2], *v_part.shape[-2:]
-                                    )
+                                    k_part = k_part.view(-1, k_part.shape[2], *k_part.shape[-2:])
+                                    v_part = v_part.view(-1, v_part.shape[2], *v_part.shape[-2:])
                                 else:
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -1336,10 +1320,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
                             if enable_mla:
-                                out = torch.zeros_like(v if not fp8 else out_per_step[0]).view(v_shape)
+                                out = torch.zeros_like(v if not fp8 else out_per_step[0]).view(
+                                    v_shape
+                                )
                             else:
                                 # MHA or GQA
-                                out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
+                                out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(
+                                    q.shape
+                                )
                     elif (i - 1) <= rank or not causal:
                         flash_attn_fwd_softmax_lse_correction(
                             softmax_lse, softmax_lse_per_step[i - 1]
@@ -1774,8 +1762,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_, kv_, out_, dout_ = None, None, None, None
             dq_, dk_, dv_ = None, None, None
             if ctx.enable_mla:
-                k_part = kv[:ctx.k_numel].view(*ctx.k_shape)
-                v_part = kv[ctx.k_numel:].view(*ctx.v_shape)
+                k_part = kv[: ctx.k_numel].view(*ctx.k_shape)
+                v_part = kv[ctx.k_numel :].view(*ctx.v_shape)
             # In reversed order of fwd
             if causal:
                 if i == (cp_size - 1):
@@ -1816,8 +1804,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         q_part = q_
                         if not ctx.enable_mla:
-                            k_part = kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
-                            v_part = kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
                         out_part = out_
                         dout_part = dout_
 
@@ -1965,8 +1957,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         q_part = q_
                         if not ctx.enable_mla:
-                            k_part = kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
-                            v_part = kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
                         out_part = out_
                         dout_part = dout_
 
@@ -2105,8 +2101,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                         q_part = q_
                         if not ctx.enable_mla:
-                            k_part = kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
-                            v_part = kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            k_part = (
+                                kv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[0]
+                            )
+                            v_part = (
+                                kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1]
+                            )
                         out_part = out_
                         dout_part = dout_
 
@@ -2391,8 +2391,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.enable_mla:
                 # [b, 2, sk//2, np, hn] or
                 # [2, sk//2, b, np, hn]
-                dk = dkv[:ctx.k_numel].view(*ctx.k_shape)
-                dv = dkv[ctx.k_numel:].view(*ctx.v_shape)
+                dk = dkv[: ctx.k_numel].view(*ctx.k_shape)
+                dv = dkv[ctx.k_numel :].view(*ctx.v_shape)
                 if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
                     dk_ = dk_.view(*ctx.k_shape)
                     dv_ = dv_.view(*ctx.v_shape)
@@ -2422,7 +2422,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     else:
                         dk.copy_(dk_)
                         dv.copy_(dv_)
-            elif ctx.enable_mla and causal: # enable_mla and not fp8
+            elif ctx.enable_mla and causal:  # enable_mla and not fp8
                 if i == (cp_size - 1):
                     if rank == 0:
                         if ctx.qkv_format == "bshd":
@@ -2465,14 +2465,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 elif i > 0:
                     dk.add_(dk_)
                     dv.add_(dv_)
-                else: # i == 0
+                else:  # i == 0
                     dk.copy_(dk_)
                     dv.copy_(dv_)
-            elif ctx.enable_mla: # enable_mla and not fp8 and not causal
+            elif ctx.enable_mla:  # enable_mla and not fp8 and not causal
                 if i == 0:
                     dk.copy_(dk_)
                     dv.copy_(dv_)
-                else: # i > 0
+                else:  # i > 0
                     dk.add_(dk_)
                     dv.add_(dv_)
             elif ctx.fp8:
@@ -2515,12 +2515,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "none")
                 elif i > 0:
                     dkv.add_(dkv_)
-                else: # i == 0
+                else:  # i == 0
                     dkv.copy_(dkv_)
             else:
                 if i == 0:
                     dkv.copy_(dkv_)
-                else: # i > 0
+                else:  # i > 0
                     dkv.add_(dkv_)
 
         if ctx.fp8 and ctx.use_fused_attention:
@@ -2533,8 +2533,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             if ctx.enable_mla:
                 # [cp, b, 2, sk//2, np, hn] or [cp, 2, sk//2, b, np, hn]
-                dk_fp8 = dkv_fp8[:ctx.k_numel].view(cp_size, *ctx.k_shape)
-                dv_fp8 = dkv_fp8[ctx.k_numel:].view(cp_size, *ctx.v_shape)
+                dk_fp8 = dkv_fp8[: ctx.k_numel].view(cp_size, *ctx.k_shape)
+                dv_fp8 = dkv_fp8[ctx.k_numel :].view(cp_size, *ctx.v_shape)
                 dk = ctx.dQKV_CP_quantizer.create_tensor_from_data(
                     dk_fp8, fake_dtype=torch.float32, internal=True
                 )

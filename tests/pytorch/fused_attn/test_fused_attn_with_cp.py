@@ -108,19 +108,65 @@ model_configs_fused_attn = {
         2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
     ),  # GQA
     "cp_3_0": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=64,
+        2,
+        12,
+        12,
+        128,
+        4096,
+        4096,
+        0.0,
+        "causal",
+        "no_bias",
+        head_dim_v=64,
     ),  # MLA
     "cp_3_1": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=64,
+        2,
+        12,
+        12,
+        128,
+        4096,
+        4096,
+        0.0,
+        "no_mask",
+        "no_bias",
+        head_dim_v=64,
     ),  # MLA
     "cp_3_2": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias", head_dim_v=64,
+        2,
+        12,
+        12,
+        128,
+        4096,
+        4096,
+        0.0,
+        "causal",
+        "post_scale_bias",
+        head_dim_v=64,
     ),  # MLA
     "cp_3_3": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias", head_dim_v=64,
+        2,
+        12,
+        12,
+        128,
+        4096,
+        4096,
+        0.0,
+        "no_mask",
+        "post_scale_bias",
+        head_dim_v=64,
     ),  # MLA
     "cp_3_4": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=64, window_size=(512, 0),
+        2,
+        12,
+        12,
+        128,
+        4096,
+        4096,
+        0.0,
+        "causal",
+        "no_bias",
+        head_dim_v=64,
+        window_size=(512, 0),
     ),  # MLA
 }
 
