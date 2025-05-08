@@ -93,7 +93,7 @@ class FakeQuant(TEConfigAPIMapper):
             - wgrad
             - dgrad
 
-    quant_format: str, default = "FP8E5M2"
+    quant_format: str
         specifies the FP8 format to use:
 
             - FP8E5M2
