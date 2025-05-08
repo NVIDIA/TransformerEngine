@@ -19,7 +19,6 @@ import torch
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
@@ -27,6 +26,8 @@ from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions
@@ -36,6 +37,13 @@ from utils import dtype_tols, str_to_dtype
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+quantization_list: list[Optional[str]] = [None]
+if fp8_available:
+    quantization_list.append("fp8")
+if mxfp8_available:
+    quantization_list.append("mxfp8")
+
 
 # Check if there are multiple GPUs
 if torch.cuda.device_count() < 2:
@@ -51,7 +59,7 @@ class ModelConfig:
     num_heads: int
     head_dim: int
     dtype: torch.dtype
-    fp8: bool
+    quantization: Optional[str]
 
     @property
     def hidden_size(self):
@@ -129,12 +137,16 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
 
     # Make copy of tensor
+    test = ref.to(device=test_device, dtype=test_dtype)
     if test_is_fp8:
-        test = Float8Tensor.to_float8(ref)
-    else:
-        test = ref.to(device=test_device, dtype=test_dtype)
-        if test.data_ptr() == ref.data_ptr():
-            test = test.clone()
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=test_device),
+            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        test = quantizer(test)
+    elif test.data_ptr() == ref.data_ptr():
+        test = test.clone()
 
     # Make sure reference and test tensors represent exact same values
     ref.copy_(test)
@@ -143,6 +155,21 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
+
+
+def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
+    """Make recipe for quantization scheme"""
+    if name is None:
+        return None
+    if name == "fp8":
+        return transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    if name == "mxfp8":
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def _test_linear(
@@ -155,7 +182,8 @@ def _test_linear(
     weight_requires_grad: bool = True,
 ) -> None:
     dtype = model_config.dtype
-    fp8_compute = model_config.fp8
+    quantization = model_config.quantization
+    quantized_compute = quantization is not None
 
     # Distributed process group
     process_group = world_group()
@@ -175,14 +203,19 @@ def _test_linear(
         in_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(x_test, QuantizedTensor):
+        with torch.no_grad():
+            x_test = x_test.dequantize().requires_grad_()
     w_ref, w_test = make_reference_and_test_tensors(
         (out_features, in_features),
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(w_test, QuantizedTensor):
+        w_test = w_test.dequantize()
     b_ref, b_test = None, None
     if bias:
         if tensor_parallel_mode == "row":
@@ -198,9 +231,11 @@ def _test_linear(
         out_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
         requires_grad=False,
     )
+    if isinstance(dy_test, QuantizedTensor):
+        dy_test = dy_test.dequantize()
 
     # Plain PyTorch implementation
     y_ref = torch.nn.functional.linear(x_ref, w_ref)
@@ -265,21 +300,15 @@ def _test_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    with te.fp8_model_init(enabled=fp8_compute):
+    recipe = make_recipe(quantization)
+    with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
         ops = []
         linear_op = None
         bias_op = None
         if tensor_parallel_mode == "column":
             userbuffers_options = {}
             if not weight_requires_grad:
-                if fp8_compute:
-                    userbuffers_options["comm_name"] = "fc1"
-                else:
-                    # There is a correctness bug with overlapping
-                    # dgrad reduce-scatter with dgrad GEMM. Fall back
-                    # to overlapping dgrad reduce-scatter with wgrad
-                    # GEMM, even though wgrad isn't needed.
-                    userbuffers_options["comm_name"] = "qkv"
+                userbuffers_options["comm_name"] = "fc1"
             else:
                 userbuffers_options["comm_name"] = "qkv"
             linear_op = te_ops.BasicLinear(
@@ -322,7 +351,7 @@ def _test_linear(
             bias_op.bias.copy_(b_test)
         del w_test
         del b_test
-    with te.fp8_autocast(enabled=fp8_compute):
+    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 
@@ -338,7 +367,7 @@ def _test_linear(
     tols = dtype_tols(dtype)
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
-    if fp8_compute:
+    if quantized_compute:
         tols = dtype_tols(
             model[0].weight._fp8_dtype
             if is_float8_tensor(model[0].weight)
@@ -370,7 +399,7 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
     for test_config in itertools.product(
         (False, True),  # bias
         ("column", "row"),  # tensor_parallel_mode
-        (False, True),  # weight_requires_grad
+        (True, False),  # weight_requires_grad
     ):
         if rank == 0:
             print(f"Running _test_linear with {test_config=}")
@@ -390,18 +419,14 @@ if torch.cuda.device_count() > 1:
 
 
 @pytest.mark.parametrize("world_size", _world_sizes)
-@pytest.mark.parametrize("fp8", (False, True))
+@pytest.mark.parametrize("quantization", quantization_list)
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
     dtype: torch.dtype = torch.bfloat16,
-    fp8: bool,
+    quantization: Optional[str],
 ) -> None:
     """Launch parallel job and run tests"""
-
-    # Skip invalid configurations
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
 
     # Parallel job launcher
     command = []
@@ -424,8 +449,8 @@ def test_fuser_ops_with_userbuffers(
             str(dtype),
         )
     )
-    if fp8:
-        command.append("--fp8")
+    if quantization is not None:
+        command.extend(("--quantization", quantization))
 
     # Environment
     env = dict(os.environ)
@@ -445,12 +470,12 @@ def main() -> None:
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
-    parser.add_argument("--sequence-length", type=int, default=32)
+    parser.add_argument("--sequence-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=16)
-    parser.add_argument("--head-dim", type=int, default=32)
+    parser.add_argument("--head-dim", type=int, default=256)
     parser.add_argument("--dtype", type=str, default="bfloat16")
-    parser.add_argument("--fp8", action="store_true")
+    parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args()
 
     # Run parallel tests if needed
@@ -463,14 +488,17 @@ def main() -> None:
             num_heads=args.num_heads,
             head_dim=args.head_dim,
             dtype=str_to_dtype(args.dtype),
-            fp8=args.fp8,
+            quantization=args.quantization,
         )
 
         # Initialize Userbuffers
         group = world_group()  # Initialize NCCL
         bootstrap_backend = "mpi" if launcher() == "ompi" else "nccl"
         userbuffer_configs = {
-            "fc1_dgrad": {"method": "pipeline"},  # Overlap dgrad RS with dgrad GEMM
+            "fc1_dgrad": {
+                "method": "ring_exchange",
+                "fp8_buf": False,
+            },  # Overlap dgrad RS with dgrad GEMM
         }
         te.module.base.initialize_ub(
             [
@@ -478,7 +506,7 @@ def main() -> None:
                 model_config.num_heads * model_config.head_dim,
             ],
             torch.distributed.get_world_size(group),
-            use_fp8=model_config.fp8,
+            use_fp8=model_config.quantization is not None,
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,
