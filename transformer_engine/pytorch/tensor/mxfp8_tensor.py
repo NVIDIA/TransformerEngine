@@ -368,13 +368,13 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, MXFP8Tensor) and isinstance(dst, MXFP8Tensor):
                 if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(src._rowwise_data)
+                    dst._rowwise_data.copy_(src._rowwise_data, *args[2:])
                 if dst._rowwise_scale_inv is not None:
-                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv)
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv, *args[2:])
                 if dst._columnwise_data is not None:
-                    dst._columnwise_data.copy_(src._columnwise_data)
+                    dst._columnwise_data.copy_(src._columnwise_data, *args[2:])
                 if dst._columnwise_scale_inv is not None:
-                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv)
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv, *args[2:])
                 return dst
         elif func == torch.ops.aten.is_pinned.default:
             if args[0]._rowwise_data is not None:

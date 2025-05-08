@@ -449,13 +449,13 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst, src = args[0], args[1]
             if isinstance(src, Float8BlockwiseQTensor) and isinstance(dst, Float8BlockwiseQTensor):
                 if dst._rowwise_data is not None:
-                    dst._rowwise_data.copy_(src._rowwise_data)
+                    dst._rowwise_data.copy_(src._rowwise_data, *args[2:])
                 if dst._rowwise_scale_inv is not None:
-                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv)
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv, *args[2:])
                 if dst._columnwise_data is not None:
-                    dst._columnwise_data.copy_(src._columnwise_data)
+                    dst._columnwise_data.copy_(src._columnwise_data, *args[2:])
                 if dst._columnwise_scale_inv is not None:
-                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv)
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv, *args[2:])
                 return dst
         elif func == torch.ops.aten.is_pinned.default:
             if args[0]._rowwise_data is not None:

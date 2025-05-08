@@ -4,526 +4,456 @@
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
 from __future__ import annotations
-from contextlib import nullcontext
-from typing import Any, Dict, Optional
-
+from dataclasses import dataclass
 import torch
+from torch.autograd.graph import saved_tensors_hooks
+from typing import Any, Optional
+import contextlib
+__all__ = ["offload", "_manual_reload", "CPUOffload"]
 
-__all__ = ["get_cpu_offload_context"]
 
-CPUOffloadEnabled = False
+def is_cpu_offload_enabled():
+    return CURRENT_CPU_OFFLOAD_HANDLER is not None
 
+def offload(*tensors: torch.Tensor | torch.nn.Parameter | Any, manual_reload: bool = False) -> None:
+    """ 
+        The provided tensors are offloaded to the CPU, with the CPU copy operation synchronized with the main PyTorch stream. 
+        After invoking this function, the tensors should not be modified in place. The transition to a CPU tensor occurs within 
+        save_for_backward via a PyTorch hook.
 
-def mark_activation_offload(*tensors):
-    """Set the type of the offloading needed for a tensor."""
+        This function can be applied multiple times to the same tensor object; however, only a single copy on the CPU is created, 
+        ensuring proper synchronization.
+
+        By default, the tensor is reloaded during restore_from_saved via a PyTorch hook.
+        If manual_reload is set to True, the tensor is switched to CPU tensor in prepare_for_saving - not inside the hook.
+        Then cpu tensors are saved for backward and restored in restore_from_saved. This allows to delay the reloading synchronization
+        to the moment when these tensors are actually needed. To reload the tensor, use the _manual_reload function.
+    """
+    def _offload(tensor: torch.Tensor):
+        assert CURRENT_CPU_OFFLOAD_HANDLER is not None, "offload() should be called inside CPUOffload wrapper"
+        CURRENT_CPU_OFFLOAD_HANDLER.offload(tensor)
+        tensor.offload_handler = CURRENT_CPU_OFFLOAD_HANDLER
+        tensor.activation_offloading = True
+        tensor.manual_reload = manual_reload
+
+        return tensor
+
     for tensor in tensors:
         if tensor is None:
             continue
         if isinstance(tensor, torch.Tensor):
-            tensor.activation_offloading = True
+            _offload(tensor)
         else:
             data_tensors = tensor.get_data_tensors()
-            for tensor in data_tensors:
-                if tensor is not None:
-                    tensor.activation_offloading = True
+            for data_tensor in data_tensors:
+                if data_tensor is not None:
+                    _offload(data_tensor)
 
-
-def is_cpu_offload_enabled() -> bool:
-    """Check if CPU offloading is currently enabled."""
-    return CPUOffloadEnabled
-
-
-class CpuOffloadSavedTensorHook:
-    """Contex-manager that executes a pair of pack/unpack hooks for saved tensors.
-
-    In this context, the ``on_save_for_backward`` method will be called every time
-    a tensor is saved for backward (this includes intermediary results saved using
-    :func:`~torch.autograd.function._ContextMethodMixin.save_for_backward` but
-    also those recorded by a PyTorch-defined operation).
-
-    The ``on_get_saved_tensors`` method will be called when the backward function
-    of this op attempts to retrieve the saved tensor from context (this includes
-    :func: `torch.Tensor.backward()` or :func: `torch.autograd.grad()`. It takes the
-    as input the return value of the ``on_save_for_backward``, and is meant to return
-    an identical copy of the tensor being saved by ``on_save_for_backward`` in terms of
-    size, device and element values.
-
-    Example:
-
-        >>> import torch
-        >>> from typing import Any
-        >>>
-        >>> class DummyHook(CpuOffloadSavedTensorHook):
-        ...
-        ...     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        ...         logging.info("On save", tensor)
-        ...         return (tensor,)
-        ...
-        ...     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
-        ...         logging.info("On get", saved_state)
-        ...         tensor, = saved_state
-        ...         return tensor
-        ...
-        >>> a = torch.ones(5, requires_grad=True)
-        >>> b = torch.ones(5, requires_grad=True) * 2
-        >>> with DummyHook():
-        ...     y = a * b
-        ...
-        On save tensor([1., 1., 1., 1., 1.], requires_grad=True)
-        On save tensor([2., 2., 2., 2., 2.], grad_fn=<MulBackward0>)
-        >>> y.sum().backward()
-        On get (tensor([1., 1., 1., 1., 1.], requires_grad=True),)
-        On get (tensor([2., 2., 2., 2., 2.], grad_fn=<MulBackward0>),)
-
+def _manual_reload(cpu_tensor: torch.Tensor | Any) -> torch.Tensor | Any:
     """
+        This function consumes the CPU copy of the tensor and returns the reloaded GPU copy. 
+        It is synchronized with the main PyTorch stream. 
+        The primary advantage of this function is that it allows the reloading synchronization 
+        to be delayed until the tensors are actually needed. For example:
 
-    def __init__(self) -> None:
-        self.inside_context = False
+        ```python
+        class Function(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                offload(x, manual_reload=True)
 
-    def __enter__(self):
-        global CPUOffloadEnabled
-        CPUOffloadEnabled = True
+                # ...
+                y = ...
+                # ...
 
-        self.inside_context = True
-        torch._C._autograd._push_saved_tensors_default_hooks(
-            self.on_save_for_backward, self.on_get_saved_tensor
-        )
+                save_for_backward(x)
+                return y
 
-    def __exit__(self, *args: Any):
-        global CPUOffloadEnabled
-        CPUOffloadEnabled = False
+            @staticmethod
+            def backward(ctx, grad_output):
+                x = ctx.saved_tensors[0]  # x is a CPU tensor
+                # Even if the reload is not finished, the following operation can start.
 
-        self.inside_context = False
-        torch._C._autograd._pop_saved_tensors_default_hooks()
+                # ...
+                # some long operation
+                # ...
 
-    def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        """On save for backward."""
-        raise NotImplementedError(
-            "`on_save_for_backward: Callable[[torch.Tensor], Any]`"
-            "is not implemented in CpuOffloadHook class. Inherit "
-            "this class and implement your custom hooks"
-        )
+                x = _manual_reload(x)  # x is a GPU tensor, reload is synchronized with the main stream
 
-    def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
-        """On get saved tensor."""
-        raise NotImplementedError(
-            "`on_get_saved_tensors: Callable[[Any], torch.Tensor]`"
-            "is not implemented in CpuOffloadHook class. Inherit "
-            "this class and implement your custom hooks"
-        )
+                # ...
 
+                return grad_output
+        ```
 
-class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
-    """Context-manager that offloads/recovers tensors through an offload hander.
-
-    The hook just offloads/recovers the tensor object to the handler through `tensor_push`
-    and `tensor_pop` interface. How the offload-handler manages the offloading, recovering
-    or prefetching timing is transparent to this hook.
+        The number of times `offload` is used with `manual_reload` for each tensor 
+        object should match the number of invocations of the `_manual_reload` function. 
+        This is because the CPU offloading maintains a reference count, 
+        which is decremented in the `_manual_reload` function.
     """
+    if cpu_tensor is None:
+        return None
+    if isinstance(cpu_tensor, torch.Tensor):
+        return cpu_tensor.offload_handler.reload(cpu_tensor)
+    else:
+        data_tensors = cpu_tensor.get_data_tensors()
+        new_data_tensors = []
+        for data_tensor in data_tensors:
+            new_data_tensors.append(_manual_reload(data_tensor))
+        return cpu_tensor.set_data_tensors(*new_data_tensors)
 
-    def __init__(
-        self,
-        offload_handler: OffloadHandler,
-        handler_extra_kwargs: Optional[Dict[str, Any]] = None,
-        debug: bool = False,
-    ) -> None:
-        if handler_extra_kwargs is None:
-            handler_extra_kwargs = {}
-        self.debug: bool = debug
-        self.offload_handler: OffloadHandler = offload_handler
-        self.handler_extra_kwargs: Dict[str, Any] = handler_extra_kwargs
-        super().__init__()
-
-    def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
-        return retrieve_identifier
-
-    def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
-        tensor = self.offload_handler.tensor_pop(saved_state, **self.handler_extra_kwargs)
-        return tensor
-
-
-class OffloadHandler:
-    """A base class for CPU offload-handler."""
-
-    def __init__(self) -> None:
-        pass
-
-    def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
-        """Tensor push."""
-        raise NotImplementedError(
-            "`tensor_push is not implented in OffloadHandler class. "
-            "Inherit this class and implement your custom tensor_push."
-        )
-
-    def tensor_pop(self, tensor_tag: Any, **kwargs):
-        """Tensor pop."""
-        raise NotImplementedError(
-            "`tensor_pop is not implented in OffloadHandler class. "
-            "Inherit this class and implement your custom tensor_pop."
-        )
-
-
-class GroupCommitFunction(torch.autograd.Function):
-    """this is a dummy op with output identical to input.
-    However, it is necessary for marking a timepoint for offload handler to
-    accomplish all synchronizations. Implementing it as a function is necessary
-    because we need to actions in both forward and backward.
+@dataclass
+class _OffloadTensorData:
+    """ 
+        Data of one offloaded tensor. If one tensor is offloaded multiple times,
+        then all the data is stored in the same _OffloadTensorData object.
     """
+    # Pointer to the gpu tensor need to be in Python until
+    # the _copy function in d2h stream is finished.
+    original_gpu_tensor: torch.Tensor 
+    original_gpu_tensor_id: int
+    cpu_tensor: torch.Tensor
+    cpu_tensor_id: int
+    reloaded_gpu_tensor: Optional[torch.Tensor] = None
+    # Number of times the tensor object was packed.
+    # Increased when tensor in in pack_hook and decreased when tensor is reloaded.
+    # When refcount is 0, the _OffloadMeta object is deleted.
+    refcount: int = 0
 
-    @staticmethod
-    def forward(ctx, tensor, cpu_offload_handler):
-        # pylint: disable=missing-function-docstring
-        cpu_offload_handler.on_group_commit_forward()
-        ctx.cpu_offload_handler = cpu_offload_handler
-        # return the identical tensor
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # pylint: disable=missing-function-docstring
-        cpu_offload_handler = ctx.cpu_offload_handler
-        cpu_offload_handler.on_group_commit_backward()
-        return grad_output, None
-
-
-group_prefetch_offload_commit = GroupCommitFunction.apply
-
-
-class SynchronizedGroupOffloadHandler(OffloadHandler):
-    """Offload Handler that offloads/reloads in a synchronized way.
-    The device-to-host and host-to-device copying happen in the same stream
-    as the computation kernels, thus the copying will block computation.
+class _CPUOffloadHandler:
     """
+        This is internal class handling the CPU offloading with simple and intuitive interface.
+        Example of the usage of the API:
 
-    def __init__(
-        self, num_offload_group, tensor_need_offloading_checker=(lambda _: True), debug=False
-    ) -> None:
-        super().__init__()
+        __init__()
 
-        self.num_offload_group = num_offload_group
-        self.tensor_need_offloading_checker = tensor_need_offloading_checker
-        self.debug = debug
+        start_layer_fwd()
+        t1_cpu = offload(t1)
+        tensor_packed(t1_cpu)
+        end_layer_fwd()
 
-        self.groupid_reset()
+        start_layer_fwd()
+        t2_cpu = offload(t2)
+        tensor_packed(t2_cpu)
+        end_layer_fwd()
 
-    def groupid_reset(self):
-        """Groupid reset."""
-        # Data structures to label saved tensors and book-keep their cpu copies.
-        # Currently, on push, create a new cpu tensor and copies; on pop, copies
-        # the tensor back to gpu and deletes the cpu tensor.
-        # These will increment whenever `group_commit()` is invoked
-        self.current_group, self.tensor_count_current_group = (0, 0)
-        self.torch_tensor_count = 0
-        self.tensor_tag_to_state = {}
+        after_fwd_before_bwd()
 
-    def on_group_commit_forward(self):
-        """On group commit forward."""
-        # finishing up with updating current group and tensor count
-        self.current_group += 1  # increment
-        self.tensor_count_current_group = 0  # reset
+        start_layer_bwd()
+        t1_gpu = _manual_reload(t1_cpu)
+        end_layer_bwd()
 
-    def on_group_commit_backward(self):
-        """On group commit backward."""
-        self.current_group -= 1
-        assert self.current_group >= 0
-
-    @staticmethod
-    def offload(src_tensor, pin_memory=True):
-        """Offload."""
-
-        cpu_backup = torch.empty_like(
-            src_tensor,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
-        state = (src_tensor.device, cpu_backup)
-        return state
-
-    @staticmethod
-    def reload(state, non_blocking=None):
-        """Reload."""
-        dev, cpu_backup = state
-        if non_blocking is None:
-            non_blocking = cpu_backup.is_pinned()
-        return cpu_backup.to(dev, non_blocking=non_blocking)
-
-    def tensor_push(self, tensor: torch.Tensor, **kwargs):
-        """Tensor push."""
-        # obtain a unique tensor tag
-        tensor_tag = (self.current_group, self.tensor_count_current_group)
-        self.tensor_count_current_group += 1
-        assert tensor_tag not in self.tensor_tag_to_state
-        if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
-            tensor
-        ):
-            state = SynchronizedGroupOffloadHandler.offload(tensor)
-            self.tensor_tag_to_state[tensor_tag] = state
-        else:
-            # will be offloaded together after group commit
-            self.tensor_tag_to_state[tensor_tag] = tensor
-
-        return tensor_tag
-
-    def tensor_pop(self, tensor_tag, **kwargs):
-        """Tensor pop."""
-        assert tensor_tag in self.tensor_tag_to_state
-        state = self.tensor_tag_to_state.pop(tensor_tag)
-        if isinstance(state, tuple):
-            tensor = SynchronizedGroupOffloadHandler.reload(state)
-        else:
-            tensor = state
-        return tensor
-
-
-class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
-    """Compared to synchronize, this uses more memory because of the buffer but
-    achieves better performance due to the overlapping. D2h and h2d copying are
-    completely hidden behind computation if computation time of a layer is longer
-    than host-device communication time. Bulk offloading with delay and bulk reloading
-    with prefetch are implemented."""
-
-    def __init__(
-        self,
-        num_offload_group,  # must be <= actual number of groups (number of commits)
-        num_model_group,
-        tensor_need_offloading_checker=(lambda t: True),
-        debug=False,
-    ) -> None:
-        super().__init__(
-            num_offload_group=num_offload_group,
-            tensor_need_offloading_checker=tensor_need_offloading_checker,
-            debug=debug,
-        )
-        # Number of layers in the model
-        self.num_layers = num_model_group
-        # Data Structure to maintain reference to activation tensors
-        self.tensor_tag_to_buf = {}
-        # Tracking the number of layers offloaded
-        self.offloaded_group_count = 0
-        # Core data structure that decides the window for offloading
-        self.layer_window_map = {}
-
-        # Logic to make offloading load balance across computation
-        # for optimal CPU/GPU interconnect usage
-        constant = 0
-        for i in range(self.num_offload_group):
-            self.layer_window_map[i] = ((self.num_layers // self.num_offload_group) * (i + 1)) - 1
-            if i < (self.num_layers % self.num_offload_group):
-                self.layer_window_map[i] += i + 1
-                constant = i + 1
-            else:
-                self.layer_window_map[i] += constant
-
-        # allocate streams and events for synchronization
+        start_layer_bwd()
+        t2_gpu = _manual_reload(t2_cpu)
+        end_layer_bwd()
+    """
+    def __init__(self):
         self.d2h_stream = torch.cuda.Stream()
         self.h2d_stream = torch.cuda.Stream()
 
-    def tensor_push(self, tensor: torch.Tensor, **kwargs) -> Any:
+        # this dicts contain the same values, but with different keys
+        self._by_gpu: dict[int, _OffloadTensorData] = {} # key: id(gpu tensor before offload)
+        self._by_cpu: dict[int, _OffloadTensorData] = {} # key: id(cpu copy of the tensor)
 
-        torch_stray_tensor = isinstance(
-            tensor,
-            (
-                torch._subclasses.fake_tensor.FakeTensor,
-                torch._subclasses.functional_tensor.FunctionalTensor,
-            ),
-        )
+        # sanity check
+        self.in_layer_fwd = False
+        self.in_layer_bwd = False
 
-        if not torch_stray_tensor:
-            # obtain a unique tensor tag
-            tensor_tag = (self.current_group, self.tensor_count_current_group)
-            self.tensor_count_current_group += 1
+    def start_layer_fwd(self):
+        """
+            Invoked before the new offloaded layer is started.
+            
+            Behavior:
+            - Wait for the offloading of the previous layer to finish,
+            - Free the memory of the gpu activation tensors of the previous layer
+                  by deleting the references to them.
+        """
+        self.in_layer_fwd = True
+        main_stream = torch.cuda.current_stream()
+        main_stream.wait_stream(self.d2h_stream)
+        
+        for x in self._by_gpu.values():
+            x.original_gpu_tensor = None
 
-            assert tensor_tag not in self.tensor_tag_to_state
+    def end_layer_fwd(self):
+        """
+            Invoked after the offloaded layer is finished.
+        """
+        self.in_layer_fwd = False
 
-            self.tensor_tag_to_state[tensor_tag] = tensor
+    def after_fwd_before_bwd(self):
+        """
+            Invoked once between forward and backward pass.
 
-            if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
-                tensor
-            ):
-                self.tensor_tag_to_buf[tensor_tag] = tensor
+            Behavior:
+            - Wait for the remaining offloading to finish,
+            - Free the memory of the gpu activation tensors of the previous layer
+                  by deleting the references to them,
+            - synchronize the stream for reloading the tensors - to prevent reloading during the forward pass.
+        """
+
+        assert self.in_layer_fwd == False
+        assert self.in_layer_bwd == False
+        
+        main_stream = torch.cuda.current_stream()
+        main_stream.wait_stream(self.d2h_stream)
+        self.h2d_stream.wait_stream(main_stream)
+        
+        for meta in self._by_gpu.values():
+            meta.original_gpu_tensor = None
+
+    def start_layer_bwd(self):
+        """
+            Invoked when the backward pass of offloaded layer is started.
+
+            Behavior:
+            - Record the event for the start of the backward pass of the layer.
+        """
+        self.in_layer_bwd = True
+        self.event_start_bwd_main = torch.cuda.Event()
+        self.event_start_bwd_main.record(torch.cuda.current_stream())
+
+    def end_layer_bwd(self):
+        """
+            Invoked when the backward pass of offloaded layer is finished.
+
+            Behavior:
+            - Stream h2d(reload) waits for the beginning of the backward pass of the layer on main.
+                  This prevents starting the reload of layer n + 2 
+                  before the forward pass of layer n is finished.
+        """
+        self.in_layer_bwd = False
+
+        self.event_start_bwd_main.wait(self.h2d_stream)
+
+    def offload(self, gpu_tensor: torch.Tensor) -> torch.Tensor:
+        """
+            Offload the tensor to the CPU. It returns the CPU copy of the tensor.
+            Can be called between start_layer_fwd and end_layer_fwd.
+
+            Behavior:
+            - If the tensor is already offloaded, increment the reference count.
+            - Synchronize the d2h stream with main - copy should start after the tensor is computed.
+            - Otherwise, create a new empty tensor on the CPU and start async copy from GPU in the d2h stream.
+            - Return the CPU copy of the tensor.
+        """
+        assert self.in_layer_fwd
+
+        if id(gpu_tensor) in self._by_gpu:
+            meta = self._by_gpu[id(gpu_tensor)]
+            return meta.cpu_tensor
         else:
-            tensor_tag = (-1, self.torch_tensor_count)
-            self.torch_tensor_count += 1
-            self.tensor_tag_to_state[tensor_tag] = tensor
-
-        return tensor_tag
-
-    def tensor_pop(self, tensor_tag, **kwargs):
-        """Tensor pop."""
-        assert tensor_tag in self.tensor_tag_to_state
-        tensor = self.tensor_tag_to_state.pop(tensor_tag)
-        self.tensor_tag_to_buf.pop(tensor_tag, None)
-
-        # the tensor should have been copied back in on_group_commit_backward()
-        # which invokes bulk_reload_group.
-        assert not isinstance(tensor, tuple)
-        return tensor
-
-    def bulk_offload_group(self, group_to_offload):
-        """Bulk offload group."""
-        with torch.cuda.stream(self.d2h_stream):
-            for tensor_tag, state in self.tensor_tag_to_state.items():
-                group_id, _ = tensor_tag
-                if group_id == group_to_offload:
-                    assert not isinstance(state, tuple)
-
-                    tensor_on_device = state
-                    # if offload, return the reference to cpu copy
-                    if self.tensor_need_offloading_checker(tensor_on_device):
-                        state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
-                    self.tensor_tag_to_state[tensor_tag] = state
-
-    def synchronize_on_group_commit_forward(self, current_group):
-        """Synchronize on group commit forward."""
-
-        # For the first group, kickstart the offload after we have
-        # the first compute completion
-        if current_group == 0:
+            cpu_tensor = torch.empty_like(gpu_tensor, device="cpu", pin_memory=True)
+            self._by_cpu[id(cpu_tensor)] = _OffloadTensorData(gpu_tensor, id(gpu_tensor), cpu_tensor, id(cpu_tensor))
+            self._by_gpu[id(gpu_tensor)] = self._by_cpu[id(cpu_tensor)]
+            
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
-            self.bulk_offload_group(current_group)
+            with torch.cuda.stream(self.d2h_stream):
+                cpu_tensor.copy_(gpu_tensor, non_blocking=True)
+                
+            return cpu_tensor
 
-        # Window map data structure helps us synchronize based on number
-        # of layers offloaded
-        if self.layer_window_map[self.offloaded_group_count] == current_group:
+    def reload(self, cpu_tensor: torch.Tensor) -> torch.Tensor:
+        """
+            Reload the tensor from the CPU to the GPU. It returns the GPU copy of the tensor
+            and is synchronized with the main PyTorch stream.
+            Can be called between start_layer_bwd and end_layer_bwd.
 
-            # Stream synchronization both ways
-            self.d2h_stream.wait_stream(torch.cuda.current_stream())
-            torch.cuda.current_stream().wait_stream(self.d2h_stream)
+            Behavior:
+            - Decrement the reference count.
+            - If the reference count is 0, delete the _OffloadTensorData object.
+            - Create a new empty tensor on the GPU and start async copy from CPU in the h2d stream.
+            - Synchronize the h2d stream with main - returned tensor can be used on the main stream.
+            - Return the GPU copy of the tensor.
+        """
+        assert self.in_layer_bwd
 
-            # Time to free the activation memory after usage
-            for tensor_tag, _ in self.tensor_tag_to_buf.items():
-                if tensor_tag[0] == self.offloaded_group_count:
-                    # Release the pointer to the tensor
-                    self.tensor_tag_to_buf[tensor_tag] = None
 
-            # Time to offload the next group
-            if self.offloaded_group_count < (self.num_offload_group - 1):
-                self.bulk_offload_group(self.offloaded_group_count + 1)
+        meta = self._by_cpu[id(cpu_tensor)]
+        meta.refcount -= 1
+        if meta.refcount == 0:
+            self._by_cpu.pop(meta.cpu_tensor_id)
+            self._by_gpu.pop(meta.original_gpu_tensor_id)
 
-            # Increment the offload group count to keep track
-            self.offloaded_group_count += 1
-
-    def on_group_commit_forward(self):
-        """This function will cause host device synchronization"""
-        # handle synchronization events
-        self.synchronize_on_group_commit_forward(self.current_group)
-
-        super().on_group_commit_forward()
-
-    def bulk_reload_group(self, group_to_reload):
-        """Bulk reload group."""
-        assert group_to_reload < self.num_offload_group
-
+        meta.reloaded_gpu_tensor = torch.empty_like(cpu_tensor, device="cuda")
         with torch.cuda.stream(self.h2d_stream):
-            # move back tensors
-            for tensor_label, state in self.tensor_tag_to_state.items():
-                group_id, _ = tensor_label
-                if group_id == group_to_reload:
-                    if isinstance(state, tuple):
-                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(state)
-                        self.tensor_tag_to_state[tensor_label] = recovered_tensor
+            meta.reloaded_gpu_tensor.copy_(cpu_tensor, non_blocking=True)
+        self.h2d_stream.wait_stream(torch.cuda.current_stream())
+            
+        return meta.reloaded_gpu_tensor
 
-    def on_group_commit_backward(self):
-        # first decrement the current group.
-        # after last commit in forward, the group will +1; in backward it -1.
-        # Finally it should be decremented to 0.
-        self.current_group -= 1
-        assert self.current_group >= 0
+    def tensor_packed(self, cpu_tensor: torch.Tensor):
+        """
+            Called when the tensor is packed. We use the fact that number of times the tensor was packed
+            is equal to the number of times the tensor is reloaded.
 
-        # Layer window data structure helps us to reload at right times
-        if self.layer_window_map[self.offloaded_group_count - 1] == self.current_group:
+            Behavior:
+            - Increment the reference count.
+        """
+        self._by_cpu[id(cpu_tensor)].refcount += 1
 
-            # Stream synchronization both ways
-            self.h2d_stream.wait_stream(torch.cuda.current_stream())
-            torch.cuda.current_stream().wait_stream(self.h2d_stream)
-
-            # Time to reload the next group
-            self.bulk_reload_group(self.offloaded_group_count - 1)
-
-            # Decrease the offloading group counter
-            self.offloaded_group_count -= 1 if self.offloaded_group_count > 1 else 0
-
-        # Last group computation needs to wait till all the reloads complete
-        if self.current_group == 0:
-            torch.cuda.current_stream().wait_stream(self.h2d_stream)
-            self.offloaded_group_count = 0
-
-
-def get_cpu_offload_context(
-    enabled: bool = False,
-    num_layers: int = 1,
-    model_layers: int = 1,
-    offload_activations: bool = True,
-    offload_weights: bool = False,
-):
+class SwitchOffloadHandler(contextlib.ContextDecorator):
     """
-    This function returns the CPU Offload context and the synchronizer function that needs to be
-    used after every transformer layer. Returns `nullcontext()` if offloading is not enabled.
-
-    Usage:
-
-    .. code-block:: python
-
-        cpu_offload_context, cpu_offload_synchronizer = get_cpu_offload_context(enabled=True)
-
-        with cpu_offload_context:
-            te_layer.forward(inp_tensor)
-        cpu_offload_synchronizer()
-
-    Parameters
-    ----------
-    enabled: bool, default = `False`
-             When set to True, CPU Offloading functionality is enabled.
-    num_layers: int, default = 1
-                Determines the number of transformer layers
-                you want to offload activations/weights for.
-    model_layers: int, default = 1
-                  Number of layers in the model that will be used under this context.
-    offload_activations: bool, default = `True`
-                         When set to `True`, offloads the activations for the TE layer.
-    offload_weights: bool, default = `True`
-                     When set to `True`, offloads the weights for the TE layer.
-
+        Context manager to change the current CPU offload handler.
     """
+    def __init__(self, handler: _CPUOffloadHandler):
+        self.handler = handler
 
-    if not offload_weights and not offload_activations:
-        raise ValueError(
-            "CPU Offloading is enabled while it is not "
-            "mentioned what to offload (weights/activations)"
-        )
+    def __enter__(self):
+        global CURRENT_CPU_OFFLOAD_HANDLER
+        self.previous_cls = CURRENT_CPU_OFFLOAD_HANDLER
+        CURRENT_CPU_OFFLOAD_HANDLER = self.handler
 
-    if offload_weights:
-        import warnings
+    def __exit__(self, *args):
+        global CURRENT_CPU_OFFLOAD_HANDLER
+        CURRENT_CPU_OFFLOAD_HANDLER = self.previous_cls
+        
 
-        warnings.warn(
-            "Offloading weights is deprecated. Using offload_weights=True does not have any"
-            " effect.",
-            DeprecationWarning,
-        )
+CURRENT_CPU_OFFLOAD_HANDLER = None
 
-        # Weights offloading is deprecated but we maintain backward compatibility by doing nothing.
-        if not offload_activations:
-            return nullcontext(), lambda x: x
+class CPUOffload:
+    """
+        CPU Offloading allows to offload the activation of the layer during the forward pass,
+        and reload it during the backward pass. To use it, create object of the CPU Offload class, 
+        for example `cpu_offload = CPUOffload()`. Then wrap computation with `y = cpu_offload(layer, *args, **kwargs)`,
+        to offload the activation of the layer. Notice that you can mix offloaded layers and non-offloaded layers.
+        The function `cpu_offload.sync_before_bwd()` should be called between the forward and backward.
 
-    def tensor_need_offloading_checker_activations(tensor):
-        return hasattr(tensor, "activation_offloading")
+        Synchronization:
+        ----------------
+        The offloading is performed asynchronously with respect to the main stream.
+        The activation offloading of one computation needs to finish before offloading of the next computation can start.
+        This ensures that only one copy of the activation memory of the offloaded layer is present in the memory during forward pass.
+        During the backward pass, the activation of the offloaded layer n is reloaded since the start of the backward pass of the layer n + 2,
+        thus 2 portions of offloaded activations can be present in the memory at the same time.
 
-    tensor_need_offloading_checker = tensor_need_offloading_checker_activations
+        We encourage to profile the code using Nsight Systems to ensure full overlap of the offloading and computation.
 
-    cpu_offload_handler = AsyncDoubleBufferGroupOffloadHandler(
-        num_offload_group=num_layers,
-        num_model_group=model_layers,
-        tensor_need_offloading_checker=tensor_need_offloading_checker,
-    )
+        Example:
+        --------
+        ```python
+        # ...
+        cpu_offload = CPUOffload()
 
-    def group_prefetch_offload_commit_async(tensor):
-        return group_prefetch_offload_commit(tensor, cpu_offload_handler)
+        x2 = cpu_offload(layer1, x1)
+        x3 = layer2(x2)
+        y = cpu_offload(layer3, x3)
 
-    if enabled:
-        return (
-            CpuOffloadHookWithOffloadHandler(offload_handler=cpu_offload_handler),
-            group_prefetch_offload_commit_async,
-        )
-    return nullcontext(), group_prefetch_offload_commit_async
+        cpu_offload.sync_before_bwd()
+
+        y.sum().backward()
+
+        # ...
+        
+        ```
+        
+    """
+    def __init__(self):
+        self.handler = _CPUOffloadHandler()
+        handler = self.handler
+        self.phase = "forward"
+
+        class _LayerHooksBefore(torch.autograd.function.Function):
+            """
+                This autograd function is used to call CPUOffload api calls both in forward and backward pass.
+            """
+            @staticmethod
+            def forward(ctx, *args):
+                handler.start_layer_fwd()
+                self.phase = "forward"
+                return args
+
+            @staticmethod
+            def backward(ctx, *args):
+                handler.end_layer_bwd()
+                if self.phase == "forward":
+                    raise RuntimeError("sync_before_bwd should be called between forward and backward")
+                return args
+            
+        self.layer_hooks_before = _LayerHooksBefore
+
+        class _LayerHooksAfter(torch.autograd.Function):
+            """
+                This autograd function is used to call CPUOffload api calls both in forward and backward pass.
+            """
+            @staticmethod
+            def forward(ctx, *args):
+                handler.end_layer_fwd()
+                self.phase = "forward"
+                return args[0] if len(args) == 1 else args
+
+            @staticmethod
+            def backward(ctx, *args):
+                handler.start_layer_bwd()
+                if self.phase == "forward":
+                    raise RuntimeError("sync_before_bwd should be called between forward and backward")
+                return args[0] if len(args) == 1 else args
+
+        self.layer_hooks_after = _LayerHooksAfter
+    
+    def _pack_hook(self, tensor: torch.Tensor) -> tuple[torch.Tensor, _CPUOffloadHandler, bool]:
+        """
+            If tensor needs to be offloaded - if it has activation_offloading attribute - offload it.
+
+            Returns:
+            - tensor: the offloaded or non-offloaded tensor.
+            - handler: the offload handler or None - it is needed to restore the tensor in the backward pass.
+            - manual_reload: whether the tensor should be reloaded during _unpack_hook or later manually.
+        """
+
+        if hasattr(tensor, "activation_offloading"):
+            if tensor.device.type == "cpu":
+                # If tensor was offloaded with manual_reload=True,
+                # it is substituted with a CPU tensor inside prepare_for_saving.
+                output = (tensor, CURRENT_CPU_OFFLOAD_HANDLER, True)
+            else:  
+                # If tensor was offloaded with manual_reload=False,
+                # it is offloaded again - handler returns the same CPU tensor, so reloading does not happen twice.
+                output = (self.handler.offload(tensor), CURRENT_CPU_OFFLOAD_HANDLER, False)
+            
+            self.handler.tensor_packed(output[0])
+            return output
+        else:
+            return (tensor, None, False)
+    
+    def _unpack_hook(self, tensor_handler: tuple[torch.Tensor, _CPUOffloadHandler, bool]):
+        """
+            Unpacks the tensor and the offload handler.
+        """
+        tensor, handler, manual_reload = tensor_handler
+        if handler is not None:
+            tensor.offload_handler = handler
+            if not manual_reload:
+                return self.handler.reload(tensor)
+            else:
+                return tensor
+        else:
+            # standard, non-offloaded tensor
+            return tensor
+
+    def __call__(self, func, *args, **kwargs):
+        """
+           Wraps the function, which activation is offloaded.
+
+           Parameters
+           ----------
+           func : torch.nn.Module
+               The function, which activation is offloaded.
+           *args : torch.Tensor
+               The arguments to the function.
+           **kwargs : dict
+               The keyword arguments to the function.
+        """
+        with saved_tensors_hooks(self._pack_hook, self._unpack_hook), \
+            SwitchOffloadHandler(self.handler):
+            args = self.layer_hooks_before.apply(*args)
+            out = func(*args, **kwargs)
+            out = self.layer_hooks_after.apply(out)
+        return out
+
+    def sync_before_bwd(self):
+        """
+            This function should be called between the forward and backward pass to ensure proper synchronization.
+            Not calling it will result in an error.
+        """
+        self.phase = "backward"
+        self.handler.after_fwd_before_bwd()

@@ -112,6 +112,11 @@ class Float8BlockwiseQTensorBase:
         """Get this Tensor's data."""
         return self._rowwise_data, self._columnwise_data
 
+    def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
+        """Set this Tensor's data."""
+        self._rowwise_data = rowwise_data
+        self._columnwise_data = columnwise_data
+
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""
         if columnwise_dq.dim() < 2:

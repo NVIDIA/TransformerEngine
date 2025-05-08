@@ -31,7 +31,24 @@ def prepare_for_saving(
             t, t_obj = tensor.prepare_for_saving()
             tensor_list.extend(t)
             tensor_objects_list.append(t_obj)
-    return tensor_list, tensor_objects_list
+    final_tensor_list = []
+
+    # Logic for the CPU offloading. 
+    # If the tensor was offloaded with manual_reload=True,
+    # it is substituted with a CPU tensor inside prepare_for_saving.
+
+    for t in tensor_list:
+        if hasattr(t, "manual_reload"):
+            if t.manual_reload:
+                tensor = t.offload_handler.offload(t)
+                tensor.activation_offloading = True
+                final_tensor_list.append(tensor)
+            else:
+                final_tensor_list.append(t)
+        else:
+            final_tensor_list.append(t)
+
+    return final_tensor_list, tensor_objects_list
 
 
 def restore_from_saved(
@@ -255,7 +272,7 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False, device: Optional[torch.device] = None):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -266,7 +283,7 @@ class QuantizedTensor(torch.Tensor):
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
-            device=torch.cuda.current_device(),
+            device=torch.cuda.current_device() if device is None else device,
         )
 
         return instance

@@ -127,6 +127,11 @@ class Float8TensorBase:
     def get_data_tensors(self):
         """Get this Tensor's data."""
         return self._data, self._transpose
+    
+    def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
+        """Set this Tensor's data."""
+        self._data = data
+        self._transpose = transpose
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""

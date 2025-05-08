@@ -67,7 +67,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, offload
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -478,7 +478,7 @@ class _LayerNormMLP(torch.autograd.Function):
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
         else:
             if cpu_offloading:
-                mark_activation_offload(
+                offload(
                     inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
                 )
 

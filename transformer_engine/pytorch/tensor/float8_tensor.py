@@ -483,6 +483,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             else None
         )
         new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
+        device = new_scale_inv.device
         return Float8Tensor(
             shape=self.shape,
             dtype=self.dtype,
@@ -491,6 +492,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             fp8_dtype=self._fp8_dtype,
             data_transpose=new_transpose,
             quantizer=self._quantizer,
+            device=device,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
@@ -631,12 +633,12 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             # Just copy FP8 attrs if copying between Float8Tensors
             if isinstance(src, Float8Tensor) and isinstance(dst, Float8Tensor):
                 if dst._data is not None:
-                    dst._data.copy_(src._data)
+                    dst._data.copy_(src._data, *args[2:])
                 if dst._scale_inv is not None:
-                    dst._scale_inv.copy_(src._scale_inv)
+                    dst._scale_inv.copy_(src._scale_inv, *args[2:])
                 if dst._transpose is not None and not dst._transpose_invalid:
                     if not src._transpose_invalid:
-                        dst._transpose.copy_(src._transpose)
+                        dst._transpose.copy_(src._transpose, *args[2:])
                     else:
                         dst._create_transpose()
                 return dst

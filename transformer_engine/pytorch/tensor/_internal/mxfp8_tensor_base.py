@@ -130,6 +130,11 @@ class MXFP8TensorBase:
     def get_data_tensors(self):
         """Get this Tensor's data."""
         return self._rowwise_data, self._columnwise_data
+    
+    def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
+        """Set this Tensor's data."""
+        self._rowwise_data = rowwise_data
+        self._columnwise_data = columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
