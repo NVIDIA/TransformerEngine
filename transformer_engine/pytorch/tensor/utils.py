@@ -16,12 +16,6 @@ from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantize
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 
 
-@functools.lru_cache(maxsize=None)
-def _empty_tensor() -> torch.Tensor:
-    """Get tensor with no entries and no data"""
-    return torch.Tensor()
-
-
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
     r"""Change a quantized tensor's data buffer while preserving values
 
