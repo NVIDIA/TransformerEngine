@@ -18,7 +18,7 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
-from ...utils import is_non_tn_fp8_gemm_supported
+from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -98,7 +98,7 @@ class Float8TensorBase(QuantizedTensorBase):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         for t in (self._data, self._transpose, self._scale_inv):
             if t is not None:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
         self._transpose_invalid = True
 
     def get_metadata(self) -> Dict[str, Any]:
