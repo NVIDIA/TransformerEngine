@@ -997,6 +997,7 @@ class Linear(TransformerEngineBaseModule):
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
         name: Optional[str] = None,
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 

@@ -501,6 +501,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
+        layer_number: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -515,6 +516,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
+
         assert (
             not ub_overlap_rs and not ub_overlap_ag
         ), "GroupedLinear doesn't support Userbuffer overlap."
