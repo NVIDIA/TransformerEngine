@@ -26,10 +26,10 @@ fp8_recipes = [
     recipe.Float8BlockScaling(),
 ]
 
-SIZE = 512
+SIZE = 64
 NUM_HEADS = 8
 NUM_LAYERS = 5
-EPSILON = 0.1
+EPSILON = 0.05
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
@@ -48,7 +48,7 @@ model_types = {
         SIZE, NUM_HEADS, params_dtype=torch.bfloat16
     ),
     "transformer_layer": lambda: te.TransformerLayer(
-        SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
+         SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
     ),
 }
 
@@ -97,7 +97,8 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
         ), offload_context:
             tensor = model(tensor)
         tensor = sync_function(tensor)
-
+    
+    import gc; gc.collect()
     max_mem_used = torch.cuda.memory_allocated() / (1024**2)
     torch.cuda.synchronize()
 
@@ -119,7 +120,6 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     the difference being the size of the FP8 cache that is not offloaded to the CPU.
     We also expect this memory consumption to be smaller than in scenario (1).
     """
-
     model_cls = model_types[model_key]
     models_list = [model_cls() for _ in range(NUM_LAYERS)]
 
