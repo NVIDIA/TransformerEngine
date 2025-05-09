@@ -60,12 +60,6 @@ _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
-_QUANTIZED_WEIGHT_TENSOR_TYPES = (
-    QuantizedTensor,
-    Float8TensorBase,
-    MXFP8TensorBase,
-    Float8BlockwiseQTensorBase,
-)
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -1393,7 +1387,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = self.fp8_meta["recipe"]
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, _QUANTIZED_WEIGHT_TENSOR_TYPES) and not isinstance(
+            if isinstance(tensor, QuantizedTensorBase) and not isinstance(
                 tensor, recipe.expected_tensor_class
             ):
                 raise RuntimeError(
