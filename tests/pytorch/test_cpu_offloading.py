@@ -55,7 +55,7 @@ model_types = {
 }
 
 def _get_input():
-    return torch.empty((1, SIZE, SIZE), dtype=torch.bfloat16, requires_grad=True).cuda()
+    return torch.empty((8, SIZE, SIZE), dtype=torch.bfloat16, requires_grad=True).cuda()
 
 def test_auto_offload():
     def run(offload_enabled):
@@ -70,8 +70,10 @@ def test_auto_offload():
             return y
 
         cpu_offload = CPUOffload()
+        if offload_enabled:
+            compute = cpu_offload(compute)
 
-        y = cpu_offload(compute, inp)
+        y = compute(inp)
         cpu_offload.sync_before_bwd()
 
         memory_allocated = torch.cuda.memory_allocated() / (1024**2)
@@ -145,8 +147,10 @@ def test_manual_offload(x_tensor_type):
             return Function.apply(input_tensor, x, offload_enabled)
 
         cpu_offload = CPUOffload()
+        if offload_enabled:
+            compute = cpu_offload(compute)
 
-        y = cpu_offload(compute, inp)
+        y = compute(inp)
         cpu_offload.sync_before_bwd()
 
         memory_allocated = torch.cuda.memory_allocated() / (1024**2)
@@ -189,22 +193,26 @@ def test_cpu_offload_on_layers(layer_type, fp8_recipe):
     model = model_types[layer_type]()
 
     def _get_memory(offload_enabled):
-        def comp():
-            inp = _get_input()
+        def comp(inp):
             with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
                 y = model(inp)
             return y
+        def run_comp(f):
+            inp = _get_input()
+            return f(inp)
         cpu_offload = CPUOffload()
         if offload_enabled:
-            y = cpu_offload(comp)
-            cpu_offload.sync_before_bwd()
-        else:
-            y = comp()
+            comp = cpu_offload(comp)
+        y = run_comp(comp)
+        cpu_offload.sync_before_bwd()
+        
         memory_allocated = torch.cuda.memory_allocated() / (1024**2)
-        #y.sum().backward()
+        
+        y.sum().backward()
         return memory_allocated
     
     # warm up
+    _get_memory(False)
     _get_memory(True)
     _get_memory(False)
     initial_memory = torch.cuda.memory_allocated() / (1024**2)

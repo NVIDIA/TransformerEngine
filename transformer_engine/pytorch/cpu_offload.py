@@ -334,9 +334,12 @@ class CPUOffload:
         # ...
         cpu_offload = CPUOffload()
 
-        x2 = cpu_offload(layer1, x1)
+        layer1 = cpu_offload(layer1)
+        layer3 = cpu_offload(layer3)
+
+        x2 = layer1(x1)
         x3 = layer2(x2)
-        y = cpu_offload(layer3, x3)
+        y = layer3(x3)
 
         cpu_offload.sync_before_bwd()
 
@@ -430,25 +433,24 @@ class CPUOffload:
             # standard, non-offloaded tensor
             return tensor
 
-    def __call__(self, func, *args, **kwargs):
+    def __call__(self, func):
         """
            Wraps the function, which activation is offloaded.
 
            Parameters
            ----------
-           func : torch.nn.Module
-               The function, which activation is offloaded.
-           *args : torch.Tensor
-               The arguments to the function.
-           **kwargs : dict
-               The keyword arguments to the function.
+           func : Callable
+               The function, which activation is offloaded. All TE layers called by this function
+               will be affected by the offloading. It does not impact non-TE layers.
         """
-        with saved_tensors_hooks(self._pack_hook, self._unpack_hook), \
-            SwitchOffloadHandler(self.handler):
-            args = self.layer_hooks_before.apply(*args)
-            out = func(*args, **kwargs)
-            out = self.layer_hooks_after.apply(out)
-        return out
+        def wrapper(*args, **kwargs):
+            with saved_tensors_hooks(self._pack_hook, self._unpack_hook), \
+                SwitchOffloadHandler(self.handler):
+                args = self.layer_hooks_before.apply(*args)
+                out = func(*args, **kwargs)
+                out = self.layer_hooks_after.apply(out)
+            return out
+        return wrapper
 
     def sync_before_bwd(self):
         """
