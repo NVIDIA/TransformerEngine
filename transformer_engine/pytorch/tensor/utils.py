@@ -5,7 +5,6 @@
 """Helper functions for using fp8 tensors as weights"""
 
 import torch
-
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
