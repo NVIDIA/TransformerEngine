@@ -170,11 +170,19 @@ Docker (Recommended)
 ^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
+
+
 For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
     docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.04-py3
+
+For example to use the NGC JAX container interactively,
+
+.. code-block:: bash
+
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.04-py3
 
 Where 25.04 (corresponding to April 2025 release) is the container version.
 
