@@ -486,7 +486,6 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         is_2D_scaled=False,
                         requires_grad=act_grad.requires_grad,
                     )
-                    print('quantizer on permutation', quantizer)
                 elif mxfp8_recipe:
                     act_grad = MXFP8Tensor(
                         shape=act_grad.shape,
