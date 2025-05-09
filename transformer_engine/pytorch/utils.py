@@ -11,7 +11,6 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
 import torch
 
-import transformer_engine.pytorch.cpp_extensions as ext
 from . import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
