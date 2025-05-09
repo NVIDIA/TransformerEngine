@@ -48,7 +48,7 @@ model_types = {
         SIZE, NUM_HEADS, params_dtype=torch.bfloat16
     ),
     "transformer_layer": lambda: te.TransformerLayer(
-         SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
+        SIZE, SIZE, NUM_HEADS, params_dtype=torch.bfloat16, hidden_dropout=0.0
     ),
 }
 
@@ -97,8 +97,10 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
         ), offload_context:
             tensor = model(tensor)
         tensor = sync_function(tensor)
-    
-    import gc; gc.collect()
+
+    import gc
+
+    gc.collect()
     max_mem_used = torch.cuda.memory_allocated() / (1024**2)
     torch.cuda.synchronize()
 

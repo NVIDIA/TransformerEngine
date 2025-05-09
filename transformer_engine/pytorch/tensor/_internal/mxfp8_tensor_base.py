@@ -134,7 +134,12 @@ class MXFP8TensorBase(QuantizedTensorBase):
     def get_data_tensors(self, scaling_factors=False):
         """Get this Tensor's data."""
         if scaling_factors:
-            return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
+            return (
+                self._rowwise_data,
+                self._columnwise_data,
+                self._rowwise_scale_inv,
+                self._columnwise_scale_inv,
+            )
         return self._rowwise_data, self._columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
