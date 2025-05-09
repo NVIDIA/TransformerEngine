@@ -6,7 +6,6 @@
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
-#include "transformer_engine/transformer_engine.h"
 
 /***************************************************************************************************
  * KV Cache: Copy new KV tokens to the KV cache
@@ -172,6 +171,57 @@ void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache
                                        max_seq_len, max_pages_per_seq, is_non_paged, stream););
 }
 
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
+                                  int max_seq_len, int h, int d, cudaStream_t stream) {
+  using namespace transformer_engine;
+  convert_thd_to_bshd_kernel<<<16, 256, 0, stream>>>(
+      reinterpret_cast<scalar_t *>(tensor.data.dptr),
+      reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
+}
+
+void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
+                         int max_seq_len, cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  auto tensor_shape = tensor.shape();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
+      new_tensor.dtype(), dtype,
+      convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len,
+                                          tensor_shape[1], tensor_shape[2], stream););
+}
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
+                                  int max_seq_len, int h, int d, cudaStream_t stream) {
+  using namespace transformer_engine;
+  convert_bshd_to_thd_kernel<<<16, 256, 0, stream>>>(
+      reinterpret_cast<scalar_t *>(tensor.data.dptr),
+      reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
+      reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
+}
+
+void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
+                         cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  auto tensor_shape = tensor.shape();
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(
+      tensor.dtype(), dtype,
+      convert_bshd_to_thd_launcher<dtype>(tensor, new_tensor, cu_seqlens, tensor_shape[0],
+                                          tensor_shape[1], tensor_shape[2], tensor_shape[3],
+                                          stream););
+}
+
 }  // namespace kv_cache
 }  // namespace transformer_engine
 
@@ -189,4 +239,24 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
       *reinterpret_cast<Tensor *>(page_table), *reinterpret_cast<Tensor *>(cu_new_lens),
       *reinterpret_cast<Tensor *>(cu_cached_lens), qkv_format, b, max_ctx_len, max_seq_len,
       max_pages_per_seq, is_non_paged, stream);
+}
+
+void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int b, int max_seq_len, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_thd_to_bshd);
+  using namespace transformer_engine;
+
+  kv_cache::convert_thd_to_bshd(*reinterpret_cast<Tensor *>(tensor),
+                                *reinterpret_cast<Tensor *>(cu_seqlens),
+                                *reinterpret_cast<Tensor *>(new_tensor), b, max_seq_len, stream);
+}
+
+void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int t, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_bshd_to_thd);
+  using namespace transformer_engine;
+
+  kv_cache::convert_bshd_to_thd(*reinterpret_cast<Tensor *>(tensor),
+                                *reinterpret_cast<Tensor *>(cu_seqlens),
+                                *reinterpret_cast<Tensor *>(new_tensor), t, stream);
 }

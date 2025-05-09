@@ -500,10 +500,10 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
   std::vector<int64_t> shape = {3, qkvi.size(1), qkvi.size(0), qkvi.size(2), qkvi.size(3)};
   at::Tensor qkv = at::empty(shape, at::CUDA(qkvi.scalar_type()));
 
-  auto qkvi_cu = makeTransformerEngineTensor(qkvi);
-  auto qkv_cu = makeTransformerEngineTensor(qkv);
+  auto te_qkvi = makeTransformerEngineTensor(qkvi);
+  auto te_qkv = makeTransformerEngineTensor(qkv);
 
-  nvte_prepare_flash_attn_fwd(qkvi_cu.data(), qkv_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_prepare_flash_attn_fwd(te_qkvi.data(), te_qkv.data(), at::cuda::getCurrentCUDAStream());
 
   return qkv;
 }
@@ -527,12 +527,12 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   std::vector<int64_t> shape = {q.size(1), q.size(0), q.size(2), 3 * q.size(3)};
   at::Tensor qkv = at::empty(shape, at::CUDA(q.scalar_type()));
 
-  auto q_cu = makeTransformerEngineTensor(q);
-  auto k_cu = makeTransformerEngineTensor(k);
-  auto v_cu = makeTransformerEngineTensor(v);
-  auto qkv_cu = makeTransformerEngineTensor(qkv);
+  auto te_q = makeTransformerEngineTensor(q);
+  auto te_k = makeTransformerEngineTensor(k);
+  auto te_v = makeTransformerEngineTensor(v);
+  auto te_qkv = makeTransformerEngineTensor(qkv);
 
-  nvte_prepare_flash_attn_bwd(q_cu.data(), k_cu.data(), v_cu.data(), qkv_cu.data(),
+  nvte_prepare_flash_attn_bwd(te_q.data(), te_k.data(), te_v.data(), te_qkv.data(),
                               at::cuda::getCurrentCUDAStream());
 
   return qkv;
@@ -572,12 +572,12 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
   shape[seq_dim] /= 2;
   at::Tensor half = at::empty(shape, at::CUDA(tensor.scalar_type()));
 
-  auto tensor_cu = makeTransformerEngineTensor(tensor);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  auto half_cu = makeTransformerEngineTensor(half);
+  auto te_tensor = makeTransformerEngineTensor(tensor);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_half = makeTransformerEngineTensor(half);
 
-  nvte_thd_read_half_tensor(tensor_cu.data(), cu_seqlens_cu.data(), half_cu.data(), half_idx,
-                            at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_read_half_tensor(te_tensor.data(), te_cu_seqlens.data(), te_half.data(), half_idx,
+                               at::cuda::getCurrentCUDAStream());
 
   return half;
 }
@@ -624,12 +624,13 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
     NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
   }
 
-  auto lse_cu = makeTransformerEngineTensor(lse);
-  auto lse_per_step_cu = makeTransformerEngineTensor(lse_per_step);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
+  auto te_lse = makeTransformerEngineTensor(lse);
+  auto te_lse_per_step = makeTransformerEngineTensor(lse_per_step);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
 
-  nvte_thd_second_half_lse_correction(lse_cu.data(), lse_per_step_cu.data(), cu_seqlens_cu.data(),
-                                      lse_packed, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_second_half_lse_correction(te_lse.data(), te_lse_per_step.data(),
+                                         te_cu_seqlens.data(), lse_packed,
+                                         at::cuda::getCurrentCUDAStream());
 }
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
@@ -669,12 +670,13 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
 
   at::Tensor half_lse = at::zeros(shape, at::CUDA(lse.scalar_type()));
 
-  auto lse_cu = makeTransformerEngineTensor(lse);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  auto half_lse_cu = makeTransformerEngineTensor(half_lse);
+  auto te_lse = makeTransformerEngineTensor(lse);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_half_lse = makeTransformerEngineTensor(half_lse);
 
-  nvte_thd_read_second_half_lse(lse_cu.data(), cu_seqlens_cu.data(), half_lse_cu.data(), lse_packed,
-                                second_half_lse_seqlen, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_read_second_half_lse(te_lse.data(), te_cu_seqlens.data(), te_half_lse.data(),
+                                   lse_packed, second_half_lse_seqlen,
+                                   at::cuda::getCurrentCUDAStream());
 
   return half_lse;
 }
@@ -689,14 +691,14 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
 
-  auto out_cu = makeTransformerEngineTensor(out);
-  auto out_per_step_cu = makeTransformerEngineTensor(out_per_step);
-  auto lse_cu = makeTransformerEngineTensor(lse);
-  auto lse_per_step_cu = makeTransformerEngineTensor(lse_per_step);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  nvte_thd_out_correction(out_cu.data(), out_per_step_cu.data(), lse_cu.data(),
-                          lse_per_step_cu.data(), cu_seqlens_cu.data(), only_second_half,
-                          lse_packed, at::cuda::getCurrentCUDAStream());
+  auto te_out = makeTransformerEngineTensor(out);
+  auto te_out_per_step = makeTransformerEngineTensor(out_per_step);
+  auto te_lse = makeTransformerEngineTensor(lse);
+  auto te_lse_per_step = makeTransformerEngineTensor(lse_per_step);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  nvte_cp_thd_out_correction(te_out.data(), te_out_per_step.data(), te_lse.data(),
+                             te_lse_per_step.data(), te_cu_seqlens.data(), only_second_half,
+                             lse_packed, at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************
@@ -709,11 +711,12 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
 
-  auto grad_cu = makeTransformerEngineTensor(grad);
-  auto grad_per_step_cu = makeTransformerEngineTensor(grad_per_step);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  nvte_thd_grad_correction(grad_cu.data(), grad_per_step_cu.data(), cu_seqlens_cu.data(),
-                           first_half.data(), second_half.data(), at::cuda::getCurrentCUDAStream());
+  auto te_grad = makeTransformerEngineTensor(grad);
+  auto te_grad_per_step = makeTransformerEngineTensor(grad_per_step);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  nvte_cp_thd_grad_correction(te_grad.data(), te_grad_per_step.data(), te_cu_seqlens.data(),
+                              te_first_half.data(), te_second_half.data(),
+                              at::cuda::getCurrentCUDAStream());
 }
 
 /***************************************************************************************************
@@ -737,11 +740,11 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
   std::vector<int64_t> shape = {total_tokens / world_size};
   at::Tensor output = at::empty(shape, at::CUDA(at::ScalarType::Int));
 
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  auto output_cu = makeTransformerEngineTensor(output);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_output = makeTransformerEngineTensor(output);
 
-  nvte_thd_get_partitioned_indices(cu_seqlens_cu.data(), output_cu.data(), total_tokens, world_size,
-                                   rank, at::cuda::getCurrentCUDAStream());
+  nvte_cp_thd_get_partitioned_indices(te_cu_seqlens.data(), te_output.data(), total_tokens,
+                                      world_size, rank, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
@@ -759,11 +762,11 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
   std::vector<int64_t> shape = {b, max_seq_len, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
 
-  auto tensor_cu = makeTransformerEngineTensor(tensor);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  auto new_tensor_cu = makeTransformerEngineTensor(new_tensor);
+  auto te_tensor = makeTransformerEngineTensor(tensor);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_new_tensor = makeTransformerEngineTensor(new_tensor);
 
-  nvte_convert_thd_to_bshd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), b,
+  nvte_convert_thd_to_bshd(te_tensor.data(), te_cu_seqlens.data(), te_new_tensor.data(), b,
                            max_seq_len, at::cuda::getCurrentCUDAStream());
 
   return new_tensor;
@@ -783,11 +786,11 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) 
   std::vector<int64_t> shape = {t, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
 
-  auto tensor_cu = makeTransformerEngineTensor(tensor);
-  auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens);
-  auto new_tensor_cu = makeTransformerEngineTensor(new_tensor);
+  auto te_tensor = makeTransformerEngineTensor(tensor);
+  auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
+  auto te_new_tensor = makeTransformerEngineTensor(new_tensor);
 
-  nvte_convert_bshd_to_thd(tensor_cu.data(), cu_seqlens_cu.data(), new_tensor_cu.data(), t,
+  nvte_convert_bshd_to_thd(te_tensor.data(), te_cu_seqlens.data(), te_new_tensor.data(), t,
                            at::cuda::getCurrentCUDAStream());
 
   return new_tensor;
@@ -808,16 +811,16 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
                  qkv_format == NVTE_QKV_Format::NVTE_THD,
              "qkv_format must be {BSHD, SBHD, THD}.");
 
-  auto new_k_cu = makeTransformerEngineTensor(new_k);
-  auto new_v_cu = makeTransformerEngineTensor(new_v);
-  auto k_cache_cu = makeTransformerEngineTensor(k_cache);
-  auto v_cache_cu = makeTransformerEngineTensor(v_cache);
-  auto page_table_cu = makeTransformerEngineTensor(page_table);
-  auto cu_new_lens_cu = makeTransformerEngineTensor(cu_new_lens);
-  auto cu_cached_lens_cu = makeTransformerEngineTensor(cu_cached_lens);
+  auto te_new_k = makeTransformerEngineTensor(new_k);
+  auto te_new_v = makeTransformerEngineTensor(new_v);
+  auto te_k_cache = makeTransformerEngineTensor(k_cache);
+  auto te_v_cache = makeTransformerEngineTensor(v_cache);
+  auto te_page_table = makeTransformerEngineTensor(page_table);
+  auto te_cu_new_lens = makeTransformerEngineTensor(cu_new_lens);
+  auto te_cu_cached_lens = makeTransformerEngineTensor(cu_cached_lens);
 
-  nvte_copy_to_kv_cache(new_k_cu.data(), new_v_cu.data(), k_cache_cu.data(), v_cache_cu.data(),
-                        page_table_cu.data(), cu_new_lens_cu.data(), cu_cached_lens_cu.data(),
+  nvte_copy_to_kv_cache(te_new_k.data(), te_new_v.data(), te_k_cache.data(), te_v_cache.data(),
+                        te_page_table.data(), te_cu_new_lens.data(), te_cu_cached_lens.data(),
                         qkv_format, b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged,
                         at::cuda::getCurrentCUDAStream());
 }

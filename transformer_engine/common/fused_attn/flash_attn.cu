@@ -6,7 +6,6 @@
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
-#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace flash_attention {
