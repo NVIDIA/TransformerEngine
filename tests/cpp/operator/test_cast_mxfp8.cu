@@ -36,8 +36,9 @@ enum ActivationType {
     SReLU
 };
 
-template <typename InputType, typename OutputType, float (*OP)(const float)>
+template <typename InputType, typename OutputType>
 void scale_block(const ProcessingMethod processing_method,
+                 float (*OP)(const float),
                  const InputType* input,
                  const InputType* grad,
                  OutputType* output_c,
@@ -102,8 +103,9 @@ void scale_block(const ProcessingMethod processing_method,
     }
 }
 
-template <typename InputType, typename OutputType, float (*OP)(const float)>
+template <typename InputType, typename OutputType>
 void compute_ref_x1(const ProcessingMethod processing_method,
+                    float (*OP)(const float),
                     const InputType* input,
                     const InputType* grad,
                     OutputType* output_c,
@@ -148,8 +150,8 @@ void compute_ref_x1(const ProcessingMethod processing_method,
                     const size_t j_max = std::min(j_min + block_size_X, cols);
 
                     const size_t scale_idx = block_idx_Y * scales_stride + block_idx_X;
-                    scale_block<InputType, OutputType, OP>(
-                        processing_method, input, grad, output_c, thread_dbias.data(),
+                    scale_block<InputType, OutputType>(
+                        processing_method, OP, input, grad, output_c, thread_dbias.data(),
                         output_scales, scale_idx, i_min, i_max, j_min, j_max, cols);
                 }
             }
@@ -166,8 +168,9 @@ void compute_ref_x1(const ProcessingMethod processing_method,
     }
 }
 
-template <typename InputType, typename OutputType, float (*OP)(const float)>
+template <typename InputType, typename OutputType>
 void compute_ref_x2(const ProcessingMethod processing_method,
+                    float (*OP)(const float),
                     const InputType* input,
                     const InputType* grad,
                     OutputType* output_rowwise,
@@ -181,11 +184,11 @@ void compute_ref_x2(const ProcessingMethod processing_method,
                     const size_t block_size_X,
                     const size_t scales_stride_rowwise,
                     const size_t scales_stride_colwise) {
-    compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, grad, output_rowwise, scales_rowwise, output_dbias,
+    compute_ref_x1<InputType, OutputType>(
+        processing_method, OP, input, grad, output_rowwise, scales_rowwise, output_dbias,
         rows, cols, 1, block_size_X, scales_stride_rowwise);
-    compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, grad, output_colwise, scales_colwise, output_dbias,
+    compute_ref_x1<InputType, OutputType>(
+        processing_method, OP, input, grad, output_colwise, scales_colwise, output_dbias,
         rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
@@ -197,8 +200,9 @@ void compute_ref_x2(const ProcessingMethod processing_method,
  * 2) Scaled columns + column-wise scaling factors
  */
 
-template <typename InputType, typename OutputType, float (*OP)(const float)>
+template <typename InputType, typename OutputType>
 void performTest_x1(const ProcessingMethod processing_method,
+                    float (*OP)(const float),
                     const std::vector<size_t>& shape,
                     const bool rowwise,
                     const bool colwise,
@@ -262,10 +266,10 @@ void performTest_x1(const ProcessingMethod processing_method,
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
             auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
-            if constexpr (OP == &dsilu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
-            else if (OP == &drelu)      { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
-            else if (OP == &dqgelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
-            else if (OP == &dsrelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
+            if (OP == &dsilu)       { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
+            else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
+            else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
+            else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
 
             nvte_quantize_dbias_dact(grad.data(),
                                      input.data(),
@@ -285,20 +289,20 @@ void performTest_x1(const ProcessingMethod processing_method,
         }
         case ProcessingMethod::CAST_DACT: {
             auto nvte_dact = &nvte_dgelu;
-            if constexpr (OP == &dsilu) { nvte_dact = &nvte_dsilu; }
-            else if (OP == &drelu)      { nvte_dact = &nvte_drelu; }
-            else if (OP == &dqgelu)     { nvte_dact = &nvte_dqgelu; }
-            else if (OP == &dsrelu)     { nvte_dact = &nvte_dsrelu; }
+            if (OP == &dsilu)       { nvte_dact = &nvte_dsilu; }
+            else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
+            else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
+            else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
 
             nvte_dact(grad.data(), input.data(), output_c.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
             auto nvte_act = &nvte_gelu;
-            if constexpr (OP == &silu) { nvte_act = &nvte_silu; }
-            else if (OP == &relu)      { nvte_act = &nvte_relu; }
-            else if (OP == &qgelu)     { nvte_act = &nvte_qgelu; }
-            else if (OP == &srelu)     { nvte_act = &nvte_srelu; }
+            if (OP == &silu)       { nvte_act = &nvte_silu; }
+            else if (OP == &relu)  { nvte_act = &nvte_relu; }
+            else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
+            else if (OP == &srelu) { nvte_act = &nvte_srelu; }
 
             nvte_act(input.data(), output_c.data(), 0);
             break;
@@ -309,17 +313,18 @@ void performTest_x1(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref_x1<InputType, OutputType, OP>(processing_method,
-                                              input.rowwise_cpu_dptr<InputType>(),
-                                              grad.rowwise_cpu_dptr<InputType>(),
-                                              ref_output_c.get(),
-                                              ref_output_scales.get(),
-                                              ref_output_dbias.get(),
-                                              rows,
-                                              cols,
-                                              block_size_rows,
-                                              block_size_cols,
-                                              scales_stride);
+    compute_ref_x1<InputType, OutputType>(processing_method,
+                                          OP,
+                                          input.rowwise_cpu_dptr<InputType>(),
+                                          grad.rowwise_cpu_dptr<InputType>(),
+                                          ref_output_c.get(),
+                                          ref_output_scales.get(),
+                                          ref_output_dbias.get(),
+                                          rows,
+                                          cols,
+                                          block_size_rows,
+                                          block_size_cols,
+                                          scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
@@ -350,8 +355,9 @@ void performTest_x1(const ProcessingMethod processing_method,
  *      AND
  * 2) Scaled columns + column-wise scaling factors
  */
-template <typename InputType, typename OutputType, float (*OP)(const float)>
+template <typename InputType, typename OutputType>
 void performTest_x2(const ProcessingMethod processing_method,
+                    float (*OP)(const float),
                     const std::vector<size_t>& shape,
                     const size_t block_size_rows,
                     const size_t block_size_cols,
@@ -420,10 +426,10 @@ void performTest_x2(const ProcessingMethod processing_method,
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
             auto nvte_quantize_dbias_dact = &nvte_quantize_dbias_dgelu;
-            if constexpr (OP == &dsilu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
-            else if (OP == &drelu)      { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
-            else if (OP == &dqgelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
-            else if (OP == &dsrelu)     { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
+            if (OP == &dsilu)       { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsilu; }
+            else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
+            else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
+            else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
 
             nvte_quantize_dbias_dact(grad.data(),
                                      input.data(),
@@ -443,20 +449,20 @@ void performTest_x2(const ProcessingMethod processing_method,
         }
         case ProcessingMethod::CAST_DACT: {
             auto nvte_dact = &nvte_dgelu;
-            if constexpr (OP == &dsilu) { nvte_dact = &nvte_dsilu; }
-            else if (OP == &drelu)      { nvte_dact = &nvte_drelu; }
-            else if (OP == &dqgelu)     { nvte_dact = &nvte_dqgelu; }
-            else if (OP == &dsrelu)     { nvte_dact = &nvte_dsrelu; }
+            if (OP == &dsilu)       { nvte_dact = &nvte_dsilu; }
+            else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
+            else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
+            else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
 
             nvte_dact(grad.data(), input.data(), output.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
             auto nvte_act = &nvte_gelu;
-            if constexpr (OP == &silu) { nvte_act = &nvte_silu; }
-            else if (OP == &relu)      { nvte_act = &nvte_relu; }
-            else if (OP == &qgelu)     { nvte_act = &nvte_qgelu; }
-            else if (OP == &srelu)     { nvte_act = &nvte_srelu; }
+            if (OP == &silu)       { nvte_act = &nvte_silu; }
+            else if (OP == &relu)  { nvte_act = &nvte_relu; }
+            else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
+            else if (OP == &srelu) { nvte_act = &nvte_srelu; }
 
             nvte_act(input.data(), output.data(), 0);
             break;
@@ -467,20 +473,21 @@ void performTest_x2(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref_x2<InputType, OutputType, OP>(processing_method,
-                                              input.rowwise_cpu_dptr<InputType>(),
-                                              grad.rowwise_cpu_dptr<InputType>(),
-                                              ref_output_c_rowwise.get(),
-                                              ref_output_c_colwise.get(),
-                                              ref_scales_rowwise.get(),
-                                              ref_scales_colwise.get(),
-                                              ref_output_dbias.get(),
-                                              rows,
-                                              cols,
-                                              block_size_rows,
-                                              block_size_cols,
-                                              scales_stride_rowwise,
-                                              scales_stride_colwise);
+    compute_ref_x2<InputType, OutputType>(processing_method,
+                                          OP,
+                                          input.rowwise_cpu_dptr<InputType>(),
+                                          grad.rowwise_cpu_dptr<InputType>(),
+                                          ref_output_c_rowwise.get(),
+                                          ref_output_c_colwise.get(),
+                                          ref_scales_rowwise.get(),
+                                          ref_scales_colwise.get(),
+                                          ref_output_dbias.get(),
+                                          rows,
+                                          cols,
+                                          block_size_rows,
+                                          block_size_cols,
+                                          scales_stride_rowwise,
+                                          scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
@@ -564,26 +571,6 @@ class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 transformer_engine::DType,
                 InputsFillCase>> {};
 
-#define DACT_FUNC_SWITCH(OP_FUNC_TYPE, OP, ...) \
-switch (OP_FUNC_TYPE) { \
-    case ActivationType::Identity: { constexpr auto OP = &identity; { __VA_ARGS__ } } break; \
-    case ActivationType::GeLU:     { constexpr auto OP = &dgelu;    { __VA_ARGS__ } } break; \
-    case ActivationType::SiLU:     { constexpr auto OP = &dsilu;    { __VA_ARGS__ } } break; \
-    case ActivationType::ReLU:     { constexpr auto OP = &drelu;    { __VA_ARGS__ } } break; \
-    case ActivationType::QGeLU:    { constexpr auto OP = &dqgelu;   { __VA_ARGS__ } } break; \
-    case ActivationType::SReLU:    { constexpr auto OP = &dsrelu;   { __VA_ARGS__ } } break; \
-}
-
-#define ACT_FUNC_SWITCH(OP_FUNC_TYPE, OP, ...) \
-switch (OP_FUNC_TYPE) { \
-    case ActivationType::Identity: { constexpr auto OP = &identity; { __VA_ARGS__ } } break; \
-    case ActivationType::GeLU:     { constexpr auto OP = &gelu;    { __VA_ARGS__ } } break; \
-    case ActivationType::SiLU:     { constexpr auto OP = &silu;    { __VA_ARGS__ } } break; \
-    case ActivationType::ReLU:     { constexpr auto OP = &relu;    { __VA_ARGS__ } } break; \
-    case ActivationType::QGeLU:    { constexpr auto OP = &qgelu;   { __VA_ARGS__ } } break; \
-    case ActivationType::SReLU:    { constexpr auto OP = &srelu;   { __VA_ARGS__ } } break; \
-}
-
 TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
@@ -617,35 +604,48 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
     const bool colwise = block_size.first != 1;
     if (processing_method == ProcessingMethod::CAST_ACT) {
         // Forward activations
-        ACT_FUNC_SWITCH(Act_type, OP,
-            TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-                TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-                    if (block_size.first == 1 || block_size.second == 1) {
-                        performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size,
-                            rowwise, colwise, fill_case);
-                    } else {
-                        performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size,
-                            block_size.first, block_size.second, fill_case);
-                    }
-                );
+        auto OP = &identity;
+        switch (Act_type) {
+            case ActivationType::GeLU: OP = &gelu; break;
+            case ActivationType::SiLU: OP = &silu; break;
+            case ActivationType::ReLU: OP = &relu; break;
+            case ActivationType::QGeLU: OP = &qgelu; break;
+            case ActivationType::SReLU: OP = &srelu; break;
+        }
+
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
+                if (block_size.first == 1 || block_size.second == 1) {
+                    performTest_x1<InputType, OutputType>(
+                        processing_method, OP, matrix_size,
+                        rowwise, colwise, fill_case);
+                } else {
+                    performTest_x2<InputType, OutputType>(
+                        processing_method, OP, matrix_size,
+                        block_size.first, block_size.second, fill_case);
+                }
             );
         );
     } else {
-        DACT_FUNC_SWITCH(Act_type, OP,
-            TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-                TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-                    if (block_size.first == 1 || block_size.second == 1) {
-                        performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size,
-                            rowwise, colwise, fill_case);
-                    } else {
-                        performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size,
-                            block_size.first, block_size.second, fill_case);
-                    }
-                );
+        auto OP = &identity;
+        switch (Act_type) {
+            case ActivationType::GeLU: OP = &dgelu; break;
+            case ActivationType::SiLU: OP = &dsilu; break;
+            case ActivationType::ReLU: OP = &drelu; break;
+            case ActivationType::QGeLU: OP = &dqgelu; break;
+            case ActivationType::SReLU: OP = &dsrelu; break;
+        }
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
+                if (block_size.first == 1 || block_size.second == 1) {
+                    performTest_x1<InputType, OutputType>(
+                        processing_method, OP, matrix_size,
+                        rowwise, colwise, fill_case);
+                } else {
+                    performTest_x2<InputType, OutputType>(
+                        processing_method, OP, matrix_size,
+                        block_size.first, block_size.second, fill_case);
+                }
             );
         );
     }
