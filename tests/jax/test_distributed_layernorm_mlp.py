@@ -1,19 +1,25 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
+from typing import Callable, Sequence, Union, Optional
 import pytest
-from typing import Callable, List, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from utils import (
+    assert_allclose,
+    assert_tree_like_allclose,
+    is_devices_enough,
+    pytest_parametrize_wrapper,
+)
 
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
-from transformer_engine.jax.fp8 import is_fp8_available
+from transformer_engine.common import recipe
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.flax import LayerNormMLP
-from transformer_engine.jax.layernorm_mlp import fused_layernorm_fp8_mlp
+from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 from transformer_engine.jax.sharding import (
     HIDDEN_AXES,
     HIDDEN_TP_AXES,
@@ -26,17 +32,32 @@ from transformer_engine.jax.sharding import (
     W_JOINED_AXES,
 )
 from transformer_engine.jax.sharding import MeshResource
+from transformer_engine.jax.quantize import QuantizerFactory
 
-from utils import assert_allclose, assert_tree_like_allclose, is_devices_enough
 
 is_fp8_supported, reason = is_fp8_available()
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+
+SUPPORTED_RECIPES = []
+if is_fp8_supported:
+    SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
+if is_mxfp8_supported:
+    SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[64, 128, 32]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
 DOT_2_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_TP_AXES)
-INTERMEDIATE = 16
+KERNEL_1_AXES = (W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES)
+KERNEL_2_AXES = (W_TP_AXES, W_FSDP_AXES)
+LN_SCALE_AXES = (W_NO_SHARD_AXES,)
+LN_BIAS_AXES = (W_NO_SHARD_AXES,)
+BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
+BIAS_2_AXES = (W_NO_SHARD_AXES,)
+INTERMEDIATE = 64
 
 
 # Only test with FSDP and TP as DP is not used
@@ -46,7 +67,6 @@ def generate_fsdp_and_tp_configs():
         configs.append(
             [2, (1, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
-
     if is_devices_enough(4):
         configs.append(
             [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
@@ -86,115 +106,72 @@ class TestDistributedLayernormMLP:
         ln_scale: jnp.ndarray,
         kernel_1: jnp.ndarray,
         kernel_2: jnp.ndarray,
-        bias_1: jnp.ndarray,
-        bias_2: jnp.ndarray,
-        amax_list_1: List[jnp.ndarray],
-        amax_list_2: List[jnp.ndarray],
-        scale_list_1: List[jnp.ndarray],
-        scale_list_2: List[jnp.ndarray],
+        bias_1: Optional[jnp.ndarray],
+        bias_2: Optional[jnp.ndarray],
         layernorm_type: str = "rmsnorm",
         activation_type: Sequence[Union[str, Callable]] = ("gelu",),
-        use_bias: bool = True,
         multi_gpus: bool = False,
     ) -> jnp.ndarray:
-
-        fp8_meta_pkg1 = FP8MetaPackage(
-            amax_list_1[0],
-            scale_list_1[0],
-            amax_list_1[1],
-            scale_list_1[1],
-            amax_list_1[2],
-            scale_list_1[2],
-        )
-        fp8_meta_pkg2 = FP8MetaPackage(
-            amax_list_2[0],
-            scale_list_2[0],
-            amax_list_2[1],
-            scale_list_2[1],
-            amax_list_2[2],
-            scale_list_2[2],
-        )
 
         if multi_gpus:
             layernorm_input_axes = LAYERNORM_INPUT_AXES
             dot_1_input_axes = DOT_1_INPUT_AXES
             dot_2_input_axes = DOT_2_INPUT_AXES
+            kernel_1_axes = KERNEL_1_AXES
+            kernel_2_axes = KERNEL_2_AXES
         else:
             layernorm_input_axes = None
-            dot_1_input_axes = None
-            dot_2_input_axes = None
+            dot_1_input_axes = dot_2_input_axes = None
+            kernel_1_axes = kernel_2_axes = None
+
+        quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
 
         # out = ((x * kernel_1) + bias_1) * kernel_2 + bias_2
         return jnp.mean(
-            fused_layernorm_fp8_mlp(
+            layernorm_mlp(
                 x,
                 ln_scale,
                 None,
                 [kernel_1, kernel_2],
                 [bias_1, bias_2],
-                [fp8_meta_pkg1, fp8_meta_pkg2],
                 layernorm_type,
-                layernorm_input_axes=layernorm_input_axes,
+                norm_input_axes=layernorm_input_axes,
                 dot_1_input_axes=dot_1_input_axes,
                 dot_2_input_axes=dot_2_input_axes,
+                kernel_1_axes=kernel_1_axes,
+                kernel_2_axes=kernel_2_axes,
                 activation_type=activation_type,
-                use_bias=use_bias,
+                quantizer_sets=quantizer_sets,
             )
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("mesh_config", generate_fsdp_and_tp_configs())
-    @pytest.mark.parametrize("input_shape", INPUT_SHAPE)
-    @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize("use_bias", [True, False])
-    def test_layernorm_fp8_mlp_primitive(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype
+    def _test_layernorm_mlp_grad(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
-
-        fp8_amax_list_1 = [
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-        ]
-        fp8_amax_list_2 = [
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-            jnp.zeros((FP8Helper.AMAX_HISTORY_LEN,), jnp.float32),
-        ]
-        fp8_scale_list_1 = [
-            jnp.ones((1,), jnp.float32),
-            jnp.ones((1,), jnp.float32),
-            jnp.ones((1,), jnp.float32),
-        ]
-        fp8_scale_list_2 = [
-            jnp.ones((1,), jnp.float32),
-            jnp.ones((1,), jnp.float32),
-            jnp.ones((1,), jnp.float32),
-        ]
 
         inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
             input_shape, activation_type, use_bias, dtype
         )
-        inputs = [*inputs, fp8_amax_list_1, fp8_amax_list_2, fp8_scale_list_1, fp8_scale_list_2]
-        static_inputs = [layernorm_type, activation_type, use_bias]
+        static_inputs = [layernorm_type, activation_type]
         value_and_grad_func = jax.value_and_grad(
             self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
         )
 
         # Single GPU
-        single_jitter = jax.jit(
-            value_and_grad_func, static_argnums=range(len(inputs), len(static_inputs) + len(inputs))
-        )
-        with fp8_autocast(enabled=True):
+        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+            single_jitter = jax.jit(
+                value_and_grad_func,
+                static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
+            )
             single_fwd, single_grads = single_jitter(*inputs, *static_inputs)
 
         # Multi GPUs
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, mesh_resource=mesh_resource):
+        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
             k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
             k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
             k1_ = jax.device_put(k1, k1_sharding)
@@ -208,7 +185,7 @@ class TestDistributedLayernormMLP:
 
             # Position ref for sharding pspec lists
             #   x, gamma, k1, k2, b1,
-            #   b2, fp8_max, fp8_metas_amax, fp8_metas_scale, fp8_metas_scale_inv
+            #   b2
             in_shardings = (
                 None,
                 None,
@@ -216,14 +193,10 @@ class TestDistributedLayernormMLP:
                 k2_sharding,
                 b1_sharding,
                 None,
-                None,
-                None,
-                None,
-                None,
             )
             out_shardings = (
                 None,
-                (None, None, k1_sharding, k2_sharding, b1_sharding, None, None, None, None, None),
+                (None, None, k1_sharding, k2_sharding, b1_sharding, None),
             )
 
             multi_jitter = jax.jit(
@@ -252,9 +225,59 @@ class TestDistributedLayernormMLP:
                         err_msg=f"multi_grads[{i}] is not close",
                     )
 
-    def _test_layernorm_mlp(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    def test_layernorm_mlp_grad(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
     ):
+        self._test_layernorm_mlp_grad(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            fp8_recipe,
+            use_shardy=False,
+        )
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    def test_layernorm_mlp_grad_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype
+    ):
+        # We don't test block scaling with Shardy because at the time of writing,
+        # it is not supported in JAX's scaled_matmul_stablehlo.
+        self._test_layernorm_mlp_grad(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            fp8_recipe=recipe.DelayedScaling(),
+            use_shardy=True,
+        )
+
+    def _test_layernorm_mlp(
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        use_fp8,
+        fp8_recipe,
+        use_shardy,
+    ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
 
@@ -265,7 +288,7 @@ class TestDistributedLayernormMLP:
         init_rngs = {"params": subkeys[1]}
 
         # Single GPUs
-        with fp8_autocast(enabled=use_fp8):
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
             ln_mlp_single = LayerNormMLP(
                 layernorm_type=layernorm_type,
                 transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
@@ -273,7 +296,7 @@ class TestDistributedLayernormMLP:
                 activations=activation_type,
                 use_bias=use_bias,
             )
-            params_single = ln_mlp_single.init(init_rngs, x)
+            params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
             mlp_out_single, ln_out_single = ln_mlp_single.apply(
                 params_single, x, deterministic=True
             )
@@ -282,25 +305,27 @@ class TestDistributedLayernormMLP:
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=use_fp8, mesh_resource=mesh_resource):
+        with mesh, fp8_autocast(
+            enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+        ):
             ln_mlp_sharded = LayerNormMLP(
                 layernorm_type=layernorm_type,
                 transpose_batch_sequence=False,
                 intermediate_dim=INTERMEDIATE,
                 activations=activation_type,
-                scale_axes=(W_NO_SHARD_AXES,),
-                ln_bias_axes=(W_NO_SHARD_AXES,),
-                kernel_axes_1=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
-                kernel_axes_2=(W_TP_AXES, W_FSDP_AXES),
+                scale_axes=LN_SCALE_AXES,
+                ln_bias_axes=LN_BIAS_AXES,
+                kernel_axes_1=KERNEL_1_AXES,
+                kernel_axes_2=KERNEL_2_AXES,
                 use_bias=use_bias,
-                bias_axes_1=(W_JOINED_AXES, W_TP_AXES),
-                bias_axes_2=(W_NO_SHARD_AXES,),
+                bias_axes_1=BIAS_1_AXES,
+                bias_axes_2=BIAS_2_AXES,
                 layernorm_input_axes=LAYERNORM_INPUT_AXES,
                 dot_1_input_axes=DOT_1_INPUT_AXES,
                 dot_2_input_axes=DOT_2_INPUT_AXES,
                 name="mlp",
             )
-            params_sharded = ln_mlp_sharded.init(init_rngs, x)
+            params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
             mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
                 params_sharded, x, deterministic=True
             )
@@ -310,25 +335,43 @@ class TestDistributedLayernormMLP:
         assert_allclose(ln_out_sharded, ln_out_single, dtype=dtype)
         assert_allclose(mlp_out_sharded, mlp_out_single, dtype=dtype)
 
-    @pytest.mark.parametrize("input_shape", INPUT_SHAPE)
-    @pytest.mark.parametrize("mesh_config", generate_fsdp_and_tp_configs())
-    @pytest.mark.parametrize("activation_type", [("gelu",), ("silu", "linear"), ("gelu", "gelu")])
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize("use_bias", [True, False])
-    def test_layernorm_mlp_layer(self, mesh_config, activation_type, use_bias, input_shape, dtype):
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    def test_layernorm_mlp_layer(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy
+    ):
         self._test_layernorm_mlp(
-            mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8=False
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=False,
+            fp8_recipe=None,
+            use_shardy=use_shardy,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("mesh_config", generate_fsdp_and_tp_configs())
-    @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear"), ("gelu", "gelu")])
-    @pytest.mark.parametrize("use_bias", [True, False])
-    @pytest.mark.parametrize("input_shape", INPUT_SHAPE)
-    @pytest.mark.parametrize("dtype", DTYPES)
-    def test_layernorm_fp8_mlp_layer(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    def test_layernorm_mlp_layer_fp8(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
     ):
         self._test_layernorm_mlp(
-            mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8=True
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=True,
+            fp8_recipe=fp8_recipe,
+            use_shardy=False,
         )

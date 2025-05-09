@@ -8,11 +8,9 @@ import gc
 from contextlib import contextmanager
 
 import torch
-from torch import nn
 
 import transformer_engine as te
-from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
-from transformer_engine.pytorch.fp8 import fp8_model_init
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 
 import transformers
 from transformers.models.llama.modeling_llama import (

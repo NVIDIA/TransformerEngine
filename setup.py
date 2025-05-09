@@ -5,7 +5,6 @@
 """Installation script."""
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -23,7 +22,6 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
-    uninstall_te_wheel_packages,
 )
 
 frameworks = get_frameworks()
@@ -64,6 +62,12 @@ def setup_common_extension() -> CMakeExtension:
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
@@ -84,7 +88,15 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
+    setup_reqs: List[str] = [
+        "nvidia-cuda-runtime-cu12",
+        "nvidia-cublas-cu12",
+        "nvidia-cudnn-cu12",
+        "nvidia-cuda-cccl-cu12",
+        "nvidia-cuda-nvcc-cu12",
+        "nvidia-nvtx-cu12",
+        "nvidia-cuda-nvrtc-cu12",
+    ]
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -103,13 +115,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
+            setup_reqs.extend(["torch>=2.1"])
             install_reqs.extend(["torch>=2.1"])
+            install_reqs.append(
+                "nvdlfw-inspect @"
+                " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+            )
             # Blackwell is not supported as of Triton 3.2.0, need custom internal build
             # install_reqs.append("triton")
             test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
         if "jax" in frameworks:
+            setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            # test_reqs.extend(["numpy", "praxis"])
             test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
@@ -145,9 +162,6 @@ if __name__ == "__main__":
         extras_require = {"test": test_requires}
 
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-            # Remove residual FW packages since compiling from source
-            # results in a single binary with FW extensions included.
-            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 

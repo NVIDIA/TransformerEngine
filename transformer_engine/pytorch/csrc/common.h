@@ -30,6 +30,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
 #include <transformer_engine/permutation.h>
@@ -149,7 +150,6 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   DType dtype;
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
-  int amax_reduction_size;
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0;
 
@@ -159,6 +159,38 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8BlockQuantizer : public Quantizer {
+ public:
+  // Which float8 type is used for q data.
+  DType dtype;
+  // Options about how to quantize the tensor
+  // Quantization scales are rounded down to powers of 2.
+  bool force_pow_2_scales = false;
+  // Amax within quantization tile has a floor of epsilon.
+  float amax_epsilon = 0.0;
+
+ private:
+  int block_scaling_dim = 2;
+
+ public:
+  // Initializes from a python handle to a Float8BlockQuantizer
+  explicit Float8BlockQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override {
+    return (block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  }
+
+  // Gets rowwise and columnwise_data from tensor and sets them on wrapper
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  // Create a python Float8BlockQuantized tensor and C++ wrapper
+  // for the tensor. Should set quantized data, scales for rowwise
+  // and optionally columnwise usage.
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
@@ -188,6 +220,8 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {
+    case transformer_engine::DType::kInt16:
+      return torch::kInt16;
     case transformer_engine::DType::kInt32:
       return torch::kInt32;
     case transformer_engine::DType::kInt64:
@@ -225,6 +259,8 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
       return transformer_engine::DType::kByte;
     case torch::kByte:
       return transformer_engine::DType::kByte;
+    case torch::kInt16:
+      return transformer_engine::DType::kInt16;
     case torch::kInt32:
       return transformer_engine::DType::kInt32;
     case torch::kInt64:
@@ -261,6 +297,10 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const transformer_engine::DType type);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
+
+std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
+           std::vector<NVTETensor*>, size_t, size_t>
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists);
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer);
 
