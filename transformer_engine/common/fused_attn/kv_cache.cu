@@ -155,9 +155,9 @@ void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache
                       Tensor cu_new_lens, Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
                       int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged,
                       cudaStream_t stream) {
-  int h_kv = new_k.shape()[-2];
-  int d_k = new_k.shape()[-1];
-  int d_v = new_v.shape()[-1];
+  int h_kv = new_k.shape()[new_k.dim() - 2];
+  int d_k = new_k.shape()[new_k.dim() - 1];
+  int d_v = new_v.shape()[new_v.dim() - 1];
   NVTE_CHECK(k_cache.dtype() == v_cache.dtype() && new_k.dtype() == new_v.dtype() &&
                  new_k.dtype() == k_cache.dtype(),
              "new_k, new_v, k_cache and v_cache must be of the same data type.");

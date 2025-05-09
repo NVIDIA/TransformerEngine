@@ -800,9 +800,6 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
 
-  int h_kv = new_k.size(-2);
-  int d_k = new_k.size(-1);
-  int d_v = new_v.size(-1);
   NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
                  new_k.scalar_type() == new_v.scalar_type() &&
                  new_k.scalar_type() == k_cache.scalar_type(),
