@@ -7,23 +7,6 @@
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
 
-/***************************************************************************************************
- * KV Cache: Copy new KV tokens to the KV cache
- *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
- *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
- *      in current step
- *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
- *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
- *      Set is_non_paged = True/False to indicate as such.
- *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
- *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
- *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
- *      preserved for the next layer in the same iteration.
- *   5. Only supports same page_table for k_cache and v_cache
- *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
- *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
- **************************************************************************************************/
-
 namespace transformer_engine {
 namespace kv_cache {
 
@@ -149,6 +132,23 @@ void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache, Tenso
         max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
   }
 }
+
+/***************************************************************************************************
+ * KV Cache: Copy new KV tokens to the KV cache
+ *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *      in current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
+ *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
+ *      Set is_non_paged = True/False to indicate as such.
+ *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
+ *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
+ *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
+ *      preserved for the next layer in the same iteration.
+ *   5. Only supports same page_table for k_cache and v_cache
+ *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
+ *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
+ **************************************************************************************************/
 
 void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache, Tensor page_table,
                       Tensor cu_new_lens, Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
