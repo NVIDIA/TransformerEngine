@@ -715,7 +715,7 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
   auto te_grad_per_step = makeTransformerEngineTensor(grad_per_step);
   auto te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens);
   nvte_cp_thd_grad_correction(te_grad.data(), te_grad_per_step.data(), te_cu_seqlens.data(),
-                              te_first_half.data(), te_second_half.data(),
+                              first_half.data(), second_half.data(),
                               at::cuda::getCurrentCUDAStream());
 }
 
