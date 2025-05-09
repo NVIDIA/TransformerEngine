@@ -712,29 +712,29 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
 }  // namespace transformer_engine
 
 void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
-                               NVTETensor half, int half_idx, cudaStream_t stream) {
+                                  NVTETensor half, int half_idx, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_half_tensor);
   using namespace transformer_engine;
 
   context_parallel::thd_read_half_tensor(*reinterpret_cast<Tensor *>(tensor),
-                            *reinterpret_cast<Tensor *>(cu_seqlens),
-                            *reinterpret_cast<Tensor *>(half), half_idx, stream);
+                                         *reinterpret_cast<Tensor *>(cu_seqlens),
+                                         *reinterpret_cast<Tensor *>(half), half_idx, stream);
 }
 
 void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
-                                         const NVTETensor &cu_seqlens, int lse_packed,
-                                         cudaStream_t stream) {
+                                            const NVTETensor &cu_seqlens, int lse_packed,
+                                            cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_second_half_lse_correction);
   using namespace transformer_engine;
 
-  context_parallel::thd_second_half_lse_correction(*reinterpret_cast<Tensor *>(lse),
-                                      *reinterpret_cast<Tensor *>(lse_per_step),
-                                      *reinterpret_cast<Tensor *>(cu_seqlens), lse_packed, stream);
+  context_parallel::thd_second_half_lse_correction(
+      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(lse_per_step),
+      *reinterpret_cast<Tensor *>(cu_seqlens), lse_packed, stream);
 }
 
 void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
-                                   NVTETensor half_lse, int lse_packed, int second_half_lse_seqlen,
-                                   cudaStream_t stream) {
+                                      NVTETensor half_lse, int lse_packed,
+                                      int second_half_lse_seqlen, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_read_second_half_lse);
   using namespace transformer_engine;
 
@@ -743,9 +743,10 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
       *reinterpret_cast<Tensor *>(half_lse), lse_packed, second_half_lse_seqlen, stream);
 }
 
-void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, const NVTETensor &lse,
-                             const NVTETensor &lse_per_step, const NVTETensor &cu_seqlens,
-                             int only_second_half, int lse_packed, cudaStream_t stream) {
+void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
+                                const NVTETensor &lse, const NVTETensor &lse_per_step,
+                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
+                                cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_out_correction);
   using namespace transformer_engine;
 
@@ -756,8 +757,8 @@ void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step, 
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
-                              const NVTETensor &cu_seqlens, const char *first_half,
-                              const char *second_half, cudaStream_t stream) {
+                                 const NVTETensor &cu_seqlens, const char *first_half,
+                                 const char *second_half, cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_grad_correction);
   using namespace transformer_engine;
 
@@ -770,12 +771,12 @@ void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_ste
 }
 
 void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
-                                      int total_tokens, int world_size, int rank,
-                                      cudaStream_t stream) {
+                                         int total_tokens, int world_size, int rank,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_thd_get_partitioned_indices);
   using namespace transformer_engine;
 
   context_parallel::thd_get_partitioned_indices(*reinterpret_cast<Tensor *>(cu_seqlens),
-                                   *reinterpret_cast<Tensor *>(output), total_tokens, world_size,
-                                   rank, stream);
+                                                *reinterpret_cast<Tensor *>(output), total_tokens,
+                                                world_size, rank, stream);
 }
