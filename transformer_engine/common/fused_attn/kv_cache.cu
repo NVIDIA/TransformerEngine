@@ -171,10 +171,6 @@ void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache
                                        max_seq_len, max_pages_per_seq, is_non_paged, stream););
 }
 
-/***************************************************************************************************
- * Format conversions: THD <-> BSDH
- **************************************************************************************************/
-
 template <typename scalar_t>
 __global__ void convert_thd_to_bshd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
                                            int b, int max_seq_len, int h, int d) {
@@ -210,10 +206,6 @@ __global__ void convert_bshd_to_thd_kernel(scalar_t *tensor, scalar_t *new_tenso
   }
 }
 
-/***************************************************************************************************
- * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
- **************************************************************************************************/
-
 template <typename scalar_t>
 void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
                                   int max_seq_len, int h, int d, cudaStream_t stream) {
@@ -223,6 +215,10 @@ void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
+ **************************************************************************************************/
 
 void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
                          int max_seq_len, cudaStream_t stream) {
@@ -235,10 +231,6 @@ void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
                                           tensor_shape[1], tensor_shape[2], stream););
 }
 
-/***************************************************************************************************
- * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
- **************************************************************************************************/
-
 template <typename scalar_t>
 void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
                                   int max_seq_len, int h, int d, cudaStream_t stream) {
@@ -248,6 +240,10 @@ void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<scalar_t *>(new_tensor.data.dptr),
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
+ **************************************************************************************************/
 
 void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
                          cudaStream_t stream) {
