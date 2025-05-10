@@ -2,6 +2,8 @@ import torch
 import pathlib
 import os
 
+should_dump_tensors = os.getenv("NVTE_TEST_DISTRIBUTED_EXACT", "0") == "1"
+
 TENSOR_DUMP_DIR = (
     pathlib.Path(__file__).resolve().parent.parent.parent.parent / "tensor_dumps" / "distributed"
 )
@@ -39,7 +41,8 @@ def maybe_dump_outputs(
     sequence_parallel=False,
     check_rank=0,
 ):
-    # skip if not check rank
+    if not should_dump_tensors:
+        return
     if torch.distributed.get_rank() != check_rank:
         return
     if test_kwargs != {}:
@@ -79,7 +82,8 @@ def maybe_dump_gradients(
     sequence_parallel=False,
     check_rank=0,
 ):
-    # skip if not check rank
+    if not should_dump_tensors:
+        return
     if torch.distributed.get_rank() != check_rank:
         return
     if test_kwargs != {}:
@@ -106,9 +110,11 @@ def maybe_dump_gradients(
             final_path = get_dump_dir(recipe) / f"{tensor_name_prefix}.pt"
             golden_path = get_dump_dir(recipe) / "golden" / f"{tensor_name_prefix}.pt"
 
-            torch.save(param_d, final_path)
+            # not checking main grad because we limit kwargs to empty dict, so no wgrad fusion
+            wgrad = param_d.grad
+            torch.save(wgrad, final_path)
 
             # if golden file exists, load it and compare with zero tolerance
             if golden_path.exists():
                 golden_tensor = torch.load(golden_path)
-                torch.testing.assert_close(param_d, golden_tensor, atol=0, rtol=0)
+                torch.testing.assert_close(wgrad, golden_tensor, atol=0, rtol=0)

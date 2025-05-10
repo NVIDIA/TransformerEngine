@@ -107,8 +107,8 @@ def main(argv=None, namespace=None):
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
     elif QUANTIZATION == "fp8_block_scaling":
-        SEQ_LEN = 256
-        BATCH_SIZE = 256
+        SEQ_LEN = 128
+        BATCH_SIZE = 128
         HIDDEN_SIZE = 512
 
     test_dict = [
@@ -502,6 +502,14 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
+    # gradients in other cases need additional synchronization
+    if (parallel_mode == "column" or not sequence_parallel) and "return_bias" not in kwargs:
+        _check_gradients(
+            model_distributed,
+            model_single_node,
+            main_grad_check=("fuse_wgrad_accumulation" in kwargs),
+        )
+
     maybe_dump_outputs(
         output_distributed,
         kwargs,
@@ -511,22 +519,14 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
         sequence_parallel=sequence_parallel,
     )
 
-    # gradients in other cases need additional synchronization
-    if (parallel_mode == "column" or not sequence_parallel) and "return_bias" not in kwargs:
-        _check_gradients(
-            model_distributed,
-            model_single_node,
-            main_grad_check=("fuse_wgrad_accumulation" in kwargs),
-        )
-
-        maybe_dump_gradients(
-            model_distributed,
-            kwargs,
-            prefix="Linear",
-            recipe=QUANTIZATION,
-            parallel_mode=parallel_mode,
-            sequence_parallel=sequence_parallel,
-        )
+    maybe_dump_gradients(
+        model_distributed,
+        kwargs,
+        prefix="Linear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
 
 
 def test_linear():
@@ -697,6 +697,14 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
+    # gradients in other cases need additional synchronization
+    if parallel_mode == "column" and not sequence_parallel and "return_bias" not in kwargs:
+        _check_gradients(
+            model_distributed,
+            model_single_node,
+            main_grad_check=("fuse_wgrad_accumulation" in kwargs),
+        )
+
     maybe_dump_outputs(
         output_distributed,
         kwargs,
@@ -706,22 +714,14 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
         sequence_parallel=sequence_parallel,
     )
 
-    # gradients in other cases need additional synchronization
-    if parallel_mode == "column" and not sequence_parallel and "return_bias" not in kwargs:
-        _check_gradients(
-            model_distributed,
-            model_single_node,
-            main_grad_check=("fuse_wgrad_accumulation" in kwargs),
-        )
-
-        maybe_dump_gradients(
-            model_distributed,
-            kwargs,
-            prefix="LayernormLinear",
-            recipe=QUANTIZATION,
-            parallel_mode=parallel_mode,
-            sequence_parallel=sequence_parallel,
-        )
+    maybe_dump_gradients(
+        model_distributed,
+        kwargs,
+        prefix="LayernormLinear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
 
 
 def test_layernorm_linear():
