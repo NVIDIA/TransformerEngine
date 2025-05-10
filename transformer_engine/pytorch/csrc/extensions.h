@@ -72,10 +72,10 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
-void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
-                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
-                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
-                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
+void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
+                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                      NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM
@@ -392,12 +392,11 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 namespace nvshmem_api {
 void init_nvshmem_backend(c10d::ProcessGroup *process_group);
 
-torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+at::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
-                                    torch::Tensor signal);
+void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at::Tensor signal);
 
-void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
+void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
 void nvshmem_finalize();
 }  // namespace nvshmem_api
