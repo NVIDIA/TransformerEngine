@@ -189,24 +189,6 @@ __global__ void convert_thd_to_bshd_kernel(scalar_t *tensor, scalar_t *new_tenso
 }
 
 template <typename scalar_t>
-__global__ void convert_bshd_to_thd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
-                                           int b, int max_seq_len, int h, int d) {
-  // tensor: bshd; new_tensor: thd
-  // cu_seqlens: [b + 1]
-  for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-    int seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
-    int num_elts = seqlen * h * d;
-    int bshd_offset = batch_idx * max_seq_len * h * d;
-    int thd_offset = cu_seqlens[batch_idx] * h * d;
-    scalar_t *bshd_token = tensor + bshd_offset;
-    scalar_t *thd_token = new_tensor + thd_offset;
-    for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
-      *(thd_token + i) = *(bshd_token + i);
-    }
-  }
-}
-
-template <typename scalar_t>
 void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_seqlens, int b,
                                   int max_seq_len, int h, int d, cudaStream_t stream) {
   using namespace transformer_engine;
@@ -229,6 +211,24 @@ void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
       new_tensor.dtype(), dtype,
       convert_thd_to_bshd_launcher<dtype>(tensor, new_tensor, cu_seqlens, b, max_seq_len,
                                           tensor_shape[1], tensor_shape[2], stream););
+}
+
+template <typename scalar_t>
+__global__ void convert_bshd_to_thd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
+                                           int b, int max_seq_len, int h, int d) {
+  // tensor: bshd; new_tensor: thd
+  // cu_seqlens: [b + 1]
+  for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+    int seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
+    int num_elts = seqlen * h * d;
+    int bshd_offset = batch_idx * max_seq_len * h * d;
+    int thd_offset = cu_seqlens[batch_idx] * h * d;
+    scalar_t *bshd_token = tensor + bshd_offset;
+    scalar_t *thd_token = new_tensor + thd_offset;
+    for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
+      *(thd_token + i) = *(bshd_token + i);
+    }
+  }
 }
 
 template <typename scalar_t>
