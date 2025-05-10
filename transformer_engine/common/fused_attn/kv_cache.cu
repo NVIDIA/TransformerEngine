@@ -133,23 +133,6 @@ void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache, Tenso
   }
 }
 
-/***************************************************************************************************
- * KV Cache: Copy new KV tokens to the KV cache
- *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
- *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
- *      in current step
- *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
- *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
- *      Set is_non_paged = True/False to indicate as such.
- *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
- *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
- *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
- *      preserved for the next layer in the same iteration.
- *   5. Only supports same page_table for k_cache and v_cache
- *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
- *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
- **************************************************************************************************/
-
 void copy_to_kv_cache(Tensor new_k, Tensor new_v, Tensor k_cache, Tensor v_cache, Tensor page_table,
                       Tensor cu_new_lens, Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
                       int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged,
@@ -198,10 +181,6 @@ void convert_thd_to_bshd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
 
-/***************************************************************************************************
- * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
- **************************************************************************************************/
-
 void convert_thd_to_bshd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int b,
                          int max_seq_len, cudaStream_t stream) {
   using namespace transformer_engine;
@@ -241,10 +220,6 @@ void convert_bshd_to_thd_launcher(Tensor tensor, Tensor new_tensor, Tensor cu_se
       reinterpret_cast<int *>(cu_seqlens.data.dptr), b, max_seq_len, h, d);
 }
 
-/***************************************************************************************************
- * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
- **************************************************************************************************/
-
 void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, int t,
                          cudaStream_t stream) {
   using namespace transformer_engine;
@@ -259,6 +234,23 @@ void convert_bshd_to_thd(Tensor tensor, Tensor cu_seqlens, Tensor new_tensor, in
 
 }  // namespace kv_cache
 }  // namespace transformer_engine
+
+/***************************************************************************************************
+ * KV Cache: Copy new KV tokens to the KV cache
+ *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *      in current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
+ *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
+ *      Set is_non_paged = True/False to indicate as such.
+ *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
+ *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
+ *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
+ *      preserved for the next layer in the same iteration.
+ *   5. Only supports same page_table for k_cache and v_cache
+ *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
+ *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
+ **************************************************************************************************/
 
 void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cache,
                            NVTETensor v_cache, NVTETensor page_table, NVTETensor cu_new_lens,
@@ -276,6 +268,10 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
       max_pages_per_seq, is_non_paged, stream);
 }
 
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = thd to qkv_format = bshd
+ **************************************************************************************************/
+
 void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
                               int b, int max_seq_len, cudaStream_t stream) {
   NVTE_API_CALL(nvte_convert_thd_to_bshd);
@@ -285,6 +281,10 @@ void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
                                 *reinterpret_cast<Tensor *>(cu_seqlens),
                                 *reinterpret_cast<Tensor *>(new_tensor), b, max_seq_len, stream);
 }
+
+/***************************************************************************************************
+ * KV Cache: Convert a tensor from qkv_format = bshd to qkv_format = thd
+ **************************************************************************************************/
 
 void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
                               int t, cudaStream_t stream) {
