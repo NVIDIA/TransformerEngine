@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <Python.h>
 #include <pybind11/pybind11.h>
 
 #include <optional>
