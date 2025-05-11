@@ -141,81 +141,79 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
                           num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                           set_sm_margin, atomic_gemm, rs_overlap_first_gemm) {}
 
-void CommOverlap::set_buffer_params(py::handle quantizer) {
-  std::unique_ptr<te::pytorch::Quantizer> my_quantizer = te::pytorch::convert_quantizer(quantizer);
-  my_quantizer->set_quantization_params(&_ubuf);
-  _ubuf_scale_inv_initialized = true;
-}
-
 /*
 ** Helper function to copy input to _ubuf
 */
-void CommOverlap::copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk) {
-  auto input_tensor = te::pytorch::makeTransformerEngineTensor(input, quantizer);
-  auto input_ptr = input_tensor.dptr() ? input_tensor.dptr() : input_tensor.columnwise_dptr();
-  NVTE_CHECK(input_ptr, "Input tensor does not have rowwise or columnwise data!");
+void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
+  const auto &input_ = input.contiguous();
 
-  char *ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+  // Check element size
+  const size_t element_size = input.element_size();
+  NVTE_CHECK(_ubuf.element_size() == element_size,
+             "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
+             "(input dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
+
+  // Input data
+  const size_t input_size = input_.numel();
+  const void *src_ptr = input_.data_ptr();
+
+  // Userbuffers data
+  const size_t ubuf_size = _ubuf.numel();
+  void *dst_ptr = _ubuf.dptr();
   if (local_chunk) {
-    if (input_tensor.numel() * _tp_size > _ubuf.numel())
-      NVTE_ERROR("input is larger than the local communication buffer!");
-    if (input_tensor.element_size() != _ubuf.element_size())
-      NVTE_ERROR("input data type does not match communication buffer!");
-    ubuf_ptr += (_ubuf.numel() / _tp_size) * _tp_id * _ubuf.element_size();
+    NVTE_CHECK(input_size * _tp_size == ubuf_size,
+               "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+               "(input_size=", input_size, ", tensor_parallel_size=", _tp_size,
+               ", ubuf_size=", ubuf_size, ")");
+    dst_ptr = (reinterpret_cast<char *>(dst_ptr) + (ubuf_size / _tp_size) * _tp_id * element_size);
   } else {
-    if (input_tensor.numel() > _ubuf.numel())
-      NVTE_ERROR("input is larger than the global communication buffer!");
-    if (input_tensor.element_size() != _ubuf.element_size())
-      NVTE_ERROR("input data type does not match communication buffer!");
+    NVTE_CHECK(input_size == ubuf_size,
+               "Tried to copy an invalid tensor into a Userbuffers buffer ",
+               "(input_size=", input_size, ", ubuf_size=", ubuf_size, ")");
   }
 
-  // Copy either row or columnwise data into the communication buffer's columnwise data
-  // NOTE: _ubuf.columnwise_dptr() is not a valid copy target because it is not registered with
-  //       the Userbuffers communicator.
-  at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
+  // Copy data
+  auto stream_main = at::cuda::getCurrentCUDAStream();
   NVTE_CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input_tensor.dptr(),
-                                  input_tensor.numel() * input_tensor.element_size(),
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, input_size * element_size,
                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
 }
 
-py::object CommOverlap::get_buffer(py::handle quantizer, bool local_chunk,
-                                   std::optional<const std::vector<int64_t>> shape) {
-  using namespace te::pytorch;
-  char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.dptr());
-  if (local_chunk) ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
-
-  std::vector<int64_t> torch_shape;
-  if (shape.has_value()) {
-    torch_shape = shape.value();
-    size_t requested = product(torch_shape);
-    auto expected = local_chunk ? _ubuf.numel() / _tp_size : _ubuf.numel();
-    NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
-               ") does not match allocated buffer size (", expected, ")!");
+at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+  // Check buffer shape
+  const size_t ubuf_size = _ubuf.numel();
+  if (shape) {
+    const size_t requested_size = transformer_engine::pytorch::product(*shape);
+    if (local_chunk) {
+      NVTE_CHECK(requested_size * _tp_size == ubuf_size,
+                 "Invalid shape for local chunk of a Userbuffers buffer (requested shape=", *shape,
+                 ", tensor_parallel_size=", _tp_size, ", ubuf_size=", ubuf_size, ")");
+    } else {
+      NVTE_CHECK(requested_size == ubuf_size,
+                 "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
+                 ", ubuf_size=", ubuf_size, ")");
+    }
   } else {
-    int64_t output_c_dim0 = (local_chunk) ? _ubuf.size(0) / _tp_size : _ubuf.size(0);
-    int64_t output_c_dim1 = _ubuf.size(1);
-    torch_shape = {output_c_dim0, output_c_dim1};
+    int64_t dim0 = _ubuf.size(0);
+    int64_t dim1 = _ubuf.size(1);
+    if (local_chunk) {
+      dim0 /= _tp_size;
+    }
+    shape = {dim0, dim1};
   }
 
-  auto ubuf_tensor = torch::from_blob(reinterpret_cast<void *>(ubuf_wt_ptr), torch_shape,
-                                      at::dtype(GetATenDType(_ubuf.dtype())).device(torch::kCUDA));
+  // Data pointer
+  void *ubuf_ptr = _ubuf.dptr();
+  if (local_chunk) {
+    ubuf_ptr = (reinterpret_cast<char *>(ubuf_ptr) +
+                (ubuf_size / _tp_size) * _tp_id * _ubuf.element_size());
+  }
 
-  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  std::vector<size_t> te_shape;
-  for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
-
-  // Always output a rowwise-only QuantizedTensor
-  // TODO (Alp): This needs to produce an un-interleaved transpose when required.
-  auto is_internal = my_quantizer->internal;
-  auto uses_columnwise = my_quantizer->columnwise_usage;
-  my_quantizer->internal = false;
-  my_quantizer->columnwise_usage = false;
-  auto [te_tensor, py_tensor] = my_quantizer->create_tensor(te_shape, _ubuf.dtype(), ubuf_tensor);
-  my_quantizer->internal = is_internal;
-  my_quantizer->columnwise_usage = uses_columnwise;
-  return py_tensor;
+  // Construct PyTorch tensor
+  const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
+  return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
 /***************************************************************************************************
@@ -236,74 +234,69 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
           comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
           atomic_gemm, aggregate) {}
 
-void CommOverlapP2P::set_buffer_params(py::handle quantizer) {
-  std::unique_ptr<te::pytorch::Quantizer> my_quantizer = te::pytorch::convert_quantizer(quantizer);
-  my_quantizer->set_quantization_params(&_ubuf);
-  for (size_t i = 0; i < _ubufs.size(); i++) my_quantizer->set_quantization_params(&_ubufs[i]);
-}
-
 /*
 ** Copy input to _ubufs[0]
 */
-void CommOverlapP2P::copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk) {
-  auto input_tensor = te::pytorch::makeTransformerEngineTensor(input, quantizer);
-  auto input_ptr = input_tensor.dptr() ? input_tensor.dptr() : input_tensor.columnwise_dptr();
-  NVTE_CHECK(input_ptr, "Input tensor does not have rowwise or columnwise data!");
+void CommOverlapP2P::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
+  const auto &input_ = input.contiguous();
 
-  at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
+  // Check element size
+  const size_t element_size = input.element_size();
+  NVTE_CHECK(_ubuf.element_size() == element_size,
+             "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
+             "(input dtype has ", element_size, " bytes, UB dtype has ", _ubuf.element_size(),
+             " bytes)");
+
+  // Input data
+  const size_t input_size = input_.numel();
+  const void *src_ptr = input_.data_ptr();
+
+  // Userbuffers data
+  void *dst_ptr;
   if (local_chunk) {
-    // Copy input to the target ubuf chunk by rank offset
-    if (input_tensor.numel() * _tp_size > _ubuf.numel())
-      NVTE_ERROR("input is larger than the local communication buffer!");
-    if (input_tensor.element_size() != _ubuf.element_size())
-      NVTE_ERROR("input data type does not match communication buffer!");
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].dptr(), input_ptr,
-                                    input_tensor.numel() * input_tensor.element_size(),
-                                    cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
-
+    NVTE_CHECK(_ubufs[_tp_id].numel() == input_size,
+               "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
+               "(input_size=", input_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+    dst_ptr = _ubufs[_tp_id].dptr();
   } else {
-    if (input_tensor.numel() > _ubuf.numel())
-      NVTE_ERROR("input is larger than the global communication buffer!");
-    if (input_tensor.element_size() != _ubuf.element_size())
-      NVTE_ERROR("input data type does not match communication buffer!");
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubuf.dptr(), input_ptr,
-                                    input_tensor.numel() * input_tensor.element_size(),
-                                    cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
+    NVTE_CHECK(_ubuf.numel() == input_size,
+               "Tried to copy an invalid tensor into a Userbuffers buffer ",
+               "(input_size=", input_size, ", ubuf_size=", _ubuf.numel(), ")");
+    dst_ptr = _ubuf.dptr();
   }
+
+  // Copy data
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, input_size * element_size,
+                                  cudaMemcpyDeviceToDevice,
+                                  (cudaStream_t)at::cuda::getCurrentCUDAStream()));
 }
 
-py::object CommOverlapP2P::get_buffer(py::handle quantizer, bool local_chunk,
-                                      std::optional<const std::vector<int64_t>> shape) {
-  using namespace te::pytorch;
-  char *ubuf_wt_ptr = reinterpret_cast<char *>(local_chunk ? _ubufs[_tp_id].dptr() : _ubuf.dptr());
-
-  std::vector<int64_t> torch_shape;
-  if (shape.has_value()) {
-    torch_shape = shape.value();
-    size_t requested = product(torch_shape);
-    auto expected = local_chunk ? _ubufs[_tp_id].numel() : _ubuf.numel();
-    NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
-               ") does not match allocated buffer size (", expected, ")!");
+at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vector<int64_t>> shape) {
+  // Check buffer shape
+  if (shape) {
+    const size_t requested_size = transformer_engine::pytorch::product(*shape);
+    if (local_chunk) {
+      NVTE_CHECK(requested_size == _ubufs[_tp_id].numel(),
+                 "Invalid shape for local chunk of a Userbuffers buffer (requested shape=", *shape,
+                 ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
+    } else {
+      NVTE_CHECK(requested_size == _ubuf.numel(),
+                 "Invalid shape for a Userbuffers buffer (requested shape=", *shape,
+                 ", ubuf_size=", _ubuf.numel(), ")");
+    }
   } else {
-    int64_t output_c_dim0 = (local_chunk) ? _ubuf.size(0) / _tp_size : _ubuf.size(0);
-    int64_t output_c_dim1 = _ubuf.size(1);
-    torch_shape = {output_c_dim0, output_c_dim1};
+    int64_t dim0 = _ubuf.size(0);
+    int64_t dim1 = _ubuf.size(1);
+    if (local_chunk) {
+      dim0 /= _tp_size;
+    }
+    shape = {dim0, dim1};
   }
-  auto ubuf_tensor = torch::from_blob(reinterpret_cast<void *>(ubuf_wt_ptr), torch_shape,
-                                      at::dtype(GetATenDType(_ubuf.dtype())).device(torch::kCUDA));
 
-  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  std::vector<size_t> te_shape;
-  for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
+  // Data pointer
+  void *ubuf_ptr = local_chunk ? _ubufs[_tp_id].dptr() : _ubuf.dptr();
 
-  // Always output a rowwise-only QuantizedTensor
-  // TODO (Alp): This needs to produce an un-interleaved transpose when required.
-  auto is_internal = my_quantizer->internal;
-  auto uses_columnwise = my_quantizer->columnwise_usage;
-  my_quantizer->internal = false;
-  my_quantizer->columnwise_usage = false;
-  auto [te_tensor, py_tensor] = my_quantizer->create_tensor(te_shape, _ubuf.dtype(), ubuf_tensor);
-  my_quantizer->internal = is_internal;
-  my_quantizer->columnwise_usage = uses_columnwise;
-  return py_tensor;
+  // Construct PyTorch tensor
+  const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
+  return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }

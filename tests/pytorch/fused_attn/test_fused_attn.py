@@ -1628,8 +1628,8 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
         )
-        if is_training:
-            out.backward(out_grad)
+    if is_training:
+        out.backward(out_grad)
 
     param_names = []
     param_names.append("hidden_states.grad")
@@ -1879,8 +1879,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
         )
-        if is_training:
-            out.backward(out_grad)
+    if is_training:
+        out.backward(out_grad)
 
     if is_training:
         return out, (inp[0].grad, inp[1].grad, inp[2].grad)
@@ -1993,7 +1993,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
     with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
         out = mha(inp, cu_seqlens, config.max_seqlen_q)
-        out.backward(out_grad)
+    out.backward(out_grad)
 
     out = torch.load("out.pt")
     dqkv = torch.load("dqkv.pt")
