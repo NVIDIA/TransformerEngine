@@ -54,6 +54,10 @@ RUN <<"EOF" bash -e
   pip3 install --verbose --verbose --no-build-isolation .[test]
 
   rm -rf transformer_engine.egg-info dist build
+
+  [[ "${FRAMEWORK}" == "pytorch" ]] \
+  && apt-get remove -y libcudnn9-headers-cuda-12 && cd /nvidia/build-scripts && INTERNAL=1 DEVEL=1 installCUDNN.sh 9.10.0.55 \
+  || [[ ! "${FRAMEWORK}" == "pytorch" ]]
 EOF
 
 WORKDIR /workspace/
