@@ -111,7 +111,7 @@ struct Tensor {
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto dim : shape()) {
       acc *= dim;
@@ -131,6 +131,14 @@ struct Tensor {
     if (has_columnwise_data()) return columnwise_data.dtype;
     // Fallback, used e.g. in workspace
     return data.dtype;
+  }
+
+  size_t dim() const {
+    if (!has_data() && has_columnwise_data()) {
+      return columnwise_data.shape.size();
+    } else {
+      return data.shape.size();
+    }
   }
 
   std::vector<size_t> shape() const {
@@ -383,6 +391,33 @@ struct TypeInfo {
     } break;                                                 \
     default:                                                 \
       NVTE_ERROR("Invalid type.");                           \
+  }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
+  switch (dtype) {                                             \
+    using namespace transformer_engine;                        \
+    case DType::kFloat32: {                                    \
+      using type = float;                                      \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat16: {                                    \
+      using type = fp16;                                       \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kBFloat16: {                                   \
+      using type = bf16;                                       \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat8E4M3: {                                 \
+      using type = fp8e4m3;                                    \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat8E5M2: {                                 \
+      using type = fp8e5m2;                                    \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    default:                                                   \
+      NVTE_ERROR("Invalid type.");                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, type, ...) \

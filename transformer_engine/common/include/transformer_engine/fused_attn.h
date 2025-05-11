@@ -244,7 +244,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, NVTETensor S,
-                                   NVTETensor O, NVTETensorPack* Aux_CTX_Tensors,
+                                   NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
                                    const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
                                    const NVTETensor rng_state, size_t max_seqlen, bool is_training,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
@@ -300,7 +300,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  */
 void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
                                    const NVTETensor S, NVTETensor dP,
-                                   const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQKV,
+                                   const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
                                    NVTETensor dBias, const NVTETensor cu_seqlens,
                                    const NVTETensor cu_seqlens_padded, size_t max_seqlen,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
@@ -368,7 +368,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  */
 void nvte_fused_attn_fwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O,
-    NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout,
@@ -429,7 +429,7 @@ void nvte_fused_attn_fwd_kvpacked(
  */
 void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
-    const NVTETensor S, NVTETensor dP, const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQ,
+    const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,
     NVTETensor dKV, NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
@@ -500,7 +500,7 @@ void nvte_fused_attn_bwd_kvpacked(
  */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor Bias, NVTETensor S, NVTETensor O,
-                         NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
+                         NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
                          const NVTETensor page_table_v, const NVTETensor rng_state,
@@ -569,7 +569,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  */
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
-                         const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
+                         const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
                          NVTETensor dV, NVTETensor dBias, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
@@ -603,6 +603,51 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  */
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
+
+void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
+                                  uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
+                                  uint32_t offset_intragraph, cudaStream_t stream);
+
+void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cache,
+                           NVTETensor v_cache, NVTETensor page_table, NVTETensor cu_new_lens,
+                           NVTETensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
+                           int max_ctx_len, int max_seq_len, int max_pages_per_seq,
+                           int is_non_paged, cudaStream_t stream);
+
+void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
+                                  NVTETensor half, int half_idx, cudaStream_t stream);
+
+void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
+                                            const NVTETensor &cu_seqlens, int lse_packed,
+                                            cudaStream_t stream);
+
+void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
+                                      NVTETensor half_lse, int lse_packed,
+                                      int second_half_lse_seqlen, cudaStream_t stream);
+
+void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
+                                const NVTETensor &lse, const NVTETensor &lse_per_step,
+                                const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
+                                cudaStream_t stream);
+
+void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
+                                 const NVTETensor &cu_seqlens, const char *first_half,
+                                 const char *second_half, cudaStream_t stream);
+
+void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
+                                         int total_tokens, int world_size, int rank,
+                                         cudaStream_t stream);
+
+void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int b, int max_seq_len, cudaStream_t stream);
+
+void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
+                              int t, cudaStream_t stream);
+
+void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t stream);
+
+void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
+                                 cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
