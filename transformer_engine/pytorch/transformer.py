@@ -177,12 +177,12 @@ class TransformerLayer(torch.nn.Module):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    attn_input_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    attn_input_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
                          This controls whether the dimensions of the
-                         intermediate hidden states is 'batch first' ('bshd') or
-                         'sequence first' ('sbhd'). `s` stands for the sequence
-                         length, `b` batch size, `h` the number of heads, `d`
-                         head size. Note that these formats are very closely
+                         intermediate hidden states is 'sequence first' ('sbhd'), 'batch first' ('bshd'),
+                         or 'token first' ('thd'). `s` stands for the sequence length, `b` batch size,
+                         `t` the total number of tokens, `h` the number of heads, `d` head size.
+                         Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
     name: str, default = `None`
