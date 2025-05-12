@@ -64,6 +64,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
@@ -307,10 +308,19 @@ class _Linear(torch.autograd.Function):
                     assert not isinstance(inputmat, QuantizedTensor)
                 saved_inputmat = inputmat
 
-            # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
+            # Weight with only column-wise usage is needed for dgrad GEMM.
+            # Clear the row-wise copy (used in forward) to avoid keeping weight
+            # in both row-wise and column-wise layout during the backward.
+            # NOTE: This is safe only when primary_weights are not one of the FP8 types.
+            if inp.requires_grad and not module.primary_weights_in_fp8:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
+                # NOTE: `_get_quantizers` for `Linear` sets `weight_quantizer.internal = True`
+                #       So, we may also encounter the base-class like `Float8TensorBase`/`MXFP8TensorBase`.
+                elif isinstance(weightmat, Float8TensorBase):
+                    weightmat._data = None
+                elif isinstance(weightmat, MXFP8TensorBase):
+                    weightmat._rowwise_data = None
 
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
