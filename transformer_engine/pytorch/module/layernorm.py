@@ -94,6 +94,9 @@ class LayerNorm(_LayerNormOp):
                 )
             kwargs["dtype"] = params_dtype
 
+        # Flag for sequence parallelism (custom Megatron-LM integration)
+        self.sequence_parallel: Optional[bool] = sequence_parallel
+
         # Initialize layer norm operation
         super().__init__(
             normalized_shape,
@@ -101,12 +104,6 @@ class LayerNorm(_LayerNormOp):
             zero_centered_gamma=zero_centered_gamma,
             **kwargs,
         )
-
-        # Flag for sequence parallelism (custom Megatron-LM integration)
-        self.sequence_parallel: Optional[bool] = sequence_parallel
-        if sequence_parallel is not None:
-            self.weight.sequence_parallel = sequence_parallel
-            self.bias.sequence_parallel = sequence_parallel
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
