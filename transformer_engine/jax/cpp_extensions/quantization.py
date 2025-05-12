@@ -614,7 +614,7 @@ def _quantize_dbias_impl(
         # Globally reduce amax across all devices for current scaling so we have a single global scale.
         # This differs from the PyTorch implementation which uses a local amax and scale per-device and persists this
         # until the tensor is dequantized (e.g. in the GEMM).
-        amax = jnp.amax(jnp.abs(x), keepdims=True)
+        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
 
     if isinstance(quantizer, DelayedScaleQuantizer):

@@ -534,7 +534,9 @@ class BasicLinear(BasicOperation):
 
         # Configure input tensor for backward pass
         if with_quantized_compute and isinstance(x_local, QuantizedTensor):
-            x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+            if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                # FP8 does not support all-gather of transpose data
+                x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
 
         return y, x_local, w
 
@@ -622,7 +624,10 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype
+            if weight is not None:
+                dtype = weight.dtype
+            else:
+                dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
@@ -814,7 +819,7 @@ class BasicLinear(BasicOperation):
             x_async = None
             dy_async = None
 
-            # Check grad input tensor
+            # Check grad weight tensor
             dw = grad_weight
             dw_dtype = dtype
             if dw is None:
