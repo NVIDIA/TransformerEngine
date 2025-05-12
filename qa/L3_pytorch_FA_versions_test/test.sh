@@ -19,7 +19,7 @@ if [ $sm_arch -gt 90 ]
 then
   FA_versions=(2.7.3)
 else
-  FA_versions=(2.3.0 2.4.1 2.5.7 2.7.3 3.0.0b1)
+  FA_versions=(2.5.7 2.7.3 3.0.0b1)
 fi
 
 for fa_version in "${FA_versions[@]}"
