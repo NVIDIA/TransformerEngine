@@ -39,7 +39,7 @@ def _run_test(fp_init, sharding_dims, layer_type):
 @pytest.mark.parametrize("fp8_init", (False, True))
 @pytest.mark.parametrize(
     "layer_type",
-    (te.Linear, te.LayerNormLinear, te.LayerNormMLP, te.MultiheadAttention, te.TransformerLayer)
+    (te.Linear, te.LayerNormLinear, te.LayerNormMLP, te.MultiheadAttention, te.TransformerLayer),
 )
 def test_torch_fsdp2(fp8_init, sharding_dims, layer_type):
     """Test a Transformer Engine Linear layer with PyTorch native FSDP2."""
