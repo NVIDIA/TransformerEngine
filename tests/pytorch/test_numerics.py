@@ -2293,7 +2293,11 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         pytest.skip("FusedAttention and FlashAttention do not support FP32")
     if use_RoPE:
         pytest.skip("KV cache does not support starting positions for RoPE")
-    if backend == "FusedAttention" and get_device_compute_capability() == (8, 9) and get_cudnn_version() < (9, 11, 0):
+    if (
+        backend == "FusedAttention"
+        and get_device_compute_capability() == (8, 9)
+        and get_cudnn_version() < (9, 11, 0)
+    ):
         pytest.skip("Skip KV cache for sm89 and cuDNN < 9.11")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
