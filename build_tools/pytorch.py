@@ -40,6 +40,7 @@ def setup_pytorch_extension(
     cxx_flags = ["-O3", "-fvisibility=hidden"]
     if debug_build_enabled():
         cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
 
