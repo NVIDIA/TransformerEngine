@@ -11,10 +11,12 @@
 
 #include <cfloat>
 #include <limits>
+#include <mutex>
 #include <string>
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
+#include "../util/multi_streams.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 #include "cast_kernels.cuh"
@@ -156,4 +158,42 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
   using namespace transformer_engine;
   detail::dequantize_helper(*reinterpret_cast<const Tensor *>(input),
                             reinterpret_cast<Tensor *>(output), stream);
+}
+
+void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const int num_groups,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_grouped_quantize);
+  using namespace transformer_engine;
+
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = false;
+  constexpr NVTETensor dbias = nullptr;
+  constexpr NVTETensor workspace = nullptr;
+  constexpr const NVTETensor grad = nullptr;
+
+  // Inits streams and events (once, globally)
+  std::call_once(detail::init_flag, detail::init_streams_and_events);
+
+  int num_stream_used = std::min(num_streams, num_groups);
+  // wait for current stream to finish
+  NVTE_CHECK_CUDA(cudaEventRecord(detail::events[0], stream));
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(detail::compute_streams[s], detail::events[0]));
+  }
+
+  for (int i = 0; i < num_groups; i++) {
+    detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
+        input[i], grad, output[i], dbias, workspace, nullptr,
+        detail::compute_streams[i % num_streams]);
+  }
+
+  // record events on compute streams
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(cudaEventRecord(detail::events[s], detail::compute_streams[s]));
+  }
+  // wait for all compute streams to finish
+  for (int s = 0; s < num_stream_used; s++) {
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::events[s]));
+  }
 }

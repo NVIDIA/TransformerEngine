@@ -10,6 +10,7 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "extensions.h"
+#include "transformer_engine/multi_streams.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
