@@ -130,18 +130,20 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 
 def assert_allclose(
-    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float = None, rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
+        tols = dtype_tols(t2.dtype)
         if rtol is not None:
             tols["rtol"] = rtol
+        if atol is not None:
+            tols["atol"] = atol
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
+            tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
             exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
