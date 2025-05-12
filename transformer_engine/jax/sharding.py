@@ -334,7 +334,7 @@ def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
     """
     if not logical_axes:
         return None
-    elif len(logical_axes) < ndim:
+    if len(logical_axes) < ndim:
         logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
     assert len(logical_axes) == ndim
 
