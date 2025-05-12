@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import combine_masks
 from jax import nn as jax_nn
 from jax import random as jax_random

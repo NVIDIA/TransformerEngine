@@ -11,7 +11,6 @@ from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 import numpy as np
 import jax.numpy as jnp
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
@@ -1180,10 +1179,16 @@ class LayerNormMLP(TransformerEngineBase):
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
-            dot_1_output_axes = (
-                *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                *get_non_contracting_logical_axes(kernel_1.ndim, self.kernel_axes_1, contract_ind),
-            )
+
+            if self.dot_1_input_axes is not None and self.kernel_axes_1 is not None:
+                dot_1_output_axes = (
+                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
+                    *get_non_contracting_logical_axes(
+                        kernel_1.ndim, self.kernel_axes_1, contract_ind
+                    ),
+                )
+            else:
+                dot_1_output_axes = None  # don't insert sharding constraint so default partitioning from previous ops will apply
             x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:

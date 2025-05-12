@@ -333,7 +333,7 @@ def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
         Tuple of logical axes for non-contracting dimensions.
     """
     if not logical_axes:
-        logical_axes = (None,) * ndim
+        return None
     elif len(logical_axes) < ndim:
         logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
     assert len(logical_axes) == ndim
