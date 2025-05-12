@@ -8,7 +8,7 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs
+from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
 
 
 def setup_pytorch_extension(
@@ -37,10 +37,12 @@ def setup_pytorch_extension(
     )
 
     # Compiler flags
-    cxx_flags = [
-        "-O3",
-        "-fvisibility=hidden",
-    ]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    if debug_build_enabled():
+        cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
+    else:
+        cxx_flags.append("-g0")
 
     # Version-dependent CUDA options
     try:
