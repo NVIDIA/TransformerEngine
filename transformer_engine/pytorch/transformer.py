@@ -729,12 +729,19 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type=enc_dec_attn_mask_type,
                 window_size=enc_dec_window_size,
                 encoder_output=encoder_output,
+                inference_params=inference_params,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                rotary_pos_emb=rotary_pos_emb,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
                 fast_zero_fill=fast_zero_fill,
+                pad_between_seqs=pad_between_seqs,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs
