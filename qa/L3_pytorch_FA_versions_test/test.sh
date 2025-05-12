@@ -11,14 +11,16 @@ mkdir -p "$XML_LOG_DIR"
 pip3 install pytest==8.2.1
 
 # Limit parallel build jobs to avoid overwhelming system resources
-export MAX_JOBS=4
+export MAX_JOBS=32
 
 # Iterate over Flash Attention versions
 sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); print(sm[0]*10+sm[1])"`
 if [ $sm_arch -gt 90 ]
 then
   FA_versions=(2.7.3)
-else
+elif [ $sm_arch -eq 90 ]
+then
+  export FLASH_ATTN_CUDA_ARCHS=90
   FA_versions=(2.5.7 2.7.3 3.0.0b1)
 fi
 
