@@ -190,10 +190,11 @@ def _train(args):
         optimizer.zero_grad()
         input_data = torch.randn(inp_shape).to(device)
         target = torch.randn(out_shape).to(device)
-        with torch.amp.autocast(enabled=not args.fp8_init, device_type="cuda"):
-            with te.fp8_autocast(enabled=args.fp8_init, fp8_recipe=fp8_recipe):
-                output = model(input_data)
-                loss = F.mse_loss(output, target)
+        with torch.autograd.detect_anomaly():
+            with torch.amp.autocast(enabled=not args.fp8_init, device_type="cuda"):
+                with te.fp8_autocast(enabled=args.fp8_init, fp8_recipe=fp8_recipe):
+                    output = model(input_data)
+                    loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
         if LOCAL_RANK == 0:
