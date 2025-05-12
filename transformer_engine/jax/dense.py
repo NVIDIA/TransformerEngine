@@ -47,6 +47,7 @@ def dense(
     Returns:
         Transformed output tensor
     """
+    x = with_sharding_constraint_by_logical_axes(x, input_axes)
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set:
         output = tex.gemm(x, kernel, contracting_dims)

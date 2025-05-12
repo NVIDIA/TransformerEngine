@@ -1503,12 +1503,11 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
         rp_bucket += np.where(rpb_is_small, negative_rp, rpb_val_if_large)
 
         # Compute relative attention bias
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, self.embedding_axes),
             (self.num_attention_heads, self.num_buckets),
             self.dtype,
-            axes=self.embedding_axes,
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)

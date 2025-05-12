@@ -316,16 +316,22 @@ class DenseGeneral(nn.Module):
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]), np.prod(features))
-        kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
+        kernel = self.param(
+            "kernel",
+            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+            kernel_param_shape,
+            self.dtype,
         )
 
         kernel = jnp.asarray(kernel, input_dtype)
         kernel = jnp.reshape(kernel, kernel_shape)
 
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, self.features, self.dtype, axes=self.bias_axes
+            bias = self.param(
+                "bias",
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes),
+                self.features,
+                self.dtype,
             )
             bias = bias.astype(input_dtype)
         else:
@@ -857,8 +863,11 @@ class LayerNorm(nn.Module):
         input_dtype = x.dtype
         features = x.shape[-1]
 
-        scale = nn_partitioning.param_with_axes(
-            "scale", self.scale_init, (features,), self.dtype, axes=("embed",)
+        scale = self.param(
+            "scale",
+            nn.with_logical_partitioning(self.scale_init, ("embed",)),
+            (features,),
+            self.dtype,
         )
         x_ = x.astype(jnp.float32)
         if self.layernorm_type == "layernorm":
@@ -866,8 +875,11 @@ class LayerNorm(nn.Module):
             var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
             y = (x_ - mean) * lax.rsqrt(var + self.epsilon)
 
-            bias = nn_partitioning.param_with_axes(
-                "ln_bias", self.bias_init, (features,), self.dtype, axes=("embed",)
+            bias = self.param(
+                "ln_bias",
+                nn.with_logical_partitioning(self.bias_init, ("embed",)),
+                (features,),
+                self.dtype,
             )
             bias = jnp.asarray(bias, input_dtype)
 
@@ -976,12 +988,11 @@ class RelativePositionBiases(nn.Module):
             num_buckets=self.num_buckets,
             max_distance=self.max_distance,
         )
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, ("heads", "relpos_buckets")),
             (self.num_heads, self.num_buckets),
             jnp.float32,
-            axes=("heads", "relpos_buckets"),
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)
