@@ -14,6 +14,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 #include <cuda_runtime_api.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -55,6 +56,7 @@ using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
+using fp4e2m1 = __nv_fp4_e2m1;
 
 template <typename T>
 struct TypeInfo{
@@ -67,7 +69,8 @@ struct TypeInfo{
                              bf16,
                              fp8e4m3,
                              fp8e5m2,
-                             fp8e8m0>;
+                             fp8e8m0,
+                             fp4e2m1>;
 
     template <typename U, DType current>
     struct Helper {
@@ -94,7 +97,7 @@ struct TypeInfo{
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static size_t size = sizeof(T);
+    constexpr static double size = sizeof(T);
 };
 
 class Tensor {
@@ -416,7 +419,7 @@ inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
-size_t typeToSize(DType type);
+double typeToSize(DType type);
 size_t product(const NVTEShape &shape);
 size_t product(const std::vector<size_t> &shape);
 
@@ -515,6 +518,12 @@ constexpr int32_t blackwellComputeCapability = 100;
                 {__VA_ARGS__} \
             } \
         break; \
+        case DType::kFloat4E2M1: \
+            { \
+                using type = fp4e2m1; \
+                {__VA_ARGS__} \
+            } \
+        break; \
         default: \
             NVTE_ERROR("Invalid type."); \
     }
@@ -531,6 +540,19 @@ constexpr int32_t blackwellComputeCapability = 100;
         case DType::kFloat8E5M2: \
             { \
                 using type = fp8e5m2; \
+                {__VA_ARGS__} \
+            } \
+        break; \
+        default: \
+            NVTE_ERROR("Invalid type."); \
+    }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
+    switch (dtype) { \
+        using namespace transformer_engine; \
+        case DType::kFloat4E2M1: \
+            { \
+                using type = fp4e2m1; \
                 {__VA_ARGS__} \
             } \
         break; \

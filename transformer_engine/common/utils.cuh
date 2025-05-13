@@ -10,6 +10,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 
 #if !defined(__CUDACC_RTC__)
 #include <cstdint>

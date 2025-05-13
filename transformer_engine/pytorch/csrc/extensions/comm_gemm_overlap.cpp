@@ -161,7 +161,7 @@ void CommOverlap::copy_into_buffer(py::handle input, py::handle quantizer, bool 
       NVTE_ERROR("input is larger than the local communication buffer!");
     if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
-    ubuf_ptr += (_ubuf.numel() / _tp_size) * _tp_id * _ubuf.element_size();
+    ubuf_ptr += _ubuf.bytes() / _tp_size * _tp_id;
   } else {
     if (input_tensor.numel() > _ubuf.numel())
       NVTE_ERROR("input is larger than the global communication buffer!");
@@ -176,7 +176,7 @@ void CommOverlap::copy_into_buffer(py::handle input, py::handle quantizer, bool 
   NVTE_CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
   NVTE_CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input_tensor.dptr(),
-                                  input_tensor.numel() * input_tensor.element_size(),
+                                  input_tensor.bytes(),
                                   cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
 }
 
@@ -184,7 +184,7 @@ py::object CommOverlap::get_buffer(py::handle quantizer, bool local_chunk,
                                    std::optional<const std::vector<int64_t>> shape) {
   using namespace te::pytorch;
   char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.dptr());
-  if (local_chunk) ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
+  if (local_chunk) ubuf_wt_ptr += _ubuf.bytes() / _tp_size * _tp_id;
 
   std::vector<int64_t> torch_shape;
   if (shape.has_value()) {
@@ -258,7 +258,7 @@ void CommOverlapP2P::copy_into_buffer(py::handle input, py::handle quantizer, bo
     if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
     NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].dptr(), input_ptr,
-                                    input_tensor.numel() * input_tensor.element_size(),
+                                    input_tensor.bytes(),
                                     cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
 
   } else {
@@ -267,7 +267,7 @@ void CommOverlapP2P::copy_into_buffer(py::handle input, py::handle quantizer, bo
     if (input_tensor.element_size() != _ubuf.element_size())
       NVTE_ERROR("input data type does not match communication buffer!");
     NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubuf.dptr(), input_ptr,
-                                    input_tensor.numel() * input_tensor.element_size(),
+                                    input_tensor.bytes(),
                                     cudaMemcpyDeviceToDevice, (cudaStream_t)stream_main));
   }
 }
