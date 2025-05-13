@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "extensions.h"
+#include "pybind.h"
 
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
@@ -75,6 +76,8 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
              "Number of input and padded row list must match");
 
   // Launch TE kernel
-  nvte_multi_padding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
-                     padded_num_rows_list.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_padding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
+                       padded_num_rows_list.data(), at::cuda::getCurrentCUDAStream());
+  });
 }

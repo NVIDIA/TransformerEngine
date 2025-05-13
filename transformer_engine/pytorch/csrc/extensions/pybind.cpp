@@ -6,7 +6,6 @@
 
 #include "pybind.h"
 
-#include <Python.h>
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
@@ -210,17 +209,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
-  m.def("compute_amax", &compute_amax, "Compute absolute max value in tensor",
-        py::call_guard<py::gil_scoped_release>());
+  m.def("compute_amax", &compute_amax, "Compute absolute max value in tensor", py::arg("input"),
+        py::arg("amax"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_block_scaling_compute_partial_amax", &fp8_block_scaling_compute_partial_amax,
-        "Compute partial amax from master weights for fp8 block scaling",
+        "Compute partial amax from master weights for fp8 block scaling", py::arg("tensor"),
+        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_block_scaling_partial_cast", &fp8_block_scaling_partial_cast,
-        "Partial cast from master weights for fp8 block scaling",
-        py::call_guard<py::gil_scoped_release>());
+        "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
+        py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
+        py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
         py::call_guard<py::gil_scoped_release>());
 
