@@ -14,7 +14,6 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
                                       const at::Tensor &gamma, const int sm_margin,
                                       const bool zero_centered_gamma) {
-  using namespace transformer_engine::pytorch;
   const auto &dz_ = dz.contiguous();
   const auto &x_ = x.contiguous();
   const auto &mu_ = mu.contiguous();
@@ -24,7 +23,7 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dx = at::empty_like(x_);
   auto dgamma = at::empty_like(gamma_);
   auto dbeta = at::empty_like(gamma_);
-  transformer_engine::TensorWrapper workspace;
+  TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
   auto x_cu = makeTransformerEngineTensor(x_);
@@ -64,8 +63,6 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                                       DType out_dtype, const int sm_margin,
                                       const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
-  using namespace transformer_engine::pytorch;
-  using namespace transformer_engine;
 
   // Input and param tensors
   auto none = py::none();
@@ -119,7 +116,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
 
   // Query workspace size
-  transformer_engine::TensorWrapper workspace;
+  TensorWrapper workspace;
   NVTE_SCOPED_GIL_RELEASE({
     nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), eps, kernel_out_cu.data(),
                        mu_cu.data(), rsigma_cu.data(), workspace.data(),
@@ -186,7 +183,6 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
                                     const int sm_margin, const bool zero_centered_gamma) {
-  using namespace transformer_engine::pytorch;
   const auto &dz_ = dz.contiguous();
   const auto &x_ = x.contiguous();
   const auto &rsigma_ = rsigma.contiguous();
@@ -194,7 +190,7 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 
   auto dx = at::empty_like(x_);
   auto dgamma = at::empty_like(gamma_);
-  transformer_engine::TensorWrapper workspace;
+  TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
   auto x_cu = makeTransformerEngineTensor(x_);
@@ -228,12 +224,9 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 }
 
 std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
-                                    py::object out, py::handle quantizer,
-                                    transformer_engine::DType out_dtype, const int sm_margin,
-                                    const bool zero_centered_gamma) {
+                                    py::object out, py::handle quantizer, DType out_dtype,
+                                    const int sm_margin, const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
-  using namespace transformer_engine::pytorch;
-  using namespace transformer_engine;
 
   // Input and param tensors
   auto none = py::none();
@@ -281,7 +274,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
 
   // Query workspace size
-  transformer_engine::TensorWrapper workspace;
+  TensorWrapper workspace;
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), eps, kernel_out_cu.data(), rsigma_cu.data(),
                      workspace.data(),
