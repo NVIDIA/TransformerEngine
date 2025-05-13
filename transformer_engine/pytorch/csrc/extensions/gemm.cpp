@@ -17,7 +17,6 @@
 #include "extensions.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
-#include "util.h"
 
 namespace {
 

@@ -405,9 +405,8 @@ void nvshmem_finalize();
  * swizzle
  **************************************************************************************************/
 
-at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
-
-at::Tensor columnwise_swizzle(at::Tensor input, at::Tensor scale_inv);
+std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper &input,
+                                                  bool trans);
 
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers

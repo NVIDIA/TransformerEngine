@@ -111,10 +111,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
-  m.def("rowwise_swizzle", &rowwise_swizzle, "Swizzle rowwise scale inverses.",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("columnwise_swizzle", &columnwise_swizzle, "Swizzle columnwise scale inverses.",
-        py::call_guard<py::gil_scoped_release>());
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
