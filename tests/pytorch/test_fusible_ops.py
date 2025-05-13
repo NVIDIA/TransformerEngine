@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import io
 import math
 from typing import Optional
 
@@ -1393,6 +1394,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
+    @pytest.mark.parametrize("cache_quantized_input", (False, True))
     def test_activation(
         self,
         *,
@@ -1401,6 +1403,7 @@ class TestBasicOps:
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
+        cache_quantized_input: bool,
     ) -> None:
         """Activation functions"""
 
@@ -1412,6 +1415,8 @@ class TestBasicOps:
         # Skip invalid configurations
         quantized_compute = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        if cache_quantized_input:
+            maybe_skip_quantization("fp8", device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1420,15 +1425,17 @@ class TestBasicOps:
             test_device=device,
             test_is_fp8=quantized_compute,
         )
-        if quantized_compute:
-            with torch.no_grad():
-                x_test = x_test.dequantize().requires_grad_()
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
             test_dtype=dtype,
             test_device=device,
+            test_is_fp8=quantized_compute,
             requires_grad=False,
         )
+        if quantized_compute:
+            with torch.no_grad():
+                x_test = x_test.dequantize().requires_grad_()
+                dy_test = dy_test.dequantize()
 
         # Plain PyTorch implementation
         y_ref: torch.Tensor
@@ -1459,7 +1466,8 @@ class TestBasicOps:
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
-            make_op(),
+            te_ops.Quantize(forward=False, backward=quantized_compute),
+            make_op(cache_quantized_input=cache_quantized_input),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
@@ -1468,9 +1476,9 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute:
+        if quantized_compute or cache_quantized_input:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
-        if activation == "relu":
+        if activation == "relu" and not cache_quantized_input:
             tols = {"atol": 0, "rtol": 0}
 
         # Check results
@@ -1882,3 +1890,118 @@ class TestFusedOps:
         torch.testing.assert_close(y2_test, y2_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+
+
+class TestCheckpointing:
+    """Tests for checkpointing"""
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_linear(
+        self,
+        *,
+        pre_checkpoint_steps: int = 2,
+        post_checkpoint_steps: int = 2,
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Iterable[int] = (32, -1),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_weight: bool,
+    ) -> None:
+        """Check checkpointing with linear op"""
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        in_shape = list(in_shape)[:-1] + [in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Skip invalid configurations
+        quantized_compute = quantization is not None
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=out_shape)
+
+        # Construct model
+        recipe = make_recipe(quantization)
+        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+            model_save = te_ops.Sequential(
+                te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
+            )
+        optim_save = torch.optim.SGD(model_save.parameters(), lr=0.25)
+
+        # Warmup training steps
+        for _ in range(pre_checkpoint_steps):
+            x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+            dy = torch.randn(out_shape, dtype=dtype, device=device)
+            optim_save.zero_grad()
+            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                y = model_save(x)
+            y.backward(dy)
+            optim_save.step()
+
+        # Save checkpoint
+        byte_stream = io.BytesIO()
+        torch.save(
+            {"model": model_save.state_dict(), "optim": optim_save.state_dict()},
+            byte_stream,
+        )
+        checkpoint_bytes = byte_stream.getvalue()
+        del byte_stream
+
+        # Synthetic data for evaluation
+        xs_save = [
+            torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
+            for _ in range(post_checkpoint_steps)
+        ]
+        with torch.no_grad():
+            xs_load = [x.clone().requires_grad_() for x in xs_save]
+        dys = [
+            torch.randn(out_shape, dtype=dtype, device=device) for _ in range(post_checkpoint_steps)
+        ]
+
+        # Training steps with original model
+        ys_save = []
+        for i in range(post_checkpoint_steps):
+            optim_save.zero_grad()
+            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                y = model_save(xs_save[i])
+            y.backward(dys[i])
+            optim_save.step()
+            ys_save.append(y)
+
+        # Load checkpoint
+        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+            model_load = te_ops.Sequential(
+                te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
+            )
+        optim_load = torch.optim.SGD(model_load.parameters(), lr=0.25)
+        state_dict = torch.load(io.BytesIO(checkpoint_bytes), weights_only=False)
+        model_load.load_state_dict(state_dict["model"])
+        optim_load.load_state_dict(state_dict["optim"])
+
+        # Training steps with loaded model
+        ys_load = []
+        for i in range(post_checkpoint_steps):
+            optim_load.zero_grad()
+            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                y = model_load(xs_load[i])
+            y.backward(dys[i])
+            optim_load.step()
+            ys_load.append(y)
+
+        # Check that original and loaded model match exactly
+        tols = {"rtol": 0, "atol": 0}
+        for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
+            torch.testing.assert_close(param_load, param_save, **tols)
+            torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
+        for y_load, y_save in zip(ys_load, ys_save):
+            torch.testing.assert_close(y_load, y_save, **tols)
+        for x_load, x_save in zip(xs_load, xs_save):
+            torch.testing.assert_close(x_load.grad, x_save.grad, **tols)

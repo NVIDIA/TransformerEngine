@@ -94,15 +94,15 @@ def _check_fp8_support(scaling_mode, gpu_id) -> Tuple[bool, str]:
         A tuple of (bool, str) indicating support and any error message
     """
     gpu_arch = get_device_compute_capability(gpu_id)
-    if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+    if scaling_mode.is_tensor_scaling():
         return _check_delayed_scaling_fp8_support(gpu_arch)
-    if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+    if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         return _check_block_scaling_fp8_support(gpu_arch)
     return (False, "Unsupported scaling_mode!")
 
 
 def is_fp8_available(
-    scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+    scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
     gpu_id=None,
 ) -> Tuple[bool, str]:
     """Check if FP8 is available for the given scaling mode and GPU.
@@ -179,9 +179,11 @@ def _get_scaling_mode(fp8_recipe: recipe.Recipe) -> ScalingMode:
         ValueError: If the recipe type is not supported
     """
     if isinstance(fp8_recipe, recipe.DelayedScaling):
-        return ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+        return ScalingMode.DELAYED_TENSOR_SCALING
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
-        return ScalingMode.NVTE_MXFP8_1D_SCALING
+        return ScalingMode.MXFP8_1D_SCALING
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        return ScalingMode.CURRENT_TENSOR_SCALING
     raise ValueError("Invalid fp8_recipe!")
 
 
@@ -217,7 +219,7 @@ class QuantizeConfig:
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False
     IF_QUANTIZE_2X: bool = False
-    SCALING_MODE: ScalingMode = ScalingMode.NVTE_NO_SCALING
+    SCALING_MODE: ScalingMode = ScalingMode.NO_SCALING
 
     # DelayedScaling
     AMAX_HISTORY_LEN: int = 1024
@@ -240,7 +242,7 @@ class QuantizeConfig:
             fp8_recipe: The FP8 recipe to use for initialization
         """
         cls.INITIALIZED = True
-        cls.MARGIN = fp8_recipe.margin
+        cls.MARGIN = fp8_recipe.margin if "margin" in dir(fp8_recipe) else 0.0
         cls.FP8_FORMAT = fp8_recipe.fp8_format
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
         cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
@@ -253,11 +255,11 @@ class QuantizeConfig:
         cls.MARGIN = 0.0
         cls.FP8_FORMAT = recipe.Format.HYBRID
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
-        cls.SCALING_MODE = ScalingMode.NVTE_NO_SCALING
+        cls.SCALING_MODE = ScalingMode.NO_SCALING
         cls.FP8_2X_ACC_FPROP = False
         cls.FP8_2X_ACC_DGRAD = False
         cls.FP8_2X_ACC_WGRAD = False
-        cls.SCALING_MODE = ScalingMode.NVTE_NO_SCALING
+        cls.SCALING_MODE = ScalingMode.NO_SCALING
         cls.IF_QUANTIZE_2X = False
         # DelayedScaling
         cls.AMAX_HISTORY_LEN = 1024
@@ -306,6 +308,30 @@ class DelayedScalingQuantizeConfig:
     @staticmethod
     def finalize() -> None:
         """Reset the delayed scaling configuration."""
+        QuantizeConfig.finalize()
+
+
+class CurrentScalingQuantizeConfig:
+    """Configuration class for current scaling FP8 recipe.
+
+    This class provides specific initialization and finalization for current scaling
+    FP8 quantization mode.
+    """
+
+    @staticmethod
+    def initialize(fp8_recipe: recipe.Recipe) -> None:
+        """Initialize current scaling FP8 configuration.
+
+        Args:
+            fp8_recipe: The FP8 recipe to use for initialization
+        """
+        cls = QuantizeConfig
+        cls.initialize(fp8_recipe)
+        cls.AMAX_HISTORY_LEN = 0
+
+    @staticmethod
+    def finalize() -> None:
+        """Reset the current scaling configuration."""
         QuantizeConfig.finalize()
 
 
@@ -385,6 +411,8 @@ def fp8_autocast(
     Config = DelayedScalingQuantizeConfig
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         Config = BlockScalingQuantizeConfig
+    if isinstance(fp8_recipe, recipe.Float8CurrentScaling):
+        Config = CurrentScalingQuantizeConfig
 
     try:
         with global_shard_guard(mesh_resource):

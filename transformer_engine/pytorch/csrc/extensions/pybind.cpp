@@ -196,18 +196,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
         py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
-        py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
+  m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
+        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
+        py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O", py::arg("input"),
-        py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
+        py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_block_scaling_compute_partial_amax", &fp8_block_scaling_compute_partial_amax,
+        "Compute partial amax from master weights for fp8 block scaling", py::arg("tensor"),
+        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"));
+  m.def("fp8_block_scaling_partial_cast", &fp8_block_scaling_partial_cast,
+        "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
+        py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
+        py::arg("out_dtype"));
   m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
         py::call_guard<py::gil_scoped_release>());
 
@@ -351,10 +360,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
       .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlap::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlap::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
              transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
@@ -369,8 +377,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt);
 }

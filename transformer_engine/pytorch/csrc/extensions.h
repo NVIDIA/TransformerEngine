@@ -50,11 +50,11 @@ std::vector<py::object> fused_attn_fwd(
     NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
-    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
-    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded,
+    const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
+    const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -63,8 +63,8 @@ std::vector<py::object> fused_attn_bwd(
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
-    const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
+    const std::optional<at::Tensor> cu_seqlens_q_padded,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
@@ -72,10 +72,10 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
-void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
-                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
-                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
-                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
+void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
+                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                      NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM
@@ -101,17 +101,21 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
     bool use_split_accumulator, int math_sm_count);
 
+namespace transformer_engine::pytorch {
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
-                                             std::optional<std::vector<py::handle>> output_list,
+std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
+                                             std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list,
                                              transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
+
+}  // namespace transformer_engine::pytorch
 
 namespace transformer_engine::pytorch {
 
@@ -260,18 +264,28 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  const std::string &amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype, float margin);
 
+// Note that the start_offset is the logical offset along the tensor dimension.
+// The offset in bytes is start_offset * sizeof(tensor.dtype)
+void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h,
+                                            size_t w, size_t start_offset, size_t block_len);
+
+void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
+                                    size_t h, size_t w, size_t start_offset, size_t block_len,
+                                    const transformer_engine::DType out_dtype);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
+                              const std::optional<at::Tensor> start_positions,
                               const NVTE_QKV_Format qkv_format, const bool interleaved,
-                              const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                              const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                               const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
-                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                               const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank);
 
 /***************************************************************************************************
@@ -378,12 +392,11 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 namespace nvshmem_api {
 void init_nvshmem_backend(c10d::ProcessGroup *process_group);
 
-torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+at::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
-                                    torch::Tensor signal);
+void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at::Tensor signal);
 
-void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
+void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
 void nvshmem_finalize();
 }  // namespace nvshmem_api
@@ -391,8 +404,6 @@ void nvshmem_finalize();
 /***************************************************************************************************
  * swizzle
  **************************************************************************************************/
-
-void swizzle_scaling_factors(transformer_engine::TensorWrapper &input, bool trans);
 
 at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
@@ -440,12 +451,10 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   ~CommOverlap() {}
 
-  void set_buffer_params(py::handle quantizer);
+  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  void copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk = false);
-
-  py::object get_buffer(py::handle quantizer, bool local_chunk = false,
-                        std::optional<const std::vector<int64_t>> shape = std::nullopt);
+  at::Tensor get_buffer(bool local_chunk = false,
+                        std::optional<std::vector<int64_t>> shape = std::nullopt);
 
 };  // CommOverlap
 
@@ -461,12 +470,10 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   ~CommOverlapP2P() {}
 
-  void set_buffer_params(py::handle quantizer);
+  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  void copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk = false);
-
-  py::object get_buffer(py::handle quantizer, bool local_chunk = false,
-                        std::optional<const std::vector<int64_t>> shape = std::nullopt);
+  at::Tensor get_buffer(bool local_chunk = false,
+                        std::optional<std::vector<int64_t>> shape = std::nullopt);
 
 };  // CommOverlapP2P
 

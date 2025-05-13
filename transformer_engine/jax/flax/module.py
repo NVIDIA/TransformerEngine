@@ -13,7 +13,6 @@ import jax.numpy as jnp
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from jax import lax
-from jax import nn as jax_nn
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
@@ -26,7 +25,12 @@ from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
-from ..cpp_extensions import is_softmax_kernel_available
+from ..cpp_extensions import (
+    is_softmax_kernel_available,
+    jax_scaled_softmax,
+    jax_scaled_masked_softmax,
+    jax_scaled_upper_triang_masked_softmax,
+)
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
 from ..sharding import get_non_contracting_logical_axes
 
@@ -168,10 +172,10 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         input_dtype = inputs.dtype
         logits = inputs
 
-        if self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
+        # use primitives
+        if is_softmax_kernel_available(
             self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
         ):
-
             if bias is not None:
                 logits = logits + bias.astype(input_dtype)
 
@@ -180,31 +184,22 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
                 mask_ = None
 
             outputs = softmax(logits, mask_, self.scale_factor, self.softmax_type)
+        # use default jax based implementation
         else:
-            attention_bias = None
-            if mask is not None:
-                attention_bias = lax.select(
-                    mask > 0,
-                    jnp.full(mask.shape, -1e10),
-                    jnp.full(mask.shape, 0.0),
-                )
-                attention_bias = attention_bias.astype(input_dtype)
-
             if bias is not None:
-                attention_bias = _combine_biases(attention_bias, bias)
+                logits = logits + bias.astype(input_dtype)
 
-            if attention_bias is not None:
-                logits = logits + attention_bias.astype(input_dtype)
-
-            # For the case that self.softmax == SoftmaxType.SCALED_UPPER_TRIANG_MASKED
-            # and kernel is unavailable, then try on pure scaled softmax custom calls.
-            if is_softmax_kernel_available(
-                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, input_dtype
-            ):
-                outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
+            if self.softmax_type is SoftmaxType.SCALED:
+                outputs = jax_scaled_softmax(logits, self.scale_factor)
+            elif self.softmax_type is SoftmaxType.SCALED_MASKED:
+                outputs = jax_scaled_masked_softmax(logits, mask, self.scale_factor)
+            elif self.softmax_type is SoftmaxType.SCALED_UPPER_TRIANG_MASKED:
+                outputs = jax_scaled_upper_triang_masked_softmax(logits, self.scale_factor)
             else:
-                outputs = jax_nn.softmax(logits * self.scale_factor)
-
+                raise ValueError(
+                    f"Unsupported softmax type: {self.softmax_type}. softmax_type must be [SCALED,"
+                    " SCALED_MASKED, SCALED_UPPER_TRIANG_MASKED]"
+                )
         assert input_dtype == outputs.dtype
         return outputs
 
@@ -361,7 +356,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             ).value
             return QuantizeMeta(scale=scale, amax_history=amax_history)
 
-        if QuantizeConfig.SCALING_MODE == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
             x_meta = generate_quantize_meta("x")
             kernel_meta = generate_quantize_meta("kernel")
             grad_meta = generate_quantize_meta("grad")

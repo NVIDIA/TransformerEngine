@@ -19,6 +19,12 @@ using namespace test;
 
 namespace {
 
+struct QuantizationOptions {
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+  size_t block_scaling_dim = 2u;
+};
+
 constexpr size_t kBlockLen = 128;
 
 enum ProcessingMethod {
@@ -273,8 +279,8 @@ void runTestCase(const ProcessingMethod processing_method, const std::vector<siz
   Tensor input("input", shape, itype);
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
-                  opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D, &opts);
-  Tensor output_dbias("output_dbias", {cols}, itype);
+                  opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(rows * cols);
@@ -293,10 +299,13 @@ void runTestCase(const ProcessingMethod processing_method, const std::vector<siz
   fillCase<EncodingType>(&input, fill_case);
   fillUniform(&grad);
 
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(opts.force_pow_2_scales);
+  quant_config.set_amax_epsilon(opts.amax_epsilon);
   Tensor workspace;
   switch (processing_method) {
     case ProcessingMethod::CAST_ONLY: {
-      nvte_quantize(input.data(), output_c.data(), 0);
+      nvte_quantize_v2(input.data(), output_c.data(), quant_config, nullptr);
       break;
     }
   }
@@ -345,8 +354,8 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
   Tensor input("input", shape, itype);
   Tensor grad("grad", shape, itype);
   Tensor output_c("output_c", shape, otype, rowwise, colwise,
-                  opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D, &opts);
-  Tensor output_dbias("output_dbias", {cols}, itype);
+                  opts.block_scaling_dim == 2 ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  Tensor output_dbias("output_dbias", std::vector<size_t>{cols}, itype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(rows * cols);
@@ -366,9 +375,12 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
   fillUniform(&grad);
 
   Tensor workspace;
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(opts.force_pow_2_scales);
+  quant_config.set_amax_epsilon(opts.amax_epsilon);
   switch (processing_method) {
     case ProcessingMethod::CAST_ONLY: {
-      nvte_quantize(input.data(), output_c.data(), 0);
+      nvte_quantize_v2(input.data(), output_c.data(), quant_config, nullptr);
       break;
     }
   }
@@ -399,9 +411,9 @@ void runTestCaseOneDimensionalBlocks(const ProcessingMethod processing_method,
 }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    {1, 16},      {16, 48},     {65, 96},     {128, 128},    {256, 256},      {993, 512},
-    {256, 65536}, {2048, 6144}, {16384, 128}, {32768, 160},  {4096, 1632},    {1024, 1},
-    {32, 1024},   {16, 512},    {1024},       {8, 32, 1024}, {16, 8, 4, 512},
+    {1, 16}, {65, 96}, {256, 256}, {993, 512},
+    {256, 65536}, {4096, 1632}, {1024, 1},
+    {16, 512}, {1024}, {8, 32, 1024}, {16, 8, 4, 512},
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -429,6 +441,8 @@ std::vector<ActivationType> Activation_types = {
 
 std::vector<float> amax_epsilons = {
     0.0f,
+    1.0f, // Make large to be observable.
+
 };
 
 }  // namespace
@@ -599,7 +613,7 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false)),
     [](const testing::TestParamInfo<FusedCastFloat8BlockwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));
@@ -623,7 +637,7 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true, false)),
     [](const testing::TestParamInfo<FusedCastFloat8VectorwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));

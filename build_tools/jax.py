@@ -4,12 +4,12 @@
 
 """JAX related extensions."""
 import os
+import shutil
 from pathlib import Path
 
 import setuptools
-from glob import glob
 
-from .utils import cuda_path, all_files_in_dir
+from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
 from typing import List
 
 
@@ -41,31 +41,33 @@ def setup_jax_extension(
     # Source files
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
-    sources = [
-        csrc_source_files / "utils.cu",
-    ] + all_files_in_dir(extensions_dir, ".cpp")
+    sources = all_files_in_dir(extensions_dir, ".cpp")
 
     # Header files
-    cuda_home, _ = cuda_path()
-    xla_home = xla_path()
-    include_dirs = [
-        cuda_home / "include",
-        common_header_files,
-        common_header_files / "common",
-        common_header_files / "common" / "include",
-        csrc_header_files,
-        xla_home,
-    ]
+    include_dirs = get_cuda_include_dirs()
+    include_dirs.extend(
+        [
+            common_header_files,
+            common_header_files / "common",
+            common_header_files / "common" / "include",
+            csrc_header_files,
+            xla_path(),
+        ]
+    )
 
     # Compile flags
     cxx_flags = ["-O3"]
-    nvcc_flags = ["-O3"]
+    if debug_build_enabled():
+        cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
+    else:
+        cxx_flags.append("-g0")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
-    class Pybind11CUDAExtension(Pybind11Extension):
-        """Modified Pybind11Extension to allow combined CXX + NVCC compile flags."""
+    class Pybind11CPPExtension(Pybind11Extension):
+        """Modified Pybind11Extension to allow custom CXX flags."""
 
         def _add_cflags(self, flags: List[str]) -> None:
             if isinstance(self.extra_compile_args, dict):
@@ -75,9 +77,9 @@ def setup_jax_extension(
             else:
                 self.extra_compile_args[:0] = flags
 
-    return Pybind11CUDAExtension(
+    return Pybind11CPPExtension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},
+        extra_compile_args={"cxx": cxx_flags},
     )

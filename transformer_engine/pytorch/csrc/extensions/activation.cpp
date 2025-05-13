@@ -50,7 +50,12 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
-    nvte_quantize(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    nvte_quantize_v2(te_output_act.data(), te_output.data(), quant_config,
+                     at::cuda::getCurrentCUDAStream());
+  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
+    // sanity check, since activation fusion is not supported for blockwise quantization yet
+    // need to raise an error here instead of silently going into act_func with wrong numerics
+    NVTE_ERROR("Activation fusion is not supported for blockwise quantization yet.");
   } else {
     act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
   }

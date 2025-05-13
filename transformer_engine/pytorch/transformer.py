@@ -10,12 +10,11 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
-from transformer_engine.pytorch.attention import (
-    MultiheadAttention,
-)
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import check_set_window_size
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -26,6 +25,7 @@ from transformer_engine.pytorch.jit import (
 from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
+    torch_get_autocast_gpu_dtype,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -34,6 +34,7 @@ from transformer_engine.pytorch.constants import (
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
@@ -185,6 +186,8 @@ class TransformerLayer(torch.nn.Module):
                          head size. Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
+    name: str, default = `None`
+        name of the module, currently used for debugging purposes.
 
     Parallelism parameters
     ----------------------
@@ -278,15 +281,14 @@ class TransformerLayer(torch.nn.Module):
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
+        name: str = None,
     ) -> None:
         super().__init__()
 
         self.self_attn_mask_type = self_attn_mask_type
-        self.window_size = check_set_window_size(self_attn_mask_type, window_size)
+        self.window_size = window_size
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
-        self.enc_dec_window_size = check_set_window_size(
-            enc_dec_attn_mask_type, enc_dec_window_size
-        )
+        self.enc_dec_window_size = enc_dec_window_size
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -337,6 +339,8 @@ class TransformerLayer(torch.nn.Module):
 
         self.attn_input_format = attn_input_format
 
+        self.name = name
+
         attention_args = (
             hidden_size,
             num_attention_heads,
@@ -377,6 +381,7 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
+            name=name + ".self_attention" if name is not None else None,
         )
 
         if layer_type == "decoder":
@@ -390,6 +395,7 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
+                name=name + ".inter_attention" if name is not None else None,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -424,6 +430,7 @@ class TransformerLayer(torch.nn.Module):
             activation=activation,
             normalization=normalization,
             device=device,
+            name=name + ".layernorm_mlp" if name is not None else None,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -431,9 +438,7 @@ class TransformerLayer(torch.nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        TORCH_MINOR = int(torch.__version__.split(".")[1])
-        use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
+        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
         self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
 
         if self.bias_dropout_fusion:
@@ -648,12 +653,10 @@ class TransformerLayer(torch.nn.Module):
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
             window_size = self.window_size
-        window_size = check_set_window_size(self_attn_mask_type, window_size)
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
         if enc_dec_window_size is None:
             enc_dec_window_size = self.enc_dec_window_size
-        enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -680,9 +683,12 @@ class TransformerLayer(torch.nn.Module):
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
+        if TEDebugState.debug_enabled:
+            TransformerEngineBaseModule._validate_name(self)
+
         # For AMP
         if torch.is_autocast_enabled():
-            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_gpu_dtype())
+            hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.
         self_attention_outputs = self.self_attention(

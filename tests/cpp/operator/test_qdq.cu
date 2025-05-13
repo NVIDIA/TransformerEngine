@@ -58,8 +58,8 @@ void performTestQ(const size_t N) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input", { N }, itype);
-  Tensor output("output", { N }, otype);
+  Tensor input("input", std::vector<size_t>{ N }, itype);
+  Tensor output("output", std::vector<size_t>{ N }, otype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N);
 
@@ -89,8 +89,8 @@ void performTestDQ(const size_t N) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input", { N }, itype);
-  Tensor output("output", { N }, otype);
+  Tensor input("input", std::vector<size_t>{ N }, itype);
+  Tensor output("output", std::vector<size_t>{ N }, otype);
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N);
 

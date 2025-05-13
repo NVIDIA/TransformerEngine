@@ -46,6 +46,7 @@ struct BytesToType<8> {
 };
 
 using byte = uint8_t;
+using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
@@ -58,6 +59,7 @@ using fp8e8m0 = uint8_t;
 template <typename T>
 struct TypeInfo{
     using types = std::tuple<byte,
+                             int16,
                              int32,
                              int64,
                              fp32,
@@ -95,29 +97,21 @@ struct TypeInfo{
     constexpr static size_t size = sizeof(T);
 };
 
-struct QuantizationOptions {
-  bool force_pow_2_scales = false;
-  float amax_epsilon = 0.0;
-  size_t block_scaling_dim = 2u;
-};
-
 class Tensor {
  public:
   Tensor(const std::string& name,
          const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const QuantizationOptions* q_opts = nullptr);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
 
   Tensor(const std::string& name,
          const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const QuantizationOptions* q_opts = nullptr) :
-    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode, q_opts) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
+    Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 

@@ -9,7 +9,6 @@
 #include "common.h"
 #include "pybind.h"
 #include "torch/torch.h"
-#include "util.h"
 
 namespace transformer_engine::pytorch {
 
@@ -103,12 +102,13 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !non_tn_fp8_gemm_supported();
+  bool create_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }
   const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
   opts = opts.dtype(torch::kFloat32);
+  // TODO: Replace with an empty tensor.
   at::Tensor scale_inv = at::reciprocal(scale);
   py::object ret;
   if (internal) {
@@ -214,7 +214,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   }
   const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
   at::Tensor columnwise_data;
-  bool create_transpose = columnwise_usage && !non_tn_fp8_gemm_supported();
+  bool create_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
   if (create_transpose) {
     columnwise_data = at::empty(columnwise_torch_shape, opts);
   }
@@ -257,12 +257,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
-  NVTE_CHECK(quantizer.attr("force_pow_2_scales").cast<bool>(),
-             "Pending additional parameters to the nvte_quantize API, "
-             "float8 block quantization requires pow2 scales");
-  NVTE_CHECK(quantizer.attr("amax_epsilon").cast<float>() == 0.0,
-             "Pending additional parameters to the nvte_quantize API, "
-             "float8 block quantization requires amax_epsilon==0");
+  this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
+  this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
 }

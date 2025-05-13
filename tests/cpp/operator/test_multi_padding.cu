@@ -85,8 +85,8 @@ void performTest() {
     const size_t height = tensor_dims[tensor_id].first;
     const size_t width = tensor_dims[tensor_id].second;
     const size_t padded_height = (height + align - 1) / align * align;
-    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), { height, width }, itype));
-    output_list.emplace_back(Tensor("output_" + std::to_string(tensor_id), { padded_height, width }, otype));
+    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), std::vector<size_t>{ height, width }, itype));
+    output_list.emplace_back(Tensor("output_" + std::to_string(tensor_id), std::vector<size_t>{ padded_height, width }, otype));
 
     auto& input = input_list.back();
     auto& output = output_list.back();
