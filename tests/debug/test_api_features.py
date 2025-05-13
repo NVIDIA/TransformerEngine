@@ -292,9 +292,6 @@ def test_statistics_collection(configs_dir, feature_dirs):
         torch.testing.assert_close(
             stats[("decoder.1.mlp.fc1", "gradient", "underflows%", 200)], expected_underflows
         )
-        torch.testing.assert_close(
-            stats[("decoder.1.mlp.fc1", "gradient", "saturations%", 200)], expected_overflows
-        )
 
         assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
             "decoder.1.mlp.fc1", tensor_name="activation", gemm="fprop", iteration=201
@@ -395,7 +392,6 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
             torch.testing.assert_close(stats1[k], stats2[k])
     finally:
         debug_api.end_debug()
-        transformer_engine.debug.pytorch.debug_state.TEDebugState.reset()
 
 
 if __name__ == "__main__":

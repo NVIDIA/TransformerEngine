@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
+    QuantizedTensorBase,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -299,8 +300,9 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
-            if columnwise_gemm_tensor.dtype != dtype:
-                raise ValueError("Dtype does not match the output of the modify_tensor call")
+            if dtype is not None:
+                if columnwise_gemm_tensor.dtype != dtype:
+                    raise ValueError("Dtype does not match the output of the modify_tensor call")
         if self.rowwise_tensor_plan == API_CALL_MODIFY:
             rowwise_gemm_tensor = debug_api.transformer_engine.modify_tensor(
                 layer_name=self.layer_name,
@@ -311,8 +313,9 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
-            if rowwise_gemm_tensor.dtype != dtype:
-                raise ValueError("Dtype does not match the output of the modify_tensor call")
+            if dtype is not None:
+                if rowwise_gemm_tensor.dtype != dtype:
+                    raise ValueError("Dtype does not match the output of the modify_tensor call")
 
         # 3. If some tensors still are not defined we use high precision tensor.
         if self.rowwise_tensor_plan == HIGH_PRECISION:
@@ -456,7 +459,7 @@ class DebugQuantizer(Quantizer):
         return False
 
 
-class DebugQuantizedTensor:
+class DebugQuantizedTensor(QuantizedTensorBase):
     """
     Class containing quantized tensors after debug. Depending on configuration
     it can contain one or two different objects. These objects can be accessed by the method
@@ -524,5 +527,5 @@ class DebugQuantizedTensor:
         """Size of the tensor."""
         return self.rowwise_gemm_tensor.size()
 
-    def update_usage(self, rowwise_usage: bool, columnwise_usage: bool):
+    def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""

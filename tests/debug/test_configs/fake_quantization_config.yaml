@@ -10,7 +10,5 @@ test_fake_quant_fp8:
       tensors_struct:
         - tensor: activation
           quant_format: FP8E4M3
-          margin: 1
         - tensor: gradient
           quant_format: FP8E5M2
-          margin: 1

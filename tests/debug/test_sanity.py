@@ -98,8 +98,6 @@ def _run_test(model_key, fp8, config, feature_dirs, config_file, log_dir):
         raise error
     finally:
         debug_api.end_debug()
-        transformer_engine.debug.pytorch.debug_state.TEDebugState.reset()
-
 
 @pytest.mark.parametrize("model_key", model_keys)
 @pytest.mark.parametrize("fp8", [False, True])

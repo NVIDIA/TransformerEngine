@@ -13,10 +13,7 @@ test_per_tensor_scaling:
         - gemm: fprop
           tensors_struct:
             - tensor: activation
-              margin: 1
             - tensor: weight
-              margin: 2
         - gemm: dgrad
           tensors_struct:
             - tensor: gradient
-              margin: 4
