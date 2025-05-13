@@ -3485,6 +3485,17 @@ def attn_forward_func_with_cp(
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism.
+
+    .. note::
+
+        Context parallelism distributes chunks of the sequence onto different GPUs. To help with
+        load balancing, users are expected to reorder their tokens before entering this function.
+        For example, given cp_size = 2, we divide each sequence into 4 chunks, and distribute chunk 0
+        and chunk 3 onto GPU 0, and chunk 1 and chunk 2 onto GPU 1. If all transformer layers use
+        the same context parallel configuration, this reordering can happen only once before the first
+        layer and once after the last layer. An example of the reordering is in Megatron-LM (see
+        `get_batch_on_this_cp_rank <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_).
+
     """
 
     if cp_comm_type == "a2a+p2p":
