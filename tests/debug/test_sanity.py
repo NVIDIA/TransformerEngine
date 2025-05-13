@@ -99,6 +99,7 @@ def _run_test(model_key, fp8, config, feature_dirs, config_file, log_dir):
     finally:
         debug_api.end_debug()
 
+
 @pytest.mark.parametrize("model_key", model_keys)
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("config_key", configs.keys())
