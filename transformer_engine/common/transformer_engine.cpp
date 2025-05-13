@@ -18,12 +18,13 @@
 
 namespace transformer_engine {
 
-size_t typeToSize(const DType type) {
+double typeToSize(const DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
                                      return TypeInfo<T>::size;);  // NOLINT(*)
 }
 
 bool is_fp8_dtype(const DType t) { return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2; }
+bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
 std::string to_string(const DType type) {
   switch (type) {
@@ -41,6 +42,8 @@ std::string to_string(const DType type) {
       return "Float8E5M2";
     case DType::kFloat8E8M0:
       return "Float8E8M0";
+    case DType::kFloat4E2M1:
+      return "Float4E2M1";
     case DType::kInt32:
       return "Int32";
     case DType::kInt64:
@@ -56,6 +59,8 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
       return "NVTE_MXFP8_1D_SCALING";
+    case NVTE_NVFP4_SCALING:
+      return "NVTE_NVFP4_SCALING";
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -85,10 +90,12 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                  t.columnwise_scale_inv.shape, ")");
     }
   } else {
-    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING || t.scaling_mode == NVTE_NVFP4_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
+      const size_t block_size_rowwise = (t.scaling_mode == NVTE_MXFP8_1D_SCALING) ? 32 : 16;
+      const size_t block_size_colwise = 32;
 
       if (t.has_data()) {
         alignment = block_alignment[0];
@@ -96,7 +103,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
             DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) * alignment;
         alignment = block_alignment[1];
         expected_y =
-            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(32)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
@@ -105,7 +112,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
         expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(32)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) * alignment;
         alignment = block_alignment[0];
         expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
@@ -514,7 +521,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
+    size_t size_in_bytes = static_cast<size_t>(nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor));
     cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
   }
   // Set amax to 0 if allocated

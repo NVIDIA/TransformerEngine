@@ -32,6 +32,7 @@ enum NVTEDType {
   kNVTEFloat8E4M3 = 7, /*!< 8-bit float (E4M3) */
   kNVTEFloat8E5M2 = 8, /*!< 8-bit float (E5M2) */
   kNVTEFloat8E8M0 = 9, /*!< 8-bit float (E8M0) */
+  kNVTEFloat4E2M1 = 10,/*!< 4-bit float (E2M1) */
   kNVTENumTypes        /*!< Number of supported types */
 };
 
@@ -87,6 +88,8 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
+  /*! Single scale per block of 16 elements consecutive in rowwise direction */
+  NVTE_NVFP4_SCALING = 4,
   NVTE_INVALID_SCALING = 100
 };
 
@@ -191,7 +194,7 @@ size_t nvte_tensor_numel(const NVTETensor tensor);
  *
  *  \return Byte size of the tensor's data type.
  */
-size_t nvte_tensor_element_size(const NVTETensor tensor);
+double nvte_tensor_element_size(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data type.
  *
@@ -390,6 +393,7 @@ enum class DType {
   kFloat8E4M3 = 7,
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
+  kFloat4E2M1 = 10,
   kNumTypes
 };
 
@@ -399,6 +403,13 @@ enum class DType {
  *  \param[in] DType      TE Datatype of interest
  */
 bool is_fp8_dtype(const DType t);
+
+/*! \brief Check if TE datatype is FP4
+ *
+ * Return true if TE datatype is FP4
+ *  \param[in] DType      TE Datatype of interest
+ */
+bool is_fp4_dtype(const DType t);
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -622,7 +633,7 @@ class TensorWrapper {
    *
    *  \return Element size in bytes.
    */
-  size_t element_size() const noexcept {
+  double element_size() const noexcept {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_element_size(tensor_);
   }
@@ -634,7 +645,7 @@ class TensorWrapper {
    */
   size_t bytes() const noexcept {
     if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
-    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+    return static_cast<size_t>(nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_));
   }
 
   /*! \brief Get the data type of this TensorWrapper.

@@ -122,7 +122,8 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
       {DType::kFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_FLOAT16},
       {DType::kBFloat16, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16},
       {DType::kFloat8E4M3, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
-      {DType::kFloat8E5M2, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8}};
+      {DType::kFloat8E5M2, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8},
+      {DType::kFloat4E2M1, CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B}};
   return dtypeMapping.at(dtype);
 }
 
@@ -130,7 +131,7 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_size) {
+                          const uint32_t offset_elems, const double type_size) {
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
   static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
@@ -142,7 +143,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
-  uint64_t stride[rank - 1] = {stride_elems * type_size};
+  uint64_t stride[rank - 1] = {static_cast<uint64_t>(stride_elems * type_size)};
 
   // The boxSize is the size of the shared memory buffer that is used as the
   // source/destination of a TMA transfer
@@ -152,13 +153,13 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
-  void *dataPtr =
-      reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
+  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr)
+                                           + static_cast<uint64_t>(offset_elems * type_size));
 
   NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
              "Tensor data pointer must be 16B aligned");
 
-  const int TMA_needed_size = TMA_gmem_alignment / type_size;
+  const int TMA_needed_size = static_cast<int>(TMA_gmem_alignment / type_size);
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_size,
              "-byte data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 
