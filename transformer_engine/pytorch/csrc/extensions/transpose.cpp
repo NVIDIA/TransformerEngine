@@ -68,8 +68,10 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // Launch TE kernel
   if (with_fused_kernel) {
-    nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                              nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    });
   } else {
     for (size_t i = 0; i < py_output_objects_list.size(); i++) {
       quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);
