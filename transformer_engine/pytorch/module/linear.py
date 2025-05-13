@@ -1295,7 +1295,7 @@ class Linear(TransformerEngineBaseModule):
         ) as inp:
 
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
-            
+
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
                 if not debug

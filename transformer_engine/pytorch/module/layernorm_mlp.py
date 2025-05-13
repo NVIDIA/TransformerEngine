@@ -1987,6 +1987,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.return_bias:
             return fc2_out, fc2_bias.to(inp_dtype)
         return fc2_out
+
     def _get_debug_quantizers(self, fp8_output):
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
