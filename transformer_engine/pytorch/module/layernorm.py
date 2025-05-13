@@ -133,7 +133,7 @@ class LayerNorm(_LayerNormOp):
         super().reset_parameters()
 
         # Set flag for sequence parallelism (custom Megatron-LM integration)
-        if getattr(self, "sequence_parallel", None) is not None:
+        if self.sequence_parallel is not None:
             self.weight.sequence_parallel = self.sequence_parallel
             self.bias.sequence_parallel = self.sequence_parallel
 
