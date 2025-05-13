@@ -10,11 +10,6 @@ from enum import Enum
 from typing import Literal, Optional, Type, Union, Callable, NamedTuple
 from pydantic.dataclasses import dataclass
 
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
-
 
 class _FormatHelper(NamedTuple):
     """
@@ -179,12 +174,18 @@ class DelayedScaling(Recipe):
     reduce_amax: bool = True
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    expected_tensor_class: Type[QuantizedTensor] = Float8Tensor
+    expected_tensor_class: Optional[Type] = None
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        try:
+            from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+            self.expected_tensor_class = Float8Tensor
+        except ImportError:
+            pass
 
     def __repr__(self) -> str:
+        expected_tensor_class_name = self.expected_tensor_class.__name__ if self.expected_tensor_class else "None"
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
@@ -192,7 +193,7 @@ class DelayedScaling(Recipe):
             f"amax_history_len={self.amax_history_len}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
-            f"expected_tensor_class={self.expected_tensor_class.__name__}"
+            f"expected_tensor_class={expected_tensor_class_name}"
         )
 
 
@@ -247,12 +248,18 @@ class Float8CurrentScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    expected_tensor_class: Type[QuantizedTensor] = Float8Tensor
+    expected_tensor_class: Optional[Type] = None
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        try:
+            from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+            self.expected_tensor_class = Float8Tensor
+        except ImportError:
+            pass
 
     def __repr__(self) -> str:
+        expected_tensor_class_name = self.expected_tensor_class.__name__ if self.expected_tensor_class else "None"
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
@@ -264,7 +271,7 @@ class Float8CurrentScaling(Recipe):
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
-            f"expected_tensor_class={self.expected_tensor_class.__name__}"
+            f"expected_tensor_class={expected_tensor_class_name}"
         )
 
 
@@ -297,17 +304,23 @@ class MXFP8BlockScaling(Recipe):
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    expected_tensor_class: Type[QuantizedTensor] = MXFP8Tensor
+    expected_tensor_class: Optional[Type] = None
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        try:
+            from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+            self.expected_tensor_class = MXFP8Tensor
+        except ImportError:
+            pass
 
     def __repr__(self) -> str:
+        expected_tensor_class_name = self.expected_tensor_class.__name__ if self.expected_tensor_class else "None"
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
-            f"expected_tensor_class={self.expected_tensor_class.__name__}"
+            f"expected_tensor_class={expected_tensor_class_name}"
         )
 
 
@@ -372,7 +385,7 @@ class Float8BlockScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
-    expected_tensor_class: Type[QuantizedTensor] = Float8BlockwiseQTensor
+    expected_tensor_class: Optional[Type] = None
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -390,8 +403,14 @@ class Float8BlockScaling(Recipe):
         assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
         assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
         assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
+        try:
+            from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+            self.expected_tensor_class = Float8BlockwiseQTensor
+        except ImportError:
+            pass
 
     def __repr__(self) -> str:
+        expected_tensor_class_name = self.expected_tensor_class.__name__ if self.expected_tensor_class else "None"
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
@@ -406,5 +425,5 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
-            f"expected_tensor_class={self.expected_tensor_class.__name__}"
+            f"expected_tensor_class={expected_tensor_class_name}"
         )
