@@ -13,7 +13,6 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay) {
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -29,7 +28,6 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
                                             const float lr, const float beta1, const float beta2,
                                             const float epsilon, const int step, const int mode,
                                             const int bias_correction, const float weight_decay) {
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -46,7 +44,6 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                                 const float beta1, const float beta2, const float epsilon,
                                 const int step, const int mode, const int bias_correction,
                                 const float weight_decay, DType fp8_dtype) {
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -64,7 +61,6 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        const float epsilon, at::Tensor step, const int mode,
                                        const int bias_correction, const float weight_decay,
                                        at::Tensor inv_scale) {
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -85,7 +81,6 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_fl
                                               const float epsilon, at::Tensor step, const int mode,
                                               const int bias_correction, const float weight_decay,
                                               at::Tensor inv_scale) {
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);

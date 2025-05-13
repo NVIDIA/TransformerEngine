@@ -162,4 +162,4 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
   return std::make_tuple(act_grad, prob_grad);
 }
 
-}
+}  // namespace transformer_engine::pytorch

@@ -14,7 +14,6 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const NVTE_QKV_Format qkv_format, const bool interleaved,
                               const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                               const int cp_rank) {
-
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
@@ -107,7 +106,6 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
                                const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank) {
-
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
