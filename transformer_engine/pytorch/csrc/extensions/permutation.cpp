@@ -6,6 +6,8 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
     int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num) {
@@ -158,4 +160,6 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
                num_tokens, topK, num_cols, 0, stream);
 
   return std::make_tuple(act_grad, prob_grad);
+}
+
 }

@@ -4,24 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "common.h"
 #include "extensions.h"
 #include "pybind.h"
 
-constexpr int block_size = 512;
+namespace {
 
-// get the fused attention backend
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
-    int64_t window_size_right) {
-  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-      attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-      head_dim_qk, head_dim_v, window_size_left, window_size_right);
-  return fused_attention_backend;
-}
+constexpr int block_size = 512;
 
 // fast zero-fills of tensors
 void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &start_index) {
@@ -62,6 +51,24 @@ at::PhiloxCudaState init_philox_state(at::CUDAGeneratorImpl *gen, size_t elts_pe
   return philox_args;
 }
 
+}   // namespace
+
+namespace transformer_engine::pytorch {
+
+// get the fused attention backend
+NVTE_Fused_Attn_Backend get_fused_attn_backend(
+    const DType q_dtype, const DType kv_dtype,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
+    int64_t window_size_right) {
+  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
+      static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
+      attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
+      head_dim_qk, head_dim_v, window_size_left, window_size_right);
+  return fused_attention_backend;
+}
+
 // fused attention FWD with separate Q, K and V tensors
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -74,8 +81,7 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
+
   TensorWrapper te_Q, te_K, te_V, te_O, te_S;
 
   auto none = py::none();
@@ -87,8 +93,8 @@ std::vector<py::object> fused_attn_fwd(
   te_V = makeTransformerEngineTensor(V, none);
 
   // If qkv has FP8 dtype, fake_dtype_te is equal to the fake dtype of q, k, v - needed since torch do not have fp8 types.
-  const transformer_engine::DType qkv_type = te_Q.dtype();
-  const transformer_engine::DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
+  const DType qkv_type = te_Q.dtype();
+  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
 
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
@@ -261,12 +267,11 @@ std::vector<py::object> fused_attn_bwd(
     const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
-    const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
+    const DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
+
   auto none = py::none();
   TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
   te_Q = makeTransformerEngineTensor(Q, none);
@@ -276,8 +281,8 @@ std::vector<py::object> fused_attn_bwd(
   te_dO = makeTransformerEngineTensor(dO, none);
   // qkv type from the te_Q
   std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
-  const transformer_engine::DType qkv_type = te_Q.dtype();
-  const transformer_engine::DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
+  const DType qkv_type = te_Q.dtype();
+  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
 
   py::object s_python, dp_python;
   std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
@@ -497,8 +502,6 @@ std::vector<py::object> fused_attn_bwd(
 }
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(qkvi.dim() == 4, "Expected 4-dim tensor.");
   NVTE_CHECK(qkvi.scalar_type() == at::ScalarType::Half ||
@@ -521,8 +524,6 @@ at::Tensor fa_prepare_fwd(at::Tensor qkvi) {
 }
 
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(q.is_contiguous());
   NVTE_CHECK(k.is_contiguous());
@@ -556,8 +557,6 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(tensor.dim() == 3 || tensor.dim() == 4);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
@@ -600,8 +599,6 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
                                     const at::Tensor &cu_seqlens, bool lse_packed) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
@@ -647,8 +644,6 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
                                     bool lse_packed, int second_half_lse_seqlen) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
@@ -700,8 +695,6 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
                         bool only_second_half, bool lse_packed) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   auto te_out = makeTransformerEngineTensor(out);
   auto te_out_per_step = makeTransformerEngineTensor(out_per_step);
@@ -720,8 +713,6 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,
                          const std::string &second_half) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   auto te_grad = makeTransformerEngineTensor(grad);
   auto te_grad_per_step = makeTransformerEngineTensor(grad_per_step);
@@ -737,8 +728,6 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -766,8 +755,6 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
  **************************************************************************************************/
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   int h = tensor.size(1);
   int d = tensor.size(2);
@@ -789,8 +776,6 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
  **************************************************************************************************/
 
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   int max_seq_len = tensor.size(1);
   int h = tensor.size(2);
@@ -812,8 +797,6 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
                       at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
                       NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
                       int max_pages_per_seq, bool is_non_paged) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
                  new_k.scalar_type() == new_v.scalar_type() &&
@@ -836,3 +819,5 @@ void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at
                         qkv_format, b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged,
                         at::cuda::getCurrentCUDAStream());
 }
+
+}  // namespace transformer_engine::pytorch

@@ -6,6 +6,8 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h,
                                             size_t w, size_t start_offset, size_t block_len) {
   using namespace transformer_engine;
@@ -51,3 +53,5 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
       inp_cu.data(), out_cu.data(), scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
       start_offset, block_len, static_cast<NVTEDType>(out_dtype), at::cuda::getCurrentCUDAStream());
 }
+
+}  // namespace transformer_engine::pytorch

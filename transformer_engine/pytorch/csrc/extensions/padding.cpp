@@ -7,6 +7,8 @@
 #include "extensions.h"
 #include "pybind.h"
 
+namespace transformer_engine::pytorch {
+
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list) {
@@ -81,3 +83,5 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                        padded_num_rows_list.data(), at::cuda::getCurrentCUDAStream());
   });
 }
+
+}  // namespace transformer_engine::pytorch

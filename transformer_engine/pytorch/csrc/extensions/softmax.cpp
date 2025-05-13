@@ -6,6 +6,8 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor) {
   using namespace transformer_engine::pytorch;
   AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
@@ -245,3 +247,5 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_
 
   return output_grads;
 }
+
+}  // namespace transformer_engine::pytorch

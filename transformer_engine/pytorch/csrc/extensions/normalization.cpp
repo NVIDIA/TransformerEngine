@@ -9,22 +9,6 @@
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
-std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape &shape, DType dtype,
-                                                        py::handle quantizer) {
-  std::vector<size_t> shape_vec;
-  for (size_t i = 0; i < shape.ndim; i++) {
-    size_t t = shape.data[i];
-    shape_vec.push_back(t);
-  }
-  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  return my_quantizer->create_tensor(shape_vec, dtype);
-}
-std::pair<TensorWrapper, py::object> createOutputTensor(std::vector<size_t> &shape, DType dtype,
-                                                        py::handle quantizer) {
-  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
-  return my_quantizer->create_tensor(shape, dtype);
-}
-}  // namespace transformer_engine::pytorch
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
@@ -360,3 +344,5 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 
   return {out, py::none(), py::cast(rsigma)};
 }
+
+}  // namespace transformer_engine::pytorch

@@ -12,6 +12,8 @@
 #include "common/common.h"
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
@@ -63,3 +65,5 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reductio
       amax_compute_algo.c_str(), static_cast<NVTEDType>(fp8_dtype), margin,
       at::cuda::getCurrentCUDAStream());
 }
+
+}  // namespace transformer_engine::pytorch
