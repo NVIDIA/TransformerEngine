@@ -80,13 +80,11 @@ def test_transformer_engine_config_parsing(feature_dirs):
         "gemm": "fprop",
         "tensor": "activation",
         "quant_format": "FP8E4M3",
-        "margin": 1,
     }
     assert parsed_cfg_fc1_wei == {
         "gemm": "fprop",
         "tensor": "weight",
         "quant_format": "FP8E4M3",
-        "margin": 2,
     }
 
     # Test gemms struct
@@ -118,7 +116,7 @@ def test_transformer_engine_config_parsing(feature_dirs):
         tensor_name="activation",
     )
     assert ret
-    assert parsed_cfg_fc2_fprop_act == {"gemm": "fprop", "tensor": "activation", "margin": 1}
+    assert parsed_cfg_fc2_fprop_act == {"gemm": "fprop", "tensor": "activation"}
 
     ret, parsed_cfg_fc2_fprop_wei = TEConfigAPIMapper().parse_config_and_api(
         cfg_fc2["PerTensorScaling"],
@@ -128,7 +126,7 @@ def test_transformer_engine_config_parsing(feature_dirs):
         tensor_name="weight",
     )
     assert ret
-    assert parsed_cfg_fc2_fprop_wei == {"gemm": "fprop", "tensor": "weight", "margin": 2}
+    assert parsed_cfg_fc2_fprop_wei == {"gemm": "fprop", "tensor": "weight"}
 
     ret, parsed_cfg_fc2_wgrad_act = TEConfigAPIMapper().parse_config_and_api(
         cfg_fc2["PerTensorScaling"],
@@ -138,7 +136,7 @@ def test_transformer_engine_config_parsing(feature_dirs):
         tensor_name="activation",
     )
     assert ret
-    assert parsed_cfg_fc2_wgrad_act == {"gemm": "wgrad", "tensor": "activation", "margin": 8}
+    assert parsed_cfg_fc2_wgrad_act == {"gemm": "wgrad", "tensor": "activation"}
 
     ret, parsed_cfg_fc2_wgrad_grad = TEConfigAPIMapper().parse_config_and_api(
         cfg_fc2["PerTensorScaling"],
@@ -148,6 +146,6 @@ def test_transformer_engine_config_parsing(feature_dirs):
         tensor_name="gradient",
     )
     assert ret
-    assert parsed_cfg_fc2_wgrad_grad == {"gemm": "wgrad", "tensor": "gradient", "margin": 4}
+    assert parsed_cfg_fc2_wgrad_grad == {"gemm": "wgrad", "tensor": "gradient"}
 
     ConfigManager.reset()
