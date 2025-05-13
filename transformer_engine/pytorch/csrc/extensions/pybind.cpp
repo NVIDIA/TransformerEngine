@@ -6,7 +6,6 @@
 
 #include "pybind.h"
 
-#include <Python.h>
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
@@ -156,10 +155,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
 
   // Permutation functions
-  m.def("moe_permute_fwd", moe_permute_fwd);
-  m.def("moe_permute_bwd", moe_permute_bwd);
-  m.def("moe_unpermute_fwd", moe_unpermute_fwd);
-  m.def("moe_unpermute_bwd", moe_unpermute_bwd);
+  m.def("moe_permute_fwd", moe_permute_fwd, "MOE permute FWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_permute_bwd", moe_permute_bwd, "MOE permute BWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_unpermute_fwd", moe_unpermute_fwd, "MOE unpermute FWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_unpermute_bwd", moe_unpermute_bwd, "MOE unpermute BWD",
+        py::call_guard<py::gil_scoped_release>());
 
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
@@ -202,17 +205,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
-  m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
+  m.def("compute_amax", &compute_amax, "Compute absolute max value in tensor", py::arg("input"),
+        py::arg("amax"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_block_scaling_compute_partial_amax", &fp8_block_scaling_compute_partial_amax,
         "Compute partial amax from master weights for fp8 block scaling", py::arg("tensor"),
-        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"));
+        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("fp8_block_scaling_partial_cast", &fp8_block_scaling_partial_cast,
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
-        py::arg("out_dtype"));
+        py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
         py::call_guard<py::gil_scoped_release>());
 
@@ -225,9 +230,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &fused_attn_bwd,
         "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
-  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
-  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD");
-  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD");
+  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD",
+        py::call_guard<py::gil_scoped_release>());
 
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
