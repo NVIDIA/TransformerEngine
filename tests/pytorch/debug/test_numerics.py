@@ -18,7 +18,10 @@ import transformer_engine.pytorch as tepytorch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_FPROP,
@@ -46,7 +49,7 @@ def _cast_to_fp8(tensor, scale, dtype):
         quantizer = Float8Quantizer(scale, amax, dtype)
     else:
         quantizer = Float8CurrentScalingQuantizer(scale, device=tensor.device)
-    
+
     return quantizer(tensor)
 
 
@@ -134,7 +137,7 @@ def _emulate_linear(
 
     if activation_sync:
         activation = activation_sync(activation)
-    
+
     activation.retain_grad()
 
     (loss_multiplier * activation.sum()).backward(retain_graph=True)
