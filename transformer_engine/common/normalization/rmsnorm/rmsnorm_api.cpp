@@ -23,19 +23,20 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
                  Tensor *rsigma, Tensor *workspace, const int multiprocessorCount,
                  const bool zero_centered_gamma, cudaStream_t stream) {
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
-      !is_block_scaling(z->scaling_mode)) {
+      !is_mxfp_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 
-  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
 
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
-  NVTE_CHECK(epsilon >= 0.f);
+  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1], "Gamma must have the same hidden size.");
+  NVTE_CHECK(epsilon >= 0.f, "Epsilon must be non-negative.");
 
-  NVTE_CHECK(z->data.shape == x.data.shape);
+  NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
-  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
+  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+             "RSigma must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
   if (!workspace->data.shape.empty()) {
     CheckInputTensor(x, "x");
@@ -47,7 +48,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
   bool training =
       is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;

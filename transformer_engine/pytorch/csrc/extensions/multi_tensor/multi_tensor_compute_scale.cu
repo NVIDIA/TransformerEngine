@@ -12,6 +12,8 @@
 // #include <torch/all.h>
 
 #include <assert.h>
+
+#include <limits>
 // Stringstream is a big hammer, but I want to rely on operator<< for dtype.
 #include <sstream>
 
@@ -47,8 +49,8 @@ struct ComputeScaleAndScaleInvFunctor {
     n -= chunk_idx * chunk_size;
 
     for (int i_start = threadIdx.x; i_start < n && i_start < chunk_size; i_start += blockDim.x) {
-      float scale_val = transformer_engine::compute_scale_from_amax(amax[i_start], max_fp8,
-                                                                    force_pow_2_scales, epsilon);
+      float scale_val = transformer_engine::compute_scale_from_amax(
+          amax[i_start], max_fp8, force_pow_2_scales, epsilon, std::numeric_limits<float>::max());
       scale[i_start] = scale_val;
       transformer_engine::reciprocal(scale_inv + i_start, scale_val);
     }

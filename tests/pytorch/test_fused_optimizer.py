@@ -12,7 +12,7 @@ from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling
-from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -361,6 +361,20 @@ class TestFusedAdam(TestFusedOptimizer):
         )
 
     @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    def test_bf16_exp_avg(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.bfloat16,
+            use_master_weights=True,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.bfloat16,
+            exp_avg_sq_dtype=torch.float32,
+            master_rtol=2e-3,
+            master_atol=2e-3,
+        )
+
+    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_exp_avg(self):
         self.gen_precision_aware_test(
@@ -385,6 +399,20 @@ class TestFusedAdam(TestFusedOptimizer):
             grad_dtype=torch.float32,
             exp_avg_dtype=torch.float32,
             exp_avg_sq_dtype=torch.half,
+            master_rtol=2e-3,
+            master_atol=2e-3,
+        )
+
+    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    def test_bf16_exp_avg_sq(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.bfloat16,
+            use_master_weights=True,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.float32,
+            exp_avg_sq_dtype=torch.bfloat16,
             master_rtol=2e-3,
             master_atol=2e-3,
         )

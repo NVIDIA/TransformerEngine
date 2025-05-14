@@ -28,6 +28,9 @@ PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -61,9 +64,31 @@ void init_mxfp8_extension() {
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
+void init_float8blockwise_extension() {
+  if (Float8BlockwiseQTensorBasePythonClass) return;
+  auto fp8_module =
+      py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
+  auto fp8_base_module = py::module_::import(
+      "transformer_engine.pytorch.tensor._internal.float8_blockwise_tensor_base");
+  Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
+  Float8BlockwiseQTensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorBase"));
+  Float8BlockwiseQTensorPythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockwiseQTensor"));
+
+  NVTE_CHECK(Float8BlockwiseQuantizerClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+  NVTE_CHECK(Float8BlockwiseQTensorBasePythonClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+  NVTE_CHECK(Float8BlockwiseQTensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch float8blockwise extension.");
+}
+
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
+  init_float8blockwise_extension();
 }
 
 }  // namespace transformer_engine::pytorch
@@ -76,6 +101,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -170,12 +196,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
         py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
-        py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
+  m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
+        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
+        py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O", py::arg("input"),
-        py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
+        py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
   m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
@@ -202,10 +230,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format",
         py::call_guard<py::gil_scoped_release>());
 
   // Misc
