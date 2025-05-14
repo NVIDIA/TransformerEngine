@@ -214,7 +214,6 @@ def run_debug_test(func):
                 os.unlink(temp_file_name)
 
             debug_api.end_debug()
-            transformer_engine.debug.pytorch.debug_state.TEDebugState.reset()
 
             if rank == 0 and hasattr(wrapper, "temp_dir_obj"):
                 wrapper.temp_dir_obj.cleanup()
@@ -237,7 +236,7 @@ CONFIG_LOG_TEST_DISTRIBUTED = """log_distributed:
     LogFp8TensorStats:
       enabled: True
       tensors: [activation, gradient, weight]
-      stats: [underflows%, saturations%]
+      stats: [underflows%]
       start_step : 0
       end_step: 1
 """
@@ -497,6 +496,7 @@ def test_per_tensor_scaling(
     # need to be collected after forward pass with test data,
     # because gradient(y.grad) cannot be accessed before forward,
     # but it needs to be collected.
+
     set_current_scaling_factors(x, weight, y, input_kwargs, fp8_kwargs)
     ground_truth = _emulate_linear_distributed(
         x, weight, parallel_mode=parallel_mode, loss_multiplier=LOSS_MULTIPLIER, **fp8_kwargs
@@ -628,15 +628,6 @@ if __name__ == "__main__":
         test_disable_fp8_gemms, all_boolean, num_repeat=3, extra_args=["column", "row"]
     )
 
-    # test_per_tensor_scaling
-    _run_test_with_combinations(
-        test_per_tensor_scaling,
-        all_boolean,
-        num_repeat=6,
-        extra_args=["column", "row"],
-        sample_size=20,
-    )
-
     # test_fake_quant_fp8
     dtype_options = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2, None]
     _run_test_with_combinations(
@@ -644,5 +635,13 @@ if __name__ == "__main__":
         dtype_options,
         num_repeat=6,
         extra_args=["column", "row"],
+        sample_size=20,
+    )
+
+    _run_test_with_combinations(
+        test_per_tensor_scaling,
+        all_boolean,
+        num_repeat=6,
+        extra_args=["column"],
         sample_size=20,
     )

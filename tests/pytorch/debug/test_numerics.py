@@ -17,7 +17,6 @@ import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import (
@@ -56,7 +55,7 @@ def _get_current_scale(tensor, fp8_dtype):
     amax = tensor.abs().max().float()
     one = torch.ones(1, device=tensor.device)
 
-    return _default_sf_compute(amax, one, fp8_max, 0)
+    return _default_sf_compute(amax, one, fp8_max, 0).detach()
 
 
 def _fake_cast(tensor, fp8_dtype, scale):
