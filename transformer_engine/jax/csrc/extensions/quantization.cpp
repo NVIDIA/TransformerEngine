@@ -258,6 +258,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   bool has_colwise = quantize_layout == QuantizeLayout::COLWISE ||
                      quantize_layout == QuantizeLayout::ROWWISE_COLWISE;
   bool is_delayed_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING;
+  bool const is_tensor_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+                                 scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING;
 
   size_t input_dtype_bytes = te_dtype_bytes(in_dtype);
   size_t output_dtype_bytes = te_dtype_bytes(out_dtype);
@@ -265,8 +267,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   size_t group_size_dtype_bytes = te_dtype_bytes(group_size_dtype);
   size_t colwise_output_dtype_bytes = has_colwise ? output_dtype_bytes : 0;
   size_t colwise_sinv_dtype_bytes = has_colwise ? sinv_dtype_bytes : 0;
-  size_t scale_dtype_bytes = is_delayed_scaling ? te_dtype_bytes(scale_dtype) : 0;
-  size_t amax_dtype_bytes = is_delayed_scaling ? te_dtype_bytes(amax_dtype) : 0;
+  size_t scale_dtype_bytes = is_tensor_scaling ? te_dtype_bytes(scale_dtype) : 0;
+  size_t amax_dtype_bytes = is_tensor_scaling ? te_dtype_bytes(amax_dtype) : 0;
 
   auto input_dims = inputs.dimensions();
   int64_t input_ndim = input_dims.size();
@@ -299,7 +301,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
              "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m,
              input_dims[0]);
 
-  if (is_fp8_dtype(out_dtype) && scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
+  // TODO(Hua): shall we use is_delayed_scaling or is_tensor_scaling here?
+  if (is_fp8_dtype(out_dtype) && is_tensor_scaling) {
     NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups,
                ", got ", amaxs->dimensions()[0]);
     NVTE_CHECK(amax_dtype == DType::kFloat32 && scale_dtype == DType::kFloat32);
@@ -321,14 +324,15 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
       out_i.set_rowwise_data(static_cast<void *>(output_ptr), out_dtype, shape_i);
 
       if (is_fp8_dtype(out_dtype)) {
-        if (is_delayed_scaling) {
+        if (is_tensor_scaling) {
           out_i.set_scale(static_cast<void *>(scale_ptr), DType::kFloat32, std::vector<size_t>{1});
           out_i.set_amax(static_cast<void *>(amax_ptr), DType::kFloat32, std::vector<size_t>{1});
           out_i.set_rowwise_scale_inv(static_cast<void *>(sinv_ptr), sinv_dtype,
                                       std::vector<size_t>{1});
           sinv_size = 1;
         } else {
-          auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, false /*is_colwise*/);
+          const bool is_colwise = false;
+          auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, is_colwise);
           out_i.set_rowwise_scale_inv(static_cast<void *>(sinv_ptr), sinv_dtype, sinv_shape_i);
           sinv_size = product(sinv_shape_i);
         }
@@ -336,20 +340,21 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     }
 
     if (has_colwise) {
-      auto &tmp_shape = is_delayed_scaling ? shape_trans_i : shape_i;
+      // TODO(Hua): Shall we use is_tensor_scaling or is_delayed_scaling here? Both pass unit tests.
+      auto &tmp_shape = is_tensor_scaling ? shape_trans_i : shape_i;
       out_i.set_columnwise_data(static_cast<void *>(colwise_output_ptr), out_dtype, tmp_shape);
       // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
-      auto &tmp_sinv_ptr =
-          (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) ? sinv_ptr : colwise_sinv_ptr;
+      auto &tmp_sinv_ptr = is_tensor_scaling ? sinv_ptr : colwise_sinv_ptr;
 
-      if (is_delayed_scaling) {
+      if (is_tensor_scaling) {
         out_i.set_columnwise_scale_inv(static_cast<void *>(tmp_sinv_ptr), sinv_dtype,
                                        std::vector<size_t>{1});
         colwise_sinv_size = 1;
       } else {
-        auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, true /*is_colwise*/);
-        out_i.set_columnwise_scale_inv(static_cast<void *>(colwise_sinv_ptr), sinv_dtype,
-                                       sinv_shape_i);
+        const bool is_colwise = true;
+        auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, is_colwise);
+        // TODO(Hua): shall we use colwise_sinv_ptr or tmp_sinv_ptr here? Both pass unit tests.
+        out_i.set_columnwise_scale_inv(static_cast<void *>(tmp_sinv_ptr), sinv_dtype, sinv_shape_i);
         colwise_sinv_size = product(sinv_shape_i);
       }
     }

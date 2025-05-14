@@ -639,12 +639,13 @@ class TestQuantize:
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
+@pytest_parametrize_wrapper("with_group_sizes", [True, False])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
-        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
     ):
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
