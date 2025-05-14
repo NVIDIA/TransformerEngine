@@ -1118,7 +1118,7 @@ class LayerNormMLP(TransformerEngineBase):
             ).astype(input_dtype)
 
             bias_2_shape = (hidden_size,)
-            bias_1 = self.param(
+            bias_2 = self.param(
                 "wo_bias",
                 nn.with_logical_partitioning(self.bias_init, self.bias_axes_2),
                 bias_2_shape,
@@ -1187,9 +1187,7 @@ class LayerNormMLP(TransformerEngineBase):
                         kernel_1.ndim, self.kernel_axes_1, contract_ind
                     ),
                 )
-            else:
-                dot_1_output_axes = None  # don't insert sharding constraint so default partitioning from previous ops will apply
-            x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
+                x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (

@@ -10,11 +10,10 @@ parallelism (FSDP). It includes functions for sharding constraints, mesh managem
 and collective operations.
 """
 import os
-from typing import Optional
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, Optional
 from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
@@ -349,9 +348,7 @@ def get_non_contracting_logical_axes(
         Tuple of logical axes for non-contracting dimensions.
     """
     assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
-    if len(logical_axes) < ndim:
-        logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
-    assert len(logical_axes) == ndim
+    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
 
     non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
     non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
