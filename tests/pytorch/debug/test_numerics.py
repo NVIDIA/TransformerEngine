@@ -18,7 +18,7 @@ import transformer_engine.pytorch as tepytorch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_FPROP,
@@ -41,8 +41,12 @@ LOSS_FN = torch.nn.functional.cross_entropy
 
 def _cast_to_fp8(tensor, scale, dtype):
     tensor = tensor.contiguous()
-    amax = tensor.abs().max().float()
-    quantizer = Float8Quantizer(scale, amax, dtype)
+    if type(scale) == torch.Tensor:
+        amax = scale.abs().max().float()
+        quantizer = Float8Quantizer(scale, amax, dtype)
+    else:
+        quantizer = Float8CurrentScalingQuantizer(scale, device=tensor.device)
+    
     return quantizer(tensor)
 
 
@@ -102,7 +106,7 @@ def _emulate_linear(
     activation_sync=None,
     gradient_sync=None,
 ):
-    _scalar = lambda x: torch.Tensor([x]).cuda() if x is not None else None
+    _scalar = lambda x: torch.Tensor([x]).cuda() if type(x) in [float, torch.Tensor] else x
     if fprop_fp8:
         activation = _fp8_gemm_kernel(
             input,
@@ -130,7 +134,7 @@ def _emulate_linear(
 
     if activation_sync:
         activation = activation_sync(activation)
-
+    
     activation.retain_grad()
 
     (loss_multiplier * activation.sum()).backward(retain_graph=True)
@@ -426,17 +430,17 @@ def set_scaling_factors(model, input_kwargs, fp8_kwargs):
 def set_current_scaling_factors(x, weight, y, input_kwargs, fp8_kwargs):
     # Compute per tensor scaling factor if respective flag in input_kwargs is set.
     if input_kwargs["fprop_inp"]:
-        fp8_kwargs["fprop_input_scale"] = _get_current_scale(x, tex.DType.kFloat8E4M3)
+        fp8_kwargs["fprop_input_scale"] = tex.DType.kFloat8E4M3
     if input_kwargs["fprop_weight"]:
-        fp8_kwargs["fprop_weight_scale"] = _get_current_scale(weight, tex.DType.kFloat8E4M3)
+        fp8_kwargs["fprop_weight_scale"] = tex.DType.kFloat8E4M3
     if input_kwargs["dgrad_grad"]:
-        fp8_kwargs["dgrad_gradient_scale"] = _get_current_scale(y.grad, tex.DType.kFloat8E5M2)
+        fp8_kwargs["dgrad_gradient_scale"] = tex.DType.kFloat8E5M2
     if input_kwargs["dgrad_weight"]:
-        fp8_kwargs["dgrad_weight_scale"] = _get_current_scale(weight, tex.DType.kFloat8E4M3)
+        fp8_kwargs["dgrad_weight_scale"] = tex.DType.kFloat8E4M3
     if input_kwargs["wgrad_grad"]:
-        fp8_kwargs["wgrad_gradient_scale"] = _get_current_scale(y.grad, tex.DType.kFloat8E5M2)
+        fp8_kwargs["wgrad_gradient_scale"] = tex.DType.kFloat8E5M2
     if input_kwargs["wgrad_input"]:
-        fp8_kwargs["wgrad_input_scale"] = _get_current_scale(x, tex.DType.kFloat8E4M3)
+        fp8_kwargs["wgrad_input_scale"] = tex.DType.kFloat8E4M3
 
 
 @create_config_file
