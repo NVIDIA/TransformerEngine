@@ -52,7 +52,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-    nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    });
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
@@ -69,7 +71,10 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     // so in nvte_quantize_v2 with current scaling, the quant config is not used again
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_scale_from_amax(te_output.data(), quant_config,
+                                   at::cuda::getCurrentCUDAStream());
+    });
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
   } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
@@ -77,8 +82,10 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
   }
-  nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
-                   at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
+                     at::cuda::getCurrentCUDAStream());
+  });
 
   return out;
 }
@@ -96,7 +103,9 @@ py::object dequantize(const py::handle& input, transformer_engine::DType otype) 
 
   auto [out_tensor, out] = q.create_tensor(shape, otype);
 
-  nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   return out;
 }
@@ -120,15 +129,19 @@ std::vector<py::object> dbias_dact(const at::Tensor& grad_output, const at::Tens
 
   // Query workspace size and allocate workspace
   transformer_engine::TensorWrapper workspace;
-  func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-       workspace.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
+         workspace.data(), at::cuda::getCurrentCUDAStream());
+  });
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
   // Launch kernel
-  func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
-       workspace.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
+         workspace.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   return {py::cast(grad_bias), dact};
 }

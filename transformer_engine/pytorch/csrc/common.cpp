@@ -9,6 +9,7 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {

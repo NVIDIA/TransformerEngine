@@ -218,6 +218,26 @@ std::vector<size_t> getTensorShape(at::Tensor t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
+inline size_t typeToSize(transformer_engine::DType t) {
+  switch (t) {
+    case transformer_engine::DType::kInt64:
+      return 8;
+    case transformer_engine::DType::kInt32:
+    case transformer_engine::DType::kFloat32:
+      return 4;
+    case transformer_engine::DType::kInt16:
+    case transformer_engine::DType::kFloat16:
+    case transformer_engine::DType::kBFloat16:
+      return 2;
+    case transformer_engine::DType::kByte:
+    case transformer_engine::DType::kFloat8E4M3:
+    case transformer_engine::DType::kFloat8E5M2:
+      return 1;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt16:

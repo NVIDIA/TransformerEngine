@@ -66,6 +66,9 @@ list(APPEND transformer_engine_SOURCES
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
      activation/gelu.cu
+     fused_attn/flash_attn.cu
+     fused_attn/context_parallel.cu
+     fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      activation/relu.cu
@@ -173,6 +176,9 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             multi_tensor/l2norm.cu
                             multi_tensor/scale.cu
                             multi_tensor/sgd.cu
+                            fused_attn/flash_attn.cu
+                            fused_attn/context_parallel.cu
+                            fused_attn/kv_cache.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)

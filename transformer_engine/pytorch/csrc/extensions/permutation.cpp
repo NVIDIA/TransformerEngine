@@ -6,10 +6,11 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
-    at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
-    int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num) {
-  using namespace transformer_engine::pytorch;
+    at::Tensor input, const DType dtype, at::Tensor indices, int64_t num_out_tokens,
+    std::vector<at::Tensor> workspace, int64_t max_expanded_token_num) {
   const int num_tokens = input.size(0);
   int num_cols = input.size(1);
   const int topK = indices.size(1);
@@ -71,28 +72,23 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                                   dtype);
   auto sorted_row_id_cu = makeTransformerEngineTensor(
       sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_tokens * topK)},
-      transformer_engine::DType::kInt32);
+      DType::kInt32);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
 
   nvte_permute(input_cu.data(), permuted_output_cu.data(), sorted_row_id_cu.data(),
-               row_id_map_cu.data(), transformer_engine::TensorWrapper().data(),
-               transformer_engine::TensorWrapper().data(),
-               transformer_engine::TensorWrapper().data(), num_tokens, topK, num_cols,
-               num_out_tokens, stream);
+               row_id_map_cu.data(), TensorWrapper().data(), TensorWrapper().data(),
+               TensorWrapper().data(), num_tokens, topK, num_cols, num_out_tokens, stream);
 
   return std::make_tuple(permuted_output, row_id_map, workspace);
 }
 
-at::Tensor moe_permute_bwd(at::Tensor input, const transformer_engine::DType dtype,
-                           at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
-                           int64_t topK) {
+at::Tensor moe_permute_bwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
+                           at::Tensor prob, int64_t num_tokens, int64_t topK) {
   return moe_unpermute_fwd(input, dtype, row_id_map, prob, num_tokens, topK);
 }
 
-at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType dtype,
-                             at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
-                             int64_t topK) {
-  using namespace transformer_engine::pytorch;
+at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
+                             at::Tensor prob, int64_t num_tokens, int64_t topK) {
   int num_cols = input.size(1);
 
   // Output buffer alloc
@@ -121,9 +117,8 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType d
 }
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
-                                                     const transformer_engine::DType dtype,
-                                                     at::Tensor row_id_map, at::Tensor prob) {
-  using namespace transformer_engine::pytorch;
+                                                     const DType dtype, at::Tensor row_id_map,
+                                                     at::Tensor prob) {
   const int topK = (prob.numel() > 0) ? prob.size(1) : 1;
   const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
   int num_cols = input_bwd.size(1);
@@ -153,9 +148,11 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
   auto prob_cu = makeTransformerEngineTensor(prob);
   auto prob_grad_cu = makeTransformerEngineTensor(prob_grad);
 
-  nvte_permute(input_bwd_cu.data(), act_grad_cu.data(), transformer_engine::TensorWrapper().data(),
+  nvte_permute(input_bwd_cu.data(), act_grad_cu.data(), TensorWrapper().data(),
                row_id_map_cu.data(), prob_cu.data(), prob_grad_cu.data(), input_fwd_cu.data(),
                num_tokens, topK, num_cols, 0, stream);
 
   return std::make_tuple(act_grad, prob_grad);
 }
+
+}  // namespace transformer_engine::pytorch
