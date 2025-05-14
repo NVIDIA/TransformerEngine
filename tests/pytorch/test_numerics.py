@@ -42,7 +42,7 @@ from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
+from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 
@@ -144,18 +144,20 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 
 def assert_allclose(
-    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float = None, rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
+        tols = dtype_tols(t2.dtype)
         if rtol is not None:
             tols["rtol"] = rtol
+        if atol is not None:
+            tols["atol"] = atol
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
+            tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
             exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
@@ -2317,6 +2319,12 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         pytest.skip("FusedAttention and FlashAttention do not support FP32")
     if use_RoPE:
         pytest.skip("KV cache does not support starting positions for RoPE")
+    if (
+        backend == "FusedAttention"
+        and get_device_compute_capability() == (8, 9)
+        and get_cudnn_version() < (9, 11, 0)
+    ):
+        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.11")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
