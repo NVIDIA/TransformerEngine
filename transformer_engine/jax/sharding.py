@@ -10,6 +10,7 @@ parallelism (FSDP). It includes functions for sharding constraints, mesh managem
 and collective operations.
 """
 import os
+from typing import Optional
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -112,9 +113,22 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     return jax.lax.with_sharding_constraint(x, pspec)
 
 
-def with_sharding_constraint_by_logical_axes(x: jnp.array, logical_axis_names: tuple | list):
+def with_sharding_constraint_by_logical_axes(
+    x: jnp.array, logical_axis_names: Optional[tuple | list]
+):
     """
     A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
+
+    If logical_axis_names = None, this means no sharding constraint is applied.
+
+    If logical_axis_names = (None, None, ...), this means a sharding constraint is applied and the tensor is replicated across all devices.
+
+    Args:
+        x: Input tensor to apply sharding constraint
+        logical_axis_names: Logical axis names to apply sharding constraint
+    Returns:
+        Tensor with sharding constraint applied, or the original tensor if no logical axes are provided.
+
     """
     if not logical_axis_names:
         return x
@@ -321,7 +335,9 @@ class ShardingType(Enum):
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
 
 
-def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
+def get_non_contracting_logical_axes(
+    ndim, logical_axes: tuple[Optional[str]], contracting_dims
+) -> tuple[Optional[str]]:
     """Get logical axes for non-contracting dimensions.
 
     Args:
@@ -332,8 +348,7 @@ def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
     Returns:
         Tuple of logical axes for non-contracting dimensions.
     """
-    if not logical_axes:
-        return None
+    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
     if len(logical_axes) < ndim:
         logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
     assert len(logical_axes) == ndim
