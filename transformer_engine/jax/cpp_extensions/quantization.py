@@ -781,7 +781,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_shape = (1,)
             colwise_scale_inv_shape = (1,)
         colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
-        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        rowwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=rowwise_scale_inv_shape, dtype=scale_dtype
+        )
         colwise_scale_inv_aval = jax.core.ShapedArray(
             shape=colwise_scale_inv_shape, dtype=scale_dtype
         )
@@ -789,7 +791,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         return (
             rowwise_out_aval,
             colwise_out_aval,
-            scale_inv_aval,
+            rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
             amax_aval,
         )
@@ -801,13 +803,15 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         # Phuong: keeping outer abstract so that we can add fuse dbias later
         (
-            out,
+            rowwise_out,
             colwise_out,
             scale_inv,
             colwise_scale_inv,
             updated_amax,
+            _dbias,
+            _wkspace,
         ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
-        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
     def lowering(
@@ -859,9 +863,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         assert GroupedQuantizePrimitive.inner_primitive is not None
         (
-            out,
+            rowwise_out,
             colwise_out,
-            scale_inv,
+            rowwise_scale_inv,
             colwise_scale_inv,
             updated_amax,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
@@ -875,7 +879,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
-        return (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax)
+        return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
 
 register_primitive(GroupedQuantizePrimitive)
@@ -887,6 +891,9 @@ def grouped_quantize(
     group_sizes: jnp.ndarray = None,
     flatten_axis: int = -1,
 ) -> GroupedScaledTensor1x:
+    """
+    TODO(Hua): add docstring
+    """
 
     if quantizer is None:
         return x
@@ -896,6 +903,8 @@ def grouped_quantize(
         flatten_axis == -1 or flatten_axis == x.ndim - 1
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
+    # TODO(Hua): What is other_sizes for? Is this other_sizes correct?
+    other_sizes = x.shape[1:]
 
     if group_sizes is None:
         group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
@@ -915,11 +924,20 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             scale = scale.at[i].set(quantizer_i.scale[0])
 
-    # WAR for DelayedScaling COLWISE
-    apply_colwise_war = (
+    # TODO(Hua): this part mimics _quantize_dbias_impl(), is it correct?
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
+        tmp_scale = compute_scale_from_amax(amax, quantizer.q_dtype)
+        tmp_scale = tmp_scale.reshape(())
+        for i in range(n_groups):
+            scale = scale.at[i].set(tmp_scale)
+
+    # WAR for DelayedScaling (Hua: and CurrentScaling?) COLWISE
+    is_block_scaling = (
         quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        and quantizer.q_layout == QuantizeLayout.COLWISE
+        or quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
     )
+    apply_colwise_war = is_block_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
     q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
     (
         rowwise_casted_output,
@@ -939,12 +957,9 @@ def grouped_quantize(
         scale_dtype=quantizer.get_scale_dtype(),
     )
 
-    # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if (
-        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        and quantizer.is_2x2x()
-        or apply_colwise_war
-    ):
+    # For DelayedScaling2x (Hua: and CurrentScaling2x?), the scale buffer
+    # is shared between rowwise and colwise
+    if is_block_scaling and quantizer.is_2x2x() or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
@@ -963,6 +978,7 @@ def grouped_quantize(
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
         group_sizes=group_sizes,
+        other_sizes=other_sizes,
         group_axis=group_axis,
         original_shape=original_shape,
     )
