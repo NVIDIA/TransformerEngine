@@ -41,7 +41,7 @@ def setup_jax_extension(
     # Source files
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
-    sources = all_files_in_dir(extensions_dir, ".cpp")
+    sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
     include_dirs = get_cuda_include_dirs()
