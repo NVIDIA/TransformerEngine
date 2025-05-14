@@ -28,23 +28,32 @@ def _is_package_installed(package):
 
 
 @functools.lru_cache(maxsize=None)
-def _find_file_in_te_dir(te_path: Path, prefix: str, ext: str):
+def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
     """
-    Find a file with given prefix and suffix in the TE directory.
-    Returns None if not found.
-    Throws an error if multiple found.
+    Find a shared object file of given prefix in the top level TE directory.
+    Only the following locations are searched to avoid stray SOs and build
+    artifacts:
+        1. The given top level directory (editable install).
+        2. `transformer_engine` named directories (source install).
+        3. `wheel_lib` named directories (PyPI install).
+
+    Returns None if no shared object files are found.
+    Raises an error if multiple shared object files are found.
     """
 
     # Ensure top level dir exists and has the module. before searching.
     if not te_path.exists() or not (te_path / "transformer_engine").exists():
         return None
 
-    # Search files
+    # Search.
     files = []
     for dirname, _, names in os.walk(te_path):
-        for name in names:
-            if name.startswith(prefix) and name.endswith(f".{ext}"):
-                files.append(Path(dirname, name))
+        # Limit search paths.
+        current_directory = os.path.basename(dirname)
+        if current_directory in ("transformer_engine", "wheel_lib") or dirname == str(te_path):
+            for name in names:
+                if name.startswith(prefix) and name.endswith(f".{_get_sys_extension()}"):
+                    files.append(Path(dirname, name))
 
     if len(files) == 0:
         return None
@@ -75,17 +84,39 @@ def _get_shared_object_file(library: str) -> Path:
     else:
         so_prefix = f"transformer_engine_{library}"
 
-    # Check location where TE is installed.
+    # Check TE install location (will be local if TE is available in current dir for import).
     te_install_dir = Path(importlib.util.find_spec("transformer_engine").origin).parent.parent
-    so_path = _find_file_in_te_dir(te_install_dir, so_prefix, _get_sys_extension())
-    if so_path is not None:
-        return so_path
+    so_path_in_install_dir = _find_shared_object_in_te_dir(te_install_dir, so_prefix)
 
     # Check default python package install location in system.
     site_packages_dir = Path(sysconfig.get_paths()["purelib"])
-    so_path = _find_file_in_te_dir(site_packages_dir, so_prefix, _get_sys_extension())
-    if so_path is not None:
-        return so_path
+    so_path_in_default_dir = _find_shared_object_in_te_dir(site_packages_dir, so_prefix)
+
+    # Case 1: Typical user workflow: Both locations are the same, return any result.
+    if te_install_dir == site_packages_dir:
+        assert (
+            so_path_in_install_dir is not None
+        ), f"Could not find shared object file for Transformer Engine {library} lib."
+        return so_path_in_install_dir
+
+    # Case 2: ERR! Both locations are different but returned a valid result.
+    # NOTE: Unlike for source installations, pip does not wipe out artifacts from
+    # editable builds. In case developers are executing inside a TE directory via
+    # an inplace build, and then move to a regular build, the local shared object
+    # file will be incorrectly picked up without the following logic.
+    if so_path_in_install_dir is not None and so_path_in_default_dir is not None:
+        raise RuntimeError(
+            f"Found multiple shared object files: {so_path_in_install_dir} and"
+            f" {so_path_in_default_dir}."
+        )
+
+    # Case 3: Typical dev workflow: Editable install
+    if so_path_in_install_dir is not None:
+        return so_path_in_install_dir
+
+    # Case 4: Executing from inside a TE directory without an inplace build available.
+    if so_path_in_default_dir is not None:
+        return so_path_in_default_dir
 
     raise RuntimeError(f"Could not find shared object file for Transformer Engine {library} lib.")
 
