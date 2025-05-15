@@ -904,7 +904,7 @@ using e8m0_t = uint8_t;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
-enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENTIONAL = 2 };
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 
 template <typename T>
 struct Numeric_Traits;
@@ -931,14 +931,6 @@ struct Quantized_Limits {
 };
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-  // TODO: nan/inf needs to be set for any value
-  // of nan/inf in input not just amax.
-  if (isnan(val)) {
-    return 0xFF;
-  }
-  if (isinf(val)) {
-    return 0xFE;
-  }
 #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
   uint16_t out;
@@ -950,6 +942,14 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
       : "f"(val));
   return *reinterpret_cast<e8m0_t *>(&out);
 #else
+  // TODO: nan/inf needs to be set for any value
+  // of nan/inf in input not just amax.
+  if (isnan(val)) {
+    return 0xFF;
+  }
+  if (isinf(val)) {
+    return 0xFE;
+  }
   if (val == 0.0f) {
     return 0x00;
   }
