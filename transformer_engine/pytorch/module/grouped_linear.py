@@ -50,6 +50,8 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer, bulk_alloc_float8_blockwise_tensor
+
 __all__ = ["GroupedLinear"]
 
 
@@ -91,7 +93,8 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
+        inp_view = inp.view(-1, in_features)
+        inputmats = torch.split(inp_view, m_splits)
         if fp8:
             assert_dim_for_fp8_exec(*inputmats, *weights)
 
@@ -125,9 +128,25 @@ class _GroupedLinear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+            # TODO(zhongbo): make bulk alloc available for all quantizers
+            output_list = bulk_alloc_float8_blockwise_tensor(inp_view, m_splits, input_quantizers) if isinstance(input_quantizers[0], Float8BlockQuantizer) else None
             inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
+                inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
             )
+            # inputmats_ref = tex.fused_multi_quantize(
+            #     inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
+            # )
+            # [DEBUG]
+            # use torch testing to directly do zero tolerance test
+            # for i in range(len(inputmats)):
+            #     tensor = inputmats[i]
+            #     tensor_ref = inputmats_ref[i]
+            #     torch.testing.assert_close(tensor._rowwise_data, tensor_ref._rowwise_data)
+            #     torch.testing.assert_close(tensor._rowwise_scale_inv, tensor_ref._rowwise_scale_inv)
+            #     torch.testing.assert_close(tensor._columnwise_data, tensor_ref._columnwise_data)
+            #     torch.testing.assert_close(tensor._columnwise_scale_inv, tensor_ref._columnwise_scale_inv)
+
+            # raise Exception("Not implemented")
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             # FP8 cast to workspace buffer
@@ -250,8 +269,9 @@ class _GroupedLinear(torch.autograd.Function):
             # preprocess grad_output
 
             grad_output = grad_output.contiguous()
+            grad_output_view = grad_output.view(-1, grad_output.shape[-1])
             grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
+                grad_output_view, ctx.m_splits
             )
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
@@ -269,9 +289,10 @@ class _GroupedLinear(torch.autograd.Function):
                                 grad_output_mats[i], ctx.grad_output_quantizers[i]
                             )
                 else:
+                    output_list = bulk_alloc_float8_blockwise_tensor(grad_output_view, ctx.m_splits, ctx.grad_output_quantizers) if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer) else None
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
-                        None,
+                        output_list,
                         ctx.grad_output_quantizers,
                         TE_DType[ctx.activation_dtype],
                     )
