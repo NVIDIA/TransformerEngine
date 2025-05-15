@@ -15,16 +15,25 @@ import platform
 import importlib
 import functools
 from pathlib import Path
-from importlib.metadata import version
+from importlib.metadata import version, metadata, PackageNotFoundError
 
 
 _logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=None)
-def _is_package_installed(package):
-    """Checks if a pip package is installed."""
-    return importlib.util.find_spec(package) is not None
+def _is_pip_package_installed(package):
+    """Check if the given package is installed via pip."""
+
+    # This is needed because we only want to return true
+    # if the python package is installed via pip, and not
+    # if it's importable in the current directory due to
+    # the presence of the shared library module.
+    try:
+        metadata(package)
+    except PackageNotFoundError:
+        return False
+    return True
 
 
 @functools.lru_cache(maxsize=None)
@@ -41,7 +50,7 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
     Raises an error if multiple shared object files are found.
     """
 
-    # Before searching, ensure top level directory exists and has the module.
+    # Ensure top level dir exists and has the module. before searching.
     if not te_path.exists() or not (te_path / "transformer_engine").exists():
         return None
 
@@ -147,9 +156,11 @@ def load_framework_extension(framework: str):
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching version.
-    if _is_package_installed(module_name):
-        assert _is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
-        assert _is_package_installed(
+    if _is_pip_package_installed(module_name):
+        assert _is_pip_package_installed(
+            "transformer_engine"
+        ), "Could not find `transformer-engine`."
+        assert _is_pip_package_installed(
             "transformer_engine_cu12"
         ), "Could not find `transformer-engine-cu12`."
         assert (
@@ -167,8 +178,8 @@ def load_framework_extension(framework: str):
     # If the core package is installed via PyPI, log if
     # the framework extension is not found from PyPI.
     # Note: Should we error? This is a rare use case.
-    if _is_package_installed("transformer-engine-cu12"):
-        if not _is_package_installed(module_name):
+    if _is_pip_package_installed("transformer-engine-cu12"):
+        if not _is_pip_package_installed(module_name):
             _logger.info(
                 "Could not find package %s. Install transformer-engine using "
                 f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'",

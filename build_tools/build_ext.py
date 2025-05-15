@@ -136,12 +136,14 @@ def get_build_ext(
                 if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
                 else ""
             )
-            target_dir = install_dir / "transformer_engine" / lib_dir
-            target_dir.mkdir(exist_ok=True, parents=True)
 
-            for ext in Path(self.build_lib).glob("*.so"):
-                self.copy_file(ext, target_dir)
-                os.remove(ext)
+            if not self.inplace:
+                target_dir = install_dir / "transformer_engine" / lib_dir
+                target_dir.mkdir(exist_ok=True, parents=True)
+
+                for ext in Path(self.build_lib).glob("*.so"):
+                    self.copy_file(ext, target_dir)
+                    os.remove(ext)
 
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
