@@ -35,9 +35,13 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto my_quantizer_none = std::make_unique<NoneQuantizer>(py::none());
     auto [te_output_act, out_act] =
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
-    act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
-    // use te_output_act as input to the compute amax and find the amax of activated tensor
-    nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+
+    NVTE_SCOPED_GIL_RELEASE({
+      act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
+      // use te_output_act as input to the compute amax and find the amax of activated tensor
+      nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    });
+
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
     if (my_quantizer_cs->with_amax_reduction) {
@@ -47,17 +51,22 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     QuantizationConfigWrapper quant_config;
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-    // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-    te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
-    nvte_quantize_v2(te_output_act.data(), te_output.data(), quant_config,
-                     at::cuda::getCurrentCUDAStream());
+
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_scale_from_amax(te_output.data(), quant_config,
+                                   at::cuda::getCurrentCUDAStream());
+      // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+      te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
+      nvte_quantize_v2(te_output_act.data(), te_output.data(), quant_config,
+                       at::cuda::getCurrentCUDAStream());
+    });
   } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
     // sanity check, since activation fusion is not supported for blockwise quantization yet
     // need to raise an error here instead of silently going into act_func with wrong numerics
     NVTE_ERROR("Activation fusion is not supported for blockwise quantization yet.");
   } else {
-    act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE(
+        { act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream()); });
   }
 
   return out;
@@ -80,7 +89,9 @@ py::object dactivation_helper(const at::Tensor& grad, const at::Tensor& input,
   auto [te_output, out] =
       my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
-  act_func(te_grad.data(), te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    act_func(te_grad.data(), te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   return out;
 }
