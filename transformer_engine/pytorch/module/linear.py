@@ -1449,6 +1449,7 @@ class Linear(TransformerEngineBaseModule):
         This simplified implementation is designed specifically for inference scenarios.
         """
         from ..export import onnx_gemm
+
         assert_warmed_up(self)
         assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export."
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
@@ -1471,7 +1472,6 @@ class Linear(TransformerEngineBaseModule):
         if bias_tensor is not None:
             bias_tensor = bias_tensor.to(inp_dtype)
         weight_tensor = weight_tensor.to(inp_dtype)
-
 
         if self.apply_bias:
             output = onnx_gemm(weight_tensor, inp, bias_tensor)
