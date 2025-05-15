@@ -1620,11 +1620,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 )
                 unfused_weights = [w.dequantize() for w in unfused_weights]
 
-            weight_tensor = noop_cat(unfused_weights)
-            if self.use_bias:
-                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+        weight_tensor = noop_cat(unfused_weights)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = getattr(self, self.bias_names[0])  # Unused
         return weight_tensor, bias_tensor
 
     def onnx_forward(
@@ -1670,7 +1670,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if bias_tensor is not None:
             bias_tensor = bias_tensor.to(inp_dtype)
 
-        output = onnx_gemm(weight_tensor, ln_out, bias_tensor if not self.return_bias else None)
+        output = onnx_gemm(weight_tensor, ln_out, bias_tensor if self.apply_bias else None)
 
         if output_quantizer is not None:
             raise NotImplementedError("ONNX export of quantized output is not supported")
