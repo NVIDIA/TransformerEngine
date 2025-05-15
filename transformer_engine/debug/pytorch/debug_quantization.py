@@ -335,6 +335,7 @@ class DebugQuantizer(Quantizer):
             quantizer=self,
             layer_name=self.layer_name,
             tensor_name=self.tensor_name,
+            original_tensor=tensor,
         )
 
     def process_gemm_output(self, tensor: torch.Tensor):
@@ -473,6 +474,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         quantizer,
         layer_name=None,
         tensor_name=None,
+        original_tensor=None,
     ):
 
         self.rowwise_gemm_tensor = rowwise_gemm_tensor
@@ -480,7 +482,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         self.quantizer = quantizer
         self._layer_name = layer_name
         self._tensor_name = tensor_name
-
+        self._original_tensor = original_tensor
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
         self.tensors_to_save = (
