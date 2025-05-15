@@ -41,7 +41,7 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
     Raises an error if multiple shared object files are found.
     """
 
-    # Ensure top level dir exists and has the module. before searching.
+    # Before searching, ensure top level directory exists and has the module.
     if not te_path.exists() or not (te_path / "transformer_engine").exists():
         return None
 
