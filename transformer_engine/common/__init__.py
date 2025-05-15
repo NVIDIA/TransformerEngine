@@ -45,12 +45,17 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
     if not te_path.exists() or not (te_path / "transformer_engine").exists():
         return None
 
-    # Search.
     files = []
+    search_paths = (
+        te_path,
+        te_path / "transformer_engine",
+        te_path / "transformer_engine/wheel_lib",
+        te_path / "wheel_lib",
+    )
+
+    # Search.
     for dirname, _, names in os.walk(te_path):
-        # Limit search paths.
-        current_directory = os.path.basename(dirname)
-        if current_directory in ("transformer_engine", "wheel_lib") or dirname == str(te_path):
+        if Path(dirname) in search_paths:
             for name in names:
                 if name.startswith(prefix) and name.endswith(f".{_get_sys_extension()}"):
                     files.append(Path(dirname, name))
