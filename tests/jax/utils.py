@@ -427,9 +427,9 @@ class MlpBlock(nn.Module):
         )  # Broadcast along length.
 
         if self.transpose_batch_sequence:
-            x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "mlp"))
+            x = nn.with_logical_constraint(x, ("length", "batch", "mlp"))
         else:
-            x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "mlp"))
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
         output = DenseGeneral(
             inputs.shape[-1],
             dtype=self.dtype,
@@ -693,21 +693,13 @@ class MultiHeadAttention(nn.Module):
         value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
 
         if self.transpose_batch_sequence:
-            query = nn_partitioning.with_sharding_constraint(
-                query, ("length", "batch", "heads", "kv")
-            )
-            key = nn_partitioning.with_sharding_constraint(key, ("length", "batch", "heads", "kv"))
-            value = nn_partitioning.with_sharding_constraint(
-                value, ("length", "batch", "heads", "kv")
-            )
+            query = nn.with_logical_constraint(query, ("length", "batch", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("length", "batch", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("length", "batch", "heads", "kv"))
         else:
-            query = nn_partitioning.with_sharding_constraint(
-                query, ("batch", "length", "heads", "kv")
-            )
-            key = nn_partitioning.with_sharding_constraint(key, ("batch", "length", "heads", "kv"))
-            value = nn_partitioning.with_sharding_constraint(
-                value, ("batch", "length", "heads", "kv")
-            )
+            query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
         if decode:
             # Detect if we're initializing by absence of existing cache data.
@@ -814,9 +806,9 @@ class MultiHeadAttention(nn.Module):
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         if self.transpose_batch_sequence:
-            x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "joined_kv"))
+            x = nn.with_logical_constraint(x, ("length", "batch", "joined_kv"))
         else:
-            x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "joined_kv"))
+            x = nn.with_logical_constraint(x, ("batch", "length", "joined_kv"))
 
         # Back to the original inputs dimensions.
 
@@ -1569,14 +1561,16 @@ def sync_params_values(dst, src, transformations, sep="/"):
     """
     src_values = {}
     for key, value in jax.tree_util.tree_leaves_with_path(src):
-        normalized_key = sep.join(x.key for x in key)
+        # Only select DictKey(key="...") entries, skip GetAttr(name="...") entries at the end of the tree path
+        normalized_key = sep.join(x.key for x in key if hasattr(x, "key"))
         src_values[normalized_key] = value
 
     flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
     synced_dst_values = []
 
     for key, value in flatten_dst:
-        normalized_key = sep.join(x.key for x in key)
+        # Only select DictKey(key="...") entries, skip GetAttr(name="...") entries at the end of the tree path
+        normalized_key = sep.join(x.key for x in key if hasattr(x, "key"))
         if normalized_key in transformations:
             corresponding_src_key = transformations[normalized_key]
         else:
