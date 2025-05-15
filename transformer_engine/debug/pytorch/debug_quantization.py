@@ -483,6 +483,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         self._layer_name = layer_name
         self._tensor_name = tensor_name
         self._original_tensor = original_tensor
+
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
         self.tensors_to_save = (
