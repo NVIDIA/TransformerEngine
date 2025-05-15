@@ -22,7 +22,13 @@ class CrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, _input, target, label_smoothing=0.0, reduce_loss=False, dist_process_group=None, ignore_idx =-100
+        ctx,
+        _input,
+        target,
+        label_smoothing=0.0,
+        reduce_loss=False,
+        dist_process_group=None,
+        ignore_idx=-100,
     ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
