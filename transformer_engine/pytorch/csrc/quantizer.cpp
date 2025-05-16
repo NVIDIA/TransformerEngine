@@ -418,7 +418,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
-std::pair<size_t, size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const {
+std::pair<size_t, size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape,
+                                                                bool columnwise) const {
   using namespace pybind11::literals;
   std::vector<int64_t> torch_shape;
   size_t numel = 1;
@@ -449,7 +450,7 @@ std::pair<size_t, size_t> Float8BlockQuantizer::get_scale_shape(const std::vecto
                  block_scaling_dim);
     }
     scale_shape = {sinv0, sinv1};
-  }else {
+  } else {
     size_t sinv0 = 0;
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {

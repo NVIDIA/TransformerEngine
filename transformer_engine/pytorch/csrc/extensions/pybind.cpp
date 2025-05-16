@@ -12,13 +12,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <iostream>
 #include <stdexcept>
 
 #include "../common.h"
 #include "../extensions.h"
 #include "common.h"
-
-#include <iostream>
 
 namespace transformer_engine::pytorch {
 

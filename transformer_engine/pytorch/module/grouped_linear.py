@@ -131,15 +131,18 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-            alloc_output = tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers) if isinstance(input_quantizers[0], Float8BlockQuantizer) else None
-            # alloc_output = tex.simple_sanity_check(inp_view, input_quantizers[0]) if isinstance(input_quantizers[0], Float8BlockQuantizer) else None
+            alloc_output = (
+                tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
+                if isinstance(input_quantizers[0], Float8BlockQuantizer)
+                else None
+            )
             output_list = None
             if alloc_output is not None:
                 # last element if the full buffer, all the previous tensor are view of the full buffer
                 output_list = alloc_output[:-1]
                 full_buffer_rowwise = alloc_output[-1]._rowwise_data
                 full_buffer_columnwise = alloc_output[-1]._columnwise_data
- 
+
             inputmats = tex.fused_multi_quantize(
                 inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
             )
@@ -284,9 +287,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             grad_output = grad_output.contiguous()
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
-            grad_output_mats = torch.split(
-                grad_output_view, ctx.m_splits
-            )
+            grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
 
@@ -306,7 +307,13 @@ class _GroupedLinear(torch.autograd.Function):
                                 grad_output_mats[i], ctx.grad_output_quantizers[i]
                             )
                 else:
-                    alloc_output = tex.fused_bulk_alloc_outputs(grad_output_view, ctx.m_splits, ctx.grad_output_quantizers) if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer) else None
+                    alloc_output = (
+                        tex.fused_bulk_alloc_outputs(
+                            grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
+                        )
+                        if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
+                        else None
+                    )
                     output_list = None
                     if alloc_output is not None:
                         output_list = alloc_output[:-1]

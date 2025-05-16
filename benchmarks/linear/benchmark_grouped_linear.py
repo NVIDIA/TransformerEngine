@@ -8,17 +8,18 @@ from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.common.recipe import Float8BlockScaling
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from contextlib import nullcontext
+
 RECIPES = {
     "bf16": None,
     "fp8_sub_channel": Float8BlockScaling(),
 }
 
 
-def run_linear_multiple_steps(
-    layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None
-):
+def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
-    fp8_context = fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
+    fp8_context = (
+        fp8_autocast(enabled=True, fp8_recipe=recipe) if recipe is not None else nullcontext()
+    )
     # print(f"fp8_context: {fp8_context} and is it nullcontext? {isinstance(fp8_context, nullcontext)}")
 
     if mode == "fwd_only":
@@ -67,13 +68,11 @@ def benchmark_linear(
     num_gemms=4,
 ):
     params_dtype = torch.bfloat16
-    recipe =RECIPES[recipe_name]
+    recipe = RECIPES[recipe_name]
 
     in_features = x.shape[1]
     out_features = ws[0].shape[0]
-    gradient = torch.ones(
-        (x.shape[0], out_features), dtype=torch.bfloat16, device=x.device
-    )
+    gradient = torch.ones((x.shape[0], out_features), dtype=torch.bfloat16, device=x.device)
 
     layer = GroupedLinear(
         num_gemms,
@@ -97,7 +96,10 @@ def benchmark_linear(
     label = f"{recipe_name}_{'grouped'}"
     torch.cuda.nvtx.range_push(label)
     timing = benchmark.Timer(
-        stmt="run_linear_multiple_steps(layer, x, m_splits, mode, gradient, num_microbatches, recipe)",
+        stmt=(
+            "run_linear_multiple_steps(layer, x, m_splits, mode, gradient, num_microbatches,"
+            " recipe)"
+        ),
         globals={
             "run_linear_multiple_steps": run_linear_multiple_steps,
             "layer": layer,
@@ -116,9 +118,7 @@ def benchmark_linear(
     return timing_ms
 
 
-def run_benchmark_linear(
-    mkns, recipe_name, use_bias, num_gemms=4
-):
+def run_benchmark_linear(mkns, recipe_name, use_bias, num_gemms=4):
     data = []
     assert not use_bias, "Bias is not supported for GroupedLinear benchmark"
 
@@ -126,10 +126,7 @@ def run_benchmark_linear(
     for m, k, n in mkns:
         device = "cuda"
         x = torch.randn((m, k), dtype=torch.bfloat16, device=device, requires_grad=True)
-        ws = [
-            torch.randn((n, k), dtype=torch.bfloat16, device=device)
-            for _ in range(num_gemms)
-        ]
+        ws = [torch.randn((n, k), dtype=torch.bfloat16, device=device) for _ in range(num_gemms)]
         assert m % num_gemms == 0
         m_splits = [m // num_gemms] * num_gemms
         # Bias is not supported for GroupedLinear benchmark
@@ -192,7 +189,7 @@ if __name__ == "__main__":
     # Set the MKN values to benchmark
     mkns = []
     for m in [1024]:
-    # for m in [4096, 8192, 16384]:
+        # for m in [4096, 8192, 16384]:
         # for n in [1024, 2048, 4096, 8192, 16384]:
         for n in [3072]:
             for k in [4096]:
@@ -235,7 +232,6 @@ if __name__ == "__main__":
             df_linears = pd.concat([df_linears, df])
 
     print(df_linears)
-
 
     if args.profile:
         torch.autograd.profiler.emit_nvtx().__exit__(None, None, None)
