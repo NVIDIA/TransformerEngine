@@ -130,7 +130,7 @@ def cross_entropy_kernel(
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
 
-    if y == ignore_index:
+    if y == ignore_idx:
         # set all X_ptr as 0
         for i in range(0, n_cols, BLOCK_SIZE):
             X_offsets = i + tl.arange(0, BLOCK_SIZE)
