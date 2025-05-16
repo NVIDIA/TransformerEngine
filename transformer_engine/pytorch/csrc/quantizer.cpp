@@ -418,6 +418,57 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
+std::pair<size_t, size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const {
+  using namespace pybind11::literals;
+  std::vector<int64_t> torch_shape;
+  size_t numel = 1;
+  for (auto s : shape) {
+    torch_shape.emplace_back(static_cast<int64_t>(s));
+    numel *= s;
+  }
+
+  size_t k_dim = torch_shape.size() == 0 ? 1u : torch_shape.back();
+  size_t m_dim = numel / k_dim;
+  constexpr size_t kBlockLen = 128;
+
+  std::pair<size_t, size_t> scale_shape;
+
+  if (columnwise) {
+    size_t sinv0 = 0;
+    size_t sinv1 = 0;
+    if (block_scaling_dim == 2) {
+      sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+      sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
+    } else if (block_scaling_dim == 1) {
+      sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
+      sinv1 = roundup(k_dim, 4);
+    } else {
+      NVTE_CHECK(false,
+                 "Unsupported block_scaling_dim in create_tensor columnwise."
+                 "Expected 1 or 2. Got ",
+                 block_scaling_dim);
+    }
+    scale_shape = {sinv0, sinv1};
+  }else {
+    size_t sinv0 = 0;
+    size_t sinv1 = 0;
+    if (block_scaling_dim == 2) {
+      sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
+      sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
+    } else if (block_scaling_dim == 1) {
+      sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
+      sinv1 = roundup(m_dim, 4);
+    } else {
+      NVTE_CHECK(false,
+                 "Unsupported block_scaling_dim in create_tensor rowwise."
+                 "Expected 1 or 2. Got ",
+                 block_scaling_dim);
+    }
+    scale_shape = {sinv0, sinv1};
+  }
+  return scale_shape;
+}
+
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
 }

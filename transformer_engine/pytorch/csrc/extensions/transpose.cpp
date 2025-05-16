@@ -5,11 +5,178 @@
  ************************************************************************/
 
 #include <optional>
+#include <pybind.h>
 
 #include "../extensions.h"
 #include "pybind.h"
 
+#include <iostream>
+
 namespace transformer_engine::pytorch {
+
+std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int> m_splits, 
+                                                std::vector<py::handle> quantizer_list) {
+  init_extension();
+  using namespace pybind11::literals;  // For operator""_a
+
+  int num_splits = m_splits.size();
+
+  // convert all the quantizers
+  std::vector<std::unique_ptr<Quantizer>> quantizers;
+  for (int i = 0; i < num_splits; i++) {
+    quantizers.push_back(convert_quantizer(quantizer_list[i]));
+  }
+
+  bool rowwise_usage = quantizers[0]->rowwise_usage;
+  bool columnwise_usage = quantizers[0]->columnwise_usage;
+  size_t hidden_dim = input_view.size(1);
+
+  std::vector<py::object> output_list;
+
+  if (detail::IsFloat8BlockwiseQuantizers(quantizer_list[0].ptr())) {
+    // implement the fuse bulk alloc for blockwise quantizer
+    // downcast quantizers, resorces are owned by the unique_ptr, so use raw ptr here just to get the attributes
+    std::vector<Float8BlockQuantizer*> blockwise_quantizers;
+    for (size_t i = 0; i < quantizers.size(); i++) {
+      Quantizer* raw_ptr = quantizers[i].get();
+      Float8BlockQuantizer* blockwise_quantizer = static_cast<Float8BlockQuantizer*>(raw_ptr);
+      blockwise_quantizers.push_back(blockwise_quantizer);
+    }
+
+    bool is_2D_scaled = blockwise_quantizers[0]->get_scaling_mode() == NVTE_BLOCK_SCALING_2D;
+    transformer_engine::DType fp8_dtype = blockwise_quantizers[0]->dtype;
+
+    size_t fp8_elem_size = 1;
+    size_t scale_elem_size = 4;
+
+    std::vector<std::pair<size_t, size_t>> rowwise_data_shapes;
+    std::vector<std::pair<size_t, size_t>> rowwise_scale_shapes;
+    std::vector<size_t> rowwise_data_sizes;
+    std::vector<size_t> rowwise_scale_sizes;
+    std::vector<std::pair<size_t, size_t>> columnwise_data_shapes;
+    std::vector<std::pair<size_t, size_t>> columnwise_scale_shapes;
+    std::vector<size_t> columnwise_data_sizes;
+    std::vector<size_t> columnwise_scale_sizes;
+    for (int i = 0; i < num_splits; i++) {
+      std::pair<size_t, size_t> input_view_i_shape = std::make_pair((size_t)m_splits[i], (size_t)hidden_dim);
+      if (rowwise_usage) {
+        rowwise_data_shapes.emplace_back(input_view_i_shape);
+        rowwise_scale_shapes.emplace_back(blockwise_quantizers[i]->get_scale_shape({input_view_i_shape.first, input_view_i_shape.second}, false));
+        rowwise_data_sizes.emplace_back(input_view_i_shape.first * input_view_i_shape.second * fp8_elem_size);
+        rowwise_scale_sizes.emplace_back(rowwise_scale_shapes.back().first * rowwise_scale_shapes.back().second * scale_elem_size);
+      }
+      if (columnwise_usage) {
+        columnwise_data_shapes.emplace_back(std::make_pair(input_view_i_shape.second, input_view_i_shape.first));
+        columnwise_scale_shapes.emplace_back(blockwise_quantizers[i]->get_scale_shape({input_view_i_shape.first, input_view_i_shape.second}, true));
+        columnwise_data_sizes.emplace_back(input_view_i_shape.first * input_view_i_shape.second * fp8_elem_size);
+        columnwise_scale_sizes.emplace_back(columnwise_scale_shapes.back().first * columnwise_scale_shapes.back().second * scale_elem_size);
+      }
+    }
+
+    size_t total_size_rowwise_data = std::accumulate(rowwise_data_sizes.begin(), rowwise_data_sizes.end(), 0);
+    size_t total_size_rowwise_scale = std::accumulate(rowwise_scale_sizes.begin(), rowwise_scale_sizes.end(), 0);
+    size_t total_size_columnwise_data = std::accumulate(columnwise_data_sizes.begin(), columnwise_data_sizes.end(), 0);
+    size_t total_size_columnwise_scale = std::accumulate(columnwise_scale_sizes.begin(), columnwise_scale_sizes.end(), 0);
+
+    size_t total_size_rowwise = total_size_rowwise_data + total_size_rowwise_scale;
+    size_t total_size_columnwise = total_size_columnwise_data + total_size_columnwise_scale;
+
+    std::vector<at::Tensor> rowwise_data_list;
+    std::vector<at::Tensor> rowwise_scale_list;
+    std::vector<at::Tensor> columnwise_data_list;
+    std::vector<at::Tensor> columnwise_scale_list;
+
+    at::Tensor rowwise_full_tensor;
+    at::Tensor columnwise_full_tensor;
+
+    if (rowwise_usage) {
+      rowwise_full_tensor = at::empty({(int64_t)total_size_rowwise}, at::device(input_view.device()).dtype(torch::kUInt8));
+      // use raw pointer math + from blob, avoid torch slice to reduce cpu overhead
+      uint8_t* rowwise_data_ptr = rowwise_full_tensor.data_ptr<uint8_t>();
+      uint8_t* rowwise_scale_ptr = rowwise_full_tensor.data_ptr<uint8_t>() + total_size_rowwise_data;
+      // use from_blob to construct rowwise_data_list and rowwise_scale_list
+      for (int i = 0; i < num_splits; i++) {
+        rowwise_data_list.emplace_back(at::from_blob(rowwise_data_ptr, {static_cast<int64_t>(rowwise_data_shapes[i].first), static_cast<int64_t>(rowwise_data_shapes[i].second)}, at::device(input_view.device()).dtype(torch::kUInt8)));
+        rowwise_scale_list.emplace_back(at::from_blob(rowwise_scale_ptr, {static_cast<int64_t>(rowwise_scale_shapes[i].first), static_cast<int64_t>(rowwise_scale_shapes[i].second)}, at::device(input_view.device()).dtype(torch::kFloat32)));
+        rowwise_data_ptr += rowwise_data_sizes[i];
+        rowwise_scale_ptr += rowwise_scale_sizes[i];
+      }
+    }
+
+    if (columnwise_usage) {
+      columnwise_full_tensor = at::empty({(int64_t)total_size_columnwise}, at::device(input_view.device()).dtype(torch::kUInt8));
+      uint8_t* columnwise_data_ptr = columnwise_full_tensor.data_ptr<uint8_t>();
+      uint8_t* columnwise_scale_ptr = columnwise_full_tensor.data_ptr<uint8_t>() + total_size_columnwise_data;
+      for (int i = 0; i < num_splits; i++) {
+        columnwise_data_list.emplace_back(at::from_blob(columnwise_data_ptr, {static_cast<int64_t>(columnwise_data_shapes[i].first), static_cast<int64_t>(columnwise_data_shapes[i].second)}, at::device(input_view.device()).dtype(torch::kUInt8)));
+        columnwise_scale_list.emplace_back(at::from_blob(columnwise_scale_ptr, {static_cast<int64_t>(columnwise_scale_shapes[i].first), static_cast<int64_t>(columnwise_scale_shapes[i].second)}, at::device(input_view.device()).dtype(torch::kFloat32)));
+        columnwise_data_ptr += columnwise_data_sizes[i];
+        columnwise_scale_ptr += columnwise_scale_sizes[i];
+      }
+    }
+        
+    for (int i = 0; i < num_splits; i++) {
+
+      py::handle Float8BlockwiseQTensorClass(
+        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
+
+      // Create the tensor object with proper reference counting
+      py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+      py::object columnwise_data = columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none();
+      py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
+      py::object columnwise_scale = columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none();
+
+      py::object ret = Float8BlockwiseQTensorClass(
+          "rowwise_data"_a = rowwise_data,
+          "columnwise_data"_a = columnwise_data, 
+          "rowwise_scale_inv"_a = rowwise_scale,
+          "columnwise_scale_inv"_a = columnwise_scale,
+          "fp8_dtype"_a = fp8_dtype,
+          "quantizer"_a = quantizer_list[i],
+          "is_2D_scaled"_a = is_2D_scaled);
+
+      output_list.emplace_back(std::move(ret));
+    }
+
+    py::handle Float8BlockwiseQTensorClass(
+        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
+
+    // put the two full tensor into a python class to maintain their life cycle
+    py::object ret = Float8BlockwiseQTensorClass(
+        "rowwise_data"_a = rowwise_full_tensor,
+        "columnwise_data"_a = columnwise_full_tensor,
+        "rowwise_scale_inv"_a = py::none(),
+        "columnwise_scale_inv"_a = py::none(),
+        "fp8_dtype"_a = transformer_engine::DType::kFloat8E4M3, "quantizer"_a = py::none(), "is_2D_scaled"_a = true);
+    
+    output_list.emplace_back(std::move(ret));
+
+  }else{
+    NVTE_ERROR("Fused bulk alloc is not supported for this quantizer type");
+  }
+
+  return output_list;
+}
+
+py::object simple_sanity_check(at::Tensor input, py::handle quantizer){
+  init_extension();
+  using namespace pybind11::literals;  // For operator""_a
+  py::handle Float8BlockwiseQTensorClass(
+    reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
+
+  py::object ret = Float8BlockwiseQTensorClass(
+      "rowwise_data"_a = input,
+      "columnwise_data"_a = input,
+      "rowwise_scale_inv"_a = input,
+      "columnwise_scale_inv"_a = input,
+      "fp8_dtype"_a = transformer_engine::DType::kFloat8E4M3, "quantizer"_a = quantizer, "is_2D_scaled"_a = true);
+
+  // py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
+  // py::object ret = Float8TensorClass("data"_a = py::none(), "fp8_scale_inv"_a = py::none(),
+  //                         "fp8_dtype"_a = transformer_engine::DType::kFloat8E4M3, "data_transpose"_a = py::none(),
+  //                         "quantizer"_a = py::none());
+  return ret;
+}
 
 std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                                              std::optional<std::vector<py::object>> output_list,

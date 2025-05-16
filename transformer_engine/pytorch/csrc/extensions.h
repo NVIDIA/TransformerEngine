@@ -110,6 +110,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
  * Transpose
  **************************************************************************************************/
 
+std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor inpput_view, std::vector<int> m_splits, 
+                                                std::vector<py::handle> quantizer_list);
+
+py::object simple_sanity_check(at::Tensor input, py::handle quantizer);
+
 std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                                              std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list, DType otype);

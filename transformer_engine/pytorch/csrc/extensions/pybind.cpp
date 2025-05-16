@@ -18,6 +18,8 @@
 #include "../extensions.h"
 #include "common.h"
 
+#include <iostream>
+
 namespace transformer_engine::pytorch {
 
 PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
