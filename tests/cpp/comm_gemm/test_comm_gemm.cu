@@ -407,6 +407,8 @@ INSTANTIATE_TEST_SUITE_P(
                            64 * 4, 64 * 4, 5e-2},
                     Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
                            64 * 4, 64 * 4, 5e-2},
+                    Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat16, true, false, 128,
+                           128 * 4, 128 * 4, 5e-2},
                     Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false, 128,
                            128 * 4, 128 * 4, 5e-2},
                     Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false, 128,
