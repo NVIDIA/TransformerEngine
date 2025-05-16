@@ -11,6 +11,7 @@ from transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common import recipe
 import numpy as np
 
+
 @lru_cache
 def is_bf16_supported():
     """Return if BF16 has hardware supported"""
@@ -32,12 +33,7 @@ def is_mxfp8_supported():
     return gpu_arch >= 100
 
 
-def assert_params_sufficiently_sharded(
-    params,
-    mesh,
-    tolerance=0.01,
-    print_info=False
-):
+def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01, print_info=False):
     """Checks whether most params are sharded across sharding axis.
 
     (Adapted from https://github.com/AI-Hypercomputer/maxtext/blob/315e551e5942b24656a4250dcfca986fb4135b72/MaxText/maxtext_utils.py#L348)
@@ -64,11 +60,12 @@ def assert_params_sufficiently_sharded(
 
         # Is the weight sharded? Get the axes on which it is sharded.
         partition_spec = arr.sharding.spec
-        weight_sharding_axes = set(partition_spec) - set([None]) # None is not a sharding axis
+        weight_sharding_axes = set(partition_spec) - set([None])  # None is not a sharding axis
 
         # Total number of devices on the axes on which the weight is sharded.
-        product_num_devices_for_weight_sharding = \
-            get_product_num_devices_for_weight_sharding(weight_sharding_axes)
+        product_num_devices_for_weight_sharding = get_product_num_devices_for_weight_sharding(
+            weight_sharding_axes
+        )
 
         # Params present in one shard (on one device).
         shard = arr.addressable_shards[0]
@@ -79,23 +76,25 @@ def assert_params_sufficiently_sharded(
 
         # Percentage of params that are unsharded.
         unsharded_perc = (
-            params_per_chip /
-            (total_params / product_num_devices_for_weight_sharding) - 1
-        ) * 100 if params_per_chip < total_params else 100
+            (params_per_chip / (total_params / product_num_devices_for_weight_sharding) - 1) * 100
+            if params_per_chip < total_params
+            else 100
+        )
 
         if print_info:
-            print(f"{path}: {unsharded_perc:.2f}% unsharded, unsharded param shape={arr.shape}, partition spec={partition_spec}")
+            print(
+                f"{path}: {unsharded_perc:.2f}% unsharded, unsharded param shape={arr.shape},"
+                f" partition spec={partition_spec}"
+            )
 
         # If the weight is sharded on any axis, then the percentage of
         # unsharded params should be less than the tolerance.
         assert (
-            product_num_devices_for_weight_sharding == 1 or \
-            unsharded_perc < tolerance
+            product_num_devices_for_weight_sharding == 1 or unsharded_perc < tolerance
         ), f"{path}: {unsharded_perc:.2f}% unsharded"
 
     jax.tree_util.tree_map_with_path(
-        lambda p, x: assert_leaf_sharding('/'.join(str(x) for x in p), x),
-        params
+        lambda p, x: assert_leaf_sharding("/".join(str(x) for x in p), x), params
     )
 
 

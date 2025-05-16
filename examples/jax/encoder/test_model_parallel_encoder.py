@@ -22,7 +22,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 from common import (
     is_bf16_supported,
     get_fp8_recipe_from_name_string,
-    assert_params_sufficiently_sharded
+    assert_params_sufficiently_sharded,
 )
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
@@ -263,12 +263,8 @@ def train_and_evaluate(args):
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
         devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-    ) as mesh, \
-    nn_partitioning.axis_rules(
-        (
-            (NAMED_BROADCAST_AXIS, None),
-            (NAMED_TP_AXIS, DEVICE_TP_AXIS)
-        )
+    ) as mesh, nn_partitioning.axis_rules(
+        ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
     ):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -289,7 +285,7 @@ def train_and_evaluate(args):
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-             # Get the base axis rules and extend them with TE's rules.
+            # Get the base axis rules and extend them with TE's rules.
             axis_rules = nn_partitioning.get_axis_rules()
             te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
             print(f"Device mesh: {mesh}")
@@ -308,7 +304,8 @@ def train_and_evaluate(args):
 
             in_shardings = (None, inputs_sharding, masks_sharding)
             out_shardings = {
-                key: params_sharding[PARAMS_KEY] if key is PARAMS_KEY else None for key in abs_var_collect
+                key: params_sharding[PARAMS_KEY] if key is PARAMS_KEY else None
+                for key in abs_var_collect
             }
             jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
@@ -324,9 +321,7 @@ def train_and_evaluate(args):
 
             abs_state = jax.eval_shape(
                 lambda: train_state.TrainState.create(
-                    apply_fn=encoder.apply,
-                    params=params,
-                    tx=optimizer
+                    apply_fn=encoder.apply, params=params, tx=optimizer
                 )
             )
             logical_state_partition_spec = nn.get_partition_spec(abs_state)
