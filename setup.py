@@ -115,6 +115,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
+            install_reqs.extend(["onnx", "onnxscript"])
             setup_reqs.extend(["torch>=2.1"])
             install_reqs.extend(["torch>=2.1"])
             install_reqs.append(

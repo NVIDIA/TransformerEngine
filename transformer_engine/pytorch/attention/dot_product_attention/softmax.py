@@ -8,6 +8,7 @@ from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 
 THREADS_PER_WARP = 32
@@ -19,12 +20,18 @@ _default_causal_mask = {}
 
 def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
-    matrix_identifiers = (mask_type, sq, sk)
-    if matrix_identifiers not in _default_causal_mask:
+
+    def _get_mask():
         diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1
-        _default_causal_mask[matrix_identifiers] = torch.triu(
+        return torch.triu(
             torch.ones(sq, sk, dtype=torch.bool, device="cuda"), diagonal=diagonal_offset
         )
+
+    if is_in_onnx_export_mode():
+        return _get_mask()
+    matrix_identifiers = (mask_type, sq, sk)
+    if matrix_identifiers not in _default_causal_mask:
+        _default_causal_mask[matrix_identifiers] = _get_mask()
     return _default_causal_mask[matrix_identifiers]
 
 
@@ -169,7 +176,11 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.attn_mask_type = attn_mask_type
 
         assert scale is None or self.softmax_in_fp32, "softmax should be in fp32 when scaled"
+        if is_in_onnx_export_mode():
+            return self.forward_torch_softmax(inp, mask, scale)
 
+        # We do not want to connect this if with previous if,
+        # because we want to avoid calling is_kernel_available() in ONNX mode.
         if self.is_kernel_available(mask, *inp.size()):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
@@ -245,15 +256,15 @@ class FusedScaleMaskSoftmax(nn.Module):
         if self.attn_mask_type in ["causal", "causal_bottom_right"]:
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
+
             if mask is None:
                 mask = causal_mask
             else:
                 mask = torch.logical_or(mask, causal_mask)
-
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":
             mask_output = self.mask_func(inp, mask)
-        probs = torch.nn.Softmax(dim=-1)(mask_output)
+        probs = torch.nn.functional.softmax(mask_output, dim=-1)
 
         if self.input_in_float16 and self.softmax_in_fp32:
             if self.input_in_fp16:
