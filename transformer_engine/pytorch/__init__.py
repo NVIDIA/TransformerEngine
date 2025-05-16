@@ -4,22 +4,14 @@
 
 """Transformer Engine bindings for pyTorch"""
 
-# pylint: disable=wrong-import-position,wrong-import-order
+# pylint: disable=wrong-import-position
 
-import logging
 import functools
-import sys
-import importlib
-import importlib.util
-from importlib.metadata import version
 from packaging.version import Version as PkgVersion
 
 import torch
 
-from transformer_engine.common import get_te_path, is_package_installed
-from transformer_engine.common import _get_sys_extension
-
-_logger = logging.getLogger(__name__)
+from transformer_engine.common import load_framework_extension
 
 
 @functools.lru_cache(maxsize=None)
@@ -28,57 +20,10 @@ def torch_version() -> tuple[int, ...]:
     return PkgVersion(str(torch.__version__)).release
 
 
-def _load_library():
-    """Load shared library with Transformer Engine C extensions"""
-    module_name = "transformer_engine_torch"
-
-    if is_package_installed(module_name):
-        assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
-        assert is_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version("transformer-engine-cu12")
-        ), (
-            "TransformerEngine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
-            "'pip3 install transformer-engine[pytorch]==VERSION'"
-        )
-
-    if is_package_installed("transformer-engine-cu12"):
-        if not is_package_installed(module_name):
-            _logger.info(
-                "Could not find package %s. Install transformer-engine using "
-                "'pip3 install transformer-engine[pytorch]==VERSION'",
-                module_name,
-            )
-
-    extension = _get_sys_extension()
-    try:
-        so_dir = get_te_path() / "transformer_engine"
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-    except StopIteration:
-        try:
-            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-        except StopIteration:
-            so_dir = get_te_path()
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-
-    spec = importlib.util.spec_from_file_location(module_name, so_path)
-    solib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = solib
-    spec.loader.exec_module(solib)
-
-
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 
-_load_library()
+load_framework_extension("torch")
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
