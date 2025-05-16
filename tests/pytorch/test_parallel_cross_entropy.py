@@ -24,7 +24,7 @@ class TestParallelCrossEntropy:
         SQ = random.choice([64, 128])
         batch = random.choice([1, 2])
         vocab = random.choice([64000, 128000])
-        ignore = random.sample(range(0,SQ-1),5)
+        ignore = random.sample(range(0, SQ - 1), 5)
 
         if swap_dim:
             self.input_test = torch.rand((SQ, batch, vocab), dtype=dtype).cuda()
@@ -45,7 +45,12 @@ class TestParallelCrossEntropy:
         self.tar_ref = torch.reshape(self.tar_test.clone().detach(), (batch * SQ,))
 
     def one_iteration_test(
-            self, dtype: torch.dtype, swap_dim: bool, label_smoothing: float, reduce_loss: bool, ignore_idx: bool = False,
+        self,
+        dtype: torch.dtype,
+        swap_dim: bool,
+        label_smoothing: float,
+        reduce_loss: bool,
+        ignore_idx: bool = False,
     ):
 
         self.generate_input(dtype, swap_dim, ignore_idx)
@@ -123,6 +128,9 @@ class TestParallelCrossEntropy:
         self.generate_infra(False, 0)
         for i in range(self.iters):
             self.one_iteration_test(
-                dtype=torch.float32, swap_dim=random.choice([True,False]), label_smoothing=0, reduce_loss=False, ignore_idx = True
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                ignore_idx=True,
             )
-
