@@ -120,7 +120,6 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if not rowwise:
             return  # tensor was already seen rowwise in the other gemm
 
-        tensor = tensor._data
         options = (
             config.get("start_step", None),
             config.get("end_step", None),

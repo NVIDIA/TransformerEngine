@@ -12,7 +12,7 @@ from nvdlfw_inspect.registry import Registry
 import torch
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.pytorch.tensor import all_tensor_types
+from transformer_engine.pytorch.tensor import get_all_tensor_types
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 
@@ -424,7 +424,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
-            assert type(ret) in all_tensor_types
+            assert type(ret) in get_all_tensor_types()
             if (
                 type(ret) == torch.Tensor  # pylint: disable=unidiomatic-typecheck
                 and "dtype" in kwargs
@@ -438,4 +438,4 @@ class TransformerEngineAPI(BaseNamespaceAPI):
 
     def end_debug(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.end_debug()"""
-        TEDebugState.reset()
+        TEDebugState._reset()
