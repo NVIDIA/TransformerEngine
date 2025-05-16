@@ -200,8 +200,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_bulk_alloc_outputs", &transformer_engine::pytorch::fused_bulk_alloc_outputs, "Fused Bulk Alloc Outputs",
-        py::arg("input_view"), py::arg("m_splits"), py::arg("quantizer_list"));
+  m.def("fused_bulk_alloc_outputs", &transformer_engine::pytorch::fused_bulk_alloc_outputs,
+        "Fused Bulk Alloc Outputs", py::arg("input_view"), py::arg("m_splits"),
+        py::arg("quantizer_list"));
   m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
         "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
         py::arg("quantizer_list"), py::arg("otype"));
