@@ -124,42 +124,20 @@ class _GroupedLinear(torch.autograd.Function):
                 output_quantizer.set_usage(rowwise=True, columnwise=False)
 
         fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
-        full_buffer_rowwise = None
-        full_buffer_columnwise = None
         if fp8:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-            alloc_output = (
+            output_list = (
                 tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
                 if isinstance(input_quantizers[0], Float8BlockQuantizer)
                 else None
             )
-            output_list = None
-            if alloc_output is not None:
-                # last element if the full buffer, all the previous tensor are view of the full buffer
-                output_list = alloc_output[:-1]
-                full_buffer_rowwise = alloc_output[-1]._rowwise_data
-                full_buffer_columnwise = alloc_output[-1]._columnwise_data
-
             inputmats = tex.fused_multi_quantize(
                 inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
             )
-            # inputmats_ref = tex.fused_multi_quantize(
-            #     inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
-            # )
-            # [DEBUG]
-            # use torch testing to directly do zero tolerance test
-            # for i in range(len(inputmats)):
-            #     tensor = inputmats[i]
-            #     tensor_ref = inputmats_ref[i]
-            #     torch.testing.assert_close(tensor._rowwise_data, tensor_ref._rowwise_data)
-            #     torch.testing.assert_close(tensor._rowwise_scale_inv, tensor_ref._rowwise_scale_inv)
-            #     torch.testing.assert_close(tensor._columnwise_data, tensor_ref._columnwise_data)
-            #     torch.testing.assert_close(tensor._columnwise_scale_inv, tensor_ref._columnwise_scale_inv)
 
-            # raise Exception("Not implemented")
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             # FP8 cast to workspace buffer
@@ -217,7 +195,6 @@ class _GroupedLinear(torch.autograd.Function):
                 for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensorBase):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
-                        full_tensor_rowwise = None
             if inp.requires_grad:
                 for weight in weights_fp8:
                     if isinstance(weight, QuantizedTensorBase):
@@ -230,7 +207,6 @@ class _GroupedLinear(torch.autograd.Function):
                 *biases,
             )
             ctx.save_for_backward(*tensors_to_save)
-            ctx.full_buffer_columnwise = full_buffer_columnwise
             ctx.tensor_objects = tensor_objects
 
             ctx.weights_requires_grad = weights[0].requires_grad
@@ -275,8 +251,6 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = ctx.main_grads
 
-            full_buffer_columnwise = ctx.full_buffer_columnwise
-
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
                 for i in ctx.num_gemms:
                     w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
@@ -291,8 +265,6 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
 
-            full_buffer_rowwise_dy = None
-            full_buffer_columnwise_dy = None
             if ctx.fp8:
                 if ctx.use_bias:
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
@@ -307,18 +279,13 @@ class _GroupedLinear(torch.autograd.Function):
                                 grad_output_mats[i], ctx.grad_output_quantizers[i]
                             )
                 else:
-                    alloc_output = (
+                    output_list = (
                         tex.fused_bulk_alloc_outputs(
                             grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
                         )
                         if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
                         else None
                     )
-                    output_list = None
-                    if alloc_output is not None:
-                        output_list = alloc_output[:-1]
-                        full_buffer_rowwise_dy = alloc_output[-1]._rowwise_data
-                        full_buffer_columnwise_dy = alloc_output[-1]._columnwise_data
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
                         output_list,
