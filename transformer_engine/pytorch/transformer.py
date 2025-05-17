@@ -179,12 +179,12 @@ class TransformerLayer(torch.nn.Module):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    attn_input_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    attn_input_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
                          This controls whether the dimensions of the
-                         intermediate hidden states is 'batch first' ('bshd') or
-                         'sequence first' ('sbhd'). `s` stands for the sequence
-                         length, `b` batch size, `h` the number of heads, `d`
-                         head size. Note that these formats are very closely
+                         intermediate hidden states is 'sequence first' ('sbhd'), 'batch first' ('bshd'),
+                         or 'token first' ('thd'). `s` stands for the sequence length, `b` batch size,
+                         `t` the total number of tokens, `h` the number of heads, `d` head size.
+                         Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
     name: str, default = `None`
@@ -733,12 +733,19 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type=enc_dec_attn_mask_type,
                 window_size=enc_dec_window_size,
                 encoder_output=encoder_output,
+                inference_params=inference_params,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                rotary_pos_emb=rotary_pos_emb,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
                 fast_zero_fill=fast_zero_fill,
+                pad_between_seqs=pad_between_seqs,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs
