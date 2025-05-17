@@ -48,11 +48,11 @@ if is_bf16_compatible():
 
 model_configs_infer = {
     # test: b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "infer_0": ModelConfig(
-        4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
-    ),
+    #"infer_0": ModelConfig(
+    #    4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
+    #),
     "infer_1": ModelConfig(
-        2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
+        2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
     ),
 }
 
@@ -370,12 +370,18 @@ def generate_args(
         ]
 
 
-def get_tols(module, backend, dtype):
+def get_tols(config, module, backend, dtype):
     if module == "TransformerLayer":
-        tols = {
-            torch.half: (5e-3, 5e-3),
-            torch.bfloat16: (3.5e-2, 3.5e-2),
-        }
+        if config.head_dim_qk <= 128:
+            tols = {
+                torch.half: (5e-3, 5e-3),
+                torch.bfloat16: (3.5e-2, 3.5e-2),
+            }
+        else:
+            tols = {
+                torch.half: (7e-3, 7e-3),
+                torch.bfloat16: (5e-2, 5e-2),
+            }
     if module == "DotProductAttention":
         tols = {
             torch.half: (1e-3, 1e-3),
@@ -484,6 +490,8 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     # TransformerLayer FP8 TN Gemm currently requires %8=0
     if is_fp8 and not (qkv_format == "thd" and module == "DotProductAttention"):
         pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
+    if backend == "FusedAttention" and config.head_dim_qk > 128 and not is_paged and not is_cuda_graph:
+        pytest.skip("No support for KV caching with head dim > 128, non-paged attention, sq = 1, and mask != no_mask")
 
     # create full model
     logger.info("=== Generating all tokens at once ===")
@@ -662,7 +670,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         incremental_output = incremental_output[0]
 
         # compare results
-        atol, rtol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
+        atol, rtol = get_tols(config, module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":

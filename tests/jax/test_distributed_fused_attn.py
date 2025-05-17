@@ -68,6 +68,7 @@ class TestDistributedSelfAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BS3HD,
@@ -214,6 +215,7 @@ class TestDistributedCrossAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BSHD_BS2HD,
@@ -345,6 +347,7 @@ class TestDistributedContextParallelSelfAttn:
 
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
+                is_training,
                 dtype,
                 dtype,
                 qkv_layout,

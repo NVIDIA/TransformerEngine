@@ -100,6 +100,7 @@ class FusedAttnHelper:
     Helper for the fused attention backend
     """
 
+    is_training: bool
     q_dtype: jnp.dtype
     kv_dtype: jnp.dtype
     qkv_layout: QKVLayout
@@ -120,6 +121,7 @@ class FusedAttnHelper:
     def get_fused_attn_backend(self):
         """Get the fused attention kernel backend"""
         return transformer_engine_jax.get_fused_attn_backend(
+            self.is_training,
             jax_dtype_to_te_dtype(self.q_dtype),
             jax_dtype_to_te_dtype(self.kv_dtype),
             self.qkv_layout.value,
@@ -273,6 +275,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         # backend determines the softmax buffer shape/dtype
         backend = FusedAttnHelper(
+            config.is_training,
             q_dtype,
             k_dtype,
             config.qkv_layout,
