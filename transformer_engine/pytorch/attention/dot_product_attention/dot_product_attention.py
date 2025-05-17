@@ -961,6 +961,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
                 inference_params=inference_params,
+                cp_comm_type=self.cp_comm_type,
             )
             global _attention_backends
             if (
