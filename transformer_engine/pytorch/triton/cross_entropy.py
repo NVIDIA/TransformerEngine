@@ -94,6 +94,7 @@ def cross_entropy_kernel(
     m_d_X_y_stride,
     rank,
     world_size,
+    ignore_idx,
     n_cols,
     n_non_ignore,
     label_smoothing: tl.constexpr,
@@ -113,6 +114,7 @@ def cross_entropy_kernel(
     m_d_X_y_stride: The stride of m/d/X_y tensor.
     rank (int): The rank of this device in the TP group.
     world_size (int): The size of world involved in this distributed loss calculation.
+    ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
     n_cols (int): The number of columns in the input tensor.
     n_non_ignore (int): The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
@@ -127,6 +129,13 @@ def cross_entropy_kernel(
     # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
+
+    if y == ignore_idx:
+        # set all X_ptr as 0
+        for i in range(0, n_cols, BLOCK_SIZE):
+            X_offsets = i + tl.arange(0, BLOCK_SIZE)
+            tl.store(X_ptr + X_offsets, 0.0, mask=X_offsets < n_cols)
+        return
 
     loss_ptr += program_id * loss_stride
     m_d_X_y_ptr += program_id * 3 * m_d_X_y_stride
@@ -247,6 +256,7 @@ def cross_entropy_forward(
     label_smoothing: float,
     reduce_loss: bool,
     dist_process_group: Union[dist.ProcessGroup, None],
+    ignore_idx: int,
 ):
     """Forward implementation of Cross Entropy kernel"""
 
@@ -305,6 +315,7 @@ def cross_entropy_forward(
         m_d_X_y_stride=m_d_X_y_gathered.stride(-1),
         rank=rank,
         world_size=world_size,
+        ignore_idx=ignore_idx,
         n_cols=V,
         n_non_ignore=n_rows,
         label_smoothing=label_smoothing,
