@@ -48,9 +48,9 @@ if is_bf16_compatible():
 
 model_configs_infer = {
     # test: b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    #"infer_0": ModelConfig(
-    #    4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
-    #),
+    "infer_0": ModelConfig(
+        4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
+    ),
     "infer_1": ModelConfig(
         2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
     ),
