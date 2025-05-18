@@ -134,10 +134,10 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
-    bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right) {
+    bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   const int device_id = cuda::current_device();
@@ -228,16 +228,16 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version >= 8907)) &&
         // head dimension
         (head_dim_qk % 8 == 0 && head_dim_v % 8 == 0 &&
-	 ((head_dim_qk <= 128 && head_dim_v <= 128) ||
-	  (head_dim_qk <= 256 && head_dim_v <= 256 &&
-	   ((!is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90100) ||
-	    (is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90500))) ||
-	  (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 &&
-	   max_seqlen_q > 1 && layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
-	  (!is_training && cudnn_runtime_version >= 91000 &&
-	   (max_seqlen_q > 1 ||
-	    layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD ||
-	    (max_seqlen_q == 1 && sm_arch_ >= 100 && attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))))) &&
+         ((head_dim_qk <= 128 && head_dim_v <= 128) ||
+          (head_dim_qk <= 256 && head_dim_v <= 256 &&
+           ((!is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90100) ||
+            (is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90500))) ||
+          (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
+           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
+          (!is_training && cudnn_runtime_version >= 91000 &&
+           (max_seqlen_q > 1 || layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD ||
+            (max_seqlen_q == 1 && sm_arch_ >= 100 &&
+             attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))))) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
          (cudnn_runtime_version >= 8906 &&
@@ -427,8 +427,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h, max_seqlen,
-      max_seqlen, d, d, window_size_left, window_size_right);
+      is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, dropout, h, h,
+      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -640,8 +640,8 @@ void nvte_fused_attn_fwd_kvpacked(
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, d, window_size_left, window_size_right);
+      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+      max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -735,8 +735,8 @@ void nvte_fused_attn_bwd_kvpacked(
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d, d, window_size_left, window_size_right);
+      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+      max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -866,8 +866,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
+      is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+      max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)
@@ -958,8 +958,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv, max_seqlen_q,
-      max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
+      true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+      max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
 #if (CUDNN_VERSION >= 8901)

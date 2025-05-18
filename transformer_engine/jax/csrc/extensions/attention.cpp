@@ -18,9 +18,9 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DTy
                                             size_t head_dim, int64_t window_size_left,
                                             int64_t window_size_right) {
   auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen,
-      head_dim, head_dim, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
+      kv_max_seqlen, head_dim, head_dim, window_size_left, window_size_right);
   return backend;
 }
 
@@ -245,9 +245,9 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
   auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      head_dim, head_dim, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, head_dim, head_dim, window_size_left, window_size_right);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -498,9 +498,9 @@ static void FusedAttnBackwardImpl(
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
   auto backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
-      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      head_dim, head_dim, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
+      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, head_dim, head_dim, window_size_left, window_size_right);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias);
