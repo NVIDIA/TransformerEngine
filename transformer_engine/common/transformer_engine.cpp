@@ -10,6 +10,7 @@
 #include <iostream>
 
 #include "common.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -48,11 +49,11 @@ std::string to_string(const DType type) {
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
-      return "Delayed Tensor Scaling";
+      return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
-      return "MXFP8 1D Scaling";
+      return "NVTE_MXFP8_1D_SCALING";
     case NVTE_INVALID_SCALING:
-      return "Invalid Scaling";
+      return "NVTE_INVALID_SCALING";
   }
   return "Invalid Scaling";
 }
@@ -211,53 +212,30 @@ NVTEDType nvte_tensor_type(const NVTETensor tensor) {
       reinterpret_cast<const transformer_engine::Tensor *>(tensor)->dtype());
 }
 
+NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
+  NVTEShape ret;
+  if (ndim == 0) {
+    ret.ndim = 0;
+    return ret;
+  }
+  NVTE_CHECK(ndim <= sizeof(ret.data) / sizeof(ret.data[0]),
+             "Too many dims for NVTEShape (requested: ", ndim,
+             ", max: ", sizeof(ret.data) / sizeof(ret.data[0]), ")");
+  std::copy(data, data + ndim, ret.data);
+  ret.ndim = ndim;
+  return ret;
+}
+
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   if (tensor == nullptr) {
     NVTE_ERROR("Invalid tensor");
   }
-  NVTEShape ret;
 
   // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  switch (t.scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        // We can infer tensor shape if FP8 tensor only has FP8 data
-        // transpose. However, NVTEShape only contains a pointer and
-        // cannot store temporary data. We hack around this by caching
-        // the tensor shape within the empty FP8 data.
-        auto &shape_cache = const_cast<std::vector<size_t> &>(t.data.shape);
-        shape_cache.clear();
-        if (!t.columnwise_data.shape.empty()) {
-          for (size_t i = 1; i < t.columnwise_data.shape.size(); i++) {
-            shape_cache.push_back(t.columnwise_data.shape[i]);
-          }
-          shape_cache.push_back(t.columnwise_data.shape.front());
-        }
-        ret.data = shape_cache.data();
-        ret.ndim = shape_cache.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        ret.data = t.columnwise_data.shape.data();
-        ret.ndim = t.columnwise_data.shape.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    default:
-      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"",
-                 transformer_engine::to_string(t.scaling_mode), "\"");
-  }
+  std::vector<size_t> shape = t.shape();
 
-  return ret;
+  return nvte_make_shape(shape.data(), shape.size());
 }
 
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
@@ -265,10 +243,7 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
     NVTE_ERROR("Invalid tensor");
   }
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  NVTEShape ret;
-  ret.data = t.columnwise_data.shape.data();
-  ret.ndim = t.columnwise_data.shape.size();
-  return ret;
+  return nvte_make_shape(t.columnwise_data.shape.data(), t.columnwise_data.shape.size());
 }
 
 size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(tensor).ndim; }
@@ -292,7 +267,7 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   if (tensor == nullptr) return sizeof(float);
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return transformer_engine::typeToSize(t.data.dtype);
+  return transformer_engine::typeToSize(t.dtype());
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -336,12 +311,11 @@ void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor) {
 }
 
 NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor) {
-  if (tensor == nullptr) return {nullptr, 0};
+  if (tensor == nullptr) {
+    return nvte_make_shape(nullptr, 0);
+  }
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  NVTEShape ret;
-  ret.data = t.scale_inv.shape.data();
-  ret.ndim = t.scale_inv.shape.size();
-  return ret;
+  return nvte_make_shape(t.scale_inv.shape.data(), t.scale_inv.shape.size());
 }
 
 void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
@@ -375,7 +349,7 @@ void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
 
 NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam param_name) {
   if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, {nullptr, 0}};
+    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 0)};
   }
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   switch (param_name) {
@@ -463,6 +437,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(buf, &config_.amax_epsilon, attr_size);
       break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(buf, &config_.noop_tensor, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -492,6 +469,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigAmaxEpsilon:
       std::memcpy(&config_.amax_epsilon, buf, attr_size);
       break;
+    case kNVTEQuantizationConfigNoopTensor:
+      std::memcpy(&config_.noop_tensor, buf, attr_size);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -501,4 +481,14 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
   if (config != nullptr) {
     delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
+}
+
+int nvte_is_non_tn_fp8_gemm_supported() {
+  int deviceComputeCapability =
+      transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device());
+
+  // Note: this is temporary restriction and should be lifted in the future.
+  // (remove the note once it's done.)
+  return (deviceComputeCapability >= 100 && deviceComputeCapability < 120) ||
+         deviceComputeCapability >= 130;
 }

@@ -78,8 +78,8 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
   operator NVTEBasicTensor() const {
-    const NVTEShape shape = {this->shape.data(), this->shape.size()};
-    return {dptr, static_cast<NVTEDType>(dtype), shape};
+    return {dptr, static_cast<NVTEDType>(dtype),
+            nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
   int numel() const {
@@ -99,6 +99,7 @@ struct Tensor {
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
 
+ public:
   NVTEScalingMode scaling_mode;
 
   Tensor()
@@ -110,7 +111,7 @@ struct Tensor {
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto dim : shape()) {
       acc *= dim;
@@ -130,6 +131,14 @@ struct Tensor {
     if (has_columnwise_data()) return columnwise_data.dtype;
     // Fallback, used e.g. in workspace
     return data.dtype;
+  }
+
+  size_t dim() const {
+    if (!has_data() && has_columnwise_data()) {
+      return columnwise_data.shape.size();
+    } else {
+      return data.shape.size();
+    }
   }
 
   std::vector<size_t> shape() const {
@@ -160,6 +169,28 @@ struct Tensor {
           return data.shape;
         }
         break;
+      case NVTE_BLOCK_SCALING_1D:
+      case NVTE_BLOCK_SCALING_2D: {
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> shape;
+          size_t ndim = columnwise_data.shape.size();
+          shape.reserve(ndim);
+          for (size_t i = 0; i + 1 < ndim; ++i) {
+            shape.push_back(columnwise_data.shape[i + 1]);
+          }
+          if (ndim > 0) {
+            shape.push_back(columnwise_data.shape[0]);
+          }
+          return shape;
+        } else {
+          // NOTE: We may have removed the data pointer from
+          // data by setting usage. In that case, we return
+          // the non-null shape. It is our best guess at the most
+          // recent shape.
+          return data.shape;
+        }
+        break;
+      }
       default:
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
         return {};
@@ -200,10 +231,12 @@ struct Tensor {
 struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
+  NVTETensor noop_tensor = nullptr;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),  // force_pow_2_scales
-      sizeof(float)  // amax_epsilon
+      sizeof(bool),       // force_pow_2_scales
+      sizeof(float),      // amax_epsilon
+      sizeof(NVTETensor)  // noop_tensor
   };
 };
 
@@ -213,6 +246,7 @@ constexpr T DIVUP(const T &x, const T &y) {
 }
 
 using byte = uint8_t;
+using int16 = int16_t;
 using int32 = int32_t;
 using int64 = int64_t;
 using fp32 = float;
@@ -235,6 +269,7 @@ constexpr inline const char *type_name() noexcept;
     return #T;                                           \
   }
 TRANSFORMER_ENGINE_TYPE_NAME(uint8_t)
+TRANSFORMER_ENGINE_TYPE_NAME(int16_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int32_t)
 TRANSFORMER_ENGINE_TYPE_NAME(int64_t)
 TRANSFORMER_ENGINE_TYPE_NAME(float)
@@ -247,11 +282,41 @@ TRANSFORMER_ENGINE_TYPE_NAME(__nv_fp8_e8m0)
 #endif
 #undef TRANSFORMER_ENGINE_TYPE_NAME
 
+template <typename T>
+struct TypeExtrema;
+
+template <>
+struct TypeExtrema<fp8e4m3> {
+  static constexpr float max = 448.0f;
+};
+
+template <>
+struct TypeExtrema<fp8e5m2> {
+  static constexpr float max = 57344.0f;
+};
+
+template <>
+struct TypeExtrema<bf16> {
+  // Hex float format of 1.(7 bits of 1) * 2 ^ 127
+  static constexpr float max = 0x1.FEp127;
+};
+
+template <>
+struct TypeExtrema<fp16> {
+  // Hex float format of 1.(10 bits of 1) * 2 ^ 15
+  static constexpr float max = 0x1.FFCp15;
+};
+
+template <typename T>
+struct TypeExtrema {
+  static constexpr float max = std::numeric_limits<T>::max();
+};
+
 }  // namespace detail
 
 template <typename T>
 struct TypeInfo {
-  using types = std::tuple<byte, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
 
   template <typename U, DType current>
   struct Helper {
@@ -277,6 +342,7 @@ struct TypeInfo {
 
   constexpr static DType dtype = getType<T>();
   constexpr static size_t size = sizeof(T);
+  constexpr static float max_finite_value = detail::TypeExtrema<T>::max;
   constexpr static const char *name = detail::type_name<T>();
 };
 
@@ -285,6 +351,10 @@ struct TypeInfo {
     using namespace transformer_engine;                      \
     case DType::kByte: {                                     \
       using type = unsigned char;                            \
+      { __VA_ARGS__ }                                        \
+    } break;                                                 \
+    case DType::kInt16: {                                    \
+      using type = int16_t;                                  \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
     case DType::kInt32: {                                    \
@@ -321,6 +391,33 @@ struct TypeInfo {
     } break;                                                 \
     default:                                                 \
       NVTE_ERROR("Invalid type.");                           \
+  }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
+  switch (dtype) {                                             \
+    using namespace transformer_engine;                        \
+    case DType::kFloat32: {                                    \
+      using type = float;                                      \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat16: {                                    \
+      using type = fp16;                                       \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kBFloat16: {                                   \
+      using type = bf16;                                       \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat8E4M3: {                                 \
+      using type = fp8e4m3;                                    \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    case DType::kFloat8E5M2: {                                 \
+      using type = fp8e5m2;                                    \
+      { __VA_ARGS__ }                                          \
+    } break;                                                   \
+    default:                                                   \
+      NVTE_ERROR("Invalid type.");                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, type, ...) \
@@ -519,6 +616,9 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint32_t offset_elems, const size_t type_size);
 
 bool is_supported_by_CC_100();
+
+std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
+                                                        size_t outer_size, size_t inner_size);
 
 }  // namespace transformer_engine
 

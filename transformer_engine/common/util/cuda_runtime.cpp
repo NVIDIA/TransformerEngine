@@ -114,9 +114,15 @@ bool supports_multicast(int device_id) {
   auto init = [&]() {
     CUdevice cudev;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
-    int result;
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
-                                CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+    // Multicast support requires both CUDA12.1 UMD + KMD
+    int result = 0;
+    // Check if KMD >= 12.1
+    int driver_version;
+    NVTE_CHECK_CUDA(cudaDriverGetVersion(&driver_version));
+    if (driver_version >= 12010) {
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
+                                  CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+    }
     cache[device_id] = static_cast<bool>(result);
   };
   std::call_once(flags[device_id], init);

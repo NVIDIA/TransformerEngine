@@ -4,21 +4,44 @@
 
 """NVFuser functions and JIT utilities"""
 import os
+from functools import wraps
 from typing import Callable, Optional, Tuple
 
 import torch
 
+from . import torch_version
+from .utils import gpu_autocast_ctx
+
 # pylint: disable=unnecessary-lambda-assignment
 
+
+def lazy_compile(func):
+    """Lazy compile a function with torch.compile
+
+    This decorator defers the compilation of a function until the first call, speeding up the
+    overall module's import time if these functions are not used.
+    """
+    compiled_func = None
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal compiled_func
+        if compiled_func is None:
+            compiled_func = torch.compile(func)
+        return compiled_func(*args, **kwargs)
+
+    return wrapper
+
+
 jit_fuser = lambda func: func
-if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    jit_fuser = torch.compile
+if torch_version() >= (2, 0, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+    jit_fuser = lazy_compile
 
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
-if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
-    dropout_fuser = torch.compile
+if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+    dropout_fuser = lazy_compile
 
 
 # Decorator to disable Torch Dynamo
@@ -29,11 +52,9 @@ no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recu
 def set_jit_fusion_options() -> None:
     """Set PyTorch JIT layer fusion options."""
     # flags required to enable jit fusion kernels
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
-    if TORCH_MAJOR == 2 and TORCH_MINOR >= 2:
+    if torch_version() >= (2, 2, 0):
         pass
-    elif (TORCH_MAJOR == 2) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
+    elif torch_version() >= (1, 10, 0):
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
@@ -102,7 +123,7 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
 
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         if bias is not None and bias.numel() != 0:
             return bias_gelu_fused_(inp, bias)
         return gelu_fused_(inp)
@@ -112,7 +133,7 @@ def bgrad_dgelu_fused(
     grad_output: torch.Tensor, inp: torch.Tensor, bias: torch.Tensor
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """Disable native AMP for `bgrad_dgelu_fused_`"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         if bias is not None and bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
         return None, dgelu_fused_(grad_output, inp)
@@ -153,7 +174,7 @@ def bias_dropout_add_fused_train(
 ) -> torch.Tensor:
     """Disable native AMP and enable grad for BDA"""
     with torch.enable_grad():
-        with torch.cuda.amp.autocast(enabled=False):
+        with gpu_autocast_ctx(enabled=False):
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
@@ -169,7 +190,7 @@ def bias_dropout_add_fused_inference(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
     """Disable native AMP for BDA"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         return bias_dropout_add_fused_inference_(x, bias, residual, prob)
 
 

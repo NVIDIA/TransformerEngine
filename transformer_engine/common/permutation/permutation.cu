@@ -6,6 +6,8 @@
 
 #include <transformer_engine/permutation.h>
 
+#include <cub/cub.cuh>
+
 #include "../common.h"
 
 static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id_map,
@@ -333,7 +335,7 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
   const transformer_engine::Tensor *input_fwd_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_permute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                             reinterpret_cast<T *>(output_cu->data.dptr),
@@ -359,11 +361,19 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
   const transformer_engine::Tensor *prob_cu =
       reinterpret_cast<const transformer_engine::Tensor *>(prob);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
       nvte_unpermute_launcher(reinterpret_cast<const T *>(input_cu->data.dptr),
                               reinterpret_cast<T *>(output_cu->data.dptr),
                               reinterpret_cast<int *>(row_id_map_cu->data.dptr),
                               reinterpret_cast<const float *>(prob_cu->data.dptr), num_rows, topK,
                               num_cols, stream););
+}
+
+void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes, int *keys_in,
+                                  int *keys_out, int *values_in, int *values_out,
+                                  size_t num_items) {
+  NVTE_API_CALL(nvte_device_radix_sort_pairs);
+  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, keys_in, keys_out, values_in,
+                                  values_out, num_items);
 }

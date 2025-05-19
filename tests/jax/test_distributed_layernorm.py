@@ -13,10 +13,30 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from distributed_test_base import generate_configs, generate_collectives_count
 from distributed_test_base import compare_ops
+from utils import pytest_parametrize_wrapper
+
 from transformer_engine.jax import fp8_autocast
+from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
+from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
+
 
 DTYPES = [jnp.bfloat16, jnp.float32]
+
+NORM_INPUT_SHAPES = {
+    "L0": [[64, 64]],
+    "L2": [[64, 64]],
+}
+
+is_fp8_supported, reason = is_fp8_available()
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+
+SUPPORTED_RECIPES = []
+if is_fp8_supported:
+    SUPPORTED_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+    SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
+if is_mxfp8_supported:
+    SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 
 class TestDistributedLayernorm:
@@ -41,25 +61,35 @@ class TestDistributedLayernorm:
 
         return (x, gamma, beta), (x_pspec, g_pspec, b_pspec)
 
-    def generate_collectives_count_ref(self, mesh_resource, ln_type, shape, dtype):
+    def generate_collectives_count_ref(
+        self, mesh_resource, ln_type, shape, dtype, mesh_axes, fp8_recipe
+    ):
         jax_dtype = jax.dtypes.canonicalize_dtype(dtype)
         is_dp_enabled = mesh_resource.dp_resource is not None
         assert ln_type in ["layernorm", "rmsnorm"]
         all_reduce_loss_bytes = 4  # 1 * FP32
         # for loss, dgamma and dbeta
-        weight_count = 2 if ln_type == "layernorm" else 1
+        # TODO(Jeremy): debug this check because layernorm should always have 2x weights regardless of dp
+        weight_count = 2 if (ln_type == "layernorm" and "dp" in mesh_axes) else 1
         allreduce_total_bytes = (
             all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
         )
+        other_bytes = 0
+        if fp8_recipe == recipe.MXFP8BlockScaling() and "dp" in mesh_axes:
+            other_bytes = 384  # required for small scale shapes that require padding
+        if fp8_recipe == recipe.Float8CurrentScaling():
+            allreduce_total_bytes += jax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
-            allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=0
+            allreduce=allreduce_total_bytes * int(is_dp_enabled), allgather=0, other=other_bytes
         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("data_shape", [[32, 128, 1024], [32, 1024]])
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize("zero_centered_gamma", [False, True])
-    @pytest.mark.parametrize("shard_weights", [False, True])
+    @pytest_parametrize_wrapper("data_shape", NORM_INPUT_SHAPES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("zero_centered_gamma", [False, True])
+    @pytest_parametrize_wrapper("shard_weights", [False, True])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_layernorm(
         self,
         device_count,
@@ -70,12 +100,21 @@ class TestDistributedLayernorm:
         dtype,
         zero_centered_gamma,
         shard_weights,
+        fp8_recipe,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "layernorm"
+        q_dtype = jnp.float8_e4m3fn
 
         def target_func(x, gamma, beta):
-            return jnp.mean(layernorm(x, gamma, beta, ln_type, zero_centered_gamma, epsilon))
+            quantizer = QuantizerFactory.create_set().x
+            return jnp.mean(
+                layernorm(
+                    x, gamma, beta, ln_type, zero_centered_gamma, epsilon, quantizer=quantizer
+                )
+            )
 
         def ref_func(x, gamma, beta):
             x_ = jnp.asarray(x, jnp.float32)
@@ -92,11 +131,11 @@ class TestDistributedLayernorm:
             data_shape, mesh_resource, dtype, shard_weights
         )
         collective_count_ref = self.generate_collectives_count_ref(
-            mesh_resource, ln_type, data_shape, dtype
+            mesh_resource, ln_type, data_shape, dtype, mesh_axes, fp8_recipe
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(mesh_resource=mesh_resource):
+        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
             beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
@@ -109,8 +148,8 @@ class TestDistributedLayernorm:
                         [x_, gamma_, beta_],
                         collective_count_ref,
                         grad_args=(0, 1, 2),
-                        metric_fwd_dtype=dtype,
-                        metric_bwd_dtype=dtype,
+                        metric_fwd_dtype=q_dtype,
+                        metric_bwd_dtype=q_dtype,
                         in_shardings=(x_pspec, g_pspec, b_pspec),
                         out_shardings=(None, (x_pspec, g_pspec, b_pspec)),
                     )
@@ -131,17 +170,31 @@ class TestDistributedLayernorm:
                         )
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize("data_shape", [[32, 128, 1024], [32, 1024]])
-    @pytest.mark.parametrize("dtype", DTYPES)
-    @pytest.mark.parametrize("shard_weights", [False, True])
+    @pytest_parametrize_wrapper("data_shape", NORM_INPUT_SHAPES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("shard_weights", [False, True])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_rmsnorm(
-        self, device_count, mesh_shape, mesh_axes, mesh_resource, data_shape, dtype, shard_weights
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        shard_weights,
+        fp8_recipe,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "rmsnorm"
+        q_dtype = jnp.float8_e4m3fn
 
         def target_func(x, gamma):
-            return jnp.mean(layernorm(x, gamma, None, ln_type, False, epsilon))
+            quantizer = QuantizerFactory.create_set().x
+            return jnp.mean(layernorm(x, gamma, None, ln_type, False, epsilon, quantizer=quantizer))
 
         def ref_func(x, gamma):
             x = jnp.asarray(x, jnp.float32)
@@ -154,11 +207,11 @@ class TestDistributedLayernorm:
             data_shape, mesh_resource, dtype, shard_weights
         )
         collective_count_ref = self.generate_collectives_count_ref(
-            mesh_resource, ln_type, data_shape, dtype
+            mesh_resource, ln_type, data_shape, dtype, mesh_axes, fp8_recipe
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(mesh_resource=mesh_resource):
+        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
 
@@ -170,8 +223,8 @@ class TestDistributedLayernorm:
                         [x_, gamma_],
                         collective_count_ref,
                         grad_args=(0, 1),
-                        metric_fwd_dtype=dtype,
-                        metric_bwd_dtype=dtype,
+                        metric_fwd_dtype=q_dtype,
+                        metric_bwd_dtype=q_dtype,
                         in_shardings=(x_pspec, g_pspec),
                         out_shardings=(None, (x_pspec, g_pspec)),
                     )

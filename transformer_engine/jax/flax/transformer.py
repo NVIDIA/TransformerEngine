@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import combine_masks
 from jax import nn as jax_nn
 from jax import random as jax_random
@@ -220,11 +219,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if mask is not None:
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+            if mask is not None:
+                return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.CAUSAL_MASK:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
-                if mask is not None:
-                    return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.NO_MASK:
                 return SoftmaxType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
@@ -447,6 +446,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
 
+       attn_mask_type       mask/sequence_descriptor       SWA          softmax type
+       --------------------------------------------------------------------------------------------
+       no_mask              None                           None         SCALED
+       causal               None                           None         SCALED_UPPER_TRIANG_MASKED
+       causal               None                           Yes          SCALED_MASKED
+       padding              Required                       Yes/No       SCALED_MASKED
+       padding_causal       Required                       Yes/No       SCALED_MASKED
+
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -638,7 +645,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout.is_separate()
 
-            assert sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray)
+            assert sequence_descriptor is None or isinstance(
+                sequence_descriptor, (jnp.ndarray, np.ndarray)
+            )
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
@@ -928,7 +937,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
+        The data type used to allocate the initial parameters.
     fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
@@ -1493,12 +1502,11 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
         rp_bucket += np.where(rpb_is_small, negative_rp, rpb_val_if_large)
 
         # Compute relative attention bias
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, self.embedding_axes),
             (self.num_attention_heads, self.num_buckets),
             self.dtype,
-            axes=self.embedding_axes,
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)
@@ -1788,6 +1796,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
+
         input_dtype = inputs.dtype
         assert (
             self.layer_type in TransformerLayerType
