@@ -13,13 +13,12 @@ namespace transformer_engine::pytorch {
 
 std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                                              std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list,
-                                             transformer_engine::DType otype) {
+                                             std::vector<py::handle> quantizer_list, DType otype) {
   init_extension();
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   std::vector<py::object> py_output_objects_list;
-  std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
+  std::vector<TensorWrapper> tensor_wrappers;
   if (output_list.has_value()) {
     py_output_objects_list = output_list.value();
   }
@@ -33,7 +32,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
     auto input_tensor = makeTransformerEngineTensor(input_list[i]);
     const NVTEShape input_shape = input_tensor.shape();
 
-    transformer_engine::TensorWrapper output_tensor;
+    TensorWrapper output_tensor;
 
     if (!detail::IsFloat8Quantizers(quantizer_list[i].ptr())) {
       with_fused_kernel = false;
@@ -68,8 +67,10 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // Launch TE kernel
   if (with_fused_kernel) {
-    nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                              nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    });
   } else {
     for (size_t i = 0; i < py_output_objects_list.size(); i++) {
       quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);
@@ -78,8 +79,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   return py_output_objects_list;
 }
 
-at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
-                         std::optional<at::Tensor> output) {
+at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor> output) {
   init_extension();
 
   const auto dim = input.dim();
