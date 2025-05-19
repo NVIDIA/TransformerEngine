@@ -1056,7 +1056,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if (
                 isinstance(
                     grad_output_.get_tensor(True),
-                    (QuantizedTensor, Float8TensorBase, MXFP8TensorBase),
+                    (
+                        QuantizedTensor,
+                        Float8TensorBase,
+                        MXFP8TensorBase,
+                        Float8BlockwiseQTensorBase,
+                    ),
                 )
                 and ctx.use_bias
             ):
