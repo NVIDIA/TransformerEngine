@@ -6,12 +6,11 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::optional<bool> per_tensor_python) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
 
   auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
@@ -57,9 +56,6 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
 std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   bool per_tensor = per_tensor_python.has_value() ? per_tensor_python.value() : false;
 
   auto float_options = tensor_lists[0][0].options().dtype(at::kFloat);
@@ -105,3 +101,5 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
 
   return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
 }
+
+}  // namespace transformer_engine::pytorch

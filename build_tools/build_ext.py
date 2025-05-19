@@ -130,18 +130,24 @@ def get_build_ext(
             super().run()
             self.extensions = all_extensions
 
-            # Ensure that binaries are not in global package space.
+            # Ensure that shared objects files for source and PyPI installations live
+            # in separate directories to avoid conflicts during install and runtime.
             lib_dir = (
                 "wheel_lib"
                 if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or framework_extension_only
                 else ""
             )
-            target_dir = install_dir / "transformer_engine" / lib_dir
-            target_dir.mkdir(exist_ok=True, parents=True)
 
-            for ext in Path(self.build_lib).glob("*.so"):
-                self.copy_file(ext, target_dir)
-                os.remove(ext)
+            # Ensure that binaries are not in global package space.
+            # For editable/inplace builds this is not a concern as
+            # the SOs will be in a local directory anyway.
+            if not self.inplace:
+                target_dir = install_dir / "transformer_engine" / lib_dir
+                target_dir.mkdir(exist_ok=True, parents=True)
+
+                for ext in Path(self.build_lib).glob("*.so"):
+                    self.copy_file(ext, target_dir)
+                    os.remove(ext)
 
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
