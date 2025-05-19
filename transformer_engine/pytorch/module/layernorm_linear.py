@@ -193,6 +193,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # or if a gather of ln_out must be in high precision.
         with_quantized_norm = (
             fp8
+            and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
             and not force_hp_blockwise_ln_out_gather
