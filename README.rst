@@ -146,7 +146,7 @@ Installation
 ============
 
 System Requirements
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 * **Hardware:** Blackwell, Hopper, Grace Hopper/Blackwell, Ada, Ampere
 
@@ -167,7 +167,7 @@ Installation Methods
 ^^^^^^^^^^^^^^^^^^^^
 
 Docker (Recommended)
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
 
@@ -192,7 +192,7 @@ Where 25.04 (corresponding to April 2025 release) is the container version.
 * NGC PyTorch 23.08+ containers include FlashAttention-2
 
 pip Installation
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^
 
 **Prerequisites for pip installation:**
 
@@ -230,7 +230,7 @@ Source Installation
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
 
 Environment Variables
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^
 These environment variables can be set before installation to customize the build process:
 
 * **CUDA_PATH**: Path to CUDA installation
@@ -241,7 +241,7 @@ These environment variables can be set before installation to customize the buil
 * **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
 
 Compiling with FlashAttention
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Transformer Engine supports both FlashAttention-2 and FlashAttention-3 in PyTorch for improved performance. FlashAttention-3 was added in release v1.11 and is prioritized over FlashAttention-2 when both are present in the environment.
 
 You can verify which FlashAttention version is being used by setting these environment variables:
@@ -254,7 +254,7 @@ It is a known issue that FlashAttention-2 compilation is resource-intensive and 
 
 .. troubleshooting-begin-marker-do-not-remove
 Troubleshooting
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^
 
 **Common Issues and Solutions:**
 
