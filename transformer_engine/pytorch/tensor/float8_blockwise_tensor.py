@@ -9,9 +9,9 @@ from typing import Optional, Tuple, Iterable, Union
 import math
 import torch
 import transformer_engine_torch as tex
+from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
-from transformer_engine_torch import DType as TE_DType
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple

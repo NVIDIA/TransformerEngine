@@ -10,9 +10,9 @@ from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
+from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from transformer_engine_torch import DType as TE_DType
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
