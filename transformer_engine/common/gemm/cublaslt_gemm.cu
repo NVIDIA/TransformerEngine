@@ -586,12 +586,12 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
                       int math_sm_count, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm);
   using namespace transformer_engine;
-  const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
-  const Tensor *inputB = reinterpret_cast<const Tensor *>(B);
-  Tensor *outputD = reinterpret_cast<Tensor *>(D);
-  const Tensor *biasTensor = reinterpret_cast<const Tensor *>(bias);
-  Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
-  Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
+  const Tensor *inputA = convertNVTETensorCheck(A);
+  const Tensor *inputB = convertNVTETensorCheck(B);
+  Tensor *outputD = convertNVTETensor(D);
+  const Tensor *biasTensor = convertNVTETensor(bias);
+  Tensor *outputGelu = convertNVTETensor(pre_gelu_out);
+  Tensor *wspace = convertNVTETensor(workspace);
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
@@ -612,13 +612,13 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
 
   using namespace transformer_engine;
-  const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
-  const Tensor *inputB = reinterpret_cast<const Tensor *>(B);
-  Tensor *outputD = reinterpret_cast<Tensor *>(D);
-  const Tensor *biasTensor = reinterpret_cast<const Tensor *>(bias);
-  Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
-  const Tensor *inputCounter = reinterpret_cast<const Tensor *>(counter);
-  Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
+  const Tensor *inputA = convertNVTETensorCheck(A);
+  const Tensor *inputB = convertNVTETensorCheck(B);
+  Tensor *outputD = convertNVTETensor(D);
+  const Tensor *biasTensor = convertNVTETensor(bias);
+  Tensor *outputGelu = convertNVTETensor(pre_gelu_out);
+  const Tensor *inputCounter = convertNVTETensor(counter);
+  Tensor *wspace = convertNVTETensor(workspace);
 
   NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
                  is_delayed_tensor_scaling(inputB->scaling_mode),

@@ -261,10 +261,10 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
   using namespace transformer_engine;
 
   kv_cache::copy_to_kv_cache(
-      *reinterpret_cast<Tensor *>(new_k), *reinterpret_cast<Tensor *>(new_v),
-      *reinterpret_cast<Tensor *>(k_cache), *reinterpret_cast<Tensor *>(v_cache),
-      *reinterpret_cast<Tensor *>(page_table), *reinterpret_cast<Tensor *>(cu_new_lens),
-      *reinterpret_cast<Tensor *>(cu_cached_lens), qkv_format, b, max_ctx_len, max_seq_len,
+      *convertNVTETensorCheck(new_k), *convertNVTETensorCheck(new_v),
+      *convertNVTETensorCheck(k_cache), *convertNVTETensorCheck(v_cache),
+      *convertNVTETensorCheck(page_table), *convertNVTETensorCheck(cu_new_lens),
+      *convertNVTETensorCheck(cu_cached_lens), qkv_format, b, max_ctx_len, max_seq_len,
       max_pages_per_seq, is_non_paged, stream);
 }
 
@@ -277,9 +277,9 @@ void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
   NVTE_API_CALL(nvte_convert_thd_to_bshd);
   using namespace transformer_engine;
 
-  kv_cache::convert_thd_to_bshd(*reinterpret_cast<Tensor *>(tensor),
-                                *reinterpret_cast<Tensor *>(cu_seqlens),
-                                *reinterpret_cast<Tensor *>(new_tensor), b, max_seq_len, stream);
+  kv_cache::convert_thd_to_bshd(*convertNVTETensorCheck(tensor),
+                                *convertNVTETensorCheck(cu_seqlens),
+                                *convertNVTETensorCheck(new_tensor), b, max_seq_len, stream);
 }
 
 /***************************************************************************************************
@@ -291,7 +291,7 @@ void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
   NVTE_API_CALL(nvte_convert_bshd_to_thd);
   using namespace transformer_engine;
 
-  kv_cache::convert_bshd_to_thd(*reinterpret_cast<Tensor *>(tensor),
-                                *reinterpret_cast<Tensor *>(cu_seqlens),
-                                *reinterpret_cast<Tensor *>(new_tensor), t, stream);
+  kv_cache::convert_bshd_to_thd(*convertNVTETensorCheck(tensor),
+                                *convertNVTETensorCheck(cu_seqlens),
+                                *convertNVTETensorCheck(new_tensor), t, stream);
 }

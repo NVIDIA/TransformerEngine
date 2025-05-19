@@ -599,8 +599,8 @@ void nvte_scaled_upper_triang_masked_softmax_forward(const NVTETensor input,
                                                      NVTETensor softmax_results, float scale_factor,
                                                      cudaStream_t stream) {
   using namespace transformer_engine;
-  scaled_upper_triang_masked_softmax_forward(*reinterpret_cast<const Tensor *>(input),
-                                             reinterpret_cast<Tensor *>(softmax_results),
+  scaled_upper_triang_masked_softmax_forward(*convertNVTETensorCheck(input),
+                                             convertNVTETensorCheck(softmax_results),
                                              scale_factor, stream);
 }
 
@@ -610,6 +610,6 @@ void nvte_scaled_upper_triang_masked_softmax_backward(const NVTETensor incoming_
                                                       cudaStream_t stream) {
   using namespace transformer_engine;
   scaled_upper_triang_masked_softmax_backward(
-      *reinterpret_cast<Tensor *>(output_grads), *reinterpret_cast<const Tensor *>(incoming_grads),
-      *reinterpret_cast<const Tensor *>(softmax_results), scale_factor, stream);
+      *convertNVTETensorCheck(output_grads), *convertNVTETensorCheck(incoming_grads),
+      *convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }

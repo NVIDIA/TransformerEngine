@@ -496,6 +496,6 @@ void nvte_fp8_transpose_dbias(const NVTETensor input, NVTETensor transposed_outp
   NVTE_API_CALL(nvte_fp8_transpose_dbias);
   using namespace transformer_engine;
   fp8_transpose_dbias(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<Tensor *>(transposed_output),
-      reinterpret_cast<Tensor *>(dbias), reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensor(transposed_output),
+      convertNVTETensor(dbias), convertNVTETensor(workspace), stream);
 }

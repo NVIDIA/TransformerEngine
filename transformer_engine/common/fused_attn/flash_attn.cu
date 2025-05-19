@@ -138,8 +138,8 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
   NVTE_API_CALL(nvte_prepare_flash_attn_fwd);
   using namespace transformer_engine;
 
-  flash_attention::prepare_flash_attn_fwd(*reinterpret_cast<Tensor *>(qkvi),
-                                          *reinterpret_cast<Tensor *>(qkv), stream);
+  flash_attention::prepare_flash_attn_fwd(*convertNVTETensorCheck(qkvi),
+                                          *convertNVTETensorCheck(qkv), stream);
 }
 
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
@@ -148,6 +148,6 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
   using namespace transformer_engine;
 
   flash_attention::prepare_flash_attn_bwd(
-      *reinterpret_cast<Tensor *>(q), *reinterpret_cast<Tensor *>(k),
-      *reinterpret_cast<Tensor *>(v), *reinterpret_cast<Tensor *>(qkv), stream);
+      *convertNVTETensorCheck(q), *convertNVTETensorCheck(k),
+      *convertNVTETensorCheck(v), *convertNVTETensorCheck(qkv), stream);
 }

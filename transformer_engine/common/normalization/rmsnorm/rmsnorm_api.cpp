@@ -86,11 +86,16 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   // Compute FP8 transpose if required
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
-    Tensor transpose_data;
-    transpose_data.data = z->columnwise_data;
-    transpose_data.scaling_mode = z->scaling_mode;
-    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
-                   stream);
+    NVTETensor transpose_data = tensor_allocator.Allocate(z->scaling_mode);
+    auto* t = convertNVTETensor(transpose_data);
+    t->data = z->columnwise_data;
+    NVTETensor z_copy = tensor_allocator.Allocate(z->scaling_mode);
+    auto* z_copy_ptr = convertNVTETensor(z_copy);
+    *z_copy_ptr = *z;
+
+    nvte_transpose(z_copy, transpose_data, stream);
+    tensor_allocator.Free(transpose_data);
+    tensor_allocator.Free(z_copy);
   }
 
   return;
@@ -164,9 +169,9 @@ void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_rmsnorm_fwd);
   using namespace transformer_engine;
-  rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
-              epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma),
-              reinterpret_cast<Tensor *>(workspace), multiprocessorCount, zero_centered_gamma,
+  rmsnorm_fwd(*convertNVTETensorCheck(x), *convertNVTETensorCheck(gamma),
+              epsilon, convertNVTETensor(z), convertNVTETensor(rsigma),
+              convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
               stream);
 }
 
@@ -179,9 +184,9 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_rmsnorm_bwd);
   using namespace transformer_engine;
-  rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
-              *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
-              reinterpret_cast<Tensor *>(dx), reinterpret_cast<Tensor *>(dgamma),
-              reinterpret_cast<Tensor *>(workspace), multiprocessorCount, zero_centered_gamma,
+  rmsnorm_bwd(*convertNVTETensorCheck(dz), *convertNVTETensorCheck(x),
+              *convertNVTETensorCheck(rsigma), *convertNVTETensorCheck(gamma),
+              convertNVTETensor(dx), convertNVTETensor(dgamma),
+              convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
               stream);
 }

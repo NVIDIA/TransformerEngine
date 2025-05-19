@@ -459,10 +459,10 @@ void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETen
   using namespace transformer_engine;
 
   multi_tensor_l2norm::multi_tensor_l2norm_cuda(
-      chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
+      chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
-      *reinterpret_cast<Tensor *>(output), *reinterpret_cast<Tensor *>(output_per_tensor),
-      *reinterpret_cast<Tensor *>(ret), *reinterpret_cast<Tensor *>(ret_per_tensor), per_tensor,
+      *convertNVTETensorCheck(output), *convertNVTETensorCheck(output_per_tensor),
+      *convertNVTETensorCheck(ret), *convertNVTETensorCheck(ret_per_tensor), per_tensor,
       max_chunks_per_tensor, device_id, stream);
 }
 
@@ -477,9 +477,9 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
   using namespace transformer_engine;
 
   multi_tensor_l2norm::multi_tensor_unscale_l2norm_cuda(
-      chunk_size, *reinterpret_cast<Tensor *>(noop_flag),
+      chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
-      *reinterpret_cast<Tensor *>(output), *reinterpret_cast<Tensor *>(output_per_tensor),
-      *reinterpret_cast<Tensor *>(ret), *reinterpret_cast<Tensor *>(ret_per_tensor),
-      *reinterpret_cast<Tensor *>(inv_scale), per_tensor, max_chunks_per_tensor, device_id, stream);
+      *convertNVTETensorCheck(output), *convertNVTETensorCheck(output_per_tensor),
+      *convertNVTETensorCheck(ret), *convertNVTETensorCheck(ret_per_tensor),
+      *convertNVTETensorCheck(inv_scale), per_tensor, max_chunks_per_tensor, device_id, stream);
 }

@@ -309,9 +309,9 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor cu_seqlens
   NVTE_API_CALL(nvte_fused_rope_forward);
   using namespace transformer_engine;
   fused_rope_forward(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(cu_seqlens),
-      *reinterpret_cast<const Tensor *>(freqs), *reinterpret_cast<const Tensor *>(start_positions),
-      reinterpret_cast<Tensor *>(output), qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2,
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(cu_seqlens),
+      *convertNVTETensorCheck(freqs), *convertNVTETensorCheck(start_positions),
+      convertNVTETensorCheck(output), qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2,
       stride_s_or_t, stride_b, stride_h, stride_d, stream);
 }
 
@@ -324,9 +324,9 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor cu
                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_rope_backward);
   using namespace transformer_engine;
-  fused_rope_backward(*reinterpret_cast<const Tensor *>(output_grads),
-                      *reinterpret_cast<const Tensor *>(cu_seqlens),
-                      *reinterpret_cast<const Tensor *>(freqs),
-                      reinterpret_cast<Tensor *>(input_grads), qkv_format, interleaved, cp_size,
+  fused_rope_backward(*convertNVTETensorCheck(output_grads),
+                      *convertNVTETensorCheck(cu_seqlens),
+                      *convertNVTETensorCheck(freqs),
+                      convertNVTETensorCheck(input_grads), qkv_format, interleaved, cp_size,
                       cp_rank, s, b, h, d, d2, stride_s_or_t, stride_b, stride_h, stride_d, stream);
 }

@@ -188,10 +188,10 @@ void nvte_layernorm_fwd(const NVTETensor x,      // BxSxhidden_size
                         const bool zero_centered_gamma, cudaStream_t stream) {
   NVTE_API_CALL(nvte_layernorm_fwd);
   using namespace transformer_engine;
-  layernorm_fwd(*reinterpret_cast<const Tensor*>(x), *reinterpret_cast<const Tensor*>(gamma),
-                *reinterpret_cast<const Tensor*>(beta), epsilon, reinterpret_cast<Tensor*>(z),
-                reinterpret_cast<Tensor*>(mu), reinterpret_cast<Tensor*>(rsigma),
-                reinterpret_cast<Tensor*>(workspace), multiprocessorCount, zero_centered_gamma,
+  layernorm_fwd(*convertNVTETensorCheck(x), *convertNVTETensorCheck(gamma),
+                *convertNVTETensorCheck(beta), epsilon, convertNVTETensor(z),
+                convertNVTETensor(mu), convertNVTETensor(rsigma),
+                convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
                 stream);
 }
 
@@ -205,10 +205,10 @@ void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_layernorm_bwd);
   using namespace transformer_engine;
-  layernorm_bwd(*reinterpret_cast<const Tensor*>(dz), *reinterpret_cast<const Tensor*>(x),
-                *reinterpret_cast<const Tensor*>(mu), *reinterpret_cast<const Tensor*>(rsigma),
-                *reinterpret_cast<const Tensor*>(gamma), reinterpret_cast<Tensor*>(dx),
-                reinterpret_cast<Tensor*>(dgamma), reinterpret_cast<Tensor*>(dbeta),
-                reinterpret_cast<Tensor*>(workspace), multiprocessorCount, zero_centered_gamma,
+  layernorm_bwd(*convertNVTETensorCheck(dz), *convertNVTETensorCheck(x),
+                *convertNVTETensorCheck(mu), *convertNVTETensorCheck(rsigma),
+                *convertNVTETensorCheck(gamma), convertNVTETensor(dx),
+                convertNVTETensor(dgamma), convertNVTETensor(dbeta),
+                convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
                 stream);
 }

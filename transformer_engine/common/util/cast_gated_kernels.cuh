@@ -1058,9 +1058,9 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
   using namespace gated_kernels;
   Tensor grad_empty_tensor;
   const Tensor &grad_tensor =
-      IS_DGATED ? *(reinterpret_cast<const Tensor *>(grad)) : grad_empty_tensor;
-  const Tensor gated_input_tensor = *reinterpret_cast<const Tensor *>(gated_input);
-  Tensor *output_tensor = reinterpret_cast<Tensor *>(output);
+      IS_DGATED ? *(convertNVTETensorCheck(grad)) : grad_empty_tensor;
+  const Tensor gated_input_tensor = *convertNVTETensorCheck(gated_input);
+  Tensor *output_tensor = convertNVTETensorCheck(output);
 
   if (is_supported_by_CC_100()) {
     quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
