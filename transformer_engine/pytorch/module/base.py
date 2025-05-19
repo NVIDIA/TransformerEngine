@@ -1396,9 +1396,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     continue
                 if not isinstance(recipe, compatible_recipe_class):
                     raise RuntimeError(
-                        f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe "
-                        f"{compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}. Please check the recipes "
-                        f"assigned during fp8_model_init() and fp8_autocast() calls."
+                        f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe"
+                        f" {compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}."
+                        " Please check the recipes assigned during fp8_model_init() and"
+                        " fp8_autocast() calls."
                     )
 
     def _turn_off_unsupported_features_in_debug(self):
