@@ -13,6 +13,7 @@ import torch
 from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Recipe
 
 
 class QuantizedTensorBase:
@@ -237,6 +238,10 @@ class Quantizer(abc.ABC):
     def copy(self) -> Quantizer:
         """Create shallow copy"""
         return copy.copy(self)
+
+    @abc.abstractmethod
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Returns recipe class that is compatible with this quantizer"""
 
 
 class _QuantizeFunc(torch.autograd.Function):
