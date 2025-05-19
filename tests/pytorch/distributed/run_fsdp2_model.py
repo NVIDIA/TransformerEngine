@@ -195,7 +195,7 @@ def _train(args):
                 with te.fp8_autocast(enabled=args.fp8_init, fp8_recipe=fp8_recipe):
                     output = model(input_data)
                     loss = F.mse_loss(output, target)
-        loss.backward()
+            loss.backward()
         optimizer.step()
         if LOCAL_RANK == 0:
             print(f"Rank {LOCAL_RANK}: Iteration {iteration} completed.")
