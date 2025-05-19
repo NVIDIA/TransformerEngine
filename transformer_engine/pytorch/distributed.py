@@ -1239,12 +1239,18 @@ def gather_along_first_dim(
         final_quantizer = (
             None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
         )
+        # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+        if isinstance(rowwise, Float8BlockwiseQTensorBase):
+            rowwise = inp._original_tensor
         rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
         out_obj.rowwise_gemm_tensor = rowwise_total
         if rowwise is not columnwise:
             final_quantizer_columnwise = (
                 None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
             )
+            # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+            if isinstance(columnwise, Float8BlockwiseQTensorBase):
+                columnwise = inp._original_tensor
             columnwise_total, _ = gather_along_first_dim(
                 columnwise, process_group, False, final_quantizer_columnwise
             )
