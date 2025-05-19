@@ -4,12 +4,13 @@
 
 """Tensor class with FP8 data quantized with NxN tiles"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, Union
 
 import math
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from transformer_engine_torch import DType as TE_DType
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -228,6 +229,9 @@ class Float8BlockQuantizer(Quantizer):
         # NOTE: This interface is specific to requirements like delayed scaling
         # where state from an estimator influences distribution parameters.
         pass
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return Float8BlockScaling
 
 
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):

@@ -401,7 +401,7 @@ class TestFP8Recipe:
         with fp8_autocast(enabled=True, fp8_recipe=DelayedScaling()):
             with pytest.raises(RuntimeError) as excinfo:
                 _ = linear(x)
-            assert "Tensor type mismatch" in str(excinfo.value)
+            assert "Recipe mismatch for " in str(excinfo.value)
 
     @pytest.mark.parametrize(
         "target_recipe_class, expected_quantizer_type, available_flag, reason",

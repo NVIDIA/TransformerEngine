@@ -1387,15 +1387,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = self.fp8_meta["recipe"]
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, QuantizedTensorBase) and not isinstance(
-                tensor, recipe.expected_tensor_class
-            ):
-                raise RuntimeError(
-                    f"Tensor type mismatch for '{self.weight_names[i]}': expected"
-                    f" {recipe.expected_tensor_class.__name__} for recipe"
-                    f" {recipe.__class__.__name__}, got {tensor.__class__.__name__}. Please check"
-                    " the recipes assigned during fp8_model_init() and fp8_autocast() calls."
-                )
+            if isinstance(tensor, QuantizedTensorBase):
+                quantizer = tensor._get_quantizer()
+                if quantizer is None:
+                    continue
+                compatible_recipe_class = quantizer._get_compatible_recipe()
+                if compatible_recipe_class is None:
+                    continue
+                if not isinstance(recipe, compatible_recipe_class):
+                    raise RuntimeError(
+                        f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe "
+                        f"{compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}. Please check the recipes "
+                        f"assigned during fp8_model_init() and fp8_autocast() calls."
+                    )
 
     def _turn_off_unsupported_features_in_debug(self):
         if (
