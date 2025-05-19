@@ -6,11 +6,10 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h,
                                             size_t w, size_t start_offset, size_t block_len) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   TORCH_CHECK(block_len == 128, "Currently only block_len = 128 is supported");
   TORCH_CHECK(amax.dim() == 2, "amax must be a 2D tensor");
   TORCH_CHECK(amax.scalar_type() == at::ScalarType::Float, "amax must be a float tensor");
@@ -29,9 +28,6 @@ void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor
 void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
                                     const transformer_engine::DType out_dtype) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   TORCH_CHECK(block_len == 128, "Currently only block_len = 128 is supported");
   TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
   TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
@@ -51,3 +47,5 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
       inp_cu.data(), out_cu.data(), scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
       start_offset, block_len, static_cast<NVTEDType>(out_dtype), at::cuda::getCurrentCUDAStream());
 }
+
+}  // namespace transformer_engine::pytorch
