@@ -164,7 +164,7 @@ System Requirements
 * **Notes:** FP8 features require Compute Capability 8.9+ (Ada/Hopper/Blackwell)
 
 Installation Methods
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 Docker (Recommended)
 ^^^^^^^^^^^^^^^^^^^
