@@ -275,11 +275,12 @@ def _layernorm_mlp_fwd_rule(
         (x_contracting_dims, k_contracting_dims),
     )
 
-    dot_1_output_axes = (
-        *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
-        *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
-    )
-    dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
+    if dot_1_input_axes is not None and kernel_1_axes is not None:
+        dot_1_output_axes = (
+            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
+            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
+        )
+        dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
 
     if use_bias_1:
         bias_1_shape = bias_1.shape
@@ -302,12 +303,6 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_2.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
-
-    dot_2_output_axes = (
-        *get_non_contracting_logical_axes(x.ndim, dot_2_input_axes, x_contracting_dims),
-        *get_non_contracting_logical_axes(kernel_2.ndim, None, k_contracting_dims),
-    )
-    dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_2_output_axes)
 
     if use_bias_2:
         bias_2_shape = bias_2.shape

@@ -19,11 +19,7 @@ def setup_pytorch_extension(
     """Setup CUDA extension for PyTorch support"""
 
     # Source files
-    csrc_source_files = Path(csrc_source_files)
-    extensions_dir = csrc_source_files / "extensions"
-    sources = [
-        csrc_source_files / "common.cpp",
-    ] + all_files_in_dir(extensions_dir)
+    sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
 
     # Header files
     include_dirs = get_cuda_include_dirs()
