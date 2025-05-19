@@ -731,7 +731,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             reset("scaling_fwd")
             reset("scaling_bwd")
 
-    def get_extra_state(self) -> Optional[torch.Tensor]:
+    def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
 
         # This implementation is working around a few issues:
@@ -766,7 +766,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state = None
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
         if not fp8_checkpoint:
-            return None
+            return torch.empty(0, dtype=torch.uint8)
 
         # Copy tensors to CPU and store
         state = {}
@@ -792,13 +792,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
 
-    def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
+    def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
-        if state is None:
-            return
-
         # Load state
         if isinstance(state, torch.Tensor):
+            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            if state.numel() == 0:
+                return
             # Default format: byte tensor with pickled data
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):
