@@ -22,7 +22,7 @@ There are 4 things one needs to do to use Transformer Engine debug features:
 
 1. Create a **config.yaml** file to configure the desired features.
 2. Import, and initialize the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool, which is installed as the dependency of the Transformer Engine.
-3. One can pass ``name="..."`` to the init of every TE layer to easier identify layer names. If this is not provided, names will be inferred automatically.
+3. One can pass ``name="..."`` when creating TE layers to easier identify layer names. If this is not provided, names will be inferred automatically.
 4. Invoke ``debug_api.step()`` at the end of one forward-backward pass.
 
 To start debugging, one needs to create a ``config.yaml`` file. This file lists the features to be used in particular layers. There are 2 kinds of features:
