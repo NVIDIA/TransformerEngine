@@ -18,6 +18,7 @@ from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
+import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
@@ -199,6 +200,27 @@ def get_mesh_axis_rank(axis: str, mesh=None):
         return 0
     _, axis_name = _get_mesh_info(axis, mesh)
     return jax.lax.axis_index(axis_name)
+
+
+def get_mesh_axis_rank_host(axis, mesh) -> int:
+    if axis not in mesh.axis_names:
+        raise ValueError(f"Axis {axis} not found in mesh axis names: {mesh.axis_names}")
+
+    axis_index = mesh.axis_names.index(axis)
+
+    # Convert mesh.devices (ndarray of Device objects) to flat list
+    devices = mesh.devices
+    local_device = jax.devices()[jax.process_index()]  # Pick one device on this host
+
+    # Find index of local_device in mesh.devices
+    coords = np.argwhere(devices == local_device)
+    if coords.size == 0:
+        raise ValueError(f"Local device {local_device} not found in mesh.devices.")
+    coords = tuple(coords[0])  # Coordinates in the mesh array
+
+    # Get the mesh rank along the specified axis
+    rank = coords[axis_index]
+    return int(rank)
 
 
 @dataclass
