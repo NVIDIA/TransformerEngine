@@ -3484,60 +3484,60 @@ def attn_forward_func_with_cp(
     use_flash_attn_3=False,
 ) -> torch.Tensor:
     """
-    Attention implementation with context parallelism.
+    Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
+    dimension, and by reducing the memory and computational pressure on each GPU, it enables long-context
+    LLMs in a distributed fashion. Transformer Engine's PyTorch CP implementation currently utilizes
+    the DualChunkSwap strategy to ensure load balancing across CP ranks. It is applied to all `attn_mask_type`s
+    and all `qkv_format`s, and it requires sequence lengths to be, or are padded to be, divisible by
+    (cp_size * 2). It also requires tokens to be re-ordered before entering this function.
 
-    .. note::
+    For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is demonstrated as follows for an example
+    of s = 12 and cp_size = 2. seq_pos is the position of each token in their corresponding sequence.
 
-        Context parallelism distributes chunks of the sequence onto different GPUs. To help with
-        load balancing, users are expected to reorder their tokens before entering this function.
-        This is required for all `attn_mask_type`s and all `qkv_format`s as of the current implementation.
-        Also, each sequence is required to have seq_len % (cp_size * 2) == 0, and if not so, be padded so.
-        When all transformer layers use the same context parallelism configuration, the reordering
-        can take place in the dataloader, i.e. only once for all layers. An example code of the reordering is
-        `get_batch_on_this_cp_rank
-        <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_
-        in Megatron-LM.
+                   GPU0        |      GPU1                            GPU0        |      GPU1
+    seq_pos | 0  1  2  3  4  5 | 6  7  8  9 10 11      seq_pos | 0  1  2  9 10 11 | 3  4  5  6  7  8
+    ---------------------------|-----------------      ---------------------------|------------------
+          0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0            0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
+    G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0      G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
+    P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0      P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
+    U     3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0      U     9 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 1, 1,
+    0     4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0  ->  0    10 | 1, 1, 1, 1, 1, 0,| 1, 1, 1, 1, 1, 1,
+          5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0           11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,
+    ---------------------------|-----------------      ---------------------------|------------------
+          6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0            3 | 1, 1, 1, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
+    G     7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0      G     4 | 1, 1, 1, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
+    P     8 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 0, 0, 0,     P     5 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
+    U     9 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 0, 0,     U     6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
+    1    10 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 0,     1     7 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 0,
+         11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,           8 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 1,
 
-        For qkv_format = {'bshd', 'sbhd'}, sequences are of equal length in the batch, and for an example of
-        s = 12 and cp_size = 2, the reordering transforms the token matrix as follows.
+    For qkv_format = 'thd', there may be multiple sequences in the batch and of different lengths.
+    For an example of batch_size = 2, seq_ids = [0, 1], seq_lens = [8, 4], t = 12, and cp_size = 2, the
+    transformation of the token matrix is expected as follows.
 
-                       GPU0        |      GPU1                           GPU0        |      GPU1
-        seq_pos | 0  1  2  3  4  5 | 6  7  8  9 10 11     seq_pos | 0  1  2  9 10 11 | 3  4  5  6  7  8
-        ---------------------------|-----------------     ---------------------------|------------------
-              0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0           0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-        G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0     G     1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-        P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0     P     2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-        U     3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0     U     9 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 1, 1,
-        0     4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0 --> 0    10 | 1, 1, 1, 1, 1, 0,| 1, 1, 1, 1, 1, 1,
-              5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0          11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,
-        ---------------------------|-----------------     ---------------------------|------------------
-              6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0           3 | 1, 1, 1, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
-        G     7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0     G     4 | 1, 1, 1, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
-        P     8 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 0, 0, 0,    P     5 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
-        U     9 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 0, 0,    U     6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-        1    10 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 0,    1     7 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 0,
-             11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,          8 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 1,
+                   GPU0        |      GPU1                            GPU0        |      GPU1
+    seq_id  | 0  0  0  0  0  0 | 0  0  1  1  1  1      seq_id  | 0  0  0  0  1  1 | 0  0  0  0  1  1
+    seq_pos | 0  1  2  3  4  5 | 6  7  0  1  2  3      seq_pos | 0  1  6  7  0  3 | 2  3  4  5  1  2
+    ---------------------------|-----------------      ---------------------------|------------------
+        0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0          0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
+    G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0      G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
+    P   0 2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0      P   0 6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
+    U   0 3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0      U   0 7 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 0, 0,
+    0   0 4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0  ->  0   1 0 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 0, 0,
+        0 5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0          1 3 | 0, 0, 0, 0, 2, 2,| 0, 0, 0, 0, 2, 2,
+    ---------------------------|-----------------      ---------------------------|------------------
+        0 6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0          0 2 | 1, 1, 0, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
+    G   0 7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0      G   0 3 | 1, 1, 0, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
+    P   1 0 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 0, 0, 0      P   0 4 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
+    U   1 1 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 0, 0      U   0 5 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
+    1   1 2 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 0      1   1 1 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 0,
+        1 3 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 2          1 2 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 2,
 
-        For qkv_format = 'thd', sequences may be of different lengths, and for a batch of 2, with seq_ids = [0, 1],
-        seq_lengths = [8, 4], cp_size = 2, the reordering looks like:
-
-                       GPU0        |      GPU1                           GPU0        |      GPU1
-        seq_id  | 0  0  0  0  0  0 | 0  0  1  1  1  1     seq_id  | 0  0  0  0  1  1 | 0  0  0  0  1  1
-        seq_pos | 0  1  2  3  4  5 | 6  7  0  1  2  3     seq_pos | 0  1  6  7  0  3 | 2  3  4  5  1  2
-        ---------------------------|-----------------     ---------------------------|------------------
-            0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0         0 0 | 1, 0, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-        G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0     G   0 1 | 1, 1, 0, 0, 0, 0,| 0, 0, 0, 0, 0, 0,
-        P   0 2 | 1, 1, 1, 0, 0, 0,| 0, 0, 0, 0, 0, 0     P   0 6 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-        U   0 3 | 1, 1, 1, 1, 0, 0,| 0, 0, 0, 0, 0, 0     U   0 7 | 1, 1, 1, 1, 0, 0,| 1, 1, 1, 1, 0, 0,
-        0   0 4 | 1, 1, 1, 1, 1, 0,| 0, 0, 0, 0, 0, 0 --> 0   1 0 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 0, 0,
-            0 5 | 1, 1, 1, 1, 1, 1,| 0, 0, 0, 0, 0, 0         1 3 | 0, 0, 0, 0, 2, 2,| 0, 0, 0, 0, 2, 2,
-        ---------------------------|-----------------     ---------------------------|------------------
-            0 6 | 1, 1, 1, 1, 1, 1,| 1, 0, 0, 0, 0, 0         0 2 | 1, 1, 0, 0, 0, 0,| 1, 0, 0, 0, 0, 0,
-        G   0 7 | 1, 1, 1, 1, 1, 1,| 1, 1, 0, 0, 0, 0     G   0 3 | 1, 1, 0, 0, 0, 0,| 1, 1, 0, 0, 0, 0,
-        P   1 0 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 0, 0, 0     P   0 4 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 0, 0, 0,
-        U   1 1 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 0, 0     U   0 5 | 1, 1, 0, 0, 0, 0,| 1, 1, 1, 1, 0, 0,
-        1   1 2 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 0     1   1 1 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 0,
-            1 3 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 2         1 2 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 2,
+    When all layers in a model use the same CP configuration, e.g. cp_group, cp_global_ranks,
+    cp_comm_type, and cp_stream, token re-ordering can happen in the dataloader, and only once, for
+    all the layers. An example code of the re-ordering is `get_batch_on_this_cp_rank
+    <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_
+    in Megatron-LM. 
 
     """
 
