@@ -6,12 +6,13 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -134,6 +135,9 @@ class MXFP8Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return MXFP8BlockScaling
 
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
