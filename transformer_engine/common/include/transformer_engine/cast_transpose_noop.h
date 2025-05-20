@@ -20,9 +20,9 @@ extern "C" {
 /*! \brief Transposes the input, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *
- *  \param[in]     input     Input tensor.
+ *  \param[in]     input     Input tensor to be cast.
  *  \param[in]     noop      Noop tensor.
- *  \param[in,out] output    Output tensor.
+ *  \param[in,out] output    Output FP8/MXFP8/BlockwiseFP8 tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVTETensor output,
@@ -31,9 +31,9 @@ void nvte_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVT
 /*! \brief Casts and transposes the input, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *
- *  \param[in]     input     Input tensor.
+ *  \param[in]     input     Input tensor to be cast.
  *  \param[in]     noop      Noop tensor.
- *  \param[in,out] output    Output tensor.
+ *  \param[in,out] output    Output FP8/MXFP8/BlockwiseFP8 tensor.
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_cast_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVTETensor output,
