@@ -1223,7 +1223,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
   if constexpr (IS_DBIAS || IS_DACT) {
     // backward - input is incoming gradient
     input_tensor = convertNVTETensorCheck(grad);
-    activation_input_tensor = convertNVTETensorCheck(input);
+    activation_input_tensor = convertNVTETensor(input);
   } else {
     // forward = input is activation input
     input_tensor = convertNVTETensorCheck(input);
