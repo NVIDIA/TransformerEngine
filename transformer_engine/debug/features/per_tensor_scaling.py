@@ -82,7 +82,6 @@ class PerTensorScaling(TEConfigAPIMapper):
             transformer_engine:
                 PerTensorScaling:
                     enabled: True
-                    margin: 1
                     gemms: [dgrad]
                     tensors: [weight, activation]
     """
