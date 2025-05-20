@@ -288,7 +288,6 @@ void TensorAllocator::setDebug(bool debug) {
 }  // namespace transformer_engine
 
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
-  transformer_engine::tensor_allocator.setDebug(true);
   NVTETensor ret = transformer_engine::tensor_allocator.Allocate(scaling_mode);
   return ret;
 }
