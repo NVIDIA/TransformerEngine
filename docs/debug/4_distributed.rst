@@ -10,7 +10,7 @@ Nvidia-Pytorch-Inspect with Transformer Engine supports multi-GPU training. This
 
 To use precision debug tools in multi-GPU training, one needs to:
 
-1. Run ``debug_api.initialize(...)`` and provide the same ``config.yaml`` on every node.
+1. Run ``debug_api.initialize(...)`` and provide the same configuration YAML file on every node.
 2. If one wants to log stats, one may want to invoke ``debug_api.set_tensor_reduction_group`` with a proper reduction group.
 
 Behavior of the features
@@ -18,12 +18,12 @@ Behavior of the features
 
 In a distributed setting, **DisableFP8GEMM** and **DisableFP8Layer** function similarly to the single-GPU case, with no notable differences. 
 
-**PerTensorScaling** and **FakeQuant** calculate FP8 scaling factors independently on each node, meaning the number of GPUs may affect results. This differs from the standard FP8 recipe behavior, in which scaling factors are synchronized.
+**PerTensorScaling** and **FakeQuant** calculate FP8 scaling factors independently on each node, meaning the number of GPUs may affect results. This differs from the delayed scaling FP8 recipe behavior, in which scaling factors are synchronized.
 
 .. figure:: ./img/scaling_factors.svg
    :align: center
 
-   Fig 1:  For **PerTensorScaling** and **FakeQuant** tensor scaling factors are computed separately for each of the tensor shards. This is not the case for standard FP8 scaling factors, which are synchronized.
+   Fig 1:  For **PerTensorScaling** and **FakeQuant** tensor scaling factors are computed separately for each of the tensor shards. This is not the case for delayed scaling FP8 scaling factors, which are synchronized.
 
 Logging-related features are more complex and will be discussed further in the next sections.
 

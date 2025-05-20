@@ -6,7 +6,7 @@
 Getting started
 ==============
 
-.. warning::
+.. note::
 
    Precision debug tools with `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ for Transformer Engine are currently supported only for PyTorch.
 
@@ -20,12 +20,12 @@ Transformer Engine provides a set of precision debug tools which allow you to ea
 
 There are 4 things one needs to do to use Transformer Engine debug features:
 
-1. Create a **config.yaml** file to configure the desired features.
+1. Create a configuration YAML file to configure the desired features.
 2. Import, and initialize the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool, which is installed as the dependency of the Transformer Engine.
 3. One can pass ``name="..."`` when creating TE layers to easier identify layer names. If this is not provided, names will be inferred automatically.
 4. Invoke ``debug_api.step()`` at the end of one forward-backward pass.
 
-To start debugging, one needs to create a ``config.yaml`` file. This file lists the features to be used in particular layers. There are 2 kinds of features:
+To start debugging, one needs to create a configuration YAML file. This file lists the features to be used in particular layers. There are 2 kinds of features:
 
 - provided by the Transformer Engine - for example, DisableFP8GEMM or LogTensorStats - they are listed in the :doc:`debug features API <3_api_features>` section
 - defined by the user. For details on how to create a custom feature - please read the :doc:`calls to Nvidia-DL-Framework-Inspect <3_api_te_calls>` section.
@@ -83,7 +83,7 @@ We will demonstrate two debug features on the code above:
 Config file
 ----------
 
-We need to prepare the **config.yaml** file, as below
+We need to prepare the configuration YAML file, as below
 
 .. code-block:: yaml
 

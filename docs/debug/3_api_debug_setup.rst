@@ -6,7 +6,9 @@
 Setup
 =====
 
-Precision debug tools for the Transformer Engine use `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ package from NVIDIA. Here, we provide brief information on how to use it with TE.
+Precision debug tools for the Transformer Engine use `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ package from NVIDIA. 
+Please refer to the Nvidia-DL-Framework-Inspect `documentation <https://github.com/NVIDIA/nvidia-dlfw-inspect/tree/main/docs>`_ for more details.
+Below, we outline the steps for debug initialization.
 
 initialize()
 -----------
@@ -15,7 +17,7 @@ Must be called once on every rank in the global context to initialize Nvidia-DL-
 
 **Parameters**
 
-- **config_file** (*str*, default=""): Path to the ``config.yaml`` file containing features to enable and layer names. If one wants to run without the config file, pass ``""``.
+- **config_file** (*str*, default=""): Path to the configuration YAML file containing features to enable and layer names. If one wants to run without the configuration file, pass ``""``.
 - **feature_dirs** (*List[str] | str*): List of directories containing features to load and register. One needs to pass ``[/path/to/transformerengine/transformer_engine/debug/features]`` to use TE features.
 - **logger** (*Union[BaseLogger, None]*, default=None): Logger for logging tensor statistics. Should adhere to ``BaseLogger`` from the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ package.
 - **log_dir** (*str*, default= "."): Directory path to hold ``debug_logs`` and ``debug_statistics_logs``.

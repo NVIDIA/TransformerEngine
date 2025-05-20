@@ -6,7 +6,8 @@
 Config File Structure
 ====================
 
-To enable debug features, create a ``config.yaml`` file to specify the desired behavior, such as determining which GEMMs (General Matrix Multiply operations) should run in higher precision rather than FP8 and defining which statistics to log. Below, we outline how to structure the ``config.yaml`` file.
+To enable debug features, create a configuration YAML file to specify the desired behavior, such as determining which GEMMs (General Matrix Multiply operations) should run in higher precision rather than FP8 and defining which statistics to log. 
+Below, we outline how to structure the configuration YAML file.
 
 General Format
 -------------
