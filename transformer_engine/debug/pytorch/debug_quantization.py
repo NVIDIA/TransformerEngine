@@ -14,7 +14,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-
+from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -458,6 +458,10 @@ class DebugQuantizer(Quantizer):
             if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
                 return True
         return False
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Probably not needed for debug quantizer"""
+        return None
 
 
 class DebugQuantizedTensor(QuantizedTensorBase):
