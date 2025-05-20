@@ -3513,7 +3513,7 @@ def attn_forward_func_with_cp(
          11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,           8 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 1,
 
     For qkv_format = 'thd', multiple sequences may be packed into the batch, and they may be of different
-    lengths. DualChunkSwap divides each sequence into (cp_size * 2) chunks and distributes 2 chunks of 
+    lengths. DualChunkSwap divides each sequence into (cp_size * 2) chunks and distributes 2 chunks of
     every sequence onto a CP rank. The token matrix transformation is shown as follows, for an example of
     batch_size = 2, seq_ids = [0, 1], seq_lens = [8, 4], t = 12, attn_mask_type = 'padding_causal', and
     cp_size = 2.
