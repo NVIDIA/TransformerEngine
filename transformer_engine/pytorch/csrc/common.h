@@ -30,6 +30,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
 #include <transformer_engine/permutation.h>
@@ -217,8 +218,30 @@ std::vector<size_t> getTensorShape(at::Tensor t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
+inline size_t typeToSize(transformer_engine::DType t) {
+  switch (t) {
+    case transformer_engine::DType::kInt64:
+      return 8;
+    case transformer_engine::DType::kInt32:
+    case transformer_engine::DType::kFloat32:
+      return 4;
+    case transformer_engine::DType::kInt16:
+    case transformer_engine::DType::kFloat16:
+    case transformer_engine::DType::kBFloat16:
+      return 2;
+    case transformer_engine::DType::kByte:
+    case transformer_engine::DType::kFloat8E4M3:
+    case transformer_engine::DType::kFloat8E5M2:
+      return 1;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   switch (t) {
+    case transformer_engine::DType::kInt16:
+      return torch::kInt16;
     case transformer_engine::DType::kInt32:
       return torch::kInt32;
     case transformer_engine::DType::kInt64:
@@ -256,6 +279,8 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
       return transformer_engine::DType::kByte;
     case torch::kByte:
       return transformer_engine::DType::kByte;
+    case torch::kInt16:
+      return transformer_engine::DType::kInt16;
     case torch::kInt32:
       return transformer_engine::DType::kInt32;
     case torch::kInt64:
@@ -292,6 +317,10 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const transformer_engine::DType type);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
+
+std::tuple<std::vector<transformer_engine::TensorWrapper>, std::vector<std::vector<NVTETensor>>,
+           std::vector<NVTETensor*>, size_t, size_t>
+makeTransformerEngineTensorList(std::vector<std::vector<at::Tensor>> at_tensor_lists);
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer);
 

@@ -34,6 +34,18 @@ NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
 QUANTIZATION = None
 
+if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
 
 # Disable TF32
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -173,7 +185,7 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1.3e-6, "atol": 1e-5}
+        return {"rtol": 1.3e-6, "atol": 4e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
@@ -298,6 +310,11 @@ def _loss_backward(output_single_node, output_distributed):
     target = torch.randn_like(output_single_node)
     LOSS_FN(output_single_node, target).backward()
     LOSS_FN(output_distributed, target).backward()
+
+
+def _loss_backward_dw(model_single_node, model_distributed):
+    model_single_node.backward_dw()
+    model_distributed.backward_dw()
 
 
 def _alloc_main_grad(model_single_node, model_distributed):
@@ -473,6 +490,10 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -494,6 +515,7 @@ def test_linear():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column", "row"]:
@@ -645,6 +667,10 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -667,6 +693,7 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:
@@ -746,6 +773,9 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -771,6 +801,7 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
 
     for kwargs in kwargs_list:

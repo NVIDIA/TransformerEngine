@@ -6,6 +6,8 @@
 
 #include <transformer_engine/permutation.h>
 
+#include <cub/cub.cuh>
+
 #include "../common.h"
 
 static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id_map,
@@ -366,4 +368,12 @@ void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id
                               reinterpret_cast<int *>(row_id_map_cu->data.dptr),
                               reinterpret_cast<const float *>(prob_cu->data.dptr), num_rows, topK,
                               num_cols, stream););
+}
+
+void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes, int *keys_in,
+                                  int *keys_out, int *values_in, int *values_out,
+                                  size_t num_items) {
+  NVTE_API_CALL(nvte_device_radix_sort_pairs);
+  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, keys_in, keys_out, values_in,
+                                  values_out, num_items);
 }

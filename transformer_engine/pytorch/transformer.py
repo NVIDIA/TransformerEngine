@@ -10,13 +10,11 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.pytorch.attention import (
-    MultiheadAttention,
-)
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import check_set_window_size
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
+from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
@@ -27,6 +25,7 @@ from transformer_engine.pytorch.jit import (
 from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
+    torch_get_autocast_gpu_dtype,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -169,6 +168,8 @@ class TransformerLayer(torch.nn.Module):
                             interpretation is that the individual `q`, `k`, and `v` weights for each
                             attention head are interleaved. This parameter is set to `False` when
                             using :attr:`fuse_qkv_params=False`.
+    rotary_pos_interleaved : bool, default = `False`
+                            whether to use interleaved rotary position embeddings.
     bias : bool, default = `True`
           if set to `False`, the transformer layer will not learn any additive biases.
     activation : str, default = 'gelu'
@@ -268,6 +269,7 @@ class TransformerLayer(torch.nn.Module):
         drop_path_rate: float = 0.0,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        rotary_pos_interleaved: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
@@ -286,11 +288,9 @@ class TransformerLayer(torch.nn.Module):
         super().__init__()
 
         self.self_attn_mask_type = self_attn_mask_type
-        self.window_size = check_set_window_size(self_attn_mask_type, window_size)
+        self.window_size = window_size
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
-        self.enc_dec_window_size = check_set_window_size(
-            enc_dec_attn_mask_type, enc_dec_window_size
-        )
+        self.enc_dec_window_size = enc_dec_window_size
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -366,6 +366,7 @@ class TransformerLayer(torch.nn.Module):
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
             "qkv_weight_interleaved": qkv_weight_interleaved,
+            "rotary_pos_interleaved": rotary_pos_interleaved,
             "ub_bulk_wgrad": ub_bulk_wgrad,
             "ub_bulk_dgrad": ub_bulk_dgrad,
             "ub_overlap_ag": ub_overlap_ag,
@@ -440,9 +441,7 @@ class TransformerLayer(torch.nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        TORCH_MINOR = int(torch.__version__.split(".")[1])
-        use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
+        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
         self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
 
         if self.bias_dropout_fusion:
@@ -657,12 +656,10 @@ class TransformerLayer(torch.nn.Module):
             self_attn_mask_type = self.self_attn_mask_type
         if window_size is None:
             window_size = self.window_size
-        window_size = check_set_window_size(self_attn_mask_type, window_size)
         if enc_dec_attn_mask_type is None:
             enc_dec_attn_mask_type = self.enc_dec_attn_mask_type
         if enc_dec_window_size is None:
             enc_dec_window_size = self.enc_dec_window_size
-        enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -694,7 +691,7 @@ class TransformerLayer(torch.nn.Module):
 
         # For AMP
         if torch.is_autocast_enabled():
-            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_gpu_dtype())
+            hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.
         self_attention_outputs = self.self_attention(

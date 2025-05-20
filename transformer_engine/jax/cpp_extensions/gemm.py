@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence, Union, Dict, List
+from typing import Tuple, Sequence, Union, Dict
 from functools import partial, reduce
 import operator
 import jax
@@ -21,7 +21,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm"]
+__all__ = ["gemm"]
 
 
 num_cublas_streams = 4
@@ -155,7 +155,7 @@ def _dequantize(x, scale_inv, dq_dtype):
         4,
     ),
 )
-def __jitted_jax_gemm_delayed_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
+def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     # Need to hard-code the dequantize here instead of calling lhs.dequantize() for pattern matching
     lhs_dq = _dequantize(lhs.data, lhs.scale_inv, lhs.dq_dtype)
     rhs_dq = _dequantize(rhs.data, rhs.scale_inv, rhs.dq_dtype)
@@ -173,13 +173,11 @@ def __jitted_jax_gemm_delayed_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     return out_3d
 
 
-def _jax_gemm_delayed_scaling_fp8(
+def _jax_gemm_tensor_scaling_fp8(
     lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
 ):
     """FP8 GEMM for XLA pattern match"""
-    assert (
-        rhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-    ), "rhs does not have delayed tensor scaling mode"
+    assert rhs.scaling_mode.is_tensor_scaling(), "rhs does not have tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
@@ -196,7 +194,7 @@ def _jax_gemm_delayed_scaling_fp8(
     precision = (
         jax.lax.Precision.HIGHEST if QuantizeConfig.FP8_2X_ACC_FPROP else jax.lax.Precision.DEFAULT
     )
-    out_3d = __jitted_jax_gemm_delayed_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision)
+    out_3d = __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision)
 
     # Reshape [B, M, N] -> [..., M, N]
     out = out_3d.reshape(*lhs_remain_shape, *rhs_remain_shape)
@@ -271,8 +269,8 @@ def _jax_gemm(
 
     def _jax_gemm_fp8_impl(lhs, rhs):
 
-        if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
-            return _jax_gemm_delayed_scaling_fp8(lhs, rhs, dim_nums)
+        if lhs.scaling_mode.is_tensor_scaling():
+            return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums)
 
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             return _jax_gemm_mxfp8_1d(lhs, rhs, dim_nums)
@@ -340,8 +338,9 @@ def gemm(
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
 
+"""
 def swizzled_scale(scales):
-    """Swizzle the scale tensor for FP8 GEMM"""
+    # Swizzle the scale tensor for FP8 GEMM
     assert scales.ndim == 2
     rows, cols = scales.shape
     scales = scales.reshape(rows // 128, 4, 32, cols // 4, 4)
@@ -356,7 +355,7 @@ def grouped_gemm(
     contracting_dims_list: List[Tuple[Sequence[int], Sequence[int]]],
     bias_list: List[jnp.ndarray] = None,
 ) -> List[jnp.ndarray]:
-    """Grouped GEMM for multiple pairs of tensors."""
+    # Grouped GEMM for multiple pairs of tensors.
     assert (
         len(lhs_list) == len(rhs_list) == len(contracting_dims_list)
     ), "lhs_list, rhs_list, contracting_dims_list must have the same length"
@@ -378,7 +377,7 @@ def grouped_gemm(
             rhs_shape = rhs.data.shape
             out_dtype = lhs.dq_dtype
             # For ScaledTensors and DELAYED_TENSOR_SCALING, need to handle internal data_layout
-            if lhs.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+            if lhs.scaling_mode.is_tensor_scaling():
                 assert not (
                     lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2
                 ), "FP8 GEMM does not support E5M2 * E5M2"
@@ -406,7 +405,7 @@ def grouped_gemm(
         if scaling_mode == ScalingMode.NO_SCALING:
             lhs_3d = _shape_normalization(lhs, lhs_dn)
             rhs_3d = _shape_normalization(rhs, rhs_dn)
-        elif scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        elif scaling_mode.is_tensor_scaling():
             lhs_3d = _shape_normalization(lhs.data, lhs_dn, lhs.data_layout == "N")
             rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:
@@ -443,7 +442,7 @@ def grouped_gemm(
         if scaling_mode == ScalingMode.NO_SCALING:
             lhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
             rhs_sinv_list_.append(jnp.ones(1, dtype=jnp.float32))
-        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if scaling_mode.is_tensor_scaling():
             lhs_sinv_list_.append(lhs.scale_inv)
             rhs_sinv_list_.append(rhs.scale_inv)
         if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
@@ -465,3 +464,4 @@ def grouped_gemm(
     )
 
     return out_list
+"""

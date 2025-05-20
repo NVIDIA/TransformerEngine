@@ -17,7 +17,12 @@ import torch
 import torch.distributed as dist
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8CurrentScaling,
+    Format,
+    MXFP8BlockScaling,
+)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -163,7 +168,7 @@ def _parse_args(argv=None, namespace=None):
         "--quantization",
         type=str.lower,
         default="none",
-        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling"],
+        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"],
         help="Quantization recipe",
     )
     parser.add_argument(
@@ -414,6 +419,8 @@ def _train(opts):
         )
     elif opts.quantization == "fp8_current_scaling":
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
+    elif opts.quantization == "mxfp8":
+        fp8_recipe = MXFP8BlockScaling()
 
     # Prepare random input tensors
     test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)

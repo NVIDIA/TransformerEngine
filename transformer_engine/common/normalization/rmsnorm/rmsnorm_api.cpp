@@ -27,15 +27,16 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
   }
 
-  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");
 
-  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
-  NVTE_CHECK(epsilon >= 0.f);
+  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1], "Gamma must have the same hidden size.");
+  NVTE_CHECK(epsilon >= 0.f, "Epsilon must be non-negative.");
 
-  NVTE_CHECK(z->data.shape == x.data.shape);
+  NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
-  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
+  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+             "RSigma must be 1D tensor with shape (x.shape[0],).");
+  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
   if (!workspace->data.shape.empty()) {
     CheckInputTensor(x, "x");

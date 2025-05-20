@@ -4,13 +4,14 @@
 
 """Tensor class with FP8 data quantized with NxN tiles"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, Union
 
 import math
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
@@ -229,6 +230,9 @@ class Float8BlockQuantizer(Quantizer):
         # where state from an estimator influences distribution parameters.
         pass
 
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return Float8BlockScaling
+
 
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
     """Tensor class with FP8 data quantized via NxN blocks or 1xN blocks.
@@ -309,47 +313,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return Float8BlockwiseQTensor.make_like(self)
 
-    def update_usage(
-        self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
-    ):
-        """
-        update_usage can be used to clear out one of two possible copies of the data.
-        """
-
-        if rowwise_usage is None:
-            rowwise_usage = self._rowwise_data is not None
-        if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None
-        assert (
-            columnwise_usage or rowwise_usage
-        ), "Must retain some data either columnwise or rowwise"
-
-        if columnwise_usage and rowwise_usage:
-            assert (
-                self._rowwise_data is not None
-                and self._rowwise_scale_inv is not None
-                and self._columnwise_data is not None
-                and self._columnwise_scale_inv is not None
-            ), "Cannot update to rowwise and columnwise usage."
-            return
-
-        if rowwise_usage:
-            assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
-            ), "Cannot update to rowwise usage."
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
-            return
-        if columnwise_usage:
-            assert (
-                self._columnwise_data is not None and self._columnwise_scale_inv is not None
-            ), "Cannot update to columnwise usage."
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-            return
-
-        return
-
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         rowwise_data = None
@@ -420,11 +383,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         ):
             return self
         raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
-
-    def clear(self):
-        """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
-        self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
     def _make_in_reduce_ex(
@@ -544,14 +502,64 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        if ctx is not None:
-            ctx.shape = tensor.shape
+        ctx.shape = tensor.shape
         if shape is None:
             return tensor
 
-        if list(shape) != list(tensor.shape):
-            raise NotImplementedError("View not implemented.")
-        return tensor
+        # Canonicalize shape
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        if -1 in shape:
+            shape = list(shape)
+            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            for i, d in enumerate(shape):
+                if d == -1:
+                    shape[i] = d_inferred
+                    break
+
+        if tensor._is_2D_scaled:
+            # For the case of 2D scaled tensor, the last 2 dimensions should not change
+            if shape[-1] != ctx.shape[-1] or shape[-2] != ctx.shape[-2]:
+                raise RuntimeError(
+                    "2D scaled Float8BlockwiseQTensor does not support view "
+                    "the last 2 dimensions "
+                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)})"
+                )
+        else:
+            # For the case of 1D scaled tensor, the last dimension should not change
+            if shape[-1] != ctx.shape[-1]:
+                raise RuntimeError(
+                    "1D scaled Float8BlockwiseQTensor does not support view "
+                    "the last dimension "
+                    f"(attempted to view dims={tuple(tensor.shape)} to {tuple(shape)})"
+                )
+
+        if list(shape) == list(tensor.shape):
+            return tensor
+
+        # Construct new tensor if shape is provided
+        new_rowwise_data = None
+        new_columnwise_data = None
+        if tensor._rowwise_data is not None:
+            new_rowwise_data = tensor._rowwise_data.view(*shape)
+        if tensor._columnwise_data is not None:
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+
+        return Float8BlockwiseQTensor(
+            shape=shape,
+            dtype=tensor.dtype,
+            fp8_dtype=tensor._fp8_dtype,
+            rowwise_data=new_rowwise_data,
+            rowwise_scale_inv=tensor._rowwise_scale_inv,
+            columnwise_data=new_columnwise_data,
+            columnwise_scale_inv=tensor._columnwise_scale_inv,
+            quantizer=tensor._quantizer,
+            is_2D_scaled=tensor._is_2D_scaled,
+            requires_grad=tensor.requires_grad,
+        )
 
     @staticmethod
     def backward(
@@ -561,7 +569,27 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8BlockwiseQTensor):
-            raise NotImplementedError("View bwd not implemented")
+            new_data = (
+                grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
+            )
+            if grad._columnwise_data is not None:
+                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
+            else:
+                new_columnwise_data = None
+            dgrad = Float8BlockwiseQTensor(
+                shape=ctx.shape,
+                dtype=grad.dtype,
+                rowwise_data=new_data,
+                rowwise_scale_inv=grad._rowwise_scale_inv,
+                columnwise_data=new_columnwise_data,
+                columnwise_scale_inv=grad._columnwise_scale_inv,
+                fp8_dtype=grad._fp8_dtype,
+                quantizer=grad._quantizer,
+                is_2D_scaled=grad._is_2D_scaled,
+                requires_grad=grad.requires_grad,
+            )
+            return dgrad, None
         return grad.view(ctx.shape), None
 
 
@@ -581,8 +609,7 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        if ctx is not None:
-            ctx.shape = tensor.shape
+        ctx.shape = tensor.shape
         if shape is None:
             return tensor
 
@@ -598,9 +625,47 @@ class _ReshapeFunc(torch.autograd.Function):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        if list(shape) != list(tensor.shape):
-            raise NotImplementedError("Reshape not implemented yet.")
-        return tensor
+
+        if tensor._is_2D_scaled:
+            # For the case of 2D scaled tensor, the last 2 dimensions should not change
+            if shape[-1] != ctx.shape[-1] or shape[-2] != ctx.shape[-2]:
+                raise RuntimeError(
+                    "2D scaled Float8BlockwiseQTensor does not support reshaping "
+                    "the last 2 dimensions "
+                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                )
+        else:
+            # For the case of 1D scaled tensor, the last dimension should not change
+            if shape[-1] != ctx.shape[-1]:
+                raise RuntimeError(
+                    "1D scaled Float8BlockwiseQTensor does not support reshaping "
+                    "the last dimension "
+                    f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                )
+        if list(shape) == list(tensor.shape):
+            return tensor
+
+        # Construct new tensor if shape is provided
+        new_rowwise_data = None
+        new_columnwise_data = None
+        if tensor._rowwise_data is not None:
+            new_rowwise_data = tensor._rowwise_data.reshape(*shape)
+        if tensor._columnwise_data is not None:
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+
+        return Float8BlockwiseQTensor(
+            shape=shape,
+            dtype=tensor.dtype,
+            fp8_dtype=tensor._fp8_dtype,
+            rowwise_data=new_rowwise_data,
+            rowwise_scale_inv=tensor._rowwise_scale_inv,
+            columnwise_data=new_columnwise_data,
+            columnwise_scale_inv=tensor._columnwise_scale_inv,
+            quantizer=tensor._quantizer,
+            is_2D_scaled=tensor._is_2D_scaled,
+            requires_grad=tensor.requires_grad,
+        )
 
     @staticmethod
     def backward(
@@ -610,5 +675,24 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8BlockwiseQTensor):
-            raise NotImplementedError("Reshape bwd not implemented yet.")
+            new_rowwise_data = None
+            new_columnwise_data = None
+            if grad._rowwise_data is not None:
+                new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
+            if grad._columnwise_data is not None:
+                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
+            dgrad = Float8BlockwiseQTensor(
+                shape=ctx.shape,
+                dtype=grad.dtype,
+                rowwise_data=new_rowwise_data,
+                rowwise_scale_inv=grad._rowwise_scale_inv,
+                columnwise_data=new_columnwise_data,
+                columnwise_scale_inv=grad._columnwise_scale_inv,
+                fp8_dtype=grad._fp8_dtype,
+                quantizer=grad._quantizer,
+                is_2D_scaled=grad._is_2D_scaled,
+                requires_grad=grad.requires_grad,
+            )
+            return dgrad, None
         return grad.view(ctx.shape), None
