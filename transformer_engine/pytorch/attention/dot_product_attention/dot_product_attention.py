@@ -675,6 +675,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             ), "Keys and values must have the same batch size, sequence length and number of heads!"
             num_attention_heads = query_layer.shape[-2]
             num_gqa_groups = key_layer.shape[-2]
+            print('xxxxxxxxxx',[x.shape for x in [query_layer, key_layer, value_layer]])
             assert (
                 query_layer.shape[-1] == key_layer.shape[-1]
             ), "Queries and keys must have the same head dimension!"

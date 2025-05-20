@@ -1107,9 +1107,11 @@ model_configs_te_layer = {
     "te_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
     "te_1_1": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
     "te_1_2": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),
+    "te_1_3": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
     "te_2_0": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
     "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
     "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
 }
@@ -1120,7 +1122,7 @@ model_configs_te_layer = {
 @pytest.mark.parametrize("model_configs", [model_configs_te_layer])
 @pytest.mark.parametrize("model", model_configs_te_layer.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("qkv_format", ["sbhd"])
+@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd", "thd"])
 @pytest.mark.parametrize("fused_qkv_params", [False])
 @pytest.mark.parametrize("RoPE", [False])
 def test_transformer_layer(
@@ -1137,13 +1139,16 @@ def test_transformer_layer(
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
-        qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
+        qkv_layout=qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
+    # Skip if qkv_format = thd and "padding" not in attn_mask_type
+    if qkv_format == "thd" and "padding" not in config.attn_mask_type:
+        pytest.skip("THD requires padding mask.")
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
@@ -1194,6 +1199,8 @@ def test_transformer_layer(
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_transformer_layer]: fused attn vs flash attn")
+        print('fused min/max',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print('flash min/max',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
@@ -1264,48 +1271,140 @@ def _run_transformer_layer(
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
-    inp = torch.randn(
-        config.max_seqlen_q,
-        config.batch_size,
-        config.hidden_size,
-        dtype=dtype,
-        device="cuda",
-        requires_grad=True,
-    )
-    # In case the format to be tested is batch-first, need to transpose the
-    # input tensor.
+    if qkv_format == "sbhd":
+        inp = torch.randn(
+            config.max_seqlen_q,
+            config.batch_size,
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
+        inp_enc = torch.randn(
+            config.max_seqlen_kv,
+            config.batch_size,
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
     if qkv_format == "bshd":
-        inp = inp.transpose(0, 1)
+        inp = torch.randn(
+            config.batch_size,
+            config.max_seqlen_q,
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
+        inp_enc = torch.randn(
+            config.batch_size,
+            config.max_seqlen_kv,
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
 
     # Create seqlens
-    if "padding" in config.attn_mask_type:
-        seqlens_q = torch.randint(
-            1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-        )
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+        if config.attn_type == "self":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            if config.max_seqlen_q > 1:
+                seqlens_q = torch.randint(
+                    1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+                )
+            else:
+                seqlens_q = torch.ones([config.batch_size], dtype=torch.int32, device="cuda")
+            seqlens_kv = torch.randint(
+                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
     else:
         seqlens_q = torch.full(
             [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
         )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
+    cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
+    cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+    if qkv_format == "thd":
+        inp = torch.randn(
+            cu_seqlens_q[-1],
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
+        inp_enc = torch.randn(
+            cu_seqlens_kv[-1],
+            config.hidden_size,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=True,
+        )
 
     # Create attention mask if padding
     attention_mask = None
-    if "padding" in config.attn_mask_type:
-        attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-        for i in range(config.batch_size):
-            attention_mask_q = torch.cat(
-                [
-                    attention_mask_q,
-                    torch.Tensor(
-                        [False] * seqlens_q[i] + [True] * (config.max_seqlen_q - seqlens_q[i])
-                    )
-                    .to(torch.bool)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(0),
-                ],
-                dim=0,
-            )
-        attention_mask = attention_mask_q.to(device="cuda")
+    #if "padding" in config.attn_mask_type:
+    #    if config.attn_type == "self":
+    #        attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+    #        for i in range(config.batch_size):
+    #            attention_mask_q = torch.cat(
+    #                [
+    #                    attention_mask_q,
+    #                    torch.Tensor(
+    #                        [False] * seqlens_q[i] + [True] * (config.max_seqlen_q - seqlens_q[i])
+    #                    )
+    #                    .to(dtype=torch.bool)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0),
+    #                ],
+    #                dim=0,
+    #            )
+    #        attention_mask = attention_mask_q.to(device="cuda")
+    #    if config.attn_type == "cross":
+    #        attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+    #        attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+    #        for i in range(config.batch_size):
+    #            attention_mask_q = torch.cat(
+    #                [
+    #                    attention_mask_q,
+    #                    torch.Tensor(
+    #                        [False] * seqlens_q[i] + [True] * (config.max_seqlen_q - seqlens_q[i])
+    #                    )
+    #                    .to(dtype=torch.bool)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0),
+    #                ],
+    #                dim=0,
+    #            )
+    #            attention_mask_kv = torch.cat(
+    #                [
+    #                    attention_mask_kv,
+    #                    torch.Tensor(
+    #                        [False] * seqlens_kv[i]
+    #                        + [True] * (config.max_seqlen_kv - seqlens_kv[i])
+    #                    )
+    #                    .to(dtype=torch.bool)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0)
+    #                    .unsqueeze(0),
+    #                ],
+    #                dim=0,
+    #            )
+    #        attention_mask = (
+    #            attention_mask_q.to(device="cuda"),
+    #            attention_mask_kv.to(device="cuda"),
+    #        )
 
     sigma = 0.02
     init_method = init_method_normal(sigma)
@@ -1357,7 +1456,7 @@ def _run_transformer_layer(
         sequence_parallel=False,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
-        layer_type="encoder",
+        layer_type="encoder" if config.attn_type == "self" else "decoder",
         drop_path_rate=drop_path_rates[layer_number - 1],
         set_parallel_mode=True,
         fuse_qkv_params=fused_qkv_params,
@@ -1376,13 +1475,20 @@ def _run_transformer_layer(
     # Run a forward and backward pass
     out = block(
         inp,
-        attention_mask=attention_mask,
+        attention_mask=None, #attention_mask_q,
         self_attn_mask_type=config.attn_mask_type,
+        encoder_output=inp_enc if config.attn_type == "cross" else None,
+        enc_dec_attn_mask=None, #attention_mask if config.attn_type == "cross" else None,
+        enc_dec_attn_mask_type=config.attn_mask_type if config.attn_type == "cross" else None,
         checkpoint_core_attention=False,
         rotary_pos_emb=rotary_pos_emb,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_kv=cu_seqlens_kv,
     )
     loss = out.sum()
     loss.backward()

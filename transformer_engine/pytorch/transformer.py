@@ -678,7 +678,9 @@ class TransformerLayer(torch.nn.Module):
         if (
             "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
         ) and attention_mask is not None:
-            assert attention_mask.dtype == torch.bool, "Attention mask must be a boolean tensor"
+            assert all(
+                attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))
+            ), "Attention mask must be a boolean tensor or a list/tuple of two boolean tensors"
         if (
             "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
         ) and enc_dec_attn_mask is not None:
@@ -707,9 +709,9 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
             cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_kv=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
+            max_seqlen_kv=max_seqlen_q,
             fast_zero_fill=fast_zero_fill,
             pad_between_seqs=pad_between_seqs,
         )

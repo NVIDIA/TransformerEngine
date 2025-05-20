@@ -713,6 +713,19 @@ class MultiheadAttention(torch.nn.Module):
                 )
                 for x in (key_layer, value_layer)
             )
+            print('-----------cros', [x.shape for x in [key_layer, value_layer ]])
+
+            if self.qkv_format == "thd":
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
+            else:
+                # key, value: -> [sq, b, ng, hn]
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
