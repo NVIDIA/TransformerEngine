@@ -1139,7 +1139,9 @@ def test_transformer_layer(
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
-        qkv_layout=qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
+        qkv_layout=(
+            qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
+        ),
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1199,8 +1201,8 @@ def test_transformer_layer(
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_transformer_layer]: fused attn vs flash attn")
-        print('fused min/max',fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
-        print('flash min/max',flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
+        print("fused min/max", fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print("flash min/max", flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
@@ -1352,7 +1354,7 @@ def _run_transformer_layer(
 
     # Create attention mask if padding
     attention_mask = None
-    #if "padding" in config.attn_mask_type:
+    # if "padding" in config.attn_mask_type:
     #    if config.attn_type == "self":
     #        attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
     #        for i in range(config.batch_size):
@@ -1475,10 +1477,10 @@ def _run_transformer_layer(
     # Run a forward and backward pass
     out = block(
         inp,
-        attention_mask=None, #attention_mask_q,
+        attention_mask=None,  # attention_mask_q,
         self_attn_mask_type=config.attn_mask_type,
         encoder_output=inp_enc if config.attn_type == "cross" else None,
-        enc_dec_attn_mask=None, #attention_mask if config.attn_type == "cross" else None,
+        enc_dec_attn_mask=None,  # attention_mask if config.attn_type == "cross" else None,
         enc_dec_attn_mask_type=config.attn_mask_type if config.attn_type == "cross" else None,
         checkpoint_core_attention=False,
         rotary_pos_emb=rotary_pos_emb,
