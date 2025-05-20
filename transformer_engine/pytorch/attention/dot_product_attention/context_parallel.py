@@ -3537,7 +3537,7 @@ def attn_forward_func_with_cp(
     cp_comm_type, and cp_stream, token re-ordering can happen in the dataloader, and only once, for
     all the layers. An example code of the re-ordering is `get_batch_on_this_cp_rank
     <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_
-    in Megatron-LM. 
+    in Megatron-LM.
 
     """
 
