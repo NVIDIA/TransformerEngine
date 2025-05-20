@@ -3491,8 +3491,9 @@ def attn_forward_func_with_cp(
     and all `qkv_format`s, and it requires sequence lengths to be, or are padded to be, divisible by
     (cp_size * 2). It also requires tokens to be re-ordered before entering this function.
 
-    For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is demonstrated as follows for an example
-    of s = 12 and cp_size = 2. seq_pos is the position of each token in their corresponding sequence.
+    For qkv_format = {'bshd', 'sbhd'}, the token re-ordering is illustrated as below, for an example
+    use case of s = 12, attn_mask_type = 'causal', and cp_size = 2. seq_pos indicates each token's position
+    in their corresponding sequence.
 
                    GPU0        |      GPU1                            GPU0        |      GPU1
     seq_pos | 0  1  2  3  4  5 | 6  7  8  9 10 11      seq_pos | 0  1  2  9 10 11 | 3  4  5  6  7  8
@@ -3511,9 +3512,11 @@ def attn_forward_func_with_cp(
     1    10 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 0,     1     7 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 0,
          11 | 1, 1, 1, 1, 1, 1,| 1, 1, 1, 1, 1, 1,           8 | 1, 1, 1, 0, 0, 0,| 1, 1, 1, 1, 1, 1,
 
-    For qkv_format = 'thd', there may be multiple sequences in the batch and of different lengths.
-    For an example of batch_size = 2, seq_ids = [0, 1], seq_lens = [8, 4], t = 12, and cp_size = 2, the
-    transformation of the token matrix is expected as follows.
+    For qkv_format = 'thd', multiple sequences may be packed into the batch, and they may be of different
+    lengths. DualChunkSwap divides each sequence into (cp_size * 2) chunks and distributes 2 chunks of 
+    every sequence onto a CP rank. The token matrix transformation is shown as follows, for an example of
+    batch_size = 2, seq_ids = [0, 1], seq_lens = [8, 4], t = 12, attn_mask_type = 'padding_causal', and
+    cp_size = 2.
 
                    GPU0        |      GPU1                            GPU0        |      GPU1
     seq_id  | 0  0  0  0  0  0 | 0  0  1  1  1  1      seq_id  | 0  0  0  0  1  1 | 0  0  0  0  1  1
@@ -3533,9 +3536,9 @@ def attn_forward_func_with_cp(
     1   1 2 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 0      1   1 1 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 0,
         1 3 | 0, 0, 0, 0, 0, 0,| 0, 0, 2, 2, 2, 2          1 2 | 0, 0, 0, 0, 2, 0,| 0, 0, 0, 0, 2, 2,
 
-    When all layers in a model use the same CP configuration, e.g. cp_group, cp_global_ranks,
-    cp_comm_type, and cp_stream, token re-ordering can happen in the dataloader, and only once, for
-    all the layers. An example code of the re-ordering is `get_batch_on_this_cp_rank
+    When all transformer layers in a model share the same CP configuration, i.e. cp_group, cp_global_ranks,
+    cp_comm_type and cp_stream, token re-ordering can take place in the dataloader, i.e. only once for
+    all the layers. An example of the re-ordering code is `get_batch_on_this_cp_rank
     <https://github.com/NVIDIA/Megatron-LM/blob/d6eb60b5ea1efca47401c0be97f456fbe3a55bcd/megatron/core/utils.py#L1725>`_
     in Megatron-LM.
 
