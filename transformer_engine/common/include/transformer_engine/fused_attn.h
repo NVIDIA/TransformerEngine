@@ -618,7 +618,7 @@ uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspac
  *  \param[in]     seed_val                 Seed value.
  *  \param[in]     offset_ptr               Offset pointer.
  *  \param[in]     offset_val               Offset value.
- *  \param[in]     offset_intragraph        Intragraph RNG offset for CUDA graph safe RNG states.
+ *  \param[in]     offset_intragraph        Intragraph offset in RNG states. For use with CUDA Graphs.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
 void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
@@ -629,13 +629,13 @@ void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t 
  *
  * \warning   This API is **experimental** and subject to change.
  *
- *  \param[out]    new_k               A size 2 array storing the RNG's seed and offset respectively.
- *  \param[in]     new_v               Whether or not CUDA graph has been captured.
- *  \param[in]     k_cache             Seed pointer.
- *  \param[in]     v_cache             Seed value.
+ *  \param[in]     new_k               Key tensor.
+ *  \param[in]     new_v               Value tensor.
+ *  \param[out]    k_cache             Key cache.
+ *  \param[out]    v_cache             Value cache.
  *  \param[in]     page_table          Page table for K cache, [batch_size, max_pages_per_seq].
  *  \param[in]     cu_new_lens         Cumulative sequence lengths.
- *  \param[in]     cu_cached_lens      Cached cumulative sequence lengths..
+ *  \param[in]     cu_cached_lens      Cached cumulative sequence lengths.
  *  \param[in]     qkv_format          QKV format, e.g. sbhd.
  *  \param[in]     b                   Batch size.
  *  \param[in]     max_ctx_len         Maximum context length.
@@ -683,7 +683,7 @@ void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &ls
  *
  *  \param[in]     lse                      Input tensor.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     half_lse                 Output tensor.
+ *  \param[out]    half_lse                 Output tensor.
  *  \param[in]     lse_packed               Whether or the softmax LSE is in packed format.
  *  \param[in]     second_half_lse_seqlen   Sequence length.
  *  \param[in]     stream                   CUDA stream used for this operation.

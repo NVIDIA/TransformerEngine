@@ -17,15 +17,13 @@
 extern "C" {
 #endif
 
-/*!  \brief Computes L2 norm for a list of contiguous tensors, providing the option to
- *          immediately exit the kernel based on the value of the 'noop' tensor.
+/*!  \brief Computes L2 norm for a list of contiguous tensors.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]     chunk_size              Number of tensors per kernel launch,
-                                           limited by total size of kernel args.
- *  \param[in]     noop_flag               Noop tensor.
+ *  \param[in]     chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]     noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in]     tensor_lists            2D array of contiguous input tensors.
  *  \param[in]     num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]     num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -46,16 +44,14 @@ void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETen
                                    cudaStream_t stream);
 
 /*!  \brief Computes L2 norm for a list of contiguous tensors after unscaling.
- *          Unscaling is only done for computing the L2 norm, tensors are not updated.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
+ *
+ * Unscaling is only done for computing the L2 norm. The tensors themselves are not updated.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]     chunk_size              Number of tensors per kernel launch,
-                                           limited by total size of kernel args.
- *  \param[in]     noop_flag               Noop tensor.
+ *  \param[in]     chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]     noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in]     tensor_lists            2D array of contiguous input tensors.
  *  \param[in]     num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]     num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -78,15 +74,12 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
                                            const int device_id, cudaStream_t stream);
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -110,15 +103,12 @@ void nvte_multi_tensor_adam_cuda(int chunk_size, NVTETensor noop_flag, NVTETenso
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          where the master parameters only store the remainder bits.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -141,15 +131,12 @@ void nvte_multi_tensor_adam_param_remainder_cuda(
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          when model parameters are in Float8 precision.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -175,15 +162,12 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          with CUDA graph support and LR scheduling.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -207,15 +191,12 @@ void nvte_multi_tensor_adam_capturable_cuda(
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          with CUDA graph support, LR scheduling, and FP32 master weights.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -238,15 +219,12 @@ void nvte_multi_tensor_adam_capturable_master_cuda(
     const float weight_decay, NVTETensor inv_scale, const int device_id, cudaStream_t stream);
 
 /*!  \brief Compute and apply gradient update to parameters for SGD optimizer.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -268,15 +246,12 @@ void nvte_multi_tensor_sgd_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor
                                 const int device_id, cudaStream_t stream);
 
 /*!  \brief Check overflow and scale a list of contiguous tensors.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
@@ -289,15 +264,12 @@ void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETens
                                   float scale, const int device_id, cudaStream_t stream);
 
 /*!  \brief Check overflow and scale a list of contiguous tensors.
- *          Providing the option to immediately exit the kernel based on the
- *          value of the 'noop' tensor.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
- *  \param[in]      chunk_size              Number of tensors per kernel launch,
-                                            limited by total size of kernel args.
- *  \param[in]      noop_flag               Noop tensor.
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
  *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
