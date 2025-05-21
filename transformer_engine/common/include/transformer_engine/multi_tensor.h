@@ -17,14 +17,14 @@
 extern "C" {
 #endif
 
-/*!  \brief Computes L2 norm for a list of contiguous tensors.
+/*!  \brief Computes L2 norm for a list of tensors.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
  *  \param[in]     chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]     noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in]     tensor_lists            2D array of contiguous input tensors.
+ *  \param[in]     tensor_lists            2D array of input tensors.
  *  \param[in]     num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]     num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]     output                  Scratch space. Required size grows with number of inputs.
@@ -43,7 +43,7 @@ void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETen
                                    int max_chunks_per_tensor, const int device_id,
                                    cudaStream_t stream);
 
-/*!  \brief Computes L2 norm for a list of contiguous tensors after unscaling.
+/*!  \brief Computes L2 norm for a list of tensors after unscaling.
  *
  * Unscaling is only done for computing the L2 norm. The tensors themselves are not updated.
  *
@@ -52,7 +52,7 @@ void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETen
  *
  *  \param[in]     chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]     noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in]     tensor_lists            2D array of contiguous input tensors.
+ *  \param[in]     tensor_lists            2D array of input tensors.
  *  \param[in]     num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]     num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]     output                  Scratch space. Required size grows with number of inputs.
@@ -80,7 +80,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      lr                      Learning rate.
@@ -109,7 +109,7 @@ void nvte_multi_tensor_adam_cuda(int chunk_size, NVTETensor noop_flag, NVTETenso
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      lr                      Learning rate.
@@ -137,7 +137,7 @@ void nvte_multi_tensor_adam_param_remainder_cuda(
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      lr                      Learning rate.
@@ -168,7 +168,7 @@ void nvte_multi_tensor_adam_fp8_cuda(int chunk_size, NVTETensor noop_flag,
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      lr                      Learning rate.
@@ -197,7 +197,7 @@ void nvte_multi_tensor_adam_capturable_cuda(
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      lr                      Learning rate.
@@ -225,7 +225,7 @@ void nvte_multi_tensor_adam_capturable_master_cuda(
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      wd                      Weight decay (L2 penalty).
@@ -245,14 +245,14 @@ void nvte_multi_tensor_sgd_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor
                                 int first_run, int wd_after_momentum, float scale,
                                 const int device_id, cudaStream_t stream);
 
-/*!  \brief Check overflow and scale a list of contiguous tensors.
+/*!  \brief Check overflow and scale a list of tensors.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      scale                   Scalar for the scaling operation.
@@ -263,14 +263,14 @@ void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETens
                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
                                   float scale, const int device_id, cudaStream_t stream);
 
-/*!  \brief Check overflow and scale a list of contiguous tensors.
+/*!  \brief Check overflow and scale a list of tensors.
  *
  * \warning   This API is **experimental** and subject to change.
  * \warning   Argument device_id is deprecated and will be removed in a future release.
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
  *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
- *  \param[in,out]  tensor_lists            2D array of contiguous input tensors.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      max_fp8                 Maximum representible value in underlying FP8 format.
