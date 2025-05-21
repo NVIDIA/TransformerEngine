@@ -249,7 +249,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
           reinterpret_cast<CUmemFabricHandle *>(malloc(sizeof(CUmemFabricHandle)));
       CUmemFabricHandle *exphndls;
       NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&exphndls),
-          (*comm)->nvsize * sizeof(CUmemFabricHandle)));
+                                     (*comm)->nvsize * sizeof(CUmemFabricHandle)));
       if ((*comm)->ar2_nvrank == 0)
         NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, static_cast<void *>(tmphndl),
                                     (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0);
@@ -346,10 +346,10 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true);
-  NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id),
-      (*comm)->nranks * sizeof(int)));
+  NVTE_CHECK_CUDA(
+      cudaMalloc(reinterpret_cast<void **>(&(*comm)->send_id), (*comm)->nranks * sizeof(int)));
   NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->recv_id),
-      NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
+                             NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
   NVTE_CHECK_CUDA(cudaMemset((*comm)->send_id, 0, (*comm)->nranks * sizeof(int)));
   NVTE_CHECK_CUDA(
       cudaMemset((*comm)->recv_id, 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
@@ -361,8 +361,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 #define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
 #define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
 
-  NVTE_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&(*comm)->flags_baseptr),
-      2 * GPU_PAGE_SIZE));
+  NVTE_CHECK_CUDA(
+      cudaMalloc(reinterpret_cast<void **>(&(*comm)->flags_baseptr), 2 * GPU_PAGE_SIZE));
   NVTE_CHECK_CUDA(cudaMemset((*comm)->flags_baseptr, 0, 2 * GPU_PAGE_SIZE));
   (*comm)->flags = reinterpret_cast<int *>(
       ((CUdeviceptr)(*comm)->flags_baseptr + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
@@ -448,20 +448,21 @@ void destroy_communicator(communicator *comm) {
       // Unbind the local device buffer from the Multicast handle
       CUdevice dev;
       NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &dev, comm->mydev);
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastUnbind, comm->mc_handle, dev,
-          comm->uc_offsets[hndl], comm->mem_size[hndl]);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastUnbind, comm->mc_handle, dev, comm->uc_offsets[hndl],
+                                  comm->mem_size[hndl]);
 
       // Unmap memory addresses and release handles for both peer and own buffers
       for (int rank = 0; rank < comm->nvsize; rank++) {
         NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap,
-            reinterpret_cast<CUdeviceptr>(comm->peer_ptr[hndl][rank]), comm->mem_size[hndl]);
+                                    reinterpret_cast<CUdeviceptr>(comm->peer_ptr[hndl][rank]),
+                                    comm->mem_size[hndl]);
         NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
       }
       free(reinterpret_cast<void *>(comm->uchandles[hndl]));
 
       // Free memory reserved for buffer allocations
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->ucbase_ptr[hndl],
-        static_cast<size_t>(comm->mem_size[hndl] * comm->nvsize));
+                                  static_cast<size_t>(comm->mem_size[hndl] * comm->nvsize));
     } else {
       for (int rank = 0; rank < comm->nvsize; rank++) {
         if (rank != comm->nvrank) {
@@ -482,7 +483,7 @@ void destroy_communicator(communicator *comm) {
   NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->flags_baseptr)));
   if (comm->use_mc) {
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
-        comm->mc_maxsize);
+                                comm->mc_maxsize);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->mc_baseptr, comm->mc_maxsize);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
   }
@@ -551,7 +552,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl,
                                   comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0);
       NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&exphndl),
-          comm->nvsize * sizeof(CUmemFabricHandle)));
+                                     comm->nvsize * sizeof(CUmemFabricHandle)));
       comm->_allgather(reinterpret_cast<void *>(exphndl), comm->nvsize * sizeof(CUmemFabricHandle),
                        reinterpret_cast<void *>(&myhndl), sizeof(CUmemFabricHandle),
                        comm->comm_intra);
