@@ -26,7 +26,7 @@ def mark_activation_offload(*tensors):
         if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
             tensor.activation_offloading = True
         else:
-            data_tensors = tensor.get_data_tensors()
+            data_tensors = tensor.get_data_tensors(scaling_factors=True)
             for tensor in data_tensors:
                 if tensor is not None:
                     tensor.activation_offloading = True
