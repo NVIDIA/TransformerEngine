@@ -34,6 +34,18 @@ NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
 QUANTIZATION = None
 
+if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
 
 # Disable TF32
 torch.backends.cuda.matmul.allow_tf32 = False

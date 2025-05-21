@@ -96,7 +96,10 @@ STATS = {
     "max": (torch.max, lambda buffers: max(_get(buffers, "max"))),
     "sum": (torch.sum, lambda buffers: sum(_get(buffers, "sum"))),
     "mean": (torch.mean, lambda buffers: sum(_get(buffers, "sum")) / sum(_get(buffers, "numel"))),
-    "numel": (lambda x: x.numel(), lambda buffers: sum(_get(buffers, "numel"))),
+    "numel": (
+        lambda x: x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel(),
+        lambda buffers: sum(_get(buffers, "numel")),
+    ),
     "l1_norm": (lambda x: torch.norm(x, p=1), lambda buffers: sum(_get(buffers, "l1_norm"))),
     "l2_norm_square": (
         lambda x: torch.sum(x**2),
@@ -137,7 +140,7 @@ STATS = {
         - min(_get(buffers, "dynamic_range_bottom")),
     ),
     "underflows%": (
-        lambda x: (x == 0).sum() / x.numel() * 100,
+        lambda x: (x.get_data_tensors()[0] == 0).sum() / x.get_data_tensors()[0].numel() * 100,
         lambda buffers: 100 * sum(_get(buffers, "underflows_num")) / sum(_get(buffers, "numel")),
     ),
 }

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir
+from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
 from typing import List
 
 
@@ -41,7 +41,7 @@ def setup_jax_extension(
     # Source files
     csrc_source_files = Path(csrc_source_files)
     extensions_dir = csrc_source_files / "extensions"
-    sources = all_files_in_dir(extensions_dir, ".cpp")
+    sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
     include_dirs = get_cuda_include_dirs()
@@ -57,6 +57,11 @@ def setup_jax_extension(
 
     # Compile flags
     cxx_flags = ["-O3"]
+    if debug_build_enabled():
+        cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
+    else:
+        cxx_flags.append("-g0")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
