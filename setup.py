@@ -22,6 +22,7 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
+    cuda_toolkit_include_path,
 )
 
 frameworks = get_frameworks()
@@ -88,15 +89,19 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = [
-        "nvidia-cuda-runtime-cu12",
-        "nvidia-cublas-cu12",
-        "nvidia-cudnn-cu12",
-        "nvidia-cuda-cccl-cu12",
-        "nvidia-cuda-nvcc-cu12",
-        "nvidia-nvtx-cu12",
-        "nvidia-cuda-nvrtc-cu12",
-    ]
+    setup_reqs: List[str] = []
+    if cuda_toolkit_include_path() is None:
+        setup_reqs.extend(
+            [
+                "nvidia-cuda-runtime-cu12",
+                "nvidia-cublas-cu12",
+                "nvidia-cudnn-cu12",
+                "nvidia-cuda-cccl-cu12",
+                "nvidia-cuda-nvcc-cu12",
+                "nvidia-nvtx-cu12",
+                "nvidia-cuda-nvrtc-cu12",
+            ]
+        )
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
