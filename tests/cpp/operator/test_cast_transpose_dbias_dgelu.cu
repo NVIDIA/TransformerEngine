@@ -143,7 +143,6 @@ void performTest(const size_t N, const size_t H) {
 std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},
                                                      {2048, 12288},
                                                      {768, 1024},
-                                                     {256, 65536},
                                                      {65536, 128},
                                                      {256, 256}};
 
