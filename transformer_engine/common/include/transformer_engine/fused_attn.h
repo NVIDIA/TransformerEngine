@@ -613,7 +613,7 @@ uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspac
  * \warning   This API is **experimental** and subject to change.
  *
  *  \param[out]    rng_state_ptr            A size 2 array storing the RNG's seed and offset respectively.
- *  \param[in]     captured                 Whether or not CUDA graph has been captured.
+ *  \param[in]     captured                 Whether a CUDA graph is being captured.
  *  \param[in]     seed_ptr                 Seed pointer.
  *  \param[in]     seed_val                 Seed value.
  *  \param[in]     offset_ptr               Offset pointer.
