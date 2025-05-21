@@ -288,8 +288,7 @@ void nvte_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stre
   NVTE_API_CALL(nvte_transpose);
   using namespace transformer_engine;
   auto noop = Tensor();
-  transpose(*convertNVTETensorCheck(input), noop, convertNVTETensor(output),
-            stream);
+  transpose(*convertNVTETensorCheck(input), noop, convertNVTETensor(output), stream);
 }
 
 void nvte_transpose_with_noop(const NVTETensor input, const NVTETensor noop, NVTETensor output,

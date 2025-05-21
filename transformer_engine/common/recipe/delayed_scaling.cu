@@ -398,8 +398,8 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(
   using namespace transformer_engine;
   delayed_scaling_recipe::amax_and_scale_update(
       *convertNVTETensorCheck(amax_history), *convertNVTETensorCheck(scale),
-      convertNVTETensor(updated_amax_history), convertNVTETensor(updated_scale),
-      amax_compute_algo, static_cast<DType>(fp8_dtype), margin, stream);
+      convertNVTETensor(updated_amax_history), convertNVTETensor(updated_scale), amax_compute_algo,
+      static_cast<DType>(fp8_dtype), margin, stream);
 }
 
 void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
@@ -415,6 +415,6 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
     t_scales.push_back(convertNVTETensor(scales[i]));
   }
   delayed_scaling_recipe::amax_and_scale_update_after_reduction(
-      *convertNVTETensorCheck(amax_reduction_buffer), t_amax_histories, t_scales,
-      amax_compute_algo, static_cast<DType>(fp8_dtype), margin, stream);
+      *convertNVTETensorCheck(amax_reduction_buffer), t_amax_histories, t_scales, amax_compute_algo,
+      static_cast<DType>(fp8_dtype), margin, stream);
 }

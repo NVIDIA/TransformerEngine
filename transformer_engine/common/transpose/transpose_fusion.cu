@@ -495,7 +495,6 @@ void nvte_fp8_transpose_dbias(const NVTETensor input, NVTETensor transposed_outp
                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fp8_transpose_dbias);
   using namespace transformer_engine;
-  fp8_transpose_dbias(
-      *convertNVTETensorCheck(input), convertNVTETensor(transposed_output),
-      convertNVTETensor(dbias), convertNVTETensor(workspace), stream);
+  fp8_transpose_dbias(*convertNVTETensorCheck(input), convertNVTETensor(transposed_output),
+                      convertNVTETensor(dbias), convertNVTETensor(workspace), stream);
 }

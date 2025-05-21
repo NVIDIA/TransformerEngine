@@ -147,7 +147,7 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
   NVTE_API_CALL(nvte_prepare_flash_attn_bwd);
   using namespace transformer_engine;
 
-  flash_attention::prepare_flash_attn_bwd(
-      *convertNVTETensorCheck(q), *convertNVTETensorCheck(k),
-      *convertNVTETensorCheck(v), *convertNVTETensorCheck(qkv), stream);
+  flash_attention::prepare_flash_attn_bwd(*convertNVTETensorCheck(q), *convertNVTETensorCheck(k),
+                                          *convertNVTETensorCheck(v), *convertNVTETensorCheck(qkv),
+                                          stream);
 }

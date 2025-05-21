@@ -227,8 +227,8 @@ void nvte_fp8_block_scaling_compute_partial_amax(const NVTETensor inp, NVTETenso
   NVTE_API_CALL(nvte_fp8_block_scaling_compute_partial_amax);
   using namespace transformer_engine;
   fp8_block_scaling_recipe::fp8_block_scaling_compute_partial_amax(
-      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(amax), h, w,
-      amax_stride_h, amax_stride_w, start_offset, block_len, stream);
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(amax), h, w, amax_stride_h,
+      amax_stride_w, start_offset, block_len, stream);
 }
 
 void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
@@ -239,7 +239,7 @@ void nvte_fp8_block_scaling_partial_cast(const NVTETensor inp, NVTETensor out,
   NVTE_API_CALL(nvte_fp8_block_scaling_partial_cast);
   using namespace transformer_engine;
   fp8_block_scaling_recipe::fp8_block_scaling_partial_cast(
-      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out),
-      *convertNVTETensorCheck(scale), h, w, scale_stride_h, scale_stride_w, start_offset,
-      block_len, static_cast<DType>(out_dtype), stream);
+      *convertNVTETensorCheck(inp), *convertNVTETensorCheck(out), *convertNVTETensorCheck(scale), h,
+      w, scale_stride_h, scale_stride_w, start_offset, block_len, static_cast<DType>(out_dtype),
+      stream);
 }

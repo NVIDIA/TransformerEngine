@@ -87,10 +87,10 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   // Compute FP8 transpose if required
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
     NVTETensor transpose_data = tensor_allocator.Allocate(z->scaling_mode);
-    auto* t = convertNVTETensor(transpose_data);
+    auto *t = convertNVTETensor(transpose_data);
     t->data = z->columnwise_data;
     NVTETensor z_copy = tensor_allocator.Allocate(z->scaling_mode);
-    auto* z_copy_ptr = convertNVTETensor(z_copy);
+    auto *z_copy_ptr = convertNVTETensor(z_copy);
     *z_copy_ptr = *z;
 
     nvte_transpose(z_copy, transpose_data, stream);
@@ -169,10 +169,9 @@ void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_rmsnorm_fwd);
   using namespace transformer_engine;
-  rmsnorm_fwd(*convertNVTETensorCheck(x), *convertNVTETensorCheck(gamma),
-              epsilon, convertNVTETensor(z), convertNVTETensor(rsigma),
-              convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
-              stream);
+  rmsnorm_fwd(*convertNVTETensorCheck(x), *convertNVTETensorCheck(gamma), epsilon,
+              convertNVTETensor(z), convertNVTETensor(rsigma), convertNVTETensor(workspace),
+              multiprocessorCount, zero_centered_gamma, stream);
 }
 
 void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
@@ -186,7 +185,6 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
   using namespace transformer_engine;
   rmsnorm_bwd(*convertNVTETensorCheck(dz), *convertNVTETensorCheck(x),
               *convertNVTETensorCheck(rsigma), *convertNVTETensorCheck(gamma),
-              convertNVTETensor(dx), convertNVTETensor(dgamma),
-              convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
-              stream);
+              convertNVTETensor(dx), convertNVTETensor(dgamma), convertNVTETensor(workspace),
+              multiprocessorCount, zero_centered_gamma, stream);
 }

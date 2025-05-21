@@ -189,10 +189,9 @@ void nvte_layernorm_fwd(const NVTETensor x,      // BxSxhidden_size
   NVTE_API_CALL(nvte_layernorm_fwd);
   using namespace transformer_engine;
   layernorm_fwd(*convertNVTETensorCheck(x), *convertNVTETensorCheck(gamma),
-                *convertNVTETensorCheck(beta), epsilon, convertNVTETensor(z),
-                convertNVTETensor(mu), convertNVTETensor(rsigma),
-                convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
-                stream);
+                *convertNVTETensorCheck(beta), epsilon, convertNVTETensor(z), convertNVTETensor(mu),
+                convertNVTETensor(rsigma), convertNVTETensor(workspace), multiprocessorCount,
+                zero_centered_gamma, stream);
 }
 
 void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
@@ -207,8 +206,7 @@ void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
   using namespace transformer_engine;
   layernorm_bwd(*convertNVTETensorCheck(dz), *convertNVTETensorCheck(x),
                 *convertNVTETensorCheck(mu), *convertNVTETensorCheck(rsigma),
-                *convertNVTETensorCheck(gamma), convertNVTETensor(dx),
-                convertNVTETensor(dgamma), convertNVTETensor(dbeta),
-                convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma,
-                stream);
+                *convertNVTETensorCheck(gamma), convertNVTETensor(dx), convertNVTETensor(dgamma),
+                convertNVTETensor(dbeta), convertNVTETensor(workspace), multiprocessorCount,
+                zero_centered_gamma, stream);
 }

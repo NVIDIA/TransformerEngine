@@ -14,17 +14,17 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
-#include <mutex>
-#include <atomic>
 
 #include "./nvtx.h"
 #include "./util/cuda_driver.h"
@@ -650,8 +650,8 @@ class TensorAllocator {
 
   NVTETensor Allocate(NVTEScalingMode mode);
   void Free(NVTETensor t);
-  void Free(NVTETensor* t, size_t N);
-  Tensor* convertNVTETensor(NVTETensor t);
+  void Free(NVTETensor *t, size_t N);
+  Tensor *convertNVTETensor(NVTETensor t);
   void setDebug(bool debug);
 
  private:
@@ -667,8 +667,8 @@ class TensorAllocator {
 
 extern TensorAllocator tensor_allocator;
 
-Tensor* convertNVTETensor(const NVTETensor tensor);
-Tensor* convertNVTETensorCheck(const NVTETensor tensor);
+Tensor *convertNVTETensor(const NVTETensor tensor);
+Tensor *convertNVTETensorCheck(const NVTETensor tensor);
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

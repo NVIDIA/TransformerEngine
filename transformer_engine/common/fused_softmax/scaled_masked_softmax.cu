@@ -815,8 +815,8 @@ void nvte_scaled_softmax_forward(const NVTETensor input, NVTETensor softmax_resu
                                  float scale_factor, cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_softmax_forward);
   using namespace transformer_engine;
-  scaled_softmax_forward(*convertNVTETensorCheck(input),
-                         convertNVTETensorCheck(softmax_results), scale_factor, stream);
+  scaled_softmax_forward(*convertNVTETensorCheck(input), convertNVTETensorCheck(softmax_results),
+                         scale_factor, stream);
 }
 
 void nvte_scaled_softmax_backward(const NVTETensor incoming_grads, const NVTETensor softmax_results,
@@ -834,8 +834,7 @@ void nvte_scaled_masked_softmax_forward(const NVTETensor input, const NVTETensor
                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_masked_softmax_forward);
   using namespace transformer_engine;
-  scaled_masked_softmax_forward(*convertNVTETensorCheck(input),
-                                *convertNVTETensorCheck(mask),
+  scaled_masked_softmax_forward(*convertNVTETensorCheck(input), *convertNVTETensorCheck(mask),
                                 convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }
 
@@ -844,7 +843,7 @@ void nvte_scaled_masked_softmax_backward(const NVTETensor incoming_grads,
                                          float scale_factor, cudaStream_t stream) {
   NVTE_API_CALL(nvte_scaled_masked_softmax_backward);
   using namespace transformer_engine;
-  scaled_masked_softmax_backward(
-      *convertNVTETensorCheck(output_grads), *convertNVTETensorCheck(incoming_grads),
-      *convertNVTETensorCheck(softmax_results), scale_factor, stream);
+  scaled_masked_softmax_backward(*convertNVTETensorCheck(output_grads),
+                                 *convertNVTETensorCheck(incoming_grads),
+                                 *convertNVTETensorCheck(softmax_results), scale_factor, stream);
 }

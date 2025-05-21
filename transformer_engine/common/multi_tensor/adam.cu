@@ -853,9 +853,8 @@ void nvte_multi_tensor_adam_capturable_cuda(
   multi_tensor_adam::multi_tensor_adam_capturable_cuda(
       chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
-      *convertNVTETensorCheck(lr), beta1, beta2, epsilon, *convertNVTETensorCheck(step),
-      mode, bias_correction, weight_decay, *convertNVTETensorCheck(inv_scale), device_id,
-      stream);
+      *convertNVTETensorCheck(lr), beta1, beta2, epsilon, *convertNVTETensorCheck(step), mode,
+      bias_correction, weight_decay, *convertNVTETensorCheck(inv_scale), device_id, stream);
 }
 
 void nvte_multi_tensor_adam_capturable_master_cuda(
@@ -869,7 +868,6 @@ void nvte_multi_tensor_adam_capturable_master_cuda(
   multi_tensor_adam::multi_tensor_adam_capturable_master_cuda(
       chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list),
-      *convertNVTETensorCheck(lr), beta1, beta2, epsilon, *convertNVTETensorCheck(step),
-      mode, bias_correction, weight_decay, *convertNVTETensorCheck(inv_scale), device_id,
-      stream);
+      *convertNVTETensorCheck(lr), beta1, beta2, epsilon, *convertNVTETensorCheck(step), mode,
+      bias_correction, weight_decay, *convertNVTETensorCheck(inv_scale), device_id, stream);
 }

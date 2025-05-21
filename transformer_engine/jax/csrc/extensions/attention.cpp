@@ -41,7 +41,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // all backends need softmax but expect different shapes/dtypes
   // start with the max512 sequence length softmax shape/dtype and correct later
   tensor_pack->size = 1;
-  NVTETensor& softmax_aux = tensor_pack->tensors[0];
+  NVTETensor &softmax_aux = tensor_pack->tensors[0];
   NVTEBasicTensor softmax_aux_data;
   softmax_aux_data.data_ptr = softmax_buf;
   softmax_aux_data.shape.ndim = 4;
@@ -54,7 +54,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     tensor_pack->size = 2;
-    NVTETensor& rng_state_aux = tensor_pack->tensors[1];
+    NVTETensor &rng_state_aux = tensor_pack->tensors[1];
     NVTEBasicTensor rng_state_aux_data;
     rng_state_aux_data.data_ptr = rng_state_buf;
     rng_state_aux_data.shape = {};
@@ -68,7 +68,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
     // include bias if enabled
     if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS && bias_type != NVTE_Bias_Type::NVTE_ALIBI) {
       tensor_pack->size = 3;
-      NVTETensor& bias_aux = tensor_pack->tensors[2];
+      NVTETensor &bias_aux = tensor_pack->tensors[2];
       NVTEBasicTensor bias_aux_data;
       bias_aux_data.data_ptr = bias_buf;
       bias_aux_data.shape.ndim = 4;
@@ -107,7 +107,8 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
 
   // correct softmax shape for max512 sequence length kernel
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    NVTEBasicTensor softmax_aux_data = nvte_get_tensor_param(tensor_pack->tensors[0], kNVTERowwiseData);
+    NVTEBasicTensor softmax_aux_data =
+        nvte_get_tensor_param(tensor_pack->tensors[0], kNVTERowwiseData);
     softmax_aux_data.shape.data[3] = kv_max_seqlen;  // {B,H,Qs,1} -> {B,H,Qs,Ks}
     softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
     nvte_set_tensor_param(&(tensor_pack->tensors[0]), kNVTERowwiseData, &softmax_aux_data);

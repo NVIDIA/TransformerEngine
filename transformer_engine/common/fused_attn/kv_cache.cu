@@ -260,12 +260,12 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
   NVTE_API_CALL(nvte_copy_to_kv_cache);
   using namespace transformer_engine;
 
-  kv_cache::copy_to_kv_cache(
-      *convertNVTETensorCheck(new_k), *convertNVTETensorCheck(new_v),
-      *convertNVTETensorCheck(k_cache), *convertNVTETensorCheck(v_cache),
-      *convertNVTETensorCheck(page_table), *convertNVTETensorCheck(cu_new_lens),
-      *convertNVTETensorCheck(cu_cached_lens), qkv_format, b, max_ctx_len, max_seq_len,
-      max_pages_per_seq, is_non_paged, stream);
+  kv_cache::copy_to_kv_cache(*convertNVTETensorCheck(new_k), *convertNVTETensorCheck(new_v),
+                             *convertNVTETensorCheck(k_cache), *convertNVTETensorCheck(v_cache),
+                             *convertNVTETensorCheck(page_table),
+                             *convertNVTETensorCheck(cu_new_lens),
+                             *convertNVTETensorCheck(cu_cached_lens), qkv_format, b, max_ctx_len,
+                             max_seq_len, max_pages_per_seq, is_non_paged, stream);
 }
 
 /***************************************************************************************************
