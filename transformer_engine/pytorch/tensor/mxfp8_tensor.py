@@ -258,6 +258,8 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             if self._columnwise_scale_inv is not None
             else None
         )
+        device = new_rowwise_data.device if new_rowwise_data is not None \
+            else new_columnwise_data.device
         return MXFP8Tensor(
             shape=self.shape,
             dtype=self.dtype,
@@ -267,6 +269,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=new_columnwise_scale_inv,
             quantizer=self._quantizer,
+            device=device,
         )
 
     def view(self, *shape: Tuple[int]) -> MXFP8Tensor:

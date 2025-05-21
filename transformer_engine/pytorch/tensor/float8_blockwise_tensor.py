@@ -352,6 +352,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             else None
         )
 
+        device = new_rowwise_data.device if new_rowwise_data is not None \
+            else new_columnwise_data.device
+
         return Float8BlockwiseQTensor(
             shape=self.shape,
             dtype=self.dtype,
@@ -363,6 +366,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             quantizer=self._quantizer,
             is_2D_scaled=self._is_2D_scaled,
             requires_grad=self.requires_grad,
+            device=device,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:

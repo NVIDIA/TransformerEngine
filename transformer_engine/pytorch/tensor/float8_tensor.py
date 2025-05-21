@@ -461,6 +461,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             fp8_dtype=self._fp8_dtype,
             data_transpose=new_transpose,
             quantizer=self._quantizer,
+            device=new_data.device,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:

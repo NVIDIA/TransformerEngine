@@ -34,10 +34,11 @@ class _FromMXFP8Func(torch.autograd.Function):
 
         # Make sure FP8 data is in expected format
         if tensor._rowwise_data is not None:
-            data = tensor._rowwise_data
             if tensor._rowwise_data.device.type == "cpu":
-                data = tensor._rowwise_data.to(torch.get_current_device())
-            return tex.dequantize(data, dtype)
+                tensor_gpu = torch.empty_like(tensor, device="cuda")
+                tensor_gpu.copy_(tensor)
+                return tex.dequantize(tensor_gpu, dtype).cpu()
+            return tex.dequantize(tensor, dtype)
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
     @staticmethod

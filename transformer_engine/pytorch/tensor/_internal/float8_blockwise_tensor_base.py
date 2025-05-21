@@ -137,7 +137,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         q_M, q_K = 1, 1
         if self._rowwise_data is not None:
             q = self._rowwise_data
-            scale_inv = self._rowwise_scale_inv.to(torch.get_current_device())
+            scale_inv = self._rowwise_scale_inv
             transpose_output = False
             if len(q.shape) >= 1:
                 q_K = q.shape[-1]
@@ -145,8 +145,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 q_M *= q.shape[i]
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data.to(torch.get_current_device())
-            scale_inv = self._columnwise_scale_inv.to(torch.get_current_device())
+            q = self._columnwise_data
+            scale_inv = self._columnwise_scale_inv
             transpose_output = True
             if len(q.shape) >= 1:
                 q_M = q.shape[0]
@@ -198,9 +198,11 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             return scales[:, :derived_scale_k_shape].contiguous()
 
         q_M, q_K = 1, 1
+        device = None
         if self._rowwise_data is not None:
-            q = self._rowwise_data.to(torch.get_current_device())
-            scale_inv = self._rowwise_scale_inv.to(torch.get_current_device())
+            device = self._rowwise_data.device
+            q = self._rowwise_data.to(torch.cuda.current_device())
+            scale_inv = self._rowwise_scale_inv.to(torch.cuda.current_device())
             transpose_output = False
             if len(q.shape) >= 1:
                 q_K = q.shape[-1]
@@ -208,8 +210,9 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 q_M *= q.shape[i]
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data.to(torch.get_current_device())
-            scale_inv = self._columnwise_scale_inv.to(torch.get_current_device())
+            device = self._columnwise_data.device
+            q = self._columnwise_data.to(torch.cuda.current_device())
+            scale_inv = self._columnwise_scale_inv.to(torch.cuda.current_device())
             transpose_output = True
             if len(q.shape) >= 1:
                 q_M = q.shape[0]
@@ -247,7 +250,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             result = result.reshape(*orig_shape).contiguous()
         if transpose_output:
             return self._transpose_dq_columnwise_output(result)
-        return result
+        return result.to(device)
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
