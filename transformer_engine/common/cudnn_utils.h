@@ -10,6 +10,7 @@
 #include <cudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#include <cudnn_graph.h>
 
 #include "transformer_engine/transformer_engine.h"
 #include "util/handle_manager.h"
