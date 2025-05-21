@@ -352,8 +352,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             else None
         )
 
-        device = new_rowwise_data.device if new_rowwise_data is not None \
-            else new_columnwise_data.device
+        device = (
+            new_rowwise_data.device if new_rowwise_data is not None else new_columnwise_data.device
+        )
 
         return Float8BlockwiseQTensor(
             shape=self.shape,
