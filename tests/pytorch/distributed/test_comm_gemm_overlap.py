@@ -51,7 +51,7 @@ os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 torch._dynamo.reset()
 
 
-def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, quantization):
+def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -78,6 +78,8 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, quantization):
             if torch.cuda.get_device_properties(0).major != 9:
                 pytest.skip("Atomic GEMM is requires device compute capability 9.x (Hopper).")
             test_cmd.append("--atomic")
+        if aggregate:
+            test_cmd.append("--aggregate")
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
     if (
@@ -135,12 +137,13 @@ def _run_layer_with_overlap(
 
 
 @pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
-def test_split_all_gather_overlaps(quantization):
+@pytest.mark.parametrize("aggregate", (False, True))
+def test_split_all_gather_overlaps(quantization, aggregate):
     """
     Test (split GEMM -> all-gather) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("AG", False, True, False, quantization)
+    _run_gemm_with_overlap("AG", False, True, False, aggregate, quantization)
 
 
 @pytest.mark.parametrize("quantization", ("none", "fp8", "mxfp8"))
@@ -150,7 +153,7 @@ def test_split_reduce_scatter_overlaps(quantization, p2p):
     Test (reduce-scatter -> split GEMM) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap("RS", False, p2p, False, quantization)
+    _run_gemm_with_overlap("RS", False, p2p, False, False, quantization)
 
 
 @pytest.mark.parametrize(
@@ -183,10 +186,10 @@ def test_bulk_overlaps(comm_type, quantization, connections):
                 " 9.0 (HOPPER ARCH)."
             )
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
-        _run_gemm_with_overlap(comm_type, True, False, False, quantization)
+        _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     else:
-        _run_gemm_with_overlap(comm_type, True, False, False, quantization)
+        _run_gemm_with_overlap(comm_type, True, False, False, False, quantization)
 
 
 @pytest.mark.parametrize(
