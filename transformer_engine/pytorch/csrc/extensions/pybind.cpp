@@ -203,6 +203,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
         py::arg("quantizer_list"), py::arg("otype"));
 
+  m.def("fp8_blockwise_transpose", &transformer_engine::pytorch::fp8_blockwise_transpose,
+        "Blockwise Transpose with dequantize + cast + transpose", py::arg("tensor"), py::arg("quantizer"));
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",

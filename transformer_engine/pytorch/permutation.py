@@ -219,6 +219,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         if fp8:
             fp8_dtype = inp._fp8_dtype
             fake_dtype = inp.dtype
+            quantizer = inp._quantizer
             # blockwise scaling
             if blockwise_recipe:
                 fp8_scale = inp._rowwise_scale_inv.T.contiguous()
@@ -265,6 +266,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     fp8_scale_inv=fp8_scale_inv,
                     shape=output.shape,
                     dtype=fake_dtype,
+                    quantizer=quantizer,
                 )
             elif blockwise_recipe:
                 output = Float8BlockwiseQTensor(
@@ -275,7 +277,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     columnwise_data=None,
                     columnwise_scale_inv=None,
                     fp8_dtype=fp8_dtype,
-                    quantizer=None,
+                    quantizer=quantizer,
                     is_2D_scaled=False,
                     requires_grad=output.requires_grad,
                 )
@@ -288,7 +290,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     rowwise_scale_inv=permuted_scale.contiguous(),
                     columnwise_data=None,
                     columnwise_scale_inv=None,
-                    quantizer=None,
+                    quantizer=quantizer,
                     requires_grad=output.requires_grad,
                 )
 
@@ -405,6 +407,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             if fp8:
                 fp8_dtype = unpermuted_act_grad._fp8_dtype
                 fake_dtype = unpermuted_act_grad.dtype
+                quantizer = unpermuted_act_grad._quantizer
                 # per-tensor scaling
                 if per_tensor_recipe:
                     # Kernel does not need scale in per-tensor scaling
@@ -468,6 +471,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         fp8_scale_inv=fp8_scale_inv,
                         shape=act_grad.shape,
                         dtype=fake_dtype,
+                        quantizer=quantizer,
                     )
                 elif blockwise_recipe:
                     act_grad = Float8BlockwiseQTensor(
@@ -478,7 +482,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         columnwise_data=None,
                         columnwise_scale_inv=None,
                         fp8_dtype=fp8_dtype,
-                        quantizer=None,
+                        quantizer=quantizer,
                         is_2D_scaled=False,
                         requires_grad=act_grad.requires_grad,
                     )
@@ -491,7 +495,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                         rowwise_scale_inv=permuted_scale.contiguous(),
                         columnwise_data=None,
                         columnwise_scale_inv=None,
-                        quantizer=None,
+                        quantizer=quantizer,
                         requires_grad=act_grad.requires_grad,
                     )
 
