@@ -137,7 +137,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         q_M, q_K = 1, 1
         if self._rowwise_data is not None:
             q = self._rowwise_data
-            scale_inv = self._rowwise_scale_inv
+            scale_inv = self._rowwise_scale_inv.to(torch.get_current_device())
             transpose_output = False
             if len(q.shape) >= 1:
                 q_K = q.shape[-1]
@@ -145,8 +145,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 q_M *= q.shape[i]
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data
-            scale_inv = self._columnwise_scale_inv
+            q = self._columnwise_data.to(torch.get_current_device())
+            scale_inv = self._columnwise_scale_inv.to(torch.get_current_device())
             transpose_output = True
             if len(q.shape) >= 1:
                 q_M = q.shape[0]
@@ -199,8 +199,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
         q_M, q_K = 1, 1
         if self._rowwise_data is not None:
-            q = self._rowwise_data
-            scale_inv = self._rowwise_scale_inv
+            q = self._rowwise_data.to(torch.get_current_device())
+            scale_inv = self._rowwise_scale_inv.to(torch.get_current_device())
             transpose_output = False
             if len(q.shape) >= 1:
                 q_K = q.shape[-1]
@@ -208,8 +208,8 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 q_M *= q.shape[i]
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
-            q = self._columnwise_data
-            scale_inv = self._columnwise_scale_inv
+            q = self._columnwise_data.to(torch.get_current_device())
+            scale_inv = self._columnwise_scale_inv.to(torch.get_current_device())
             transpose_output = True
             if len(q.shape) >= 1:
                 q_M = q.shape[0]
