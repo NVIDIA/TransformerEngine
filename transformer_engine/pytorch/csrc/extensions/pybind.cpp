@@ -201,9 +201,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
   m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
-        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"),
-        py::arg("input_view"), py::arg("m_splits"),
-        py::arg("quantizer_list"), py::arg("otype"));
+        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("input_view"),
+        py::arg("m_splits"), py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
