@@ -1634,6 +1634,16 @@ class _FusedAttnCPWithP2PHelper:
                 " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
             )
 
+        # If using scanloop, idx in scan_kv_block() will be a traced device value, but
+        # _normalize_window_size_for_cp_striped() requires all parameters to be host values
+        is_context_parallel = get_mesh_axis_size(self.config.cp_axis, self.mesh) > 1
+        is_thd_layout = self.config.qkv_layout.is_thd()
+        is_sliding_window = self.config.window_size[0] != -1
+        if is_context_parallel and is_thd_layout and is_sliding_window and self.use_scanloop():
+            raise ValueError(
+                f"{header} with THD format and sliding window does not support using scan loop"
+            )
+
     def get_step_config(self, attn_mask_type) -> _FusedAttnConfig:
         """Returns a _FusedAttnConfig for single CP step call to fused attention."""
         return _FusedAttnConfig(
@@ -2193,11 +2203,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
-        # If using scanloop, idx in scan_kv_block() will be a traced device value, but
-        # _normalize_window_size_for_cp_striped() requires all parameters to be host values
-        assert (
-            not (is_context_parallel and config.window_size[0] != -1 and helper.use_scanloop())
-        ), "When context parallelism and sliding window attention are used, use scanloop is not supported"
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
@@ -2283,7 +2288,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     cp_striped_window_size = adjust_cp_striped_window_size(
                         cp_rank, kv_src_rank, cp_size, config.window_size
                     )
-                    current_config = replace(subblock_config, cp_striped_window_size=cp_striped_window_size)
+                    current_config = replace(
+                        subblock_config, cp_striped_window_size=cp_striped_window_size
+                    )
                 else:
                     current_config = subblock_config
                 output_per_step, softmax_aux_per_step, _ = compute(current_config)
@@ -2348,11 +2355,6 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         helper.check_supported()
-        # If using scanloop, idx in scan_kv_block() will be a traced device value, but
-        # _normalize_window_size_for_cp_striped() requires all parameters to be host values
-        assert (
-            not (is_context_parallel and config.window_size[0] != -1 and helper.use_scanloop())
-        ), "When context parallelism and sliding window attention are used, use scanloop is not supported"
 
         def bwd_impl(
             q,
@@ -2387,6 +2389,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            # We need cp_rank to be a host value for adjust_cp_striped_window_size()
             cp_rank = get_mesh_axis_rank_host(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
@@ -2432,7 +2435,9 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                     cp_striped_window_size = adjust_cp_striped_window_size(
                         cp_rank, kv_src_rank, cp_size, config.window_size
                     )
-                    current_config = replace(subblock_config, cp_striped_window_size=cp_striped_window_size)
+                    current_config = replace(
+                        subblock_config, cp_striped_window_size=cp_striped_window_size
+                    )
                 else:
                     current_config = subblock_config
                 dq_per_step, dkv_per_step, dbias_per_step = compute(current_config)
