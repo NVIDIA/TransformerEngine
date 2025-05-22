@@ -913,6 +913,8 @@ class TestBasicOps:
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
     @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("input_requires_grad", (False, True))
+    @pytest.mark.parametrize("weight_requires_grad", (False, True))
     def test_linear(
         self,
         *,
@@ -923,6 +925,8 @@ class TestBasicOps:
         device: torch.device = "cuda",
         quantization: Optional[str],
         quantized_weight: bool,
+        input_requires_grad: bool,
+        weight_requires_grad: bool,
     ) -> None:
         """GEMM + bias"""
 
@@ -943,9 +947,10 @@ class TestBasicOps:
             test_device=device,
             test_is_fp8=quantized_compute,
         )
-        if isinstance(x_test, QuantizedTensor):
-            with torch.no_grad():
-                x_test = x_test.dequantize().requires_grad_()
+        with torch.no_grad():
+            if isinstance(x_test, QuantizedTensor):
+                x_test = x_test.dequantize()
+            x_test.requires_grad_(requires_grad=input_requires_grad)
         w_ref, w_test = make_reference_and_test_tensors(
             (out_features, in_features),
             test_dtype=dtype,
@@ -986,9 +991,12 @@ class TestBasicOps:
                 op.bias.copy_(b_test)
             del w_test
             del b_test
+            for param in op.parameters():
+                param.requires_grad_(requires_grad=weight_requires_grad)
         with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
             y_test = op(x_test)
-        y_test.backward(dy_test)
+        if input_requires_grad or weight_requires_grad:
+            y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
@@ -999,14 +1007,16 @@ class TestBasicOps:
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
-        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y_test, y_ref, **tols)
-        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
-        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
-        if bias:
-            db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
-            torch.testing.assert_close(db_test, b_ref.grad, **tols)
+        if input_requires_grad:
+            dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        if weight_requires_grad:
+            dw_test = op.weight.grad.to(dtype=torch.float64, device="cpu")
+            torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+            if bias:
+                db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
+                torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
     @pytest.mark.parametrize("weight_shape", ((7, 2), (32,)))
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
