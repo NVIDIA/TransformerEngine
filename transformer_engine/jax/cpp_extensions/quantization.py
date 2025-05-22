@@ -978,8 +978,7 @@ def grouped_quantize(
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
         group_sizes=group_sizes,
-        other_sizes=other_sizes,
-        group_axis=group_axis,
         original_shape=original_shape,
+        group_axis=group_axis,
     )
     return out

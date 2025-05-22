@@ -230,7 +230,6 @@ class ScaledTensor1x(ScaledTensor):
         # axis_names were given for N layout, so needs to be transpose for T layout
         if self.data_layout == "T":
             assert self.flatten_axis > 0
-            flatten_axis = self.flatten_axis  # TODO(Hua): check if this is correct
             axis_names = (*logical_axis_names[flatten_axis:], *logical_axis_names[:flatten_axis])
         else:
             axis_names = logical_axis_names
@@ -260,24 +259,36 @@ class ScaledTensor1x(ScaledTensor):
 class GroupedScaledTensor1x(ScaledTensor1x):
     """Quantizer for grouped of array"""
 
-    data: jnp.ndarray  # 1d flattened
-    scale_inv: jnp.ndarray  # 1d flattened
     group_sizes: jnp.ndarray
-    other_sizes: Tuple
-    scaling_mode: ScalingMode
-    dq_dtype: jnp.dtype
-    _dq_func: Callable
-    is_colwise: bool
-    data_layout: str
-    flatten_axis: int
-    group_axis: int = -1
-    original_shape: Tuple[int] = None
+    original_shape: Tuple
+    group_axis: int
+
+    def __init__(
+        self,
+        data,
+        scale_inv,
+        group_sizes,
+        scaling_mode,
+        dq_dtype,
+        _dq_func,
+        is_colwise,
+        data_layout,
+        flatten_axis,
+        original_shape,
+        group_axis=0,
+    ):
+        self.group_sizes = group_sizes
+        self.original_shape = original_shape
+        self.group_axis = group_axis
+        super().__init__(
+            data, scale_inv, scaling_mode, dq_dtype, _dq_func, is_colwise, data_layout, flatten_axis
+        )
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
         assert self.data.ndim == 1, "Only support flattened data"
 
-        data_ndim = 1 + len(self.other_sizes)
+        data_ndim = len(self.original_shape)
         flatten_axis = data_ndim + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
         assert (
             0 < flatten_axis < data_ndim
@@ -291,12 +302,20 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         ), f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
 
         if self.data_layout == "T":
-            self.original_shape = (
-                *self.original_shape[flatten_axis:],
-                *self.original_shape[:flatten_axis],
-            )
-            flatten_axis = len(self.original_shape) - flatten_axis
-            self.group_axis = flatten_axis
+            if self.original_shape[0] == self.group_sizes.size:
+                self.original_shape = (
+                        self.original_shape[0],
+                        *self.original_shape[flatten_axis:],
+                        *self.original_shape[1: flatten_axis],
+                        )
+                flatten_axis = len(self.original_shape) - flatten_axis + 1
+            else:
+                self.original_shape = (
+                        *self.original_shape[flatten_axis:],
+                        *self.original_shape[:flatten_axis],
+                        )
+                self.group_axis = flatten_axis
+                flatten_axis = len(self.original_shape) - flatten_axis
 
         self.flatten_axis = flatten_axis
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
@@ -321,15 +340,14 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         """
         children = (self.data, self.scale_inv, self.group_sizes)
         aux_data = (
-            self.other_sizes,
             self.scaling_mode,
             self.dq_dtype,
             self._dq_func,
             self.is_colwise,
             self.data_layout,
             self.flatten_axis,
-            self.group_axis,
             self.original_shape,
+            self.group_axis,
         )
         return (children, aux_data)
 
@@ -426,9 +444,8 @@ class ScaledTensorFactory:
         data_layout="N",
         flatten_axis=-1,
         group_sizes=None,
-        other_sizes=None,
-        group_axis=-1,
         original_shape=None,
+        group_axis=0,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -441,27 +458,28 @@ class ScaledTensorFactory:
             is_colwise: Whether to use column-wise quantization (default: False)
             data_layout: The data_layout specification (default: "N")
             flatten_axis: The quantization axis for the tensor
-            other_sizes
+            original_shape
 
         Returns:
             A ScaledTensor1x instance
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
         if group_sizes is not None:
-            assert other_sizes is not None, "other_sizes is not given for GroupedScaledTensor1x"
+            assert (
+                original_shape is not None
+            ), "original_shape is not given for GroupedScaledTensor1x"
             return GroupedScaledTensor1x(
                 data=data,
                 scale_inv=scale_inv,
-                group_sizes=group_sizes,
-                other_sizes=other_sizes,
                 scaling_mode=scaling_mode,
                 dq_dtype=dq_dtype,
                 _dq_func=dequantizer.grouped_dequantize,
                 is_colwise=is_colwise,
                 data_layout=data_layout,
                 flatten_axis=flatten_axis,
-                group_axis=group_axis,
+                group_sizes=group_sizes,
                 original_shape=original_shape,
+                group_axis=group_axis,
             )
 
         return ScaledTensor1x(
@@ -486,9 +504,8 @@ class ScaledTensorFactory:
         data_layout="NN",
         flatten_axis=-1,
         group_sizes=None,
-        other_sizes=None,
-        group_axis=-1,
         original_shape=None,
+        group_axis=0,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -502,8 +519,6 @@ class ScaledTensorFactory:
             data_layout: The data_layout specification (default: "NN")
             flatten_axis: The quantization axis for the tensor
             group_sizes
-            other_sizes
-            group_axis
             original_shape
 
         Returns:
@@ -519,9 +534,8 @@ class ScaledTensorFactory:
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
-            other_sizes=other_sizes,
-            group_axis=group_axis,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -532,9 +546,8 @@ class ScaledTensorFactory:
             data_layout=data_layout[1],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
-            other_sizes=other_sizes,
-            group_axis=group_axis,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -550,9 +563,8 @@ class ScaledTensorFactory:
         q_layout: QuantizeLayout = QuantizeLayout.ROWWISE,
         flatten_axis: int = -1,
         group_sizes: jnp.ndarray = None,
-        other_sizes: Tuple[int] = None,
-        group_axis: int = -1,
         original_shape: Tuple[int] = None,
+        group_axis: int = 0,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -580,7 +592,6 @@ class ScaledTensorFactory:
                 data_layout=data_layout,
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
-                other_sizes=other_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
             )
@@ -596,7 +607,6 @@ class ScaledTensorFactory:
                 data_layout=data_layout[0],
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
-                other_sizes=other_sizes,
                 original_shape=original_shape,
                 group_axis=group_axis,
             )
@@ -610,7 +620,6 @@ class ScaledTensorFactory:
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
-            other_sizes=other_sizes,
             original_shape=original_shape,
             group_axis=group_axis,
         )
