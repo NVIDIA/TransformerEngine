@@ -899,8 +899,9 @@ def grouped_quantize(
         return x
 
     # TODO(Phuong): add support for flatten_axis = -2
-    assert (
-        flatten_axis in (-1, x.ndim - 1)
+    assert flatten_axis in (
+        -1,
+        x.ndim - 1,
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
 
@@ -932,9 +933,9 @@ def grouped_quantize(
             scale = scale.at[i].set(tmp_scale)
 
     is_tensor_scaling = quantizer.scaling_mode in (
-            ScalingMode.DELAYED_TENSOR_SCALING,
-            ScalingMode.CURRENT_TENSOR_SCALING,
-            )
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
+    )
     # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
     # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
     apply_colwise_war = is_tensor_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
