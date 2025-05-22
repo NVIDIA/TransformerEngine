@@ -156,7 +156,6 @@ def _grouped_dequantize(grouped_scaled_tensor):
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        # import pdb; pdb.set_trace()
         data_shape_i = (
             *original_shape[:group_axis],
             group_sizes[i],
