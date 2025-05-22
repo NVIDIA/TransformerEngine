@@ -680,14 +680,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fwd_results_correction_done = torch.cuda.Event()
 
         p2p_comm_buffers = [None for _ in range(cp_size)]
-        head_dim_qk = k.shape[-1]
-        head_dim_v = v.shape[-1]
-        v_shape = v.shape
         if enable_mla:
             # If MLA, the shape of k and v does not match, so we flatten them
             # and split them after receiving them.
             k_shape = k.shape
             k_numel = k.numel()
+            v_shape = v.shape
             p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
         elif qkv_format in ["bshd", "sbhd"]:
             p2p_comm_buffers[0] = torch.cat((k.unsqueeze(-3), v.unsqueeze(-3)), dim=-3)
@@ -722,8 +720,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         kv_inputs[i % 2] = QKV_quantizer(p2p_comm_buffers[i])._data
                     if enable_mla:
                         # If MLA, k and v are flattened, so split them after receiving.
-                        k_part = kv_inputs[i % 2][..., :k_numel].reshape(*k_shape)
-                        v_part = kv_inputs[i % 2][..., k_numel:].reshape(*v_shape)
+                        k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
+                        v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)
                     if causal:
                         if i == 0:
                             if pad_between_seqs:
@@ -756,8 +754,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q.view(-1, *q.shape[-3:])
                                 if enable_mla:
                                     # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                    k_part = k_part.view(-1, k_part.shape[2], *k_part.shape[-2:])
-                                    v_part = v_part.view(-1, v_part.shape[2], *v_part.shape[-2:])
+                                    k_part = k_part.view(-1, *k_part.shape[2:])
+                                    v_part = v_part.view(-1, *v_part.shape[2:])
                                 else:
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -840,7 +838,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     max_seqlen_q=max_seqlen_q,
                                     max_seqlen_kv=max_seqlen_kv,
                                 )
-                                assert not enable_mla, "Flash Attention does not support MLA."
+                                # TODO: add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -1003,7 +1001,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                assert not enable_mla, "Flash Attention does not support MLA."
+                                # TODO: add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -1066,8 +1064,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_inputs[i % 2] = q[1]
                                 if enable_mla:
                                     # [2, sk//2, b, np, hn] -> [sk, b, np, hn]
-                                    k_part = k_part.view(-1, k_part.shape[2], *k_part.shape[-2:])
-                                    v_part = v_part.view(-1, v_part.shape[2], *v_part.shape[-2:])
+                                    k_part = k_part.view(-1, *k_part.shape[2:])
+                                    v_part = v_part.view(-1, *v_part.shape[2:])
                                 else:
                                     # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
                                     kv_inputs[i % 2] = kv_inputs[i % 2].view(
@@ -1162,7 +1160,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                assert not enable_mla, "Flash Attention does not support MLA."
+                                # TODO: add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -1280,7 +1278,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 max_seqlen_q=max_seqlen_q,
                                 max_seqlen_kv=max_seqlen_kv,
                             )
-                            assert not enable_mla, "Flash Attention does not support MLA."
+                            # TODO: add MLA support once Flash Attention supports MLA
                             fa_outputs = flash_attn_fwd(
                                 q,
                                 (
@@ -1499,12 +1497,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.use_flash_attn_3 = use_flash_attn_3
 
         ctx.enable_mla = enable_mla
-        ctx.head_dim_qk = head_dim_qk
-        ctx.head_dim_v = head_dim_v
-        ctx.v_shape = v_shape
         if enable_mla:
             ctx.k_numel = k_numel
             ctx.k_shape = k_shape
+            ctx.v_shape = v_shape
 
         ctx.qkv_dtype = qkv_dtype
         ctx.dQKV_quantizer = dQKV_quantizer
@@ -1899,7 +1895,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = 0
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        assert not ctx.enable_mla, "Flash Attention does not support MLA."
+                        # TODO: add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -2054,7 +2050,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        assert not ctx.enable_mla, "Flash Attention does not support MLA."
+                        # TODO: add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -2198,7 +2194,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        assert not ctx.enable_mla, "Flash Attention does not support MLA."
+                        # TODO: add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -2295,7 +2291,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         fa_backward_kwargs["window_size_right"] = -1
                     if not ctx.use_flash_attn_3:
                         fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                    assert not ctx.enable_mla, "Flash Attention does not support MLA."
+                    # TODO: add MLA support once Flash Attention supports MLA
                     flash_attn_bwd(
                         dout,
                         q,
@@ -2396,15 +2392,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dkv_ = torch.cat(
                         (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0
                     )  # pylint: disable=used-before-assignment
-            if ctx.enable_mla:
-                # [b, 2, sk//2, np, hn] or
-                # [2, sk//2, b, np, hn]
-                dk = dkv[: ctx.k_numel].view(*ctx.k_shape)
-                dv = dkv[ctx.k_numel :].view(*ctx.v_shape)
-                if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
-                    dk_ = dk_.view(*ctx.k_shape)
-                    dv_ = dv_.view(*ctx.v_shape)
-            elif ctx.qkv_format in ["bshd", "sbhd"]:
+            if not ctx.enable_mla and ctx.qkv_format in ["bshd", "sbhd"]:
                 # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
                 # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
                 # dkv is a buffer, so we do not need to transpose it, but only need to reshape it.
@@ -2415,121 +2403,137 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     # [2, sk, b, np, hn] -> [2, 2, sk//2, b, np, hn]
                     dkv_ = dkv_.view(*dkv.shape)
 
-            if ctx.enable_mla and ctx.fp8:
-                if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
-                    if ctx.qkv_format == "bshd":
-                        dk[:, 0, ...].copy_(dk_)
-                        dk[:, 1, ...].fill_(0)
-                        dv[:, 0, ...].copy_(dv_)
-                        dv[:, 1, ...].fill_(0)
-                    elif ctx.qkv_format == "sbhd":
-                        dk[0].copy_(dk_)
-                        dk[1].fill_(0)
-                        dv[0].copy_(dv_)
-                        dv[1].fill_(0)
-                    else:
-                        dk.copy_(dk_)
-                        dv.copy_(dv_)
-            elif ctx.enable_mla and causal:  # enable_mla and not fp8
-                if i == (cp_size - 1):
-                    if rank == 0:
-                        if ctx.qkv_format == "bshd":
-                            dk[:, 0, ...].add_(dk_[:, 0, ...])
-                            dk[:, 1, ...].copy_(dk_[:, 1, ...])
-                            dv[:, 0, ...].add_(dv_[:, 0, ...])
-                            dv[:, 1, ...].copy_(dv_[:, 1, ...])
-                        elif ctx.qkv_format == "sbhd":
-                            dk[0, ...].add_(dk_[0, ...])
-                            dk[1, ...].copy_(dk_[1, ...])
-                            dv[0, ...].add_(dv_[0, ...])
-                            dv[1, ...].copy_(dv_[1, ...])
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "copy")
-                            tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "copy")
-                    else:
-                        dk.add_(dk_)
-                        dv.add_(dv_)
-                elif i >= (cp_size - rank - 1):
-                    if i == 0 and rank == (cp_size - 1):
+            if ctx.enable_mla:
+                # [b, 2, sk//2, np, hn] or
+                # [2, sk//2, b, np, hn]
+                dk = dkv[: ctx.k_numel].view(*ctx.k_shape)
+                dv = dkv[ctx.k_numel :].view(*ctx.v_shape)
+                if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
+                    dk_ = dk_.view(*ctx.k_shape)
+                    dv_ = dv_.view(*ctx.v_shape)
+                
+                if ctx.fp8:
+                    # enable_mla and fp8
+                    if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
                         if ctx.qkv_format == "bshd":
                             dk[:, 0, ...].copy_(dk_)
+                            dk[:, 1, ...].fill_(0)
                             dv[:, 0, ...].copy_(dv_)
+                            dv[:, 1, ...].fill_(0)
                         elif ctx.qkv_format == "sbhd":
-                            dk[0, ...].copy_(dk_)
-                            dv[0, ...].copy_(dv_)
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "copy", "none")
-                            tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "copy", "none")
-                    else:
-                        if ctx.qkv_format == "bshd":
-                            dk[:, 0, ...].add_(dk_)
-                            dv[:, 0, ...].add_(dv_)
-                        elif ctx.qkv_format == "sbhd":
-                            dk[0, ...].add_(dk_)
-                            dv[0, ...].add_(dv_)
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "none")
-                            tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "none")
-                elif i > 0:
-                    dk.add_(dk_)
-                    dv.add_(dv_)
-                else:  # i == 0
-                    dk.copy_(dk_)
-                    dv.copy_(dv_)
-            elif ctx.enable_mla:  # enable_mla and not fp8 and not causal
-                if i == 0:
-                    dk.copy_(dk_)
-                    dv.copy_(dv_)
-                else:  # i > 0
-                    dk.add_(dk_)
-                    dv.add_(dv_)
-            elif ctx.fp8:
-                if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
-                    if ctx.qkv_format == "bshd":
-                        dkv[:, :, 0, ...].copy_(dkv_)
-                        dkv[:, :, 1, ...].fill_(0)
-                    elif ctx.qkv_format == "sbhd":
-                        dkv[:, 0, ...].copy_(dkv_)
-                        dkv[:, 1, ...].fill_(0)
+                            dk[0].copy_(dk_)
+                            dk[1].fill_(0)
+                            dv[0].copy_(dv_)
+                            dv[1].fill_(0)
+                        else:
+                            dk.copy_(dk_)
+                            dv.copy_(dv_)
+                elif causal:
+                    # enable_mla and not fp8 and causal
+                    if i == (cp_size - 1):
+                        if rank == 0:
+                            if ctx.qkv_format == "bshd":
+                                dk[:, 0, ...].add_(dk_[:, 0, ...])
+                                dk[:, 1, ...].copy_(dk_[:, 1, ...])
+                                dv[:, 0, ...].add_(dv_[:, 0, ...])
+                                dv[:, 1, ...].copy_(dv_[:, 1, ...])
+                            elif ctx.qkv_format == "sbhd":
+                                dk[0, ...].add_(dk_[0, ...])
+                                dk[1, ...].copy_(dk_[1, ...])
+                                dv[0, ...].add_(dv_[0, ...])
+                                dv[1, ...].copy_(dv_[1, ...])
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "copy")
+                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "copy")
+                        else:
+                            dk.add_(dk_)
+                            dv.add_(dv_)
+                    elif i >= (cp_size - rank - 1):
+                        if i == 0 and rank == (cp_size - 1):
+                            if ctx.qkv_format == "bshd":
+                                dk[:, 0, ...].copy_(dk_)
+                                dv[:, 0, ...].copy_(dv_)
+                            elif ctx.qkv_format == "sbhd":
+                                dk[0, ...].copy_(dk_)
+                                dv[0, ...].copy_(dv_)
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "copy", "none")
+                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "copy", "none")
+                        else:
+                            if ctx.qkv_format == "bshd":
+                                dk[:, 0, ...].add_(dk_)
+                                dv[:, 0, ...].add_(dv_)
+                            elif ctx.qkv_format == "sbhd":
+                                dk[0, ...].add_(dk_)
+                                dv[0, ...].add_(dv_)
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "none")
+                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "none")
+                    elif i > 0:
+                        dk.add_(dk_)
+                        dv.add_(dv_)
+                    else:  # i == 0
+                        dk.copy_(dk_)
+                        dv.copy_(dv_)
                 else:
-                    dkv.copy_(dkv_)
-            elif causal:
-                if i == (cp_size - 1):
-                    if rank == 0:
-                        if ctx.qkv_format == "bshd":
-                            dkv[:, :, 0, ...].add_(dkv_[:, :, 0, ...])
-                            dkv[:, :, 1, ...].copy_(dkv_[:, :, 1, ...])
-                        elif ctx.qkv_format == "sbhd":
-                            dkv[:, 0, ...].add_(dkv_[:, 0, ...])
-                            dkv[:, 1, ...].copy_(dkv_[:, 1, ...])
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "copy")
-                    else:
-                        dkv.add_(dkv_)
-                elif i >= (cp_size - rank - 1):
-                    if i == 0 and rank == (cp_size - 1):
+                    # enable_mla and not fp8 and not causal
+                    if i == 0:
+                        dk.copy_(dk_)
+                        dv.copy_(dv_)
+                    else:  # i > 0
+                        dk.add_(dk_)
+                        dv.add_(dv_)
+            else:
+                if ctx.fp8:
+                    # fp8
+                    if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
                         if ctx.qkv_format == "bshd":
                             dkv[:, :, 0, ...].copy_(dkv_)
+                            dkv[:, :, 1, ...].fill_(0)
                         elif ctx.qkv_format == "sbhd":
                             dkv[:, 0, ...].copy_(dkv_)
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "copy", "none")
+                            dkv[:, 1, ...].fill_(0)
                     else:
-                        if ctx.qkv_format == "bshd":
-                            dkv[:, :, 0, ...].add_(dkv_)
-                        elif ctx.qkv_format == "sbhd":
-                            dkv[:, 0, ...].add_(dkv_)
-                        elif ctx.qkv_format == "thd":
-                            tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "none")
-                elif i > 0:
-                    dkv.add_(dkv_)
-                else:  # i == 0
-                    dkv.copy_(dkv_)
-            else:
-                if i == 0:
-                    dkv.copy_(dkv_)
-                else:  # i > 0
-                    dkv.add_(dkv_)
+                        dkv.copy_(dkv_)
+                elif causal:
+                    # not fp8 and causal
+                    if i == (cp_size - 1):
+                        if rank == 0:
+                            if ctx.qkv_format == "bshd":
+                                dkv[:, :, 0, ...].add_(dkv_[:, :, 0, ...])
+                                dkv[:, :, 1, ...].copy_(dkv_[:, :, 1, ...])
+                            elif ctx.qkv_format == "sbhd":
+                                dkv[:, 0, ...].add_(dkv_[:, 0, ...])
+                                dkv[:, 1, ...].copy_(dkv_[:, 1, ...])
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "copy")
+                        else:
+                            dkv.add_(dkv_)
+                    elif i >= (cp_size - rank - 1):
+                        if i == 0 and rank == (cp_size - 1):
+                            if ctx.qkv_format == "bshd":
+                                dkv[:, :, 0, ...].copy_(dkv_)
+                            elif ctx.qkv_format == "sbhd":
+                                dkv[:, 0, ...].copy_(dkv_)
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "copy", "none")
+                        else:
+                            if ctx.qkv_format == "bshd":
+                                dkv[:, :, 0, ...].add_(dkv_)
+                            elif ctx.qkv_format == "sbhd":
+                                dkv[:, 0, ...].add_(dkv_)
+                            elif ctx.qkv_format == "thd":
+                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "none")
+                    elif i > 0:
+                        dkv.add_(dkv_)
+                    else:  # i == 0
+                        dkv.copy_(dkv_)
+                else:
+                    # not fp8 and not causal
+                    if i == 0:
+                        dkv.copy_(dkv_)
+                    else:  # i > 0
+                        dkv.add_(dkv_)
 
         if ctx.fp8 and ctx.use_fused_attention:
             amax_cp_bwd = amax_per_step.amax(dim=1)
@@ -2568,8 +2572,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
                 if ctx.enable_mla:
                     # [b, 2, sk//2, np, hn] -> [b, sk, np, hn]
-                    dk = dk.view(*dk.shape[0:1], -1, *dk.shape[-2:])
-                    dv = dv.view(*dv.shape[0:1], -1, *dv.shape[-2:])
+                    dk = dk.view(*dk.shape[0], -1, *dk.shape[-2:])
+                    dv = dv.view(*dv.shape[0], -1, *dv.shape[-2:])
                 else:
                     # [2, b, 2, sk//2, np, hn] -> [2, b, sk, np, hn]
                     dkv = dkv.view(*dkv.shape[0:2], -1, *dkv.shape[-2:])
@@ -3857,6 +3861,12 @@ def attn_forward_func_with_cp(
         "a2a",
         "all_gather",
     ], "The context parallel running configs cannot support sliding window attetnion!"
+
+    enable_mla = k.shape[-1] != v.shape[-1]
+    assert not enable_mla or cp_comm_type in [
+        "p2p",
+        "a2a+p2p",
+    ], "The context parallel running configs cannot support MLA!"
 
     args = [
         is_training,

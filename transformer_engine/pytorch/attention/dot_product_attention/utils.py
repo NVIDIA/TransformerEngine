@@ -241,7 +241,6 @@ class AttentionParams:
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
-    cp_comm_type: str = "p2p"
 
     def __eq__(self, other):
         """
@@ -310,7 +309,6 @@ def get_attention_backend(
     context_parallel = attention_params.context_parallel
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
-    cp_comm_type = attention_params.cp_comm_type
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
@@ -608,12 +606,6 @@ def get_attention_backend(
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with attention"
                 " bias for THD format"
-            )
-            use_fused_attention = False
-        elif head_dim_qk != head_dim_v and cp_comm_type not in ["p2p", "a2a+p2p"]:
-            logger.debug(
-                "Disabling FusedAttention as it only support MLA context parallelism with P2P"
-                " communication"
             )
             use_fused_attention = False
 
