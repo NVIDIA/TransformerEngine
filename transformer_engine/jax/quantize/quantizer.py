@@ -580,16 +580,15 @@ class QuantizerSet:
 @register_pytree_node_class
 @dataclass
 class GroupedQuantizer(Quantizer):
-    """Base class for quantizers.
+    """Quantizer for grouped arrays.
 
-    This abstract class defines the interface for tensor quantization, providing
-    methods for quantization and scale management.
+    This class extends Quantizer to support quantization of arrays in grouped manner,
+    where elements are grouped along a specified axis then quantized separately.
 
     Attributes:
-        q_dtype: The data type for quantized values
-        scaling_mode: The scaling mode to use for quantization
-        q_layout: The quantization axis (row-wise, column-wise, or both)
-
+        data_layout: The data layout specification
+        n_groups: Number of groups for quantization
+        quantizers: Tuple of quantizers for each group
     """
 
     data_layout: str = None
@@ -660,9 +659,22 @@ class GroupedQuantizer(Quantizer):
         group_sizes=None,
         group_axis=0,
     ):
-        """
+        """Quantize a tensor in grouped manner.
+
         Expected input shape: [M, K] or [G, K, N]
         Split to x.shape[group_axis] number of groups if group_sizes is not given
+
+        Args:
+            x: Input tensor to quantize
+            is_rowwise: Whether to use row-wise quantization
+            is_colwise: Whether to use column-wise quantization
+            dq_dtype: Data type for dequantized values
+            flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+            group_sizes: Array of ints containing the size of each group (default: None)
+            group_axis: The axis along which grouping is performed (default: 0)
+
+        Returns:
+            A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         assert group_axis == 0, "Only group_axis == 0 is supported now!"
 

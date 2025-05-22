@@ -72,8 +72,7 @@ class TensorScaleDequantizer(Dequantizer):
 
 
 class BlockScaleDequantizer(Dequantizer):
-    """
-    BlockScaling Dequantizer Class
+    """BlockScaling Dequantizer Class.
 
     This class provides static methods for dequantizing tensors that have been
     quantized using block scaling modes.
@@ -81,6 +80,19 @@ class BlockScaleDequantizer(Dequantizer):
 
     @staticmethod
     def _dequantize_func(data, scale_inv, dq_dtype, scaling_mode, is_colwise, flatten_axis):
+        """Dequantize a tensor using block scaling.
+
+        Args:
+            data: The quantized tensor data
+            scale_inv: The inverse scaling factors
+            dq_dtype: The data type for dequantized values
+            scaling_mode: The scaling mode used for quantization
+            is_colwise: Whether the scaling is column-wise
+            flatten_axis: The axis along which the tensor could be flattened to 2D
+
+        Returns:
+            The dequantized tensor
+        """
 
         data = data.astype(jnp.float32)
         scale_inv = scale_inv.view(jnp.uint8).astype(jnp.float32)
@@ -143,6 +155,14 @@ ScalingModeToDequantizerMap = {
 
 @staticmethod
 def _grouped_dequantize(grouped_scaled_tensor):
+    """Dequantize a grouped tensor.
+
+    Args:
+        grouped_scaled_tensor: The grouped scaled tensor to dequantize
+
+    Returns:
+        List of dequantized tensors for each group
+    """
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = grouped_scaled_tensor.group_sizes

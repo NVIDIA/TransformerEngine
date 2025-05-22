@@ -891,8 +891,27 @@ def grouped_quantize(
     group_sizes: jnp.ndarray = None,
     flatten_axis: int = -1,
 ) -> GroupedScaledTensor1x:
-    """
-    TODO(Hua): add docstring
+    """Quantize a tensor in grouped manner.
+
+    This function quantizes a tensor by splitting it into groups along a specified axis
+    and applying quantization to each group separately. The groups can be either specified
+    explicitly through group_sizes or automatically split along the group_axis.
+
+    Args:
+        x: Input tensor to quantize
+        quantizer: The quantizer to use for quantization
+        group_sizes: Array of ints containing the size of each group (default: None)
+        flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+
+    Returns:
+        A GroupedScaledTensor1x containing the quantized data
+
+    Note:
+        - If group_sizes is not provided, the tensor will be split into equal-sized groups
+          along the group_axis
+        - The group_axis is currently fixed to 0
+        - The quantizer's q_layout determines whether row-wise, column-wise, or both
+          quantization is applied
     """
 
     if quantizer is None:

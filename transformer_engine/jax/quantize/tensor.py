@@ -260,7 +260,16 @@ class ScaledTensor1x(ScaledTensor):
 @register_pytree_node_class
 @dataclass
 class GroupedScaledTensor1x(ScaledTensor1x):
-    """Quantizer for grouped of array"""
+    """Grouped Quantizer for an array.
+
+    This class extends ScaledTensor1x to support quantization of an array in grouped manner,
+    where elements are grouped along a specified axis.
+
+    Attributes:
+        group_sizes: Array containing the size of each group
+        original_shape: The original shape of the tensor before grouping
+        group_axis: The axis along which grouping is performed (default: 0)
+    """
 
     group_sizes: jnp.ndarray
     original_shape: Tuple
@@ -455,16 +464,17 @@ class ScaledTensorFactory:
         Args:
             data: The quantized tensor data
             scale_inv: The inverse scaling factors
-            group_sizes
             scaling_mode: The scaling mode for quantization
             dq_dtype: The data type for dequantized values (default: bfloat16)
             is_colwise: Whether to use column-wise quantization (default: False)
             data_layout: The data_layout specification (default: "N")
             flatten_axis: The quantization axis for the tensor
-            original_shape
+            group_sizes: Arra of ints containing the size of each group (default: None)
+            original_shape: The original shape of the tensor before grouping (default: None)
+            group_axis: The axis along which grouping is performed (default: 0)
 
         Returns:
-            A ScaledTensor1x instance
+            A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
         if group_sizes is not None:
@@ -521,8 +531,9 @@ class ScaledTensorFactory:
             dq_dtype: The data type for dequantized values (default: bfloat16)
             data_layout: The data_layout specification (default: "NN")
             flatten_axis: The quantization axis for the tensor
-            group_sizes
-            original_shape
+            group_sizes: Array containing the size of each group (default: None)
+            original_shape: The original shape of the tensor before grouping (default: None)
+            group_axis: The axis along which grouping is performed (default: 0)
 
         Returns:
             A ScaledTensor2x instance
@@ -580,6 +591,10 @@ class ScaledTensorFactory:
             dq_dtype: The data type for dequantized values (default: bfloat16)
             data_layout: The data_layout specification (default: "NN")
             q_layout: The quantization axis (default: ROWWISE)
+            flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+            group_sizes: Array containing the size of each group (default: None)
+            original_shape: The original shape of the tensor before grouping (default: None)
+            group_axis: The axis along which grouping is performed (default: 0)
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout

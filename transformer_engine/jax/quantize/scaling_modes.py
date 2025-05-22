@@ -79,7 +79,8 @@ class ScalingModeMetadataImpl(ABC):
             data_shape: The shape of the tensor being quantized
             is_colwise: Whether the scaling is column-wise
             is_padded: Whether to return padded shape
-            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+            flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+
         Returns:
             The shape for scale tensors
         """
@@ -92,9 +93,11 @@ class ScalingModeMetadataImpl(ABC):
 
         Args:
             data_shape: Original shape of the data tensor
+            n_groups: Number of groups in grouped quantization
+            group_axis: The axis along which grouping is performed
             is_colwise: Whether to use column-wise scaling
             is_padded: Whether to use padded shapes
-            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+            flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
         Returns:
             The shape for scale tensors
@@ -521,8 +524,10 @@ class ScalingMode(Enum):
 
         Args:
             data_shape: Shape of the data tensor
+            n_groups: Number of groups for grouped quantization
+            group_axis: The axis along which grouping is performed
             is_padded: Whether to use padded shapes
-            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+            flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
         Returns:
             Tuple of (rowwise_scale_shape, colwise_scale_shape)
