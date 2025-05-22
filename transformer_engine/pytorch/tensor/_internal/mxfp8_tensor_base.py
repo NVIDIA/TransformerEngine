@@ -17,6 +17,8 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
+from ..utils import update_tensor_quantizer
+
 from ...utils import _empty_tensor
 
 
@@ -200,3 +202,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
+
+    def update_quantizer(self, quantizer: Quantizer):
+        """Update the quantizer for the tensor"""
+        update_tensor_quantizer(self, quantizer)

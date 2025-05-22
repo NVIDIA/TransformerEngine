@@ -1514,6 +1514,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer,
             ) = quantizers
 
+            # Make sure weight tensor has correct quantizer
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            if weight_quantizer is not None and isinstance(weight_tensor, QuantizedTensorBase):
+                weight_tensor.update_quantizer(weight_quantizer)
+
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
                 args = []

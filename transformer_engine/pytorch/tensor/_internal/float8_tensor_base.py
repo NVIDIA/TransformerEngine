@@ -18,6 +18,8 @@ from ...constants import TE_DType as torch_to_transformer_engine_dtype
 
 from ..quantized_tensor import Quantizer
 
+from ..utils import update_tensor_quantizer
+
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
 
@@ -199,3 +201,7 @@ class Float8TensorBase(QuantizedTensorBase):
         if not needs_data_transpose:
             self._transpose = None
             self._transpose_invalid = True
+
+    def update_quantizer(self, quantizer: Quantizer):
+        """Update the quantizer for the tensor"""
+        update_tensor_quantizer(self, quantizer)

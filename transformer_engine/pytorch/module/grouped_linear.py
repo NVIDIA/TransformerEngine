@@ -720,6 +720,13 @@ class GroupedLinear(TransformerEngineBaseModule):
                     for i in range(self.num_gemms):
                         grad_output_quantizers[i].internal = True
 
+            # Make sure weight tensors has correct quantizers
+            # Note: Quantizer might have changed if quantization
+            # recipe changed
+            for weight, quantizer in zip(weight_tensors, weight_quantizers):
+                if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                    weight.update_quantizer(quantizer)
+
             if torch.is_grad_enabled():
                 linear_fn = _GroupedLinear.apply
                 args = []

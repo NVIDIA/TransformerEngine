@@ -70,6 +70,12 @@ class QuantizedTensorBase:
             f"{self.__class__.__name__} class does not implement restore_from_saved function"
         )
 
+    def update_quantizer(self, quantizer: Quantizer):
+        """Update the quantizer for the tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_quantizer function"
+        )
+
 
 def prepare_for_saving(
     *tensors: Union[torch.Tensor, QuantizedTensorBase],
