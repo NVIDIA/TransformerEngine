@@ -18,8 +18,6 @@ from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
 
-from ..utils import update_tensor_quantizer
-
 from ...utils import _empty_tensor
 
 
@@ -354,4 +352,6 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
     def update_quantizer(self, quantizer: Quantizer):
         """Update the quantizer for the tensor"""
+        from ..utils import update_tensor_quantizer
+        
         update_tensor_quantizer(self, quantizer)
