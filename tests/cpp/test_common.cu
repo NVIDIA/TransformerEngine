@@ -694,6 +694,17 @@ std::pair<double, double> getTolerances(const DType type) {
 
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
+  // Check how many times the distribution will call the generator
+  int k = 0;
+  {
+    std::mt19937 gen1 = *gen, gen2 = *gen;
+    std::uniform_real_distribution<> dis(-2.0, 1.0);
+    const float _ = dis(gen1);
+    while (gen2 != gen1) {
+      auto _ = gen2();
+      ++k;
+    }
+  }
   #pragma omp parallel proc_bind(spread)
   {
     std::mt19937 gen_local = *gen;
@@ -702,14 +713,14 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
     const int chunk_size = (size + threads_num - 1) / threads_num;
     const int idx_min = chunk_size * thread_ID;
     const int idx_max = std::min(chunk_size * (thread_ID + 1), static_cast<int>(size));
-    gen_local.discard(idx_min);
+    gen_local.discard(idx_min * k);
     std::uniform_real_distribution<> dis(-2.0, 1.0);
 
     for (int i = idx_min; i < idx_max; ++i) {
       data[i] = static_cast<T>(dis(gen_local));
     }
   }
-  gen->discard(size);
+  gen->discard(size * k);
 }
 
 void fillUniform(Tensor *t) {
