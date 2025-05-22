@@ -16,7 +16,6 @@ directly from C/C++, without Python.
    activation.h <activation>
    cast_transpose_noop.h <cast_transpose_noop>
    cast.h <cast>
-   comm_gemm_overlap.h <comm_gemm_overlap>
    cudnn.h <cudnn>
    fused_attn.h <fused_attn>
    fused_rope.h <fused_rope>
