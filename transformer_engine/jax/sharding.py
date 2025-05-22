@@ -203,6 +203,10 @@ def get_mesh_axis_rank(axis: str, mesh=None):
 
 
 def get_mesh_axis_rank_host(axis, mesh) -> int:
+    """
+    Same as get_mesh_axis_rank(), but return a host value instead of a
+    traced device value.
+    """
     if axis not in mesh.axis_names:
         raise ValueError(f"Axis {axis} not found in mesh axis names: {mesh.axis_names}")
 

@@ -482,7 +482,7 @@ class TestDistributedContextParallelSelfAttn:
         [
             pytest.param((-1, -1), id="window_size(-1, -1)"),
             pytest.param((20, 0), id="window_size(20, 0)"),
-        ]
+        ],
     )
     def test_context_parallel_ring_attn(
         self,
@@ -502,7 +502,10 @@ class TestDistributedContextParallelSelfAttn:
         if window_size != (-1, -1) and not qkv_layout.is_thd():
             pytest.skip("Sliding window attention is only supported for THD layout")
         if window_size != (-1, -1) and qkv_layout.is_thd() and use_scan:
-            pytest.skip("When context parallelism and sliding window attention are used, use scanloop is not supported")
+            pytest.skip(
+                "When context parallelism and sliding window attention are used, "
+                "scanloop is not supported"
+            )
         self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
