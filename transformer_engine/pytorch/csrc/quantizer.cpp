@@ -389,7 +389,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
 
 // TODO(zhongbo): it will also be better if create_tensor can use this function to reduce code duplication
 std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape,
-                                                                bool columnwise) const {
+                                                          bool columnwise) const {
   using namespace pybind11::literals;
   std::vector<int64_t> torch_shape;
   size_t numel = 1;

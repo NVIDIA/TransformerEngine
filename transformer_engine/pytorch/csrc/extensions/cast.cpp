@@ -91,9 +91,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 }
 
 // TODO(zhongbo): we should let this function be the backend of quantize to reduce code redundancy
-void quantize_cpp(TensorWrapper &te_input, py::handle quantizer_py, std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &te_output,
-                    std::optional<at::Tensor> noop) {
-
+void quantize_cpp(TensorWrapper& te_input, py::handle quantizer_py,
+                  std::unique_ptr<Quantizer>& quantizer_cpp, TensorWrapper& te_output,
+                  std::optional<at::Tensor> noop) {
   TensorWrapper te_noop;
   if (noop.has_value()) {
     te_noop = makeTransformerEngineTensor(*noop);
@@ -144,7 +144,6 @@ void quantize_cpp(TensorWrapper &te_input, py::handle quantizer_py, std::unique_
     nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());
   });
-
 }
 
 py::object dequantize(const py::handle& input, transformer_engine::DType otype) {
