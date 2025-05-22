@@ -195,7 +195,7 @@ class Float8BlockQuantizer : public Quantizer {
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 
-  std::pair<size_t, size_t> get_scale_shape(const std::vector<size_t>& shape,
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape,
                                             bool columnwise) const;
 };
 

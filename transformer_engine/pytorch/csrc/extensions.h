@@ -110,12 +110,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_bulk_alloc_outputs(at::Tensor inpput_view, std::vector<int> m_splits,
-                                                 std::vector<py::handle> quantizer_list);
-
-std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
-                                             std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list, DType otype);
+std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list, at::Tensor input_view,
+                                             std::vector<int> m_splits, std::vector<py::handle> quantizer_list, DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
@@ -187,6 +183,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  **************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
+                    std::optional<at::Tensor> noop);
+
+void quantize_cpp(TensorWrapper &te_input, py::handle quantizer_py, std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &te_output,
                     std::optional<at::Tensor> noop);
 
 py::object dequantize(const py::handle &input, DType otype);
