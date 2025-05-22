@@ -2411,7 +2411,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
                     dk_ = dk_.view(*ctx.k_shape)
                     dv_ = dv_.view(*ctx.v_shape)
-                
+
                 if ctx.fp8:
                     # enable_mla and fp8
                     if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
@@ -2443,8 +2443,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 dv[0, ...].add_(dv_[0, ...])
                                 dv[1, ...].copy_(dv_[1, ...])
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "copy")
-                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "copy")
+                                tex.thd_grad_correction(
+                                    dk, dk_, cu_seqlens_kv_padded, "add", "copy"
+                                )
+                                tex.thd_grad_correction(
+                                    dv, dv_, cu_seqlens_kv_padded, "add", "copy"
+                                )
                         else:
                             dk.add_(dk_)
                             dv.add_(dv_)
@@ -2457,8 +2461,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 dk[0, ...].copy_(dk_)
                                 dv[0, ...].copy_(dv_)
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "copy", "none")
-                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "copy", "none")
+                                tex.thd_grad_correction(
+                                    dk, dk_, cu_seqlens_kv_padded, "copy", "none"
+                                )
+                                tex.thd_grad_correction(
+                                    dv, dv_, cu_seqlens_kv_padded, "copy", "none"
+                                )
                         else:
                             if ctx.qkv_format == "bshd":
                                 dk[:, 0, ...].add_(dk_)
@@ -2467,8 +2475,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 dk[0, ...].add_(dk_)
                                 dv[0, ...].add_(dv_)
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dk, dk_, cu_seqlens_kv_padded, "add", "none")
-                                tex.thd_grad_correction(dv, dv_, cu_seqlens_kv_padded, "add", "none")
+                                tex.thd_grad_correction(
+                                    dk, dk_, cu_seqlens_kv_padded, "add", "none"
+                                )
+                                tex.thd_grad_correction(
+                                    dv, dv_, cu_seqlens_kv_padded, "add", "none"
+                                )
                     elif i > 0:
                         dk.add_(dk_)
                         dv.add_(dv_)
@@ -2506,7 +2518,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 dkv[:, 0, ...].add_(dkv_[:, 0, ...])
                                 dkv[:, 1, ...].copy_(dkv_[:, 1, ...])
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "copy")
+                                tex.thd_grad_correction(
+                                    dkv, dkv_, cu_seqlens_kv_padded, "add", "copy"
+                                )
                         else:
                             dkv.add_(dkv_)
                     elif i >= (cp_size - rank - 1):
@@ -2516,14 +2530,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             elif ctx.qkv_format == "sbhd":
                                 dkv[:, 0, ...].copy_(dkv_)
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "copy", "none")
+                                tex.thd_grad_correction(
+                                    dkv, dkv_, cu_seqlens_kv_padded, "copy", "none"
+                                )
                         else:
                             if ctx.qkv_format == "bshd":
                                 dkv[:, :, 0, ...].add_(dkv_)
                             elif ctx.qkv_format == "sbhd":
                                 dkv[:, 0, ...].add_(dkv_)
                             elif ctx.qkv_format == "thd":
-                                tex.thd_grad_correction(dkv, dkv_, cu_seqlens_kv_padded, "add", "none")
+                                tex.thd_grad_correction(
+                                    dkv, dkv_, cu_seqlens_kv_padded, "add", "none"
+                                )
                     elif i > 0:
                         dkv.add_(dkv_)
                     else:  # i == 0
