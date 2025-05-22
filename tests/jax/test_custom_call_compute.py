@@ -128,9 +128,13 @@ def assert_dequantized_grouped_scaled_tensor(
                 data_ndim = len(a.original_shape)
                 flatten_axis = a.flatten_axis
                 if b_i.shape[0] == 1:
-                    b_i = jnp.transpose(b_i, (0, *range(flatten_axis, data_ndim), *range(1, flatten_axis)))
+                    b_i = jnp.transpose(
+                        b_i, (0, *range(flatten_axis, data_ndim), *range(1, flatten_axis))
+                    )
                 else:
-                    b_i = jnp.transpose(b_i, (*range(flatten_axis, data_ndim), *range(flatten_axis)))
+                    b_i = jnp.transpose(
+                        b_i, (*range(flatten_axis, data_ndim), *range(flatten_axis))
+                    )
             dq_a_i = dq_a_i.reshape(b_i.shape)
             assert_allclose(dq_a_i, b_i, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):

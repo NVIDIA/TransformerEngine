@@ -304,16 +304,16 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         if self.data_layout == "T":
             if self.original_shape[0] == self.group_sizes.size:
                 self.original_shape = (
-                        self.original_shape[0],
-                        *self.original_shape[flatten_axis:],
-                        *self.original_shape[1: flatten_axis],
-                        )
+                    self.original_shape[0],
+                    *self.original_shape[flatten_axis:],
+                    *self.original_shape[1:flatten_axis],
+                )
                 flatten_axis = len(self.original_shape) - flatten_axis + 1
             else:
                 self.original_shape = (
-                        *self.original_shape[flatten_axis:],
-                        *self.original_shape[:flatten_axis],
-                        )
+                    *self.original_shape[flatten_axis:],
+                    *self.original_shape[:flatten_axis],
+                )
                 self.group_axis = flatten_axis
                 flatten_axis = len(self.original_shape) - flatten_axis
 

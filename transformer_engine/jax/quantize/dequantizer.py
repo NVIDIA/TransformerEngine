@@ -157,7 +157,11 @@ def _grouped_dequantize(grouped_scaled_tensor):
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
         # import pdb; pdb.set_trace()
-        data_shape_i = (*original_shape[:group_axis], group_sizes[i], *original_shape[group_axis+1:])
+        data_shape_i = (
+            *original_shape[:group_axis],
+            group_sizes[i],
+            *original_shape[group_axis + 1 :],
+        )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"
