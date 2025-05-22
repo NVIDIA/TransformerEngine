@@ -301,8 +301,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
              "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m,
              input_dims[0]);
 
-  // TODO(Hua): shall we use is_delayed_scaling or is_tensor_scaling here?
-  if (is_fp8_dtype(out_dtype) && is_tensor_scaling) {
+  if (is_delayed_scaling) {
     NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups,
                ", got ", amaxs->dimensions()[0]);
     NVTE_CHECK(amax_dtype == DType::kFloat32 && scale_dtype == DType::kFloat32);
@@ -340,7 +339,6 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     }
 
     if (has_colwise) {
-      // TODO(Hua): Shall we use is_tensor_scaling or is_delayed_scaling here? Both pass unit tests.
       auto &tmp_shape = is_tensor_scaling ? shape_trans_i : shape_i;
       out_i.set_columnwise_data(static_cast<void *>(colwise_output_ptr), out_dtype, tmp_shape);
       // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
@@ -353,8 +351,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
       } else {
         const bool is_colwise = true;
         auto sinv_shape_i = get_mxfp8_scale_shape(m_i, n, is_colwise);
-        // TODO(Hua): shall we use colwise_sinv_ptr or tmp_sinv_ptr here? Both pass unit tests.
-        out_i.set_columnwise_scale_inv(static_cast<void *>(tmp_sinv_ptr), sinv_dtype, sinv_shape_i);
+        out_i.set_columnwise_scale_inv(static_cast<void *>(colwise_sinv_ptr), sinv_dtype,
+                                       sinv_shape_i);
         colwise_sinv_size = product(sinv_shape_i);
       }
     }

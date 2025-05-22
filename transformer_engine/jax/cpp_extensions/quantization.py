@@ -924,7 +924,8 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             scale = scale.at[i].set(quantizer_i.scale[0])
 
-    # TODO(Hua): this part mimics _quantize_dbias_impl(), is it correct?
+    # TODO(Phuong): for CurrentScaling, move this amax reduction to C++ so that the amax is
+    # calculated for each individual matrix in the group
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
         tmp_scale = compute_scale_from_amax(amax, quantizer.q_dtype)
@@ -932,12 +933,13 @@ def grouped_quantize(
         for i in range(n_groups):
             scale = scale.at[i].set(tmp_scale)
 
-    # WAR for DelayedScaling (Hua: and CurrentScaling?) COLWISE
-    is_block_scaling = (
+    is_tensor_scaling = (
         quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
         or quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
     )
-    apply_colwise_war = is_block_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
+    # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
+    # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
+    apply_colwise_war = is_tensor_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
     q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
     (
         rowwise_casted_output,
@@ -957,9 +959,9 @@ def grouped_quantize(
         scale_dtype=quantizer.get_scale_dtype(),
     )
 
-    # For DelayedScaling2x (Hua: and CurrentScaling2x?), the scale buffer
+    # For DelayedScaling2x and CurrentScaling2x, the scale buffer
     # is shared between rowwise and colwise
-    if is_block_scaling and quantizer.is_2x2x() or apply_colwise_war:
+    if is_tensor_scaling and quantizer.is_2x2x() or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
