@@ -129,13 +129,8 @@ class _GroupedLinear(torch.autograd.Function):
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
-            output_list = (
-                tex.fused_bulk_alloc_outputs(inp_view, m_splits, input_quantizers)
-                if isinstance(input_quantizers[0], Float8BlockQuantizer)
-                else None
-            )
             inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, output_list, input_quantizers, TE_DType[activation_dtype]
+                inputmats_no_fp8, inp_view, m_splits, input_quantizers, TE_DType[activation_dtype]
             )
 
             weights_fp8 = []
@@ -279,16 +274,10 @@ class _GroupedLinear(torch.autograd.Function):
                                 grad_output_mats[i], ctx.grad_output_quantizers[i]
                             )
                 else:
-                    output_list = (
-                        tex.fused_bulk_alloc_outputs(
-                            grad_output_view, ctx.m_splits, ctx.grad_output_quantizers
-                        )
-                        if isinstance(ctx.grad_output_quantizers[0], Float8BlockQuantizer)
-                        else None
-                    )
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
-                        output_list,
+                        grad_output_view,
+                        ctx.m_splits,
                         ctx.grad_output_quantizers,
                         TE_DType[ctx.activation_dtype],
                     )
