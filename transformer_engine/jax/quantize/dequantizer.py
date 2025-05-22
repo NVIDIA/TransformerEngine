@@ -33,15 +33,16 @@ class Dequantizer(ABC):
     @staticmethod
     @abstractmethod
     def dequantize(scaled_tensor):
-        pass
+        """Dequantizing given tensor to higher precision."""
 
 
 class TensorScaleDequantizer(Dequantizer):
-    """Encapsulation class for dequantization helpers.
+    """
+    TensorScaling Dequantizer Class
 
     This class provides static methods for dequantizing tensors that have been
-    quantized using different scaling modes. It supports both delayed scaling
-    and block scaling modes.
+    quantized using different tensor scaling modes. It supports both delayed scaling
+    and current scaling modes.
     """
 
     @staticmethod
@@ -71,6 +72,12 @@ class TensorScaleDequantizer(Dequantizer):
 
 
 class BlockScaleDequantizer(Dequantizer):
+    """
+    BlockScaling Dequantizer Class
+
+    This class provides static methods for dequantizing tensors that have been
+    quantized using block scaling modes.
+    """
 
     @staticmethod
     def _dequantize_func(data, scale_inv, dq_dtype, scaling_mode, is_colwise, flatten_axis):

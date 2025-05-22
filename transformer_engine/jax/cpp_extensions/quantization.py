@@ -5,8 +5,8 @@
 import operator
 from functools import reduce
 from typing import Tuple, Optional
-from packaging import version
 import math
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -900,11 +900,9 @@ def grouped_quantize(
 
     # TODO(Phuong): add support for flatten_axis = -2
     assert (
-        flatten_axis == -1 or flatten_axis == x.ndim - 1
+        flatten_axis in (-1, x.ndim - 1)
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
-    # TODO(Hua): What is other_sizes for? Is this other_sizes correct?
-    other_sizes = x.shape[1:]
 
     if group_sizes is None:
         group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
@@ -933,10 +931,10 @@ def grouped_quantize(
         for i in range(n_groups):
             scale = scale.at[i].set(tmp_scale)
 
-    is_tensor_scaling = (
-        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        or quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
-    )
+    is_tensor_scaling = quantizer.scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+            )
     # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
     # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
     apply_colwise_war = is_tensor_scaling and quantizer.q_layout == QuantizeLayout.COLWISE

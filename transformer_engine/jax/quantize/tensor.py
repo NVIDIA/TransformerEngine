@@ -230,7 +230,7 @@ class ScaledTensor1x(ScaledTensor):
         # axis_names were given for N layout, so needs to be transpose for T layout
         if self.data_layout == "T":
             assert self.flatten_axis > 0
-            axis_names = (*logical_axis_names[flatten_axis:], *logical_axis_names[:flatten_axis])
+            axis_names = (*logical_axis_names[self.flatten_axis:], *logical_axis_names[:self.flatten_axis])
         else:
             axis_names = logical_axis_names
 

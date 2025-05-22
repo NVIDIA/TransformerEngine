@@ -617,7 +617,7 @@ class GroupedQuantizer(Quantizer):
         self, tensor_list, group_sizes, original_shape, group_axis, mode
     ):
         # mode 0 = concate, mode 1 = add
-        # TODO (Ming Huang): Consider to apply Enum for mode.
+        # TODO(Ming Huang): Consider to apply Enum for mode.
         assert mode in [0, 1]
         grouped_data = (
             [] if mode == 0 else jnp.zeros(tensor_list[0].data.shape, tensor_list[0].data.dtype)

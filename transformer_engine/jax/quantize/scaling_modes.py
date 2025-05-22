@@ -12,7 +12,6 @@ including delayed scaling and block scaling strategies.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-import math
 from typing import Tuple, Dict
 from functools import reduce
 import operator
@@ -28,6 +27,7 @@ __all__ = ["QuantizeShardyRules", "ScalingMode"]
 
 
 def DIVUP(a, b):
+    "Divide a by b and then round up"
     return -(a // -b)
 
 
