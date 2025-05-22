@@ -11,32 +11,31 @@
 
 #include "common.h"
 
+namespace transformer_engine::pytorch {
+
 /***************************************************************************************************
  * Permutation
  **************************************************************************************************/
 
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
-    at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
-    int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num);
+    at::Tensor input, const DType dtype, at::Tensor indices, int64_t num_out_tokens,
+    std::vector<at::Tensor> workspace, int64_t max_expanded_token_num);
 
-at::Tensor moe_permute_bwd(at::Tensor input, const transformer_engine::DType dtype,
-                           at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
-                           int64_t topK);
+at::Tensor moe_permute_bwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
+                           at::Tensor prob, int64_t num_tokens, int64_t topK);
 
-at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType dtype,
-                             at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
-                             int64_t topK);
+at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
+                             at::Tensor prob, int64_t num_tokens, int64_t topK);
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
-                                                     const transformer_engine::DType dtype,
-                                                     at::Tensor row_id_map, at::Tensor prob);
+                                                     const DType dtype, at::Tensor row_id_map,
+                                                     at::Tensor prob);
 
 /***************************************************************************************************
  * Attention
  **************************************************************************************************/
 
-NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
-                                               const transformer_engine::DType kv_dtype,
+NVTE_Fused_Attn_Backend get_fused_attn_backend(const DType q_dtype, const DType kv_dtype,
                                                NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                                NVTE_Mask_Type attn_mask_type, float p_dropout,
                                                size_t num_attn_heads, size_t num_gqa_groups,
@@ -61,8 +60,8 @@ std::vector<py::object> fused_attn_bwd(
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
-    const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
+    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
+    const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer);
@@ -72,10 +71,10 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
-void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
-                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
-                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
-                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
+void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
+                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                      NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM
@@ -83,25 +82,29 @@ void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_
 
 using MaybeTensor = std::optional<at::Tensor>;
 
-void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
+                             py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
+                             DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
+                             at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                             bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
+                             std::optional<CommOverlapType> comm_type = std::nullopt,
+                             MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false);
+
+void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
-                    at::Tensor B_scale_inverse, transformer_engine::DType B_type,
-                    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
-                    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
-                    at::Tensor bias, transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
-                    bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                    at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
+                    bool transb, at::Tensor D, at::Tensor D_scale, DType D_type, at::Tensor D_amax,
+                    at::Tensor bias, DType bias_type, at::Tensor pre_gelu_out, bool grad,
+                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter);
 
 std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
-    std::optional<std::vector<at::Tensor>> D, transformer_engine::DType D_type,
-    std::vector<int64_t> m_splits, std::vector<at::Tensor> bias,
-    transformer_engine::DType bias_type, bool single_output, std::vector<at::Tensor> pre_gelu_out,
-    bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
-    bool use_split_accumulator, int math_sm_count);
-
-namespace transformer_engine::pytorch {
+    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
+    std::vector<at::Tensor> bias, DType bias_type, bool single_output,
+    std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
+    size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count);
 
 /***************************************************************************************************
  * Transpose
@@ -109,15 +112,10 @@ namespace transformer_engine::pytorch {
 
 std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                                              std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list,
-                                             transformer_engine::DType otype);
+                                             std::vector<py::handle> quantizer_list, DType otype);
 
-at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
+at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
-
-}  // namespace transformer_engine::pytorch
-
-namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
  * Activations
@@ -155,8 +153,6 @@ py::object dqgelu(const at::Tensor &grad, const at::Tensor &input, py::handle qu
 
 py::object dsrelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
 
-}  // namespace transformer_engine::pytorch
-
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -168,7 +164,7 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 
 std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, MaybeTensor bias,
                                       float eps, py::object ln_out, py::handle quantizer,
-                                      transformer_engine::DType out_dtype, const int sm_margin,
+                                      DType out_dtype, const int sm_margin,
                                       const bool zero_centered_gamma);
 
 /***************************************************************************************************
@@ -180,34 +176,23 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const int sm_margin, const bool zero_centered_gamma);
 
 std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
-                                    py::object ln_out, py::handle quantizer,
-                                    transformer_engine::DType otype, const int sm_margin,
-                                    const bool zero_centered_gamma);
+                                    py::object ln_out, py::handle quantizer, DType otype,
+                                    const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
  * Cast
  **************************************************************************************************/
 
-namespace transformer_engine::pytorch {
-
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop);
 
-py::object dequantize(const py::handle &input, transformer_engine::DType otype);
-
-std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
-
-std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
-                             py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
-                             DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
-                             at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                             bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
-                             std::optional<CommOverlapType> comm_type = std::nullopt,
-                             MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false);
+py::object dequantize(const py::handle &input, DType otype);
 
 /***************************************************************************************************
- * Cast fusions
+ * Bias gradient fusions
  **************************************************************************************************/
+
+std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
 
 std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
                                     py::handle quantizer);
@@ -223,8 +208,6 @@ std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Te
 
 std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
                                      py::handle quantizer);
-
-}  // namespace transformer_engine::pytorch
 
 /***************************************************************************************************
  * Softmax
@@ -262,7 +245,7 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
                                                  const std::string &amax_compute_algo,
-                                                 transformer_engine::DType fp8_dtype, float margin);
+                                                 DType fp8_dtype, float margin);
 
 // Note that the start_offset is the logical offset along the tensor dimension.
 // The offset in bytes is start_offset * sizeof(tensor.dtype)
@@ -271,7 +254,7 @@ void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor
 
 void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
                                     size_t h, size_t w, size_t start_offset, size_t block_len,
-                                    const transformer_engine::DType out_dtype);
+                                    const DType out_dtype);
 
 /***************************************************************************************************
  * Rotary positional embedding
@@ -335,7 +318,6 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python);
 
-using transformer_engine::DType;
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
@@ -389,26 +371,17 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
  * NVSHMEM APIs
  **************************************************************************************************/
 
-namespace nvshmem_api {
 void init_nvshmem_backend(c10d::ProcessGroup *process_group);
 
-torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+at::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
-                                    torch::Tensor signal);
+void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at::Tensor signal);
 
-void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
+void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
 void nvshmem_finalize();
-}  // namespace nvshmem_api
 
-/***************************************************************************************************
- * swizzle
- **************************************************************************************************/
-
-at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
-
-at::Tensor columnwise_swizzle(at::Tensor input, at::Tensor scale_inv);
+}  // namespace transformer_engine::pytorch
 
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
@@ -452,12 +425,10 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   ~CommOverlap() {}
 
-  void set_buffer_params(py::handle quantizer);
+  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  void copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk = false);
-
-  py::object get_buffer(py::handle quantizer, bool local_chunk = false,
-                        std::optional<const std::vector<int64_t>> shape = std::nullopt);
+  at::Tensor get_buffer(bool local_chunk = false,
+                        std::optional<std::vector<int64_t>> shape = std::nullopt);
 
 };  // CommOverlap
 
@@ -473,12 +444,10 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   ~CommOverlapP2P() {}
 
-  void set_buffer_params(py::handle quantizer);
+  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  void copy_into_buffer(py::handle input, py::handle quantizer, bool local_chunk = false);
-
-  py::object get_buffer(py::handle quantizer, bool local_chunk = false,
-                        std::optional<const std::vector<int64_t>> shape = std::nullopt);
+  at::Tensor get_buffer(bool local_chunk = false,
+                        std::optional<std::vector<int64_t>> shape = std::nullopt);
 
 };  // CommOverlapP2P
 

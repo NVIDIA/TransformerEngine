@@ -229,7 +229,7 @@ class CurrentScaleQuantizer(Quantizer):
 
         compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
-        amax = jnp.max(jnp.abs(x)).reshape((1,))
+        amax = jnp.max(jnp.abs(x)).reshape((1,)).astype(compute_dtype)
         fp8_max = jnp.astype(jnp.finfo(self.q_dtype).max, jnp.float32)
         scale = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
         scaled_x = x.astype(compute_dtype) * scale

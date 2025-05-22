@@ -919,8 +919,10 @@ def _all_gather_fp8(
     # Note: We cannot directly all-gather the transposed FP8 tensor,
     # so temporarily modify quantizer to avoid creating FP8 transpose.
     if not isinstance(inp, Float8TensorBase):
-        if quantizer is None:
-            raise ValueError("Input tensor is not FP8 and no quantizer was provided")
+        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+        # we cannot directly gather the transposed fp8 tensor
+        # so we need to disable columnwise usage for the quantizer
+        # and then set it back to the original value after quantizing
         init_rowwise_usage = quantizer.rowwise_usage
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1063,11 +1065,11 @@ def _all_gather_mxfp8(
         dtype = inp.dtype
     elif isinstance(inp, MXFP8TensorBase):
         if inp._rowwise_data is not None:
-            in_shape = inp._rowwise_data.device.size()
+            in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
             dtype = inp._rowwise_data.dtype
         elif inp._columnwise_data is not None:
-            in_shape = inp._columnwise_data.device.size()
+            in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
             dtype = inp._columnwise_data.dtype
         else:
@@ -1237,12 +1239,18 @@ def gather_along_first_dim(
         final_quantizer = (
             None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
         )
+        # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+        if isinstance(rowwise, Float8BlockwiseQTensorBase):
+            rowwise = inp._original_tensor
         rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
         out_obj.rowwise_gemm_tensor = rowwise_total
         if rowwise is not columnwise:
             final_quantizer_columnwise = (
                 None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
             )
+            # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+            if isinstance(columnwise, Float8BlockwiseQTensorBase):
+                columnwise = inp._original_tensor
             columnwise_total, _ = gather_along_first_dim(
                 columnwise, process_group, False, final_quantizer_columnwise
             )

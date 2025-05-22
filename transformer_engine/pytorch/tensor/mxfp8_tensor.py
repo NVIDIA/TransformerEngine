@@ -6,12 +6,13 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -135,6 +136,9 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return MXFP8BlockScaling
+
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -216,51 +220,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         # TODO(ksivamani): Fix the detach bug
         return MXFP8Tensor.make_like(self)
-
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        """
-        For MXFP8, columnwise scaled output is only produced by x2
-        scaling kernels, so this function only disables usages.
-        """
-
-        # Default usage is based on available data
-        if rowwise_usage is None:
-            rowwise_usage = self._rowwise_data is not None
-        if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None
-
-        # Update row-scaled data
-        if rowwise_usage:
-            if self._rowwise_data is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
-                )
-            if self._rowwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
-                )
-        else:
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-
-        # Update column-scaled data
-        if columnwise_usage:
-            if self._columnwise_data is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
-                )
-            if self._columnwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
-                )
-        else:
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring

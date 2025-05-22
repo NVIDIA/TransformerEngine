@@ -17,7 +17,8 @@
 #include <torch/cuda.h>
 #include <torch/extension.h>
 
-namespace nvshmem_api {
+namespace transformer_engine::pytorch {
+
 void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 #ifdef NVTE_ENABLE_NVSHMEM
   nvshmemx_init_attr_t attr = {};
@@ -126,4 +127,5 @@ void nvshmem_finalize() {
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
-}  // namespace nvshmem_api
+
+}  // namespace transformer_engine::pytorch

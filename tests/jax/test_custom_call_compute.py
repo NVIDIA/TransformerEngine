@@ -81,12 +81,17 @@ def is_shape_supported_by_mxfp8(input_shape):
 
 def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
+        assert a.scaling_mode == b.scaling_mode
         assert a.scale_inv.dtype == b.scale_inv.dtype
-        if a.scale_inv.dtype == jnp.float8_e8m0fnu:
+        if a.scaling_mode.is_tensor_scaling():
+            # Assert in dq_dtype as some unfused codepaths have an intermediate cast
+            # to an input dtype which reduces precision compared to everything in fp32
+            assert_allclose(a.scale_inv, b.scale_inv, dtype=a.dq_dtype)
+        elif a.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             # Compare MXFP8 scales as uint8
             assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
         else:
-            assert_allclose(a.scale_inv, b.scale_inv)
+            raise ValueError(f"Unsupported scaling mode {a.scaling_mode}")
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
@@ -550,17 +555,24 @@ QUANTIZE_OUTPUT_DTYPES = {
     "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
 }
 
-ALL_QUANTIZE_TEST_SHAPES = [
-    (32, 64),
-    (2, 64, 32),
+ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = [
+    ((32, 64), -1),
+    ((2, 64, 32), -1),
+    ((2, 64, 32), -2),
+    ((32, 256, 128), -1),
+    ((32, 256, 128), -2),
+    ((64, 32, 32, 256), -1),
+    ((64, 32, 32, 256), -2),
+    ((64, 32, 32, 256), -3),
 ]
 
-QUANTIZE_TEST_SHAPES = {
+QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = {
     "L0": [
-        (32, 256, 128),
-        (64, 32, 32, 256),
+        ((32, 64), -1),
+        ((2, 64, 32), -1),
+        ((2, 64, 32), -2),
     ],
-    "L2": ALL_QUANTIZE_TEST_SHAPES,
+    "L2": ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES,
 }
 
 QUANTIZATION_INPUT_DTYPE = {
@@ -572,9 +584,8 @@ QUANTIZATION_INPUT_DTYPE = {
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-@pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
+@pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
@@ -718,12 +729,11 @@ class TestFusedQuantize:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("input_shape", QUANTIZE_TEST_SHAPES)
+    @pytest_parametrize_wrapper("input_shape,flatten_axis", QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
     def test_quantize_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, flatten_axis
     ):
@@ -731,6 +741,12 @@ class TestFusedQuantize:
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
+
+        if (flatten_axis < 0 and flatten_axis + len(input_shape) <= 0) or flatten_axis <= 0:
+            pytest.skip(
+                f"Flatten axis {flatten_axis} is not supported for input shape {input_shape}. There"
+                " must be at least one axis on either side of the flatten_axis split."
+            )
 
         key = jax.random.PRNGKey(0)
         input = jax.random.uniform(key, input_shape, in_dtype)

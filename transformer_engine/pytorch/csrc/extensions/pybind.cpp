@@ -6,7 +6,6 @@
 
 #include "pybind.h"
 
-#include <Python.h>
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
@@ -111,10 +110,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
-  m.def("rowwise_swizzle", &rowwise_swizzle, "Swizzle rowwise scale inverses.",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("columnwise_swizzle", &columnwise_swizzle, "Swizzle columnwise scale inverses.",
-        py::call_guard<py::gil_scoped_release>());
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
@@ -160,161 +155,188 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
 
   // Permutation functions
-  m.def("moe_permute_fwd", moe_permute_fwd);
-  m.def("moe_permute_bwd", moe_permute_bwd);
-  m.def("moe_unpermute_fwd", moe_unpermute_fwd);
-  m.def("moe_unpermute_bwd", moe_unpermute_bwd);
+  m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_permute_bwd", transformer_engine::pytorch::moe_permute_bwd, "MOE permute BWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_unpermute_fwd", transformer_engine::pytorch::moe_unpermute_fwd, "MOE unpermute FWD",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("moe_unpermute_bwd", transformer_engine::pytorch::moe_unpermute_bwd, "MOE unpermute BWD",
+        py::call_guard<py::gil_scoped_release>());
 
   // Softmax functions
-  m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
+  m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
+        "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("scaled_softmax_backward", &transformer_engine::pytorch::scaled_softmax_backward,
+        "Scaled Softmax BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("scaled_masked_softmax_forward",
+        &transformer_engine::pytorch::scaled_masked_softmax_forward, "Scaled Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_softmax_backward", &scaled_softmax_backward, "Scaled Softmax BWD",
+  m.def("scaled_masked_softmax_backward",
+        &transformer_engine::pytorch::scaled_masked_softmax_backward, "Scaled Masked Softmax BWD",
         py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_masked_softmax_forward", &scaled_masked_softmax_forward,
-        "Scaled Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_masked_softmax_backward", &scaled_masked_softmax_backward,
-        "Scaled Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_upper_triang_masked_softmax_forward", &scaled_upper_triang_masked_softmax_forward,
+  m.def("scaled_upper_triang_masked_softmax_forward",
+        &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_forward,
         "Scaled Upper-Triangular Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_upper_triang_masked_softmax_backward", &scaled_upper_triang_masked_softmax_backward,
+  m.def("scaled_upper_triang_masked_softmax_backward",
+        &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_backward,
         "Scaled Upper-Triangular Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_forward",
-        &scaled_aligned_causal_masked_softmax_forward,
+        &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_forward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
   m.def("scaled_aligned_causal_masked_softmax_backward",
-        &scaled_aligned_causal_masked_softmax_backward,
+        &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_backward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
-  m.def("layernorm_fwd", &layernorm_fwd, "LayerNorm", py::arg("input"), py::arg("weight"),
-        py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"),
-        py::arg("sm_margin"), py::arg("zero_centered_gamma"));
-  m.def("layernorm_bwd", &layernorm_bwd, "Backward of LayerNorm");
-  m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm", py::arg("input"), py::arg("weight"), py::arg("eps"),
-        py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
-        py::arg("zero_centered_gamma"));
-  m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
+  m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
+        py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
+        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
+  m.def("layernorm_bwd", &transformer_engine::pytorch::layernorm_bwd, "Backward of LayerNorm");
+  m.def("rmsnorm_fwd", &transformer_engine::pytorch::rmsnorm_fwd, "RMSNorm", py::arg("input"),
+        py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
+        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
+  m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
   m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
         "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
         py::arg("quantizer_list"), py::arg("otype"));
 
-  m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
+  m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
+        "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
+  m.def("get_fused_attn_backend", &transformer_engine::pytorch::get_fused_attn_backend,
+        "Get Fused Attention backend", py::call_guard<py::gil_scoped_release>());
+  m.def("compute_amax", &transformer_engine::pytorch::compute_amax,
+        "Compute absolute max value in tensor", py::arg("input"), py::arg("amax"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
-  m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
+  m.def("fused_amax_and_scale_update_after_reduction",
+        &transformer_engine::pytorch::fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fp8_block_scaling_compute_partial_amax", &fp8_block_scaling_compute_partial_amax,
+  m.def("fp8_block_scaling_compute_partial_amax",
+        &transformer_engine::pytorch::fp8_block_scaling_compute_partial_amax,
         "Compute partial amax from master weights for fp8 block scaling", py::arg("tensor"),
-        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"));
-  m.def("fp8_block_scaling_partial_cast", &fp8_block_scaling_partial_cast,
+        py::arg("amax"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fp8_block_scaling_partial_cast",
+        &transformer_engine::pytorch::fp8_block_scaling_partial_cast,
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
-        py::arg("out_dtype"));
-  m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+  m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
+        "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
-  m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
+  m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
+        "Prepare QKV for Flash Attention", py::call_guard<py::gil_scoped_release>());
+  m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
+        "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_attn_fwd", &fused_attn_fwd,
+  m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
-  m.def("fused_attn_bwd", &fused_attn_bwd,
+  m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,
         "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
-  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
-  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD");
-  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD");
+  m.def("copy_to_kv_cache", &transformer_engine::pytorch::copy_to_kv_cache,
+        "Copy new KV tokens to KV cache", py::call_guard<py::gil_scoped_release>());
+  m.def("convert_thd_to_bshd", &transformer_engine::pytorch::convert_thd_to_bshd,
+        "Convert a tensor from THD to BSHD", py::call_guard<py::gil_scoped_release>());
+  m.def("convert_bshd_to_thd", &transformer_engine::pytorch::convert_bshd_to_thd,
+        "Convert a tesnor from BSHD to THD", py::call_guard<py::gil_scoped_release>());
 
   // fused apply rope
-  m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD",
-        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_rope_forward", &transformer_engine::pytorch::fused_rope_forward,
+        "Fused Apply RoPE FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_rope_backward", &transformer_engine::pytorch::fused_rope_backward,
+        "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
   // Misc
-  m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
+  m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
+        "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
+  m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
   // Support THD format for Context Parallel
-  m.def("thd_read_half_tensor", &thd_read_half_tensor,
+  m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
         "tensor",
         py::call_guard<py::gil_scoped_release>());
-  m.def("thd_second_half_lse_correction", &thd_second_half_lse_correction,
+  m.def("thd_second_half_lse_correction",
+        &transformer_engine::pytorch::thd_second_half_lse_correction,
         "Correct the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
-  m.def("thd_read_second_half_lse", &thd_read_second_half_lse,
+  m.def("thd_read_second_half_lse", &transformer_engine::pytorch::thd_read_second_half_lse,
         "Read the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
-  m.def("thd_out_correction", &thd_out_correction,
+  m.def("thd_out_correction", &transformer_engine::pytorch::thd_out_correction,
         "Correct the THD format output of context parallelism in forward pass",
         py::call_guard<py::gil_scoped_release>());
-  m.def("thd_grad_correction", &thd_grad_correction,
+  m.def("thd_grad_correction", &transformer_engine::pytorch::thd_grad_correction,
         "Correct the THD format gradients of context parallelism in backward pass",
         py::call_guard<py::gil_scoped_release>());
-  m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
+  m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
-  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend,
+  m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,
         "Initialize nvshmem backend with Pytorch distributed process groups",
         py::call_guard<py::gil_scoped_release>());
-  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor,
+  m.def("create_nvshmem_tensor", &transformer_engine::pytorch::create_nvshmem_tensor,
         "Create a tensor in NVSHMEM shared memory", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_send_on_current_stream", &nvshmem_api::nvshmem_send_on_current_stream,
+  m.def("nvshmem_send_on_current_stream",
+        &transformer_engine::pytorch::nvshmem_send_on_current_stream,
         "Asynchronously send tensor data to a remote PE using NVSHMEM on the current CUDA stream",
         py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_wait_on_current_stream", &nvshmem_api::nvshmem_wait_on_current_stream,
+  m.def("nvshmem_wait_on_current_stream",
+        &transformer_engine::pytorch::nvshmem_wait_on_current_stream,
         "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "
         "stream",
         py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize,
+  m.def("nvshmem_finalize", &transformer_engine::pytorch::nvshmem_finalize,
         "Clean up and finalize the NVSHMEM communication backend and free associated resources",
         py::call_guard<py::gil_scoped_release>());
 
   // multi-tensor functions
-  m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
+  m.def("multi_tensor_scale", &transformer_engine::pytorch::multi_tensor_scale_cuda,
         "Fused overflow check + scale for a list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_l2norm", &multi_tensor_l2norm_cuda,
+  m.def("multi_tensor_l2norm", &transformer_engine::pytorch::multi_tensor_l2norm_cuda,
         "Computes L2 norm for a list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_unscale_l2norm", &multi_tensor_unscale_l2norm_cuda,
+  m.def("multi_tensor_unscale_l2norm",
+        &transformer_engine::pytorch::multi_tensor_unscale_l2norm_cuda,
         "Computes L2 norm for a list of contiguous tensors after unscaling (unscaling is only "
         "performed for L2 norm computation, and tensors are not updated)",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+  m.def("multi_tensor_adam", &transformer_engine::pytorch::multi_tensor_adam_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_adam_param_remainder", &multi_tensor_adam_param_remainder_cuda,
+  m.def("multi_tensor_adam_param_remainder",
+        &transformer_engine::pytorch::multi_tensor_adam_param_remainder_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer"
         "where the master parameters only store the remainder bits",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_adam_fp8", &multi_tensor_adam_fp8_cuda,
+  m.def("multi_tensor_adam_fp8", &transformer_engine::pytorch::multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,
+  m.def("multi_tensor_adam_capturable",
+        &transformer_engine::pytorch::multi_tensor_adam_capturable_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
         "support and LR scheduling",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_adam_capturable_master", &multi_tensor_adam_capturable_master_cuda,
+  m.def("multi_tensor_adam_capturable_master",
+        &transformer_engine::pytorch::multi_tensor_adam_capturable_master_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer with CUDA graph "
         "support, LR scheduling and FP32 master weights",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
+  m.def("multi_tensor_sgd", &transformer_engine::pytorch::multi_tensor_sgd_cuda,
         "Fused SGD optimizer for list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
+  m.def("multi_tensor_compute_scale_and_scale_inv",
+        &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Data structures
@@ -360,10 +382,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
       .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlap::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlap::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
              transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
@@ -378,8 +399,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
+           py::arg("shape") = std::nullopt);
 }
