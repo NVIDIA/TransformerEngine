@@ -349,7 +349,9 @@ class BasicLinear(BasicOperation):
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        input_requires_grad: bool = True,
+        weight_requires_grad: bool = True,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Functional API for forward pass
 
         Parameters
@@ -385,17 +387,25 @@ class BasicLinear(BasicOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
+        input_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the input tensor is
+            required in the backward pass.
+        weight_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the weight tensor is
+            required in the backward pass.
 
         Returns
         -------
         torch.Tensor
             Output tensor
-        torch.Tensor
-            Input tensor used in GEMM, possibly cast and reshaped from
-            provided input tensor
-        torch.Tensor
-            Weight tensor used in GEMM, possibly cast and reshaped from
-            provided weight tensor
+        torch.Tensor, optional
+            Input tensor, ready for use in backward pass. `None` is
+            returned if loss gradient w.r.t. the weight tensor is not
+            required.
+        torch.Tensor, optional
+            Weight tensor, ready for use in backward pass. `None` is
+            returned if loss gradient w.r.t. the input tensor is not
+            required.
 
         """
 
@@ -416,7 +426,7 @@ class BasicLinear(BasicOperation):
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            input_quantizer.set_usage(rowwise=True)
+            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             if with_x_all_gather:
                 input_quantizer.set_usage(columnwise=False)
                 x, x_async = gather_along_first_dim(
@@ -449,7 +459,7 @@ class BasicLinear(BasicOperation):
         if with_quantized_compute and not w_is_quantized:
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            weight_quantizer.set_usage(rowwise=True)
+            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
         elif not with_quantized_compute and w_is_quantized:
             w = w.dequantize()
@@ -526,17 +536,25 @@ class BasicLinear(BasicOperation):
             else:
                 torch.distributed.all_reduce(y, group=tensor_parallel_group)
 
-        # Detach input tensor if needed
-        # Note: PyTorch autograd produces esoteric errors if we save
-        # input tensor as context for backward pass.
-        if x_local is input:
-            x_local = x_local.detach()
+        # Prepare weight tensor for backward pass
+        if input_requires_grad:
+            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensor):
+                w.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            w = None
 
-        # Configure input tensor for backward pass
-        if with_quantized_compute and isinstance(x_local, QuantizedTensor):
-            if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
-                # FP8 does not support all-gather of transpose data
-                x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+        # Prepare input tensor for backward pass
+        if weight_requires_grad:
+            if x_local is input:
+                # PyTorch autograd produces esoteric errors if we
+                # cache input tensor directly.
+                x_local = x_local.detach()
+            if with_quantized_compute and isinstance(x_local, QuantizedTensor):
+                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                    # FP8 does not support all-gather of transpose data
+                    x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            x_local = None
 
         return y, x_local, w
 
@@ -892,7 +910,7 @@ class BasicLinear(BasicOperation):
             dtype = torch.get_autocast_dtype("cuda")
 
         # Linear forward
-        output, x_local, _ = BasicLinear._functional_forward(
+        output, x_local, w = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
             dtype=dtype,
@@ -903,10 +921,12 @@ class BasicLinear(BasicOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
         )
 
         # Save state for backward pass
-        ctx.save_for_backward(x_local)
+        ctx.save_for_backward(x_local, w)
         ctx.with_quantized_compute = with_quantized_compute
         ctx.input_quantizer = input_quantizer
         ctx.weight_quantizer = weight_quantizer
@@ -926,7 +946,7 @@ class BasicLinear(BasicOperation):
     ) -> tuple[torch.Tensor, Iterable[Optional[torch.Tensor]]]:
 
         # Saved tensors from forward pass
-        (x_local,) = ctx.saved_tensors
+        (x_local, w) = ctx.saved_tensors
 
         # wgrad fusion
         accumulate_into_main_grad = self._accumulate_into_main_grad
@@ -946,7 +966,7 @@ class BasicLinear(BasicOperation):
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
-            weight=self.weight,
+            weight=w,
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             dtype=ctx.dtype,

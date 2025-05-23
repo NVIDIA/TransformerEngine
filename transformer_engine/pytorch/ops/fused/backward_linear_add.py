@@ -51,7 +51,7 @@ class BackwardLinearAdd(FusedOperation):
         linear_op_ctx = basic_op_ctxs[0]
 
         # Saved tensors from forward pass
-        (x_local,) = linear_op_ctx.saved_tensors
+        (x_local, w) = linear_op_ctx.saved_tensors
 
         # wgrad fusion
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
@@ -72,7 +72,7 @@ class BackwardLinearAdd(FusedOperation):
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
-            weight=linear_op.weight,
+            weight=w,
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
             dtype=grad_input.dtype,

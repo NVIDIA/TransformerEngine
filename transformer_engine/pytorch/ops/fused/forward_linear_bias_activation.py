@@ -82,6 +82,10 @@ class ForwardLinearBiasActivation(FusedOperation):
         else:
             raise NotImplementedError("Activations are not yet supported")
 
+        # Check which grads are required
+        input_requires_grad = linear_op_ctx.requires_grad and input_.requires_grad
+        weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
+
         # FP8 metadata
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         input_quantizer = None
@@ -106,7 +110,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             dtype = torch.get_autocast_dtype("cuda")
 
         # Linear forward
-        output, x_local, _ = BasicLinear._functional_forward(
+        output, x_local, w = BasicLinear._functional_forward(
             input=input_,
             weight=linear_op.weight,
             bias=bias,
@@ -118,18 +122,20 @@ class ForwardLinearBiasActivation(FusedOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
         )
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local)
+        linear_op_ctx.save_for_backward(x_local, w)
         linear_op_ctx.with_quantized_compute = with_quantized_compute
         linear_op_ctx.input_quantizer = input_quantizer
         linear_op_ctx.weight_quantizer = weight_quantizer
         linear_op_ctx.grad_output_quantizer = grad_output_quantizer
         linear_op_ctx.grad_input_quantizer = grad_input_quantizer
         linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_requires_grad = input_.requires_grad
-        linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
+        linear_op_ctx.input_requires_grad = input_requires_grad
+        linear_op_ctx.weight_requires_grad = weight_requires_grad
         linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
 
         return output, [() for _ in range(len(self.basic_ops))]
