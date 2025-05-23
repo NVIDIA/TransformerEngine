@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 
-#include <transformer_engine/multi_streams.h>
+#include <transformer_engine/multi_stream.h>
 
 #include <mutex>
 #include <vector>

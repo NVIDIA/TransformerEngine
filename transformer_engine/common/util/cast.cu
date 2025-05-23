@@ -16,7 +16,7 @@
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
-#include "../util/multi_streams.h"
+#include "../util/multi_stream.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
 #include "cast_kernels.cuh"

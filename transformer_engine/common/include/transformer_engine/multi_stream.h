@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file multi_streams.h
+/*! \file multi_stream.h
  *  \brief Functions for multi streams executions.
  */
 

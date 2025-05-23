@@ -16,7 +16,7 @@
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
-#include "../util/multi_streams.h"
+#include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
 
 namespace {
