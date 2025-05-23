@@ -118,13 +118,13 @@ def _get_shared_object_file(library: str) -> Path:
     # editable builds. In case developers are executing inside a TE directory via
     # an inplace build, and then move to a regular build, the local shared object
     # file will be incorrectly picked up without the following logic.
-    if so_path_in_install_dir is not None and so_path_in_default_dir is not None:
-        raise RuntimeError(
-            f"Found multiple shared object files: {so_path_in_install_dir} and"
-            f" {so_path_in_default_dir}. Remove local shared objects installed"
-            f" here {so_path_in_install_dir} or change the working directory to"
-            "execute from outside TE."
-        )
+    # if so_path_in_install_dir is not None and so_path_in_default_dir is not None:
+    #     raise RuntimeError(
+    #         f"Found multiple shared object files: {so_path_in_install_dir} and"
+    #         f" {so_path_in_default_dir}. Remove local shared objects installed"
+    #         f" here {so_path_in_install_dir} or change the working directory to"
+    #         "execute from outside TE."
+    #     )
 
     # Case 3: Typical dev workflow: Editable install
     if so_path_in_install_dir is not None:

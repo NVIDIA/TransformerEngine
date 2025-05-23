@@ -259,6 +259,34 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                holds configuration about quantization and dequantization modes.
     """
 
+    # TODO(zhongbo): experimental to use positional arguments for base class
+    def __new__(
+        cls,
+        *args,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
+        columnwise_data: Optional[torch.Tensor],
+        columnwise_scale_inv: Optional[torch.Tensor],
+        fp8_dtype: TE_DType,
+        quantizer: Quantizer,
+        is_2D_scaled: bool,
+        **kwargs,
+    ):
+        instance = super().__new__(
+            cls,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            quantizer,
+            is_2D_scaled,
+            *args,
+            **kwargs,
+        )
+
+        return instance
+
     def __repr__(self, *, tensor_contents=None):
         return (
             f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
