@@ -182,7 +182,7 @@ class _GroupedLinear(torch.autograd.Function):
 
             # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
-                for inputmat in inputmats:                     
+                for inputmat in inputmats:
                     if isinstance(inputmat, QuantizedTensorBase):
                         # Create columnwise data if not already present.
                         inputmat.update_usage(rowwise_usage=True, columnwise_usage=True)
@@ -243,7 +243,7 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = ctx.main_grads
-            
+
             # preprocess grad_output
             fp8_grad_output = isinstance(grad_output, Float8BlockwiseQTensorBase)
             grad_output = grad_output.contiguous()
@@ -279,7 +279,7 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                     else:  # input grad_output is blockwise
                         for grad_output_mat in grad_output_mats:
-                            grad_output_mat.update_usage    (rowwise_usage=True, columnwise_usage=True)
+                            grad_output_mat.update_usage(rowwise_usage=True, columnwise_usage=True)
                         grad_output = grad_output_mats
             else:
                 grad_output = grad_output_mats
@@ -407,7 +407,7 @@ class _GroupedLinear(torch.autograd.Function):
                 and not ctx.fp8
             ):
                 grad_biases = [None] * ctx.num_gemms
-  
+
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
         return (

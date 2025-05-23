@@ -267,10 +267,12 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
             if self._columnwise_scale_inv is None:
                 assert self._quantizer is not None, (
-                    "._quantizer of Float8BlockwiseQTensor cannot be None because all the blockwise "
-                    "quantized tensors are supposed to be generated from the quantizer."
+                    "._quantizer of Float8BlockwiseQTensor cannot be None because all the blockwise"
+                    " quantized tensors are supposed to be generated from the quantizer."
                 )
-                columnwise_scale_inv_shape = self._quantizer.get_scale_shape(rowwise_data.shape, True)
+                columnwise_scale_inv_shape = self._quantizer.get_scale_shape(
+                    rowwise_data.shape, True
+                )
                 self._columnwise_scale_inv = torch.empty(
                     columnwise_scale_inv_shape,
                     dtype=self._rowwise_scale_inv.dtype,

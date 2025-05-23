@@ -54,22 +54,33 @@ def test_dequantize_cast_transpose(
     x_ref = x_base.clone()
     x_fp8_base = quantizer.make_empty(x_base.shape, dtype=x_base.dtype, device=x_base.device)
     x_fp8_ref = quantizer.make_empty(x_ref.shape, dtype=x_ref.dtype, device=x_ref.device)
-    
+
     # Quantize to fp8
     quantizer.update_quantized(x_base, x_fp8_base)
     quantizer.update_quantized(x_ref, x_fp8_ref)
-    torch.testing.assert_close(x_fp8_base._rowwise_data, x_fp8_ref._rowwise_data, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_base._rowwise_scale_inv, x_fp8_ref._rowwise_scale_inv, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_base._columnwise_data, x_fp8_ref._columnwise_data, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(x_fp8_base._columnwise_scale_inv, x_fp8_ref._columnwise_scale_inv, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        x_fp8_base._rowwise_data, x_fp8_ref._rowwise_data, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_base._rowwise_scale_inv, x_fp8_ref._rowwise_scale_inv, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_base._columnwise_data, x_fp8_ref._columnwise_data, atol=0.0, rtol=0.0
+    )
+    torch.testing.assert_close(
+        x_fp8_base._columnwise_scale_inv, x_fp8_ref._columnwise_scale_inv, atol=0.0, rtol=0.0
+    )
 
     # Naive implementation
     def dequantize_cast_transpose_naive(x, quantizer):
         x_dequantized = x.dequantize()
         x_transposed = x_dequantized.transpose(0, 1).contiguous()
-        x_casted = quantizer.make_empty(x_transposed.shape, dtype=x_transposed.dtype, device=x_transposed.device)
+        x_casted = quantizer.make_empty(
+            x_transposed.shape, dtype=x_transposed.dtype, device=x_transposed.device
+        )
         quantizer.update_quantized(x_transposed, x_casted)
         return x_casted._rowwise_data, x_casted._rowwise_scale_inv
+
     res_base_data, res_base_scale_inv = dequantize_cast_transpose_naive(x_fp8_base, quantizer)
     # Fused implementation
     res_ref = tex.fp8_blockwise_transpose(x_fp8_ref, quantizer)

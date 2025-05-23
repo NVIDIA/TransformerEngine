@@ -3,8 +3,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <transformer_engine/transpose.h>
 #include <cuda_runtime.h>
+#include <transformer_engine/transpose.h>
 
 #include <cfloat>
 #include <functional>
@@ -69,8 +69,8 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
   // Load the scale to shared memory
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     smem_scale_inv[i] = (block_offset_x + i < seq_len)
-                        ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
-                        : epsilon;
+                            ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
+                            : epsilon;
   }
 
   auto offset_col = (block_offset_y / 4 + lane_id);
@@ -129,20 +129,20 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[2]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[3]));
     float new_scale = compute_scale_from_types<float, FP8_TYPE>(max_val, epsilon, true);
-    // 6. Re quantize the fp8 tile on smem
-    #pragma unroll
-    for(int i = 0; i < 4; i++){
-        buffer_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
+// 6. Re quantize the fp8 tile on smem
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      buffer_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
     }
 
     // Store the transposed requantized fp8 tile on smem to the global memory
-    if(is_valid){
-        output_fp32[ (offset_row) * (seq_len / 4) + offset_col] = buffer_fp32;
+    if (is_valid) {
+      output_fp32[(offset_row) * (seq_len / 4) + offset_col] = buffer_fp32;
     }
     // Store the new scaling factor to the shared memory
     __syncwarp();
-    if(lane_id == 0){
-        smem_scale_inv[w] = 1.0f / new_scale;
+    if (lane_id == 0) {
+      smem_scale_inv[w] = 1.0f / new_scale;
     }
   }
   __syncthreads();
@@ -157,7 +157,8 @@ __global__ void dequantize_cast_transpose_1x128_aligned_kernel(
 template <typename FP8_TYPE, typename RAW_TYPE>
 __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *input_scale_inv,
                                                        FP8_TYPE *output, float *output_scale_inv,
-                                                       const size_t hidden_dim, const size_t seq_len, const float epsilon) {
+                                                       const size_t hidden_dim,
+                                                       const size_t seq_len, const float epsilon) {
   auto warp_id = threadIdx.x / kThreadsPerWarp;
   auto lane_id = threadIdx.x % kThreadsPerWarp;
   auto warp_num = blockDim.x / kThreadsPerWarp;
@@ -170,14 +171,15 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   // 1. load the scale from global memory
   for (auto i = threadIdx.x; i < kTileDim; i += blockDim.x) {
     smem_scale_inv[i] = (block_offset_x + i < seq_len)
-                        ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
-                        : epsilon;
+                            ? input_scale_inv[blockIdx.y * seq_len + block_offset_x + i]
+                            : epsilon;
   }
 
   // 2. load the fp8 activation from global memory, then transpose on the smem
   // Each warp will load 1x128 row
   for (auto x = warp_id; (x < kTileDim); x += warp_num) {
-    for (auto y = lane_id; (block_offset_y + y < hidden_dim) && (y < kTileDim); y += kThreadsPerWarp) {
+    for (auto y = lane_id; (block_offset_y + y < hidden_dim) && (y < kTileDim);
+         y += kThreadsPerWarp) {
       if ((block_offset_x + x < seq_len) && (block_offset_y + y < hidden_dim))
         transposed[y][x] = input[(block_offset_x + x) * hidden_dim + (block_offset_y + y)];
       else
@@ -203,20 +205,20 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[1]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[2]));
     max_val = max(max_val, warp_max_reduce_on_float(dequantized[3]));
-    float new_scale = compute_scale_from_types<float, FP8_TYPE>(max_val, epsilon, true);  
+    float new_scale = compute_scale_from_types<float, FP8_TYPE>(max_val, epsilon, true);
 
-    // 4. Re quantize the fp8 tile on smem
-    #pragma unroll
-    for(int i = 0; i < 4; i++){
-        data_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
+// 4. Re quantize the fp8 tile on smem
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      data_fp8[i] = FP8_TYPE(float(dequantized[i]) * new_scale);
     }
 
     // Store the transposed requantized activation to the global memory
     reinterpret_cast<float *>(transposed[w])[lane_id] = data_fp32;
     // Store the new scaling factor to the shared memory
     __syncwarp();
-    if(lane_id == 0){
-        smem_scale_inv[w] = 1.0f / new_scale;
+    if (lane_id == 0) {
+      smem_scale_inv[w] = 1.0f / new_scale;
     }
   }
   __syncthreads();
@@ -228,8 +230,7 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
   }
 
   // 6. store the transposed fp16 activation to the global memory
-  for (auto x = warp_id; (block_offset_y + x < hidden_dim) && (x < kTileDim);
-       x += warp_num) {
+  for (auto x = warp_id; (block_offset_y + x < hidden_dim) && (x < kTileDim); x += warp_num) {
     auto dest_row = block_offset_y + x;
     for (auto y = lane_id; (block_offset_x + y < seq_len) && (y < kTileDim); y += kThreadsPerWarp) {
       auto dest_col = block_offset_x + y;
@@ -243,7 +244,9 @@ __global__ void dequantize_cast_transpose_1x128_kernel(FP8_TYPE *input, float *i
 }  // namespace
 }  // namespace transformer_engine
 
-void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig quant_config, transformer_engine::DType intermediate_dtype, cudaStream_t stream = 0) {
+void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig quant_config,
+                              transformer_engine::DType intermediate_dtype,
+                              cudaStream_t stream = 0) {
   NVTE_API_CALL(nvte_transpose_blockwise);
   using namespace transformer_engine;
   auto te_tensor = *reinterpret_cast<const Tensor *>(tensor);
@@ -275,7 +278,7 @@ void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig qu
              "num of cols of colwise_data must be equal to num of rows of colwise_scale_inv, got "
              "colwise_shape[0]:",
              colwise_shape[0], ", colwise_scale_inv_shape[1]:", colwise_scale_inv_shape[1]);
-  
+
   const QuantizationConfig *quant_config_cpp =
       reinterpret_cast<const QuantizationConfig *>(quant_config);
   const bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
@@ -296,29 +299,25 @@ void nvte_transpose_blockwise(NVTETensor tensor, const NVTEQuantizationConfig qu
 
   if (hidden_dim % 4 == 0 && seq_len % 4 == 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      intermediate_dtype, RAW_TYPE,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          itype, FP8_TYPE,
-          dequantize_cast_transpose_1x128_aligned_kernel<FP8_TYPE, RAW_TYPE>
-          <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
-                                      reinterpret_cast<float *>(rowwise_scale_inv.dptr),
-                                      reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
-                                      reinterpret_cast<float *>(colwise_scale_inv.dptr), hidden_dim,
-                                      seq_len, epsilon);
-      );
-    );
+        intermediate_dtype, RAW_TYPE,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+            itype, FP8_TYPE,
+            dequantize_cast_transpose_1x128_aligned_kernel<FP8_TYPE, RAW_TYPE>
+            <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
+                                         reinterpret_cast<float *>(rowwise_scale_inv.dptr),
+                                         reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
+                                         reinterpret_cast<float *>(colwise_scale_inv.dptr),
+                                         hidden_dim, seq_len, epsilon);););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      intermediate_dtype, RAW_TYPE,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          itype, FP8_TYPE,
-          dequantize_cast_transpose_1x128_kernel<FP8_TYPE, RAW_TYPE>
-          <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
-                                      reinterpret_cast<float *>(rowwise_scale_inv.dptr),
-                                      reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
-                                      reinterpret_cast<float *>(colwise_scale_inv.dptr), hidden_dim,
-                                      seq_len, epsilon);
-      );
-    );
+        intermediate_dtype, RAW_TYPE,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+            itype, FP8_TYPE,
+            dequantize_cast_transpose_1x128_kernel<FP8_TYPE, RAW_TYPE>
+            <<<grid, block, 0, stream>>>(reinterpret_cast<FP8_TYPE *>(rowwise_data.dptr),
+                                         reinterpret_cast<float *>(rowwise_scale_inv.dptr),
+                                         reinterpret_cast<FP8_TYPE *>(colwise_data.dptr),
+                                         reinterpret_cast<float *>(colwise_scale_inv.dptr),
+                                         hidden_dim, seq_len, epsilon);););
   }
 }

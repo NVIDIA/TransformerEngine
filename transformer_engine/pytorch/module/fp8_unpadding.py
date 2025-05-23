@@ -64,7 +64,7 @@ class _Fp8Unpadding(torch.autograd.Function):
 
                 in_features = grad_output._rowwise_data.shape[-1]
                 in_scale_features = grad_output._rowwise_scale_inv.T.shape[-1]
-            
+
                 rowwise_data = grad_output._rowwise_data.view(-1, in_features)
                 rowwise_scale_inv = grad_output._rowwise_scale_inv.T.view(
                     -1, in_scale_features

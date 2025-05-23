@@ -37,10 +37,7 @@ class _Fp8Padding(torch.autograd.Function):
             # Each m in m_splits indicates a tensor. So for tensor-wise scaled tensors,
             # we should always pad the high precision tensors and then do multi-quantize.
             # For MXFP8, padding doesn't make sense.
-            assert (
-                isinstance(inp, Float8BlockwiseQTensor)
-                and not inp._is_2D_scaled
-            ), (
+            assert isinstance(inp, Float8BlockwiseQTensor) and not inp._is_2D_scaled, (
                 "Fp8Padding only supports fp32, bf16 or fp8 blockwise 1D scaled tensor "
                 "with compact data and scales."
             )

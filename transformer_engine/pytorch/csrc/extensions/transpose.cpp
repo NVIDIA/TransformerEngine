@@ -120,17 +120,17 @@ py::object fp8_blockwise_transpose(py::object tensor, py::object quantizer) {
   auto torch_dtype = torch_tensor.scalar_type();
   auto te_dtype = DType::kBFloat16;
   switch (torch_dtype) {
-      case c10::ScalarType::Float:
-          te_dtype = DType::kFloat32;
-          break;  
-      case c10::ScalarType::Half:
-          te_dtype = DType::kFloat16;
-          break;
-      case c10::ScalarType::BFloat16:
-          te_dtype = DType::kBFloat16;
-          break;
-      default:
-          NVTE_ERROR("Unsupported dtype");
+    case c10::ScalarType::Float:
+      te_dtype = DType::kFloat32;
+      break;
+    case c10::ScalarType::Half:
+      te_dtype = DType::kFloat16;
+      break;
+    case c10::ScalarType::BFloat16:
+      te_dtype = DType::kBFloat16;
+      break;
+    default:
+      NVTE_ERROR("Unsupported dtype");
   }
 
   // Create TE tensor
@@ -149,7 +149,8 @@ py::object fp8_blockwise_transpose(py::object tensor, py::object quantizer) {
   quant_config.set_amax_epsilon(my_quantizer->amax_epsilon);
 
   // Launch TE kernel
-  nvte_transpose_blockwise(te_tensor.data(), quant_config, te_dtype, at::cuda::getCurrentCUDAStream());
+  nvte_transpose_blockwise(te_tensor.data(), quant_config, te_dtype,
+                           at::cuda::getCurrentCUDAStream());
 
   return tensor;
 }

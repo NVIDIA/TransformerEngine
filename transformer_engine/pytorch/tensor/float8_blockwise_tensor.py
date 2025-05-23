@@ -457,7 +457,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             split_size_or_sections,
             dim=1,
         )
-        
+
         columnwise_mats = [None] * len(rowwise_mats)
         columnwise_scale_inv_mats = [None] * len(rowwise_mats)
         # split the columnwise data if possible
@@ -478,13 +478,19 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 rowwise_data=mat,
                 rowwise_scale_inv=scale_inv_mat.contiguous(),
                 columnwise_data=columnwise_mat.contiguous() if columnwise_mat is not None else None,
-                columnwise_scale_inv=columnwise_scale_inv_mat.contiguous() if columnwise_scale_inv_mat is not None else None,
+                columnwise_scale_inv=(
+                    columnwise_scale_inv_mat.contiguous()
+                    if columnwise_scale_inv_mat is not None
+                    else None
+                ),
                 fp8_dtype=self._fp8_dtype,
                 quantizer=self._get_quantizer(),
                 is_2D_scaled=self._is_2D_scaled,
                 requires_grad=self.requires_grad,
             )
-            for mat, scale_inv_mat, columnwise_mat, columnwise_scale_inv_mat in zip(rowwise_mats, rowwise_scale_inv_mats, columnwise_mats, columnwise_scale_inv_mats)
+            for mat, scale_inv_mat, columnwise_mat, columnwise_scale_inv_mat in zip(
+                rowwise_mats, rowwise_scale_inv_mats, columnwise_mats, columnwise_scale_inv_mats
+            )
         ]
 
     @classmethod
