@@ -33,14 +33,15 @@ class BasePrimitive(metaclass=ABCMeta):
     @classmethod
     def enabled(cls):
         """
-        A custom call is marked as disabled if the `cls.name` does not fully match the
+        A custom call is marked as disabled if the `cls.__name__` does not fully match the
         `NVTE_JAX_CUSTOM_CALLS_RE` pattern.
+        This uses the Python class name of the primitive definitions that inherit from BasePrimitive.
         By default, `NVTE_JAX_CUSTOM_CALLS_RE` is set to `.*`, which matches and enables all names.
-        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!te_act_lu$).+$'` to disable `te_act_lu`.
+        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive`.
         """
         pattern = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE", r".*")
         pattern = re.compile(pattern)
-        is_enabled = pattern.fullmatch(cls.name) is not None
+        is_enabled = pattern.fullmatch(cls.__name__) is not None
         return is_enabled
 
     @staticmethod
