@@ -359,6 +359,8 @@ class UserbuffersForwardLinear(FusedOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=None,  # Not supported
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         x_local = extra_outputs["input"]

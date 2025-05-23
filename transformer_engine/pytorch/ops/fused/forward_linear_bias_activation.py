@@ -122,6 +122,8 @@ class ForwardLinearBiasActivation(FusedOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
         )
 
         # Save state for backward pass
