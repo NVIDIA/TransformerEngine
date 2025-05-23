@@ -22,7 +22,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                           Buffer_Type rhs_data, Buffer_Type rhs_scale, Buffer_Type bias,
                           Buffer_Type group_sizes, Buffer_Type group_offset, Result_Type output,
                           Result_Type workspace, size_t m, size_t n, size_t k, bool lhs_is_trans,
-                          bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias) {
+                          bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
+                          bool is_grouped_dense_wgrad) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -76,21 +77,15 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTE_CHECK(lhs_scale_dtype_bytes == rhs_scale_dtype_bytes,
              "sizeof(lhs_scale_dtype) != sizeof(rhs_scale_dtype)");
 
-  // 1. In both NN and NT mode, A has shape [M, K], B has shape [G, K, N], split on M-dim,
-  //    we only need to change the rhs_shape to [N, K] if rhs_is_trans.
-  // 2. In TN mode, A has shape [K, M], B has shape [K, N], and out has shape [G, M, N],
-  //    but now split on K-dim instead of M-dim, need to set {lhs, rhs}_shape carefully.
-  // 3. To make our life easier, we do not support TT mode.
   size_t expected_lhs_size = m * k;
-  size_t expected_rhs_size = lhs_is_trans ? (k * n) : (num_gemms * k * n);
-  size_t expected_out_size = lhs_is_trans ? (num_gemms * m * n) : (m * n);
+  size_t expected_rhs_size = is_grouped_dense_wgrad ? (k * n) : (num_gemms * k * n);
+  size_t expected_out_size = is_grouped_dense_wgrad ? (num_gemms * m * n) : (m * n);
   size_t actual_lhs_size = product(lhs_data.dimensions());
   size_t actual_rhs_size = product(rhs_data.dimensions());
   size_t actual_out_size = product(output->dimensions());
-  NVTE_CHECK(!(lhs_is_trans && rhs_is_trans), "TT (row-major) mode GEMM is not supported.");
   NVTE_CHECK(expected_lhs_size == actual_lhs_size, "Unexpected lhs size! Expect ",
              expected_lhs_size, ", got ", actual_lhs_size);
-  if (!lhs_is_trans) {
+  if (!is_grouped_dense_wgrad) {
     NVTE_CHECK(expected_rhs_size == actual_rhs_size,
                "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
                " = ", expected_rhs_size, ", got ", actual_rhs_size);
@@ -112,7 +107,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // Note: This may break cudaGraph.
   cudaStreamSynchronize(stream);
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  if (!lhs_is_trans) {
+  if (!is_grouped_dense_wgrad) {
     NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
                ", got sum(group_sizes)=", sum_group_sizes);
   } else {
@@ -154,18 +149,16 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   bool lhs_use_colwise = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) && lhs_is_trans;
 
   for (size_t i = 0; i < num_gemms; i++) {
-    // The next 4 lines handle NN and NT modes
     size_t m_i = dim_list_host[i];
     auto lhs_shape = std::vector<size_t>{m_i, k};
     auto rhs_shape = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
     auto out_shape = std::vector<size_t>{m_i, n};
-    // Handle TN mode lhs_shape and rhs_shape
-    if (lhs_is_trans && !rhs_is_trans) {
+    if (is_grouped_dense_wgrad) {
       size_t k_i = dim_list_host[i];
-      lhs_shape[0] = k_i;
-      lhs_shape[1] = m;
-      rhs_shape[0] = k_i;
-      rhs_shape[1] = n;
+      lhs_shape[0] = lhs_is_trans ? k_i : m;
+      lhs_shape[1] = lhs_is_trans ? m : k_i;
+      rhs_shape[0] = rhs_is_trans ? n : k_i;
+      rhs_shape[1] = rhs_is_trans ? k_i : n;
       out_shape[0] = m;
       out_shape[1] = n;
     }
@@ -274,7 +267,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<bool>("lhs_is_trans")
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("has_bias"),
+                                  .Attr<bool>("has_bias")
+                                  .Attr<bool>("is_grouped_dense_wgrad"),
                               FFI_CudaGraph_Traits);
 
 }  // namespace jax

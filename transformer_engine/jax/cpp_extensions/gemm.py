@@ -27,7 +27,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm"]
+__all__ = ["gemm", "grouped_gemm", "is_gemm_with_all_layouts_supported"]
 
 
 num_cublas_streams = 4
@@ -52,7 +52,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14, 15)
     inner_primitive = None
     outer_primitive = None
 
@@ -74,6 +74,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         scaling_mode,
         out_dtype,
         has_bias,
+        is_grouped_dense_wgrad,
     ):
         """
             scaling_mode: Scaling mode for the GEMM operations.
@@ -84,14 +85,14 @@ class GroupedGemmPrimitive(BasePrimitive):
            1D flattened array of Grouped GEMM outputs
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
-        del rhs_is_trans, scaling_mode, has_bias
+        del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         workspace_size += lhs_scale_inv_aval.size + rhs_scale_inv_aval.size
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-        out_shape_lhs_N = (M, N)
-        out_shape_lhs_T = (group_sizes_aval.size, M, N)
-        out_shape = out_shape_lhs_N if not lhs_is_trans else out_shape_lhs_T
+        out_shape = (M, N)
+        if is_grouped_dense_wgrad:
+            out_shape = (group_sizes_aval.size, M, N)
         out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
         return (out_aval, workspace_aval)
 
@@ -102,7 +103,7 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def lowering(
-        ctx, *args, M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias
+        ctx, *args, M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias, is_grouped_dense_wgrad
     ):
         del out_dtype
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
@@ -115,6 +116,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             rhs_is_trans=rhs_is_trans,
             scaling_mode=scaling_mode.value,
             has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         )
 
     @staticmethod
@@ -134,6 +136,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         scaling_mode,
         out_dtype,
         has_bias,
+        is_grouped_dense_wgrad,
     ):
         assert GroupedGemmPrimitive.inner_primitive is not None
         (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
@@ -152,6 +155,7 @@ class GroupedGemmPrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             out_dtype=out_dtype,
             has_bias=has_bias,
+            is_grouped_dense_wgrad=is_grouped_dense_wgrad,
         )
         return (out,)
 
@@ -383,7 +387,7 @@ def gemm(
 
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
-
+import pdb
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -394,6 +398,7 @@ def grouped_gemm(
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    is_grouped_dense_wgrad: bool = False,
 ) -> jnp.ndarray:
     """
     lhs: [M, K]
@@ -438,19 +443,14 @@ def grouped_gemm(
     rhs_is_trans = rhs_contract_dim[0] != 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
-    is_computing_grouped_dense_wgrad = (
-        len(lhs_shape) == 2
-        and len(lhs_contract_dim) == 1
-        and lhs_contract_dim[0] == 0
-        and len(rhs_shape) == 2
-        and len(rhs_contract_dim) == 1
-        and rhs_contract_dim[0] == 0
-    )
+    if len(rhs_shape) == 2:
+        rhs_is_trans = rhs_contract_dim[0] != 0
 
-    if is_computing_grouped_dense_wgrad:
+    # TODO(Hua): thses are for fp16 dense wgrad, any better way to handle this?
+    if is_grouped_dense_wgrad and not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor):
+        print(f"[DEBUG] original {lhs_is_trans=}, {rhs_is_trans=}, {lhs_flatten_axis=}, {rhs_flatten_axis=}")
         lhs_is_trans = True
         rhs_is_trans = False
-        # TODO(Hua): Are the follwing two lines correct?
         lhs_flatten_axis = 1
         rhs_flatten_axis = 1
 
@@ -493,15 +493,28 @@ def grouped_gemm(
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
-    if scaling_mode.is_tensor_scaling() and not is_gemm_with_all_layouts_supported():
+    if scaling_mode.is_tensor_scaling(): #and not is_gemm_with_all_layouts_supported():
         lhs_is_trans = False
         rhs_is_trans = True
-        if not lhs_is_rowwise:
-            lhs_contract_dim = tuple((lhs.ndim - 1 - i) % lhs.ndim for i in lhs_contract_dim)
-        if not rhs_is_rowwise:
-            rhs_contract_dim = tuple((rhs.ndim - 1 - i) % rhs.ndim for i in rhs_contract_dim)
-        lhs_data = _shape_normalization(lhs_q.data, (lhs_contract_dim, ()), lhs_is_rowwise)
-        rhs_data = _shape_normalization(rhs_q.data, (rhs_contract_dim, ()), not rhs_is_rowwise)
+        if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
+            lhs_layout_is_T = lhs.data_layout == "T"
+            rhs_layout_is_T = rhs.data_layout == "T"
+        else:
+            lhs_layout_is_T = lhs_q.data_layout == "T"
+            rhs_layout_is_T = rhs_q.data_layout == "T"
+        lhs_ndim = len(lhs_shape)
+        rhs_ndim = len(rhs_shape)
+        print(f"[DEBUG] original {lhs_contract_dim=}, {rhs_contract_dim=}")
+        if lhs_layout_is_T:
+            lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
+        if rhs_layout_is_T:
+            rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
+        lhs_data = _shape_normalization(lhs_data, (lhs_contract_dim, ()), not lhs_layout_is_T)
+        rhs_data = _shape_normalization(rhs_data, (rhs_contract_dim, ()), rhs_layout_is_T)
+    
+    print(f"[DEBUG] {lhs_shape=}, {rhs_shape=}")
+    print(f"[DEBUG] {lhs_contract_dim=}, {rhs_contract_dim=}")
+    print(f"[DEBUG] {lhs_is_trans=}, {rhs_is_trans=}")
 
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
@@ -510,7 +523,7 @@ def grouped_gemm(
     M = math.prod(_calculate_remaining_shape(lhs_shape, lhs_contract_dim))
     N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim)[1:])  # Exclude G
 
-    if is_computing_grouped_dense_wgrad:
+    if is_grouped_dense_wgrad:
         N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim))
     else:
         assert group_sizes.size == rhs_shape[0]
@@ -523,10 +536,6 @@ def grouped_gemm(
 
     # TODO(Phuong): support MXFP8_1D_SCALING
     assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
-
-    assert not (
-        lhs_is_trans and rhs_is_trans
-    ), "Only NN, NT, TN modes are supported, TT mode is not supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
@@ -544,5 +553,6 @@ def grouped_gemm(
         scaling_mode=scaling_mode.value,
         out_dtype=out_dtype,
         has_bias=has_bias,
+        is_grouped_dense_wgrad=is_grouped_dense_wgrad,
     )
     return out
