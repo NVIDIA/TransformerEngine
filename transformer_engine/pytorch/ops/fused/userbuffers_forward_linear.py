@@ -269,7 +269,7 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensor):
+            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensorBase):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
@@ -280,8 +280,8 @@ class UserbuffersForwardLinear(FusedOperation):
                 # PyTorch autograd produces esoteric errors if we
                 # cache input tensor directly.
                 x_local = x_local.detach()
-            if with_quantized_compute and isinstance(x_local, QuantizedTensor):
-                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+            if with_quantized_compute and isinstance(x_local, QuantizedTensorBase):
+                if not (isinstance(x_local, Float8TensorBase) and with_ub_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
