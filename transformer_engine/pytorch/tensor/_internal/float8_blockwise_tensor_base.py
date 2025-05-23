@@ -349,9 +349,3 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             return
 
         return
-
-    def update_quantizer(self, quantizer: Quantizer):
-        """Update the quantizer for the tensor"""
-        from ..utils import update_tensor_quantizer
-
-        update_tensor_quantizer(self, quantizer)

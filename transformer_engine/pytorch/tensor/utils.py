@@ -4,7 +4,6 @@
 
 """Helper functions for using fp8 tensors as weights"""
 
-import warnings
 import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
@@ -451,12 +450,3 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         tex.fp8_block_scaling_partial_cast(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
-
-
-def update_tensor_quantizer(tensor, quantizer):
-    """Update tensor's quantizer if needed"""
-    if not hasattr(tensor, "_quantizer") or tensor._quantizer is None:
-        raise RuntimeError("To be updated, quantizer must be set")
-    if tensor._quantizer is not quantizer:
-        warnings.warn("Quantizer is being updated, this may affect model behavior")
-        tensor._quantizer = quantizer

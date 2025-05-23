@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
+import warnings
 
 import torch
 from torch.utils._pytree import tree_map
@@ -31,6 +32,8 @@ class QuantizedTensorBase:
     implement the functionality of the tensor, while
     XTensor should only implement the functionality needed
     to behave like regular torch.Tensor (liek __torch_dispatch__)."""
+
+    _quantizer: Optional[Quantizer]
 
     def update_usage(
         self,
@@ -71,10 +74,12 @@ class QuantizedTensorBase:
         )
 
     def update_quantizer(self, quantizer: Quantizer):
-        """Update the quantizer for the tensor"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement update_quantizer function"
-        )
+        """Update quantizer for the tensor"""
+        if self._quantizer is None:
+            raise RuntimeError("To be updated, quantizer must be set")
+        if self._quantizer is not quantizer:
+            warnings.warn("Quantizer is being updated, this may affect model behavior")
+            self._quantizer = quantizer
 
 
 def prepare_for_saving(

@@ -199,9 +199,3 @@ class Float8TensorBase(QuantizedTensorBase):
         if not needs_data_transpose:
             self._transpose = None
             self._transpose_invalid = True
-
-    def update_quantizer(self, quantizer: Quantizer):
-        """Update the quantizer for the tensor"""
-        from ..utils import update_tensor_quantizer
-
-        update_tensor_quantizer(self, quantizer)
