@@ -178,6 +178,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
+        print('------- enter unfused', attention_mask)
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
@@ -215,7 +216,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         if "padding" in attn_mask_type and attention_mask is None:
             attention_mask = dpa_utils.get_padding_mask(
-                batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+                batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, self.attention_type,
             )
         attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
             dpa_utils.get_full_mask(

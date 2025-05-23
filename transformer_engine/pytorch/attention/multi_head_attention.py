@@ -721,7 +721,6 @@ class MultiheadAttention(torch.nn.Module):
                 )
                 for x in (key_layer, value_layer)
             )
-            print("-----------cros", [x.shape for x in [key_layer, value_layer]])
 
             if self.qkv_format == "thd":
                 key_layer, value_layer = (
