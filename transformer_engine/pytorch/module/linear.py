@@ -1380,7 +1380,7 @@ class Linear(TransformerEngineBaseModule):
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
-        weight_quantizer, = self._get_weight_quantizers()
+        (weight_quantizer,) = self._get_weight_quantizers()
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
