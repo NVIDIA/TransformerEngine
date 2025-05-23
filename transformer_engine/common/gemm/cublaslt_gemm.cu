@@ -87,7 +87,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       A.scaling_mode == B.scaling_mode ||
           (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
           (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
-      "Inputs A and B to GEMM need to have compatible scaling modes!");
+      "Inputs A and B to GEMM need to have compatible scaling modes, but got A.scaling_mode = " +
+          to_string(A.scaling_mode) + ", B.scaling_mode = " + to_string(B.scaling_mode));
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;
@@ -492,7 +493,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-#if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205
+#if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205 && CUDA_VERSION < 13000 && \
+    CUBLAS_VERSION < 130000
   if (counter != nullptr) {
     if (m_split == 0) m_split = 1;
     if (n_split == 0) n_split = 1;
@@ -608,8 +610,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 
   int cudart_version;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
-  NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
-  NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
+  NVTE_CHECK(cudart_version >= 12020 && cudart_version < 13000,
+             "Cuda version >=12.2 and <13.0 is required for atomic gemm.");
+  NVTE_CHECK(cublasLtGetVersion() >= 120205 && cublasLtGetVersion() < 130000,
+             "Cublas version >=12.2.5 and <13.0 is required for atomic gemm.");
 
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
