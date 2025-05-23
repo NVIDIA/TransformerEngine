@@ -5,7 +5,7 @@
 """LayerNormMLP API"""
 import os
 import warnings
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -1754,9 +1754,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             ) = quantizers
 
             # Get weight tensors
-            fc1_weight = self.fc1_weight
+            fc1_weight, fc2_weight = self._get_weight_tensors()
             fc1_bias = self.fc1_bias if self.use_bias else None
-            fc2_weight = self.fc2_weight
             fc2_bias = self.fc2_bias if self.use_bias else None
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
@@ -1767,14 +1766,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.bias_gelu_nvfusion = False
-
-            # Make sure weight tensors has correct quantizers
-            # Note: Quantizer might have changed if quantization
-            # recipe changed
-            if fc1_weight_quantizer is not None and isinstance(fc1_weight, QuantizedTensorBase):
-                fc1_weight.update_quantizer(fc1_weight_quantizer)
-            if fc2_weight_quantizer is not None and isinstance(fc2_weight, QuantizedTensorBase):
-                fc2_weight.update_quantizer(fc2_weight_quantizer)
 
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
@@ -1855,31 +1846,26 @@ class LayerNormMLP(TransformerEngineBaseModule):
     def _get_quantizers(self, fp8_output):
         (
             fc1_input_quantizer,
-            fc1_weight_quantizer,
             fc1_output_quantizer,
             fc1_grad_input_quantizer,
             fc1_grad_weight_quantizer,
             fc1_grad_output_quantizer,
             fc2_input_quantizer,
-            fc2_weight_quantizer,
             fc2_output_quantizer,
             fc2_grad_input_quantizer,
             fc2_grad_weight_quantizer,
             fc2_grad_output_quantizer,
-        ) = [None] * 12
+        ) = [None] * 10
+        fc1_weight_quantizer, fc2_weight_quantizer = self._get_weight_quantizers()
         if self.fp8:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
-            fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-            fc1_weight_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
                 columnwise=isinstance(fc2_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)),
             )
             fc1_input_quantizer.internal = True
-            fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
-            fc2_weight_quantizer.internal = True
             if fp8_output:
                 fc2_output_quantizer = self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM2_OUTPUT
@@ -1995,6 +1981,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].amax_reduction_group = self.tp_group
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        return [self.fc1_weight, self.fc2_weight]
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        if not self.fp8:
+            return [None, None]
+        fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+        fc1_weight_quantizer.internal = True
+        fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
+        fc2_weight_quantizer.internal = True
+        return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):
         """
