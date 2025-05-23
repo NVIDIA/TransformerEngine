@@ -41,15 +41,13 @@ except RuntimeError as e:
         import warnings
 
         warnings.warn(
-            (
-                "Detected a JAX installation but could not find the shared object file for the "
-                "Transformer Engine JAX extension library. If this is not intentional, please "
-                "reinstall Transformer Engine with `pip install transformer_engine[jax]` or "
-                "build from source with `NVTE_FRAMEWORK=jax`."
-            ),
-            category=RuntimeWarning
+            "Detected a JAX installation but could not find the shared object file for the "
+            "Transformer Engine JAX extension library. If this is not intentional, please "
+            "reinstall Transformer Engine with `pip install transformer_engine[jax]` or "
+            "build from source with `NVTE_FRAMEWORK=jax`.",
+            category=RuntimeWarning,
         )
-        raise ImportError('') from e
+        raise ImportError("") from e
 
     # If we got here, the RuntimeError we caught is unrelated to the framework extension.
     raise e

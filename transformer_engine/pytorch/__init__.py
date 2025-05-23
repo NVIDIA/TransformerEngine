@@ -25,27 +25,25 @@ except RuntimeError as e:
         import warnings
 
         warnings.warn(
-            (
-                "Detected a PyTorch installation but could not find the shared object file for the "
-                "Transformer Engine PyTorch extension library. If this is not intentional, please "
-                "reinstall Transformer Engine with `pip install transformer_engine[pytorch]` or "
-                "build from source with `NVTE_FRAMEWORK=pytorch`."
-            ),
-            category=RuntimeWarning
+            "Detected a PyTorch installation but could not find the shared object file for the "
+            "Transformer Engine PyTorch extension library. If this is not intentional, please "
+            "reinstall Transformer Engine with `pip install transformer_engine[pytorch]` or "
+            "build from source with `NVTE_FRAMEWORK=pytorch`.",
+            category=RuntimeWarning,
         )
-        raise ImportError('') from e
+        raise ImportError("") from e
 
     # If we got here, the RuntimeError we caught is unrelated to the framework extension.
     raise e
+
 
 @functools.lru_cache(maxsize=None)
 def torch_version() -> tuple[int, ...]:
     """Get PyTorch version"""
     return PkgVersion(str(torch.__version__)).release
 
-assert torch_version() >= (2, 1), (
-    f"Minimum torch version 2.1 required. Found {torch_version()}."
-)
+
+assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
