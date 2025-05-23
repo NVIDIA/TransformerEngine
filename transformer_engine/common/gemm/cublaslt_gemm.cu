@@ -494,7 +494,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-#if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205
+#if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205 && CUDA_VERSION < 13000 && \
+    CUBLAS_VERSION < 130000
   if (counter != nullptr) {
     if (m_split == 0) m_split = 1;
     if (n_split == 0) n_split = 1;
@@ -598,8 +599,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
 
   int cudart_version;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cudart_version));
-  NVTE_CHECK(cudart_version >= 12020, "Cuda version 12.2 is required for atomic gemm.");
-  NVTE_CHECK(cublasLtGetVersion() >= 120205, "Cublas version 12.2.5 is required for atomic gemm.");
+  NVTE_CHECK(cudart_version >= 12020 && cudart_version < 13000,
+             "Cuda version >=12.2 and <13.0 is required for atomic gemm.");
+  NVTE_CHECK(cublasLtGetVersion() >= 120205 && cublasLtGetVersion() < 130000,
+             "Cublas version >=12.2.5 and <13.0 is required for atomic gemm.");
 
   using namespace transformer_engine;
   const Tensor *inputA = reinterpret_cast<const Tensor *>(A);
