@@ -50,8 +50,6 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-
 __all__ = ["GroupedLinear"]
 
 

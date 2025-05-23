@@ -50,7 +50,7 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
   std::vector<size_t> columnwise_scale_sizes;
   for (int i = 0; i < num_splits; i++) {
     std::vector<size_t> input_view_i_shape =
-        std::vector<size_t>{(size_t)m_splits[i], (size_t)hidden_dim};
+        std::vector<size_t>{static_cast<size_t>(m_splits[i]), static_cast<size_t>(hidden_dim)};
     if (rowwise_usage) {
       rowwise_data_shapes.emplace_back(input_view_i_shape);
       rowwise_scale_shapes.emplace_back(
