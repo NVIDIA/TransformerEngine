@@ -103,7 +103,17 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def lowering(
-        ctx, *args, M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias, is_grouped_dense_wgrad
+        ctx,
+        *args,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        is_grouped_dense_wgrad,
     ):
         del out_dtype
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
@@ -387,7 +397,10 @@ def gemm(
 
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
+
 import pdb
+
+
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -447,8 +460,15 @@ def grouped_gemm(
         rhs_is_trans = rhs_contract_dim[0] != 0
 
     # TODO(Hua): thses are for fp16 dense wgrad, any better way to handle this?
-    if is_grouped_dense_wgrad and not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor):
-        print(f"[DEBUG] original {lhs_is_trans=}, {rhs_is_trans=}, {lhs_flatten_axis=}, {rhs_flatten_axis=}")
+    if (
+        is_grouped_dense_wgrad
+        and not isinstance(lhs, ScaledTensor)
+        and not isinstance(rhs, ScaledTensor)
+    ):
+        print(
+            f"[DEBUG] original {lhs_is_trans=}, {rhs_is_trans=}, {lhs_flatten_axis=},"
+            f" {rhs_flatten_axis=}"
+        )
         lhs_is_trans = True
         rhs_is_trans = False
         lhs_flatten_axis = 1
@@ -493,7 +513,7 @@ def grouped_gemm(
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
-    if scaling_mode.is_tensor_scaling(): #and not is_gemm_with_all_layouts_supported():
+    if scaling_mode.is_tensor_scaling():  # and not is_gemm_with_all_layouts_supported():
         lhs_is_trans = False
         rhs_is_trans = True
         if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
@@ -511,7 +531,7 @@ def grouped_gemm(
             rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
         lhs_data = _shape_normalization(lhs_data, (lhs_contract_dim, ()), not lhs_layout_is_T)
         rhs_data = _shape_normalization(rhs_data, (rhs_contract_dim, ()), rhs_layout_is_T)
-    
+
     print(f"[DEBUG] {lhs_shape=}, {rhs_shape=}")
     print(f"[DEBUG] {lhs_contract_dim=}, {rhs_contract_dim=}")
     print(f"[DEBUG] {lhs_is_trans=}, {rhs_is_trans=}")
