@@ -117,6 +117,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
+py::object fp8_blockwise_transpose(py::object tensor, py::object quantizer);
+
 /***************************************************************************************************
  * Activations
  **************************************************************************************************/

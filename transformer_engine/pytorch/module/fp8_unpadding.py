@@ -12,7 +12,8 @@ import transformer_engine_torch as tex
 
 from ..fp8 import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
-
+from ..tensor.quantized_tensor import QuantizedTensor
+from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
 __all__ = ["Fp8Unpadding"]
 
@@ -47,18 +48,71 @@ class _Fp8Unpadding(torch.autograd.Function):
         grad_input = None
         if ctx.requires_dgrad:
             grad_output = grad_output.contiguous()
-
-            in_features = grad_output.shape[-1]
-
-            # Allocate cast and transpose output tensor
             total_row = sum(ctx.padded_m_splits)
-            grad_input = torch.empty(
-                [total_row, in_features], dtype=grad_output.dtype, device=grad_output.device
-            )
-            # FP8 pad input for forward, FP8 input transpose for backward wgrad
-            tex.fused_multi_row_padding(
-                grad_output.view(-1, in_features), grad_input, ctx.m_splits, ctx.padded_m_splits
-            )
+
+            if isinstance(grad_output, QuantizedTensor):
+                # Each m in m_splits indicates a tensor. So for tensor-wise scaled tensors,
+                # we should always pad the high precision tensors and then do multi-quantize.
+                # For MXFP8, padding doesn't make sense.
+                assert (
+                    isinstance(grad_output, Float8BlockwiseQTensor)
+                    and not grad_output._is_2D_scaled
+                ), (
+                    "Fp8Unpadding only supports fp32, bf16 or fp8 blockwise 1D scaled tensor "
+                    "with compact data and scales."
+                )
+
+                in_features = grad_output._rowwise_data.shape[-1]
+                in_scale_features = grad_output._rowwise_scale_inv.T.shape[-1]
+
+                rowwise_data = grad_output._rowwise_data.view(-1, in_features)
+                rowwise_scale_inv = grad_output._rowwise_scale_inv.T.view(
+                    -1, in_scale_features
+                ).contiguous()
+
+                grad_input_data = torch.empty(
+                    [total_row, in_features],
+                    dtype=grad_output._rowwise_data.dtype,
+                    device=grad_output.device,
+                )
+                grad_input_scale = torch.empty(
+                    [total_row, in_scale_features],
+                    dtype=grad_output._rowwise_scale_inv.dtype,
+                    device=grad_output.device,
+                )
+
+                tex.fused_multi_row_padding(
+                    rowwise_data, grad_input_data, ctx.m_splits, ctx.padded_m_splits
+                )
+                tex.fused_multi_row_padding(
+                    rowwise_scale_inv, grad_input_scale, ctx.m_splits, ctx.padded_m_splits
+                )
+
+                # FP8 pad input for forward, FP8 input transpose for backward wgrad
+                grad_input = Float8BlockwiseQTensor(
+                    shape=grad_input_data.shape,
+                    dtype=grad_output.dtype,
+                    rowwise_data=grad_input_data,
+                    rowwise_scale_inv=grad_input_scale.T.contiguous(),
+                    columnwise_data=None,
+                    columnwise_scale_inv=None,
+                    fp8_dtype=grad_output._fp8_dtype,
+                    quantizer=grad_output._get_quantizer(),
+                    is_2D_scaled=False,
+                    requires_grad=grad_output.requires_grad,
+                )
+            else:
+                in_features = grad_output.shape[-1]
+
+                # Allocate cast and transpose output tensor
+                total_row = sum(ctx.padded_m_splits)
+                grad_input = torch.empty(
+                    [total_row, in_features], dtype=grad_output.dtype, device=grad_output.device
+                )
+                # FP8 pad input for forward, FP8 input transpose for backward wgrad
+                tex.fused_multi_row_padding(
+                    grad_output.view(-1, in_features), grad_input, ctx.m_splits, ctx.padded_m_splits
+                )
 
         return (grad_input, None, None, None)
 

@@ -12,7 +12,8 @@ import transformer_engine_torch as tex
 
 from ..fp8 import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
-
+from ..tensor.quantized_tensor import QuantizedTensor
+from ..tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
 __all__ = ["Fp8Padding"]
 
@@ -29,14 +30,56 @@ class _Fp8Padding(torch.autograd.Function):
         is_grad_enabled: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        # Make sure input dimensions are compatible
-        in_features = inp.shape[-1]
 
-        # Allocate cast and transpose output tensor
         total_row = sum(padded_m_splits)
-        out = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
 
-        tex.fused_multi_row_padding(inp.view(-1, in_features), out, m_splits, padded_m_splits)
+        if isinstance(inp, QuantizedTensor):
+            # Each m in m_splits indicates a tensor. So for tensor-wise scaled tensors,
+            # we should always pad the high precision tensors and then do multi-quantize.
+            # For MXFP8, padding doesn't make sense.
+            assert isinstance(inp, Float8BlockwiseQTensor) and not inp._is_2D_scaled, (
+                "Fp8Padding only supports fp32, bf16 or fp8 blockwise 1D scaled tensor "
+                "with compact data and scales."
+            )
+
+            in_features = inp._rowwise_data.shape[-1]
+            in_scale_features = inp._rowwise_scale_inv.T.shape[-1]
+
+            rowwise_data = inp._rowwise_data.view(-1, in_features)
+            rowwise_scale_inv = inp._rowwise_scale_inv.T.view(-1, in_scale_features).contiguous()
+
+            out_data = torch.empty(
+                [total_row, in_features], dtype=inp._rowwise_data.dtype, device=inp.device
+            )
+            out_scale_inv = torch.empty(
+                [total_row, in_scale_features],
+                dtype=inp._rowwise_scale_inv.dtype,
+                device=inp.device,
+            )
+
+            tex.fused_multi_row_padding(rowwise_data, out_data, m_splits, padded_m_splits)
+            tex.fused_multi_row_padding(rowwise_scale_inv, out_scale_inv, m_splits, padded_m_splits)
+
+            out = Float8BlockwiseQTensor(
+                shape=out_data.shape,
+                dtype=inp.dtype,
+                rowwise_data=out_data,
+                rowwise_scale_inv=out_scale_inv.T.contiguous(),
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                fp8_dtype=inp._fp8_dtype,
+                quantizer=inp._get_quantizer(),
+                is_2D_scaled=False,
+                requires_grad=inp.requires_grad,
+            )
+        else:
+            # Make sure input dimensions are compatible
+            in_features = inp.shape[-1]
+
+            # Allocate cast and transpose output tensor
+            out = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
+
+            tex.fused_multi_row_padding(inp.view(-1, in_features), out, m_splits, padded_m_splits)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
