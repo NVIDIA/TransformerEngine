@@ -1132,7 +1132,6 @@ def get_full_mask(
         attn_mask_type == "padding" and bottom_right_alignment
     ):
         batch_size = attention_mask.shape[0]
-        print("xxxxxx", [x.device for x in [mask, attention_mask, actual_seqlens_kv]])
         swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q - window_size[0]
         ).view(batch_size, 1, 1, 1)

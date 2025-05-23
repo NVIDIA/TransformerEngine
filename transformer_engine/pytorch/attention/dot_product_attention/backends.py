@@ -178,7 +178,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
-        print("------- enter unfused", attention_mask)
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
