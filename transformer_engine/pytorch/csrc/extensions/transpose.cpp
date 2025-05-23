@@ -197,11 +197,13 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
     if (m_splits[i] > 0) {
       TensorWrapper te_tensor = makeTransformerEngineTensor(
           rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
-          columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr, rowwise_data_shapes[i],
-          columnwise_data_shapes[i], fp8_dtype, nullptr, nullptr,
-          rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
-          columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr, rowwise_scale_shapes[i],
-          columnwise_scale_shapes[i], scaling_mode);
+          columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
+          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
+          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+          nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+          columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
+          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
+          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode);
 
       output_list.emplace_back(std::move(te_tensor));
     }
