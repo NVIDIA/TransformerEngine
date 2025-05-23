@@ -14,8 +14,11 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <atomic>
+#include <climits>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -89,6 +92,12 @@ struct SimpleTensor {
     }
     return acc;
   }
+
+  void clear() {
+    dptr = nullptr;
+    shape.resize(0);
+    dtype = DType::kFloat32;
+  }
 };
 
 struct Tensor {
@@ -110,6 +119,16 @@ struct Tensor {
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
+
+  void clear() {
+    data.clear();
+    columnwise_data.clear();
+    amax.clear();
+    scale.clear();
+    scale_inv.clear();
+    columnwise_scale_inv.clear();
+    scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+  }
 
   size_t numel() const {
     size_t acc = 1;
@@ -620,6 +639,36 @@ bool is_supported_by_CC_100();
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size);
 
+class TensorAllocator {
+ public:
+  TensorAllocator() {
+    std::lock_guard<std::mutex> lock(mutex);
+    memory.reserve(MAX_TENSOR_NUM);
+  }
+
+  ~TensorAllocator() {}
+
+  NVTETensor Allocate(NVTEScalingMode mode);
+  void Free(NVTETensor t);
+  void Free(NVTETensor *t, size_t N);
+  Tensor *convertNVTETensor(NVTETensor t);
+  void setDebug(bool debug);
+
+ private:
+  std::mutex mutex;
+  std::atomic<size_t> size;
+  // Allocate at most 20 MB for tensors
+  // Should be replaced by virtual memory allocation
+  const size_t MAX_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(Tensor);
+  std::vector<uintptr_t> free_list;
+  std::vector<Tensor> memory;
+  bool debug = false;
+};
+
+extern TensorAllocator tensor_allocator;
+
+Tensor *convertNVTETensor(const NVTETensor tensor);
+Tensor *convertNVTETensorCheck(const NVTETensor tensor);
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

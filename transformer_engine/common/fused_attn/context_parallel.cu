@@ -677,9 +677,9 @@ void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu
   NVTE_API_CALL(nvte_thd_read_half_tensor);
   using namespace transformer_engine;
 
-  context_parallel::thd_read_half_tensor(*reinterpret_cast<Tensor *>(tensor),
-                                         *reinterpret_cast<Tensor *>(cu_seqlens),
-                                         *reinterpret_cast<Tensor *>(half), half_idx, stream);
+  context_parallel::thd_read_half_tensor(*convertNVTETensorCheck(tensor),
+                                         *convertNVTETensorCheck(cu_seqlens),
+                                         *convertNVTETensorCheck(half), half_idx, stream);
 }
 
 void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
@@ -689,8 +689,8 @@ void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &ls
   using namespace transformer_engine;
 
   context_parallel::thd_second_half_lse_correction(
-      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(lse_per_step),
-      *reinterpret_cast<Tensor *>(cu_seqlens), lse_packed, stream);
+      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(lse_per_step),
+      *convertNVTETensorCheck(cu_seqlens), lse_packed, stream);
 }
 
 void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
@@ -700,8 +700,8 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
   using namespace transformer_engine;
 
   context_parallel::thd_read_second_half_lse(
-      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(cu_seqlens),
-      *reinterpret_cast<Tensor *>(half_lse), lse_packed, second_half_lse_seqlen, stream);
+      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(cu_seqlens),
+      *convertNVTETensorCheck(half_lse), lse_packed, second_half_lse_seqlen, stream);
 }
 
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
@@ -712,9 +712,9 @@ void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
   using namespace transformer_engine;
 
   context_parallel::thd_out_correction(
-      *reinterpret_cast<Tensor *>(out), *reinterpret_cast<Tensor *>(out_per_step),
-      *reinterpret_cast<Tensor *>(lse), *reinterpret_cast<Tensor *>(lse_per_step),
-      *reinterpret_cast<Tensor *>(cu_seqlens), only_second_half, lse_packed, stream);
+      *convertNVTETensorCheck(out), *convertNVTETensorCheck(out_per_step),
+      *convertNVTETensorCheck(lse), *convertNVTETensorCheck(lse_per_step),
+      *convertNVTETensorCheck(cu_seqlens), only_second_half, lse_packed, stream);
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
@@ -727,8 +727,8 @@ void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_ste
   std::string second_half_str(second_half);
 
   context_parallel::thd_grad_correction(
-      *reinterpret_cast<Tensor *>(grad), *reinterpret_cast<Tensor *>(grad_per_step),
-      *reinterpret_cast<Tensor *>(cu_seqlens), first_half_str, second_half_str, stream);
+      *convertNVTETensorCheck(grad), *convertNVTETensorCheck(grad_per_step),
+      *convertNVTETensorCheck(cu_seqlens), first_half_str, second_half_str, stream);
 }
 
 void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
@@ -737,7 +737,7 @@ void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETenso
   NVTE_API_CALL(nvte_thd_get_partitioned_indices);
   using namespace transformer_engine;
 
-  context_parallel::thd_get_partitioned_indices(*reinterpret_cast<Tensor *>(cu_seqlens),
-                                                *reinterpret_cast<Tensor *>(output), total_tokens,
+  context_parallel::thd_get_partitioned_indices(*convertNVTETensorCheck(cu_seqlens),
+                                                *convertNVTETensorCheck(output), total_tokens,
                                                 world_size, rank, stream);
 }

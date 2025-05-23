@@ -334,8 +334,8 @@ void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
   using namespace transformer_engine;
   std::vector<Tensor*> input_list_, output_list_;
   for (size_t i = 0; i < num_tensors; ++i) {
-    input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
-    output_list_.push_back(reinterpret_cast<Tensor*>(output_list[i]));
+    input_list_.push_back(convertNVTETensorCheck(input_list[i]));
+    output_list_.push_back(convertNVTETensorCheck(output_list[i]));
   }
   multi_cast_transpose(input_list_, output_list_, stream);
 }
