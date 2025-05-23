@@ -110,7 +110,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             dtype = torch.get_autocast_dtype("cuda")
 
         # Linear forward
-        output, x_local, _ = BasicLinear._functional_forward(
+        output, x_local, w = BasicLinear._functional_forward(
             input=input_,
             weight=linear_op.weight,
             bias=bias,
@@ -125,7 +125,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         )
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local if weight_requires_grad else None)
+        linear_op_ctx.save_for_backward(x_local, w)
         linear_op_ctx.with_quantized_compute = with_quantized_compute
         linear_op_ctx.input_quantizer = input_quantizer
         linear_op_ctx.weight_quantizer = weight_quantizer

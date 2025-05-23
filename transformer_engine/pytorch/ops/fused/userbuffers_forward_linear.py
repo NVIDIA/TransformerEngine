@@ -98,6 +98,8 @@ class UserbuffersForwardLinear(FusedOperation):
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
+        input_requires_grad: bool = True,
+        weight_requires_grad: bool = True,
         ub_comm_name: str,
     ) -> tuple[torch.Tensor, dict]:
         """Functional API for forward pass
@@ -131,6 +133,12 @@ class UserbuffersForwardLinear(FusedOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
+        input_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the input tensor is
+            required in the backward pass.
+        weight_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the weight tensor is
+            required in the backward pass.
         ub_comm_name: str
             Layer type (e.g. "qkv", "proj", "fc1", "fc2"). This is
             used to access the corresponding Userbuffers communicators
@@ -141,8 +149,9 @@ class UserbuffersForwardLinear(FusedOperation):
         torch.Tensor
             Output tensor
         dict
-            Extra output tensors. "input" is the input tensor,
-            possibly cast and reshaped from the provided input tensor.
+            Extra output tensors. "input" is the input tensor and
+            "weight" is the weight tensor, both ready for use in the
+            backward pass.
 
         """
 
@@ -198,7 +207,7 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_ub_all_gather:
             if input_quantizer is not None:
                 if not isinstance(x_local, QuantizedTensorBase):
-                    input_quantizer.set_usage(rowwise=True, columnwise=True)
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     if isinstance(input_quantizer, Float8Quantizer):
                         input_quantizer.set_usage(columnwise=False)
                     x_local = input_quantizer(x_local)
@@ -212,7 +221,7 @@ class UserbuffersForwardLinear(FusedOperation):
         else:
             if with_quantized_compute:
                 if not isinstance(x_local, QuantizedTensorBase):
-                    input_quantizer.set_usage(rowwise=True, columnwise=True)
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     x_local = input_quantizer(x_local)
             else:
                 if isinstance(x_local, QuantizedTensorBase):
@@ -225,7 +234,7 @@ class UserbuffersForwardLinear(FusedOperation):
         w = weight
         w_is_quantized = isinstance(w, QuantizedTensorBase)
         if with_quantized_compute and not w_is_quantized:
-            weight_quantizer.set_usage(rowwise=True)
+            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
         elif not with_quantized_compute and w_is_quantized:
             w = w.dequantize()
@@ -258,17 +267,25 @@ class UserbuffersForwardLinear(FusedOperation):
         else:
             y_local = gemm_output
 
-        # Detach input tensor if needed
-        # Note: PyTorch autograd produces esoteric errors if we save
-        # input tensor as context for backward pass.
-        if x_local is input:
-            x_local = x_local.detach()
+        # Prepare weight tensor for backward pass
+        if input_requires_grad:
+            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensor):
+                w.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            w = None
 
-        # Configure input tensor for backward pass
-        if with_quantized_compute and isinstance(x_local, QuantizedTensorBase):
-            if not (isinstance(x_local, Float8TensorBase) and with_ub_all_gather):
-                # FP8 does not support all-gather of transpose data
-                x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+        # Prepare input tensor for backward pass
+        if weight_requires_grad:
+            if x_local is input:
+                # PyTorch autograd produces esoteric errors if we
+                # cache input tensor directly.
+                x_local = x_local.detach()
+            if with_quantized_compute and isinstance(x_local, QuantizedTensor):
+                if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
+                    # FP8 does not support all-gather of transpose data
+                    x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            x_local = None
 
         # Return cast tensors
         extra_outputs = {"input": x_local, "weight": w}
@@ -345,9 +362,10 @@ class UserbuffersForwardLinear(FusedOperation):
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         x_local = extra_outputs["input"]
+        w = extra_outputs["weight"]
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local if weight_requires_grad else None)
+        linear_op_ctx.save_for_backward(x_local, w)
         linear_op_ctx.with_quantized_compute = with_quantized_compute
         linear_op_ctx.input_quantizer = input_quantizer
         linear_op_ctx.weight_quantizer = weight_quantizer
