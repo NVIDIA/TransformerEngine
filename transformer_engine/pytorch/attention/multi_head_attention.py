@@ -482,6 +482,8 @@ class MultiheadAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
@@ -555,6 +557,12 @@ class MultiheadAttention(torch.nn.Module):
                    with shape [batch_size + 1] and dtype torch.int32.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
+                   with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
@@ -816,6 +824,8 @@ class MultiheadAttention(torch.nn.Module):
             qkv_format=self.qkv_format,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             attention_mask=attention_mask,

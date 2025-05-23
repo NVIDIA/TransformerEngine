@@ -556,9 +556,6 @@ class TransformerLayer(torch.nn.Module):
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
-        enc_dec_cu_seqlens_kv: Optional[torch.Tensor] = None,
-        enc_dec_cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
-        enc_dec_max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
         pad_between_seqs: Optional[bool] = None,
     ) -> torch.Tensor:
@@ -637,28 +634,26 @@ class TransformerLayer(torch.nn.Module):
             to the attention score of query i and key j.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
             Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
-            with shape [batch_size + 1] and dtype torch.int32. This is for encoder's self-attention.
+            with shape [batch_size + 1] and dtype torch.int32.
+            Used by encoders, or decoders' self-attention.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
             Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
             and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+            Used by decoders' cross-attention.
         cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
             Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
-            with shape [batch_size + 1] and dtype torch.int32. This is for encoder's self-attention.
+            with shape [batch_size + 1] and dtype torch.int32. Set to `cu_seqlens_q` if None.
+            Used by encoders, or decoders' self-attention.
         cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
             Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
             and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+            Set to `cu_seqlens_kv` if None. Used by decoders' cross-attention.
         max_seqlen_q: Optional[int], default = `None`
             Maximum sequence length in `query_layer`.
-            Calculated from `cu_seqlens_q` if not provided.
+            Calculated from `cu_seqlens_q_padded` if not provided.
         max_seqlen_kv: Optional[int], default = `None`
             Maximum sequence length in `key_layer` and `value_layer`.
-            Calculated from `cu_seqlens_kv` if not provided.
-        enc_dec_cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-            Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-            and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
-        enc_dec_max_seqlen_kv: Optional[int], default = `None`
-            Maximum sequence length in `key_layer` and `value_layer`.
-            Calculated from `cu_seqlens_kv` if not provided.
+            Calculated from `cu_seqlens_kv_padded` if not provided.
         fast_zero_fill: bool, default = `True`
             Whether to set output tensors to 0 or not before use.
         inference_params: InferenceParams, default = None
@@ -666,7 +661,8 @@ class TransformerLayer(torch.nn.Module):
             to efficiently calculate and store the context during inference.
         pad_between_seqs: Optional[bool], default = `None`
             If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
-            If true, there are padding tokens between individual sequences in a packed batch.
+            If true, there are padding tokens between individual sequences in a packed batch,
+            i.e. qkv_format = 'thd'.
         """
 
         if self_attn_mask_type is None:
@@ -727,6 +723,8 @@ class TransformerLayer(torch.nn.Module):
             alibi_slopes=alibi_slopes,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_q,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_q_padded,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_q,
             fast_zero_fill=fast_zero_fill,
@@ -761,6 +759,8 @@ class TransformerLayer(torch.nn.Module):
                 alibi_slopes=alibi_slopes,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 fast_zero_fill=fast_zero_fill,

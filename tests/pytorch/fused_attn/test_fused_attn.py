@@ -1111,7 +1111,7 @@ model_configs_te_layer = {
     "te_2_0": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
     "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
     "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
     "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
 }
@@ -1201,8 +1201,6 @@ def test_transformer_layer(
         torch.testing.assert_close(flash_attn_bwd, unfused_attn_bwd, **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_transformer_layer]: fused attn vs flash attn")
-        print("fused min/max", fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
-        print("flash min/max", flash_attn_fwd.min().item(), flash_attn_fwd.max().item())
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         torch.testing.assert_close(fused_attn_bwd, flash_attn_bwd, **tols)
 
