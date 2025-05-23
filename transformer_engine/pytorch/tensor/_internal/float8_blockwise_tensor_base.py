@@ -38,9 +38,32 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
 
+    # TODO(zhongbo): experimental to use positional arguments for base class
+    # def __new__(
+    #     cls,
+    #     *args,
+    #     rowwise_data: Optional[torch.Tensor],
+    #     rowwise_scale_inv: Optional[torch.Tensor],
+    #     columnwise_data: Optional[torch.Tensor],
+    #     columnwise_scale_inv: Optional[torch.Tensor],
+    #     fp8_dtype: TE_DType,
+    #     quantizer: Quantizer,
+    #     is_2D_scaled: bool,
+    #     **kwargs,
+    # ):
+    #     instance = super().__new__(cls, *args, **kwargs)
+    #     instance._rowwise_data = rowwise_data
+    #     instance._columnwise_data = columnwise_data
+    #     instance._quantizer = quantizer
+    #     instance._fp8_dtype = fp8_dtype
+    #     instance._rowwise_scale_inv = rowwise_scale_inv
+    #     instance._columnwise_scale_inv = columnwise_scale_inv
+    #     instance._is_2D_scaled = is_2D_scaled
+
+    #     return instance
+
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
@@ -48,6 +71,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        *args,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)

@@ -181,11 +181,15 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
     py::object columnwise_scale =
         columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none();
 
-    py::object ret = Float8BlockwiseQTensorClass(
-        "rowwise_data"_a = rowwise_data, "columnwise_data"_a = columnwise_data,
-        "rowwise_scale_inv"_a = rowwise_scale, "columnwise_scale_inv"_a = columnwise_scale,
-        "fp8_dtype"_a = fp8_dtype, "quantizer"_a = quantizer_list[i],
-        "is_2D_scaled"_a = is_2D_scaled);
+    // py::object ret = Float8BlockwiseQTensorClass(
+    //     "rowwise_data"_a = rowwise_data, "columnwise_data"_a = columnwise_data,
+    //     "rowwise_scale_inv"_a = rowwise_scale, "columnwise_scale_inv"_a = columnwise_scale,
+    //     "fp8_dtype"_a = fp8_dtype, "quantizer"_a = quantizer_list[i],
+    //     "is_2D_scaled"_a = is_2D_scaled);
+
+    py::object ret =
+        Float8BlockwiseQTensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
+                                    fp8_dtype, quantizer_list[i], is_2D_scaled);
 
     output_list_py.emplace_back(std::move(ret));
 
