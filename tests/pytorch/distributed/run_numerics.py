@@ -25,6 +25,7 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from run_layer_with_overlap import _compare_tensors
+from utils import maybe_dump_outputs, maybe_dump_gradients
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64
@@ -100,11 +101,15 @@ def main(argv=None, namespace=None):
 
     # Quantization scheme
     QUANTIZATION = args.quantization
-    if QUANTIZATION in ("fp8", "mxfp8", "fp8_block_scaling"):
-        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    if QUANTIZATION in ("fp8", "mxfp8"):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    elif QUANTIZATION == "fp8_block_scaling":
+        SEQ_LEN = 128
+        BATCH_SIZE = 128
+        HIDDEN_SIZE = 512
 
     test_dict = [
         test_quantizer,
@@ -505,6 +510,24 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
 
+    maybe_dump_outputs(
+        output_distributed,
+        kwargs,
+        prefix="Linear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
+
+    maybe_dump_gradients(
+        model_distributed,
+        kwargs,
+        prefix="Linear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
+
 
 def test_linear():
     """Run linear layer tests with various configurations."""
@@ -649,7 +672,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 
@@ -682,6 +705,24 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
 
+    maybe_dump_outputs(
+        output_distributed,
+        kwargs,
+        prefix="LayernormLinear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
+
+    maybe_dump_gradients(
+        model_distributed,
+        kwargs,
+        prefix="LayernormLinear",
+        recipe=QUANTIZATION,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+    )
+
 
 def test_layernorm_linear():
     kwargs_list = [
@@ -693,6 +734,7 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
+        {"return_layernorm_output": True, "return_layernorm_output_gathered": True},
         {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
@@ -758,7 +800,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 
@@ -801,6 +843,7 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
+        {"return_layernorm_output": True, "return_layernorm_output_gathered": True},
         {"delay_wgrad_compute": True},
     ]
 
