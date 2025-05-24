@@ -596,6 +596,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = key.shape[sequence_dim]
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(
+            # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
+            not deterministic,
             self.dtype,
             self.dtype,
             qkv_layout,
