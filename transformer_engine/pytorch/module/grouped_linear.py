@@ -673,21 +673,11 @@ class GroupedLinear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         with self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
-
-            weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+            weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
-            if not self.fp8 and any(isinstance(w, QuantizedTensorBase) for w in weight_tensors):
-                warnings.warn(
-                    "You are using quantized weights without quantized compute. "
-                    "Please make sure this is intentional."
-                )
-                weight_tensors = [
-                    w.dequantize() if isinstance(w, QuantizedTensorBase) else w
-                    for w in weight_tensors
-                ]
 
-            input_quantizers, weight_quantizers, output_quantizers = (
-                [None] * self.num_gemms,
+            weight_quantizers = self._get_weight_quantizers()
+            input_quantizers, output_quantizers = (
                 [None] * self.num_gemms,
                 [None] * self.num_gemms,
             )
@@ -702,14 +692,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 # TODO: use internal after #1638 is merged. # pylint: disable=fixme
                 for i in range(self.num_gemms):
                     input_quantizers[i].internal = False
-                weight_quantizers = [
-                    self.quantizers["scaling_fwd"][
-                        self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
-                    ]
-                    for i in range(self.num_gemms)
-                ]
-                for i in range(self.num_gemms):
-                    weight_quantizers[i].internal = True
                 if torch.is_grad_enabled():
                     grad_output_quantizers = [
                         self.quantizers["scaling_bwd"][
@@ -808,3 +790,30 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
                 ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+        if not self.fp8 and any(isinstance(w, QuantizedTensorBase) for w in weight_tensors):
+            warnings.warn(
+                "You are using quantized weights without quantized compute. "
+                "Please make sure this is intentional."
+            )
+            weight_tensors = [
+                w.dequantize() if isinstance(w, QuantizedTensorBase) else w for w in weight_tensors
+            ]
+        return weight_tensors
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        if not self.fp8:
+            return [None] * self.num_gemms
+        weight_quantizers = [
+            self.quantizers["scaling_fwd"][
+                self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+            ]
+            for i in range(self.num_gemms)
+        ]
+        for i in range(self.num_gemms):
+            weight_quantizers[i].internal = True
+        return weight_quantizers

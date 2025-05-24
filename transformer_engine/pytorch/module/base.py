@@ -9,7 +9,7 @@ import os
 import pickle
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union, Callable
 from contextlib import contextmanager
 import logging
 from types import MethodType
@@ -639,6 +639,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Update quantizers with new amax pointers.
             self.quantizers[meta_key] = self.fp8_meta[meta_key].make_quantizers()
+            # Make sure weight tensors has correct quantizers
+            self._update_weight_quantizers()
 
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
@@ -691,6 +693,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def _update_weight_quantizers(self) -> None:
+        """Update the quantizers for the weight tensors."""
+        weight_tensors = self._get_weight_tensors()
+        weight_quantizers = self._get_weight_quantizers()
+        assert len(weight_tensors) == len(weight_quantizers), (
+            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+            f"({len(weight_quantizers)}) must match"
+        )
+        for weight, quantizer in zip(weight_tensors, weight_quantizers):
+            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                weight.update_quantizer(quantizer)
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
+        )
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
+        )
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
