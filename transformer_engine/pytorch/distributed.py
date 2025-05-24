@@ -1014,6 +1014,7 @@ def _post_process_fp8_blockwise_gather(
         out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
     return out
 
+
 @dataclass
 class _FP8BlockwiseAllGatherAsyncHandle:
 
