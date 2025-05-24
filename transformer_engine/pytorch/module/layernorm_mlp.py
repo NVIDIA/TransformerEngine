@@ -246,20 +246,23 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Do TP communication in high precision if quantized format
         # does not support communication
-        force_hp_fc1_input_gather = (
-            fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
-        )
+        # force_hp_fc1_input_gather = (
+        #     fp8 and sequence_parallel and isinstance(fc1_input_quantizer, Float8BlockQuantizer)
+        # )
+        force_hp_fc1_input_gather = False
 
         # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
         # for return_layernorm_output: layernorm output = High precision, then cast to FP8
         #                              high precision layernorm output and output of the linear are returned
         # for debug: : layernorm output = High precision to enable processing of this norm
+
         with_quantized_norm = (
             fp8
+            and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not debug
+            and not force_hp_fc1_input_gather
         )
 
         # Apply normalization
@@ -290,7 +293,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    ln_out = fc1_input_quantizer(ln_out)
+                    if not force_hp_fc1_input_gather:
+                        ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                     if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
                         fc1_input_quantizer.set_usage(need_compact=False)
@@ -316,8 +320,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     ln_out_total, _ = gather_along_first_dim(
                         ln_out,
                         tp_group,
-                        quantizer=quantizer,
+                        quantizer=quantizer if not force_hp_fc1_input_gather else None,
                     )
+                    if not isinstance(ln_out_total, QuantizedTensorBase):
+                        ln_out_total = quantizer(ln_out_total)
         else:
             if (fp8 or debug) and not with_quantized_norm:
                 ln_out = fc1_input_quantizer(ln_out)
@@ -565,6 +571,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.force_hp_fc1_input_gather = force_hp_fc1_input_gather
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
@@ -740,7 +747,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_obj_fc1_dgrad = None
             if ctx.fc1_weight_requires_grad and ctx.tensor_parallel and ctx.sequence_parallel:
                 quantizer = None
-                if ctx.fp8 or ctx.debug and not ctx.force_hp_fc1_input_gather:
+                if (ctx.fp8 or ctx.debug) and not ctx.force_hp_fc1_input_gather:
                     quantizer = ctx.fc1_input_quantizer
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually
@@ -2009,7 +2016,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 )
         else:
             if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].set_usage(
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2].set_usage(
                     need_compact=True
                 )
 

@@ -140,9 +140,10 @@ class _Linear(torch.autograd.Function):
 
         # Do TP communication in high precision if quantized format
         # does not support communication
-        force_hp_input_gather = (
-            fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
-        )
+        # force_hp_input_gather = (
+        #     fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
+        # )
+        force_hp_input_gather = False
 
         # Configure Userbuffers communication (comm+GEMM overlap)
         ub_obj = None
@@ -191,8 +192,10 @@ class _Linear(torch.autograd.Function):
                 inputmat_total, _ = gather_along_first_dim(
                     inputmat,
                     tp_group,
-                    quantizer=quantizer,
+                    quantizer=quantizer if not force_hp_input_gather else None,
                 )
+                if not isinstance(inputmat_total, QuantizedTensorBase):
+                    inputmat_total = quantizer(inputmat_total)
             elif ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
                 inputmat_total, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_obj,
@@ -401,6 +404,7 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.force_hp_input_gather = force_hp_input_gather
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer

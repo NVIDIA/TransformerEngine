@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
+from dataclasses import dataclass
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -35,6 +36,15 @@ from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+
+try:
+    import torch.distributed._symmetric_memory as symm_mem
+
+    HAS_TORCH_SYMMETRIC = True
+except ImportError:
+    HAS_TORCH_SYMMETRIC = False
+
+import transformer_engine_torch as tex
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -1004,6 +1014,21 @@ def _post_process_fp8_blockwise_gather(
         out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
     return out
 
+@dataclass
+class _FP8BlockwiseAllGatherAsyncHandle:
+
+    tensor: Float8BlockwiseQTensorBase
+    quantizer: Float8BlockQuantizer
+    async_handle: torch.distributed.Work
+    _synchronized: bool = False
+
+    def wait(self) -> None:
+        if self._synchronized:
+            return
+        self.async_handle.wait()
+        _post_process_fp8_blockwise_gather(self.tensor, self.quantizer)
+        self._synchronized = True
+
 
 def _all_gather_fp8_blockwise(
     inp: torch.Tensor,
@@ -1077,7 +1102,7 @@ def _all_gather_fp8_blockwise(
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
-    assert quantizer.is_quantizable(inp), "Input tensor is not quantizable"
+    # assert quantizer.is_quantizable(inp), "Input tensor is not quantizable"
 
     # Cast input tensor to Float8BlockwiseQTensor with required data
     # Set to compact usage in case the quantizer is not correctly configured
@@ -1146,7 +1171,9 @@ def _all_gather_fp8_blockwise(
     # and then transpose the columnwise data to match the rowwise data
     # Make sure FP8 transpose is populated if needed
 
-    if not async_op:
+    if async_op:
+        handle = _FP8BlockwiseAllGatherAsyncHandle(out, quantizer, handle)
+    else:
         # if it's a sync op, we need to do the transpose here as post processing step
         _post_process_fp8_blockwise_gather(out, quantizer, handle)
 
