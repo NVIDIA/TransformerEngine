@@ -187,9 +187,10 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Do TP communication in high precision if quantized format
         # does not support communication
-        force_hp_blockwise_ln_out_gather = (
-            fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
-        )
+        # force_hp_blockwise_ln_out_gather = (
+        #     fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
+        # )
+        force_hp_blockwise_ln_out_gather = False
 
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
@@ -198,6 +199,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
+            and not force_hp_blockwise_ln_out_gather
         )
 
         # Apply normalization
@@ -258,8 +260,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_out_total, _ = gather_along_first_dim(
                         ln_out,
                         tp_group,
-                        quantizer=quantizer,
+                        quantizer=quantizer if not force_hp_blockwise_ln_out_gather else None,
                     )
+                    if not isinstance(ln_out_total, QuantizedTensorBase):
+                        ln_out_total = quantizer(ln_out_total)
         else:
             if (fp8 or debug) and not with_quantized_norm:
                 ln_out = input_quantizer(ln_out)
@@ -394,6 +398,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
+            ctx.force_hp_blockwise_ln_out_gather = force_hp_blockwise_ln_out_gather
 
             # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
