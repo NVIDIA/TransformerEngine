@@ -1,0 +1,7 @@
+test_disable_fp8_layer:
+  enabled: True
+  layers:
+    layer_types: [qkv]
+  transformer_engine:
+    DisableFP8Layer:
+      enabled: True

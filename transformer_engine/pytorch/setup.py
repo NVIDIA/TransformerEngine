@@ -29,7 +29,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers
+from build_tools.utils import copy_common_headers, cuda_toolkit_include_path
 from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension
 
@@ -48,6 +48,20 @@ if __name__ == "__main__":
         )
     ]
 
+    setup_requires = ["torch>=2.1"]
+    if cuda_toolkit_include_path() is None:
+        setup_requires.extend(
+            [
+                "nvidia-cuda-runtime-cu12",
+                "nvidia-cublas-cu12",
+                "nvidia-cudnn-cu12",
+                "nvidia-cuda-cccl-cu12",
+                "nvidia-cuda-nvcc-cu12",
+                "nvidia-nvtx-cu12",
+                "nvidia-cuda-nvrtc-cu12",
+            ]
+        )
+
     # Configure package
     setuptools.setup(
         name="transformer_engine_torch",
@@ -55,16 +69,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        setup_requires=[
-            "torch>=2.1",
-            "nvidia-cuda-runtime-cu12",
-            "nvidia-cublas-cu12",
-            "nvidia-cudnn-cu12",
-            "nvidia-cuda-cccl-cu12",
-            "nvidia-cuda-nvcc-cu12",
-            "nvidia-nvtx-cu12",
-            "nvidia-cuda-nvrtc-cu12",
-        ],
+        setup_requires=setup_requires,
         install_requires=["torch>=2.1"],
         tests_require=["numpy", "torchvision"],
     )
