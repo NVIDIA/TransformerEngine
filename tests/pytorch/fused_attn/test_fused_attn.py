@@ -1144,10 +1144,12 @@ def test_transformer_layer(
     workspace_opt = True
 
     # Test backend availability
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
+        is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1166,6 +1168,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     # FusedAttention backend
@@ -1179,6 +1182,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     # FlashAttention backend
@@ -1192,6 +1196,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -1260,6 +1265,7 @@ def _run_transformer_layer(
     workspace_opt: bool,
     fused_qkv_params: bool,
     RoPE: bool,
+    is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run TransformerLayer module with one forward pass and one backward pass"""
 
