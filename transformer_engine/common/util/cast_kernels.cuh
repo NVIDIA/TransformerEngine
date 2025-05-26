@@ -204,7 +204,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       thread_amax = 0.0f;
       float in_compute_colwise[BUFF_DIM_Y];
       IType in_colwise_IType[BUFF_DIM_Y];
-      
+
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
         IType thread_amax_f16 = static_cast<IType>(0.0f);
