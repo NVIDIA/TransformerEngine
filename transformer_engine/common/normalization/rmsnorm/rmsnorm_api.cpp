@@ -13,6 +13,7 @@
 #include "../../common.h"
 #include "../common.h"
 #include "transformer_engine/normalization.h"
+#include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/transpose.h"
 
 namespace transformer_engine {
@@ -53,9 +54,11 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   bool training =
       is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
 
+  bool gamma_in_weight_dtype = false;
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, rsigma->data.dptr);
@@ -68,7 +71,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
+      gamma_in_weight_dtype);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
@@ -126,9 +130,11 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+  bool gamma_in_weight_dtype = false;
   if (use_cudnn_norm_bwd()) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
@@ -141,7 +147,8 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       gamma.data.dtype,  // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
+      gamma_in_weight_dtype);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();

@@ -581,6 +581,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
+ * \warning   This API is **experimental** and subject to change.
+ *
  *  \param[in]     rng_state_dst             RNG state to store seed and offset.
  *  \param[in]     seed                      Seed for RNG state.
  *  \param[in]     q_max_seqlen              Max sequence length used for computing for Q.
@@ -596,6 +598,8 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
 
 /*!  \brief Get KV format for a given QKV layout.
  *
+ * \warning   This API is **experimental** and subject to change.
+ *
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     len                      batch_size x sequence_length.
@@ -604,48 +608,187 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
 
+/*!  \brief Set the seed and offset for RNG state.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[out]    rng_state_ptr            A size 2 array storing the RNG's seed and offset respectively.
+ *  \param[in]     captured                 Whether a CUDA graph is being captured.
+ *  \param[in]     seed_ptr                 Seed pointer.
+ *  \param[in]     seed_val                 Seed value.
+ *  \param[in]     offset_ptr               Offset pointer.
+ *  \param[in]     offset_val               Offset value.
+ *  \param[in]     offset_intragraph        Intragraph offset in RNG states. For use with CUDA Graphs.
+ *  \param[in]     stream                   CUDA stream used for this operation.
+ */
 void nvte_extract_seed_and_offset(int64_t *rng_state_ptr, int captured, int64_t *seed_ptr,
                                   uint64_t seed_val, int64_t *offset_ptr, uint64_t offset_val,
                                   uint32_t offset_intragraph, cudaStream_t stream);
 
+/*!  \brief Copy keys and values into the KV cache.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     new_k               Key tensor.
+ *  \param[in]     new_v               Value tensor.
+ *  \param[out]    k_cache             Key cache.
+ *  \param[out]    v_cache             Value cache.
+ *  \param[in]     page_table          Page table for K cache, [batch_size, max_pages_per_seq].
+ *  \param[in]     cu_new_lens         Cumulative sequence lengths.
+ *  \param[in]     cu_cached_lens      Cached cumulative sequence lengths.
+ *  \param[in]     qkv_format          QKV format, e.g. sbhd.
+ *  \param[in]     b                   Batch size.
+ *  \param[in]     max_ctx_len         Maximum context length.
+ *  \param[in]     max_seq_len         Maximum sequence length.
+ *  \param[in]     max_pages_per_seq   Maximum number of pages per sequence.
+ *  \param[in]     is_non_paged        Whether the cache is paged or not.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
 void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cache,
                            NVTETensor v_cache, NVTETensor page_table, NVTETensor cu_new_lens,
                            NVTETensor cu_cached_lens, NVTE_QKV_Format qkv_format, int b,
                            int max_ctx_len, int max_seq_len, int max_pages_per_seq,
                            int is_non_paged, cudaStream_t stream);
 
+/*!  \brief Extract the first half (half_idx=0) or second half (half_idx=1) of a THD tensor.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     tensor              Input tensor.
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    half                Output tensor.
+ *  \param[in]     half_idx            Whether to read first or second half of input tensor.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
 void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
                                   NVTETensor half, int half_idx, cudaStream_t stream);
 
+/*!  \brief Correct the second half of the softmax LSE (LogSumExp) for context parallelism.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[out]    lse                 Output tensor.
+ *  \param[in]     lse_per_step        Input tensor.
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     lse_packed          Whether or not lse_per_step is packed.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
 void nvte_cp_thd_second_half_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step,
                                             const NVTETensor &cu_seqlens, int lse_packed,
                                             cudaStream_t stream);
 
+/*!  \brief Read the second half of the softmax LSE (LogSumExp) for context parallelism.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     lse                      Input tensor.
+ *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    half_lse                 Output tensor.
+ *  \param[in]     lse_packed               Whether or the softmax LSE is in packed format.
+ *  \param[in]     second_half_lse_seqlen   Sequence length.
+ *  \param[in]     stream                   CUDA stream used for this operation.
+ */
 void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &cu_seqlens,
                                       NVTETensor half_lse, int lse_packed,
                                       int second_half_lse_seqlen, cudaStream_t stream);
 
+/*!  \brief Correct the THD format output of context parallelism in forward pass.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[out]    out                   Output tensor.
+ *  \param[in]     out_per_step          THD format output of context parallelism in forward pass.
+ *  \param[in]     lse                   Softmax LSE.
+ *  \param[in]     lse_per_step          Softmax LSE per step.
+ *  \param[in]     cu_seqlens            Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     only_second_half      Whether or not to correct only second half.
+ *  \param[in]     lse_packed            Whether or the softmax LSE is in packed format.
+ *  \param[in]     stream                CUDA stream used for this operation.
+ */
 void nvte_cp_thd_out_correction(NVTETensor out, const NVTETensor &out_per_step,
                                 const NVTETensor &lse, const NVTETensor &lse_per_step,
                                 const NVTETensor &cu_seqlens, int only_second_half, int lse_packed,
                                 cudaStream_t stream);
 
+/*!  \brief Correct the THD format output of context parallelism in forward pass.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[out]    grad                Output tensor.
+ *  \param[in]     grad_per_step       THD format gradient of context parallelism.
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[in]     first_half          One of ("add", "copy", "none") correction op for first half.
+ *  \param[in]     second_half         One of ("add", "copy", "none") correction op for second half.
+                                       Must be different from first_half.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
                                  const NVTETensor &cu_seqlens, const char *first_half,
                                  const char *second_half, cudaStream_t stream);
 
+/*!  \brief Generate partitioned indices for inputs in THD format.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     cu_seqlens          Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    output              Output tensor.
+ *  \param[in]     total_tokens        Total number of tokens.
+ *  \param[in]     world_size          Total number of devices for context parallelism.
+ *  \param[in]     rank                Device ID for current device.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
 void nvte_cp_thd_get_partitioned_indices(const NVTETensor &cu_seqlens, NVTETensor output,
                                          int total_tokens, int world_size, int rank,
                                          cudaStream_t stream);
 
+/*!  \brief Convert tensor from THD to BSHD format.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     tensor           Input tensor.
+ *  \param[in]     cu_seqlens       Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    new_tensor       Output tensor.
+ *  \param[in]     b                Batch size.
+ *  \param[in]     max_seq_len      Maximum sequence length.
+ *  \param[in]     stream           CUDA stream used for this operation.
+ */
 void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
                               int b, int max_seq_len, cudaStream_t stream);
 
+/*!  \brief Convert tensor from BSHD to THD format.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     tensor           Input tensor.
+ *  \param[in]     cu_seqlens       Cumulative sequence lengths, [batch_size + 1].
+ *  \param[out]    new_tensor       Output tensor.
+ *  \param[in]     b                Batch size.
+ *  \param[in]     max_seq_len      Maximum sequence length.
+ *  \param[in]     stream           CUDA stream used for this operation.
+ */
 void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,
                               int t, cudaStream_t stream);
 
+/*!  \brief Prepare QKV tensor for Flash Attention forward kernel.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     qkvi             Input tensor.
+ *  \param[out]    qkv              Output tensor.
+ *  \param[in]     stream           CUDA stream used for this operation.
+ */
 void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t stream);
 
+/*!  \brief Prepare QKV tensor for Flash Attention backward kernel.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]     q                Input query tensor.
+ *  \param[in]     k                Input key tensor.
+ *  \param[in]     v                Input value tensor.
+ *  \param[out]    qkv              Output tensor.
+ *  \param[in]     stream           CUDA stream used for this operation.
+ */
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 

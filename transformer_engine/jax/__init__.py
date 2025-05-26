@@ -20,66 +20,17 @@ All operations are designed to work seamlessly with JAX's functional programming
 model and support automatic differentiation.
 """
 
-# pylint: disable=wrong-import-position,wrong-import-order
+# pylint: disable=wrong-import-position
 
-import logging
-import importlib
-import importlib.util
-from importlib.metadata import version
-import sys
+# This unused import is needed because the top level `transformer_engine/__init__.py`
+# file catches an `ImportError` as a guard for cases where the given framework's
+# extensions are not available.
+import jax
 
-from transformer_engine.common import get_te_path, is_package_installed
-from transformer_engine.common import _get_sys_extension
+from transformer_engine.common import load_framework_extension
 
+load_framework_extension("jax")
 
-def _load_library():
-    """Load shared library with Transformer Engine C extensions"""
-    module_name = "transformer_engine_jax"
-
-    if is_package_installed(module_name):
-        assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
-        assert is_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version("transformer-engine-cu12")
-        ), (
-            "TransformerEngine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
-            "'pip3 install transformer-engine[jax]==VERSION'"
-        )
-
-    if is_package_installed("transformer-engine-cu12"):
-        if not is_package_installed(module_name):
-            logging.info(
-                "Could not find package %s. Install transformer-engine using "
-                "'pip3 install transformer-engine[jax]==VERSION'",
-                module_name,
-            )
-
-    extension = _get_sys_extension()
-    try:
-        so_dir = get_te_path() / "transformer_engine"
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-    except StopIteration:
-        try:
-            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-        except StopIteration:
-            so_dir = get_te_path()
-            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
-
-    spec = importlib.util.spec_from_file_location(module_name, so_path)
-    solib = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = solib
-    spec.loader.exec_module(solib)
-
-
-_load_library()
 from . import flax
 from . import quantize
 

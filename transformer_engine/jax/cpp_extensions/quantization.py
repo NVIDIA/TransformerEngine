@@ -44,7 +44,7 @@ else:
 __all__ = ["quantize", "quantize_dbias"]
 
 
-class DBiasQuantizePrimitive(BasePrimitive):
+class BaseDBiasQuantizePrimitive(BasePrimitive):
     """
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
@@ -155,7 +155,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             updated_amax,
             dbias,
             _,
-        ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
+        ) = BaseDBiasQuantizePrimitive.abstract(*args, **kwargs)
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
 
     @staticmethod
@@ -179,7 +179,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         x_aval, scale_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
-        return ffi.ffi_lowering(DBiasQuantizePrimitive.name)(
+        return ffi.ffi_lowering(BaseDBiasQuantizePrimitive.name)(
             ctx,
             x,
             scale,
@@ -205,7 +205,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         te_dbias_quantize_p implementation
         """
         del is_outer
-        assert DBiasQuantizePrimitive.inner_primitive is not None
+        assert BaseDBiasQuantizePrimitive.inner_primitive is not None
         (
             out,
             colwise_out,
@@ -214,7 +214,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             updated_amax,
             dbias,
             _,
-        ) = DBiasQuantizePrimitive.inner_primitive.bind(
+        ) = BaseDBiasQuantizePrimitive.inner_primitive.bind(
             x,
             scale,
             out_dtype=out_dtype,
@@ -262,14 +262,14 @@ class DBiasQuantizePrimitive(BasePrimitive):
         """
         del is_outer
         check_valid_batch_dims(batch_dims)
-        assert DBiasQuantizePrimitive.outer_primitive is not None
+        assert BaseDBiasQuantizePrimitive.outer_primitive is not None
         x, scale = batched_args
         x_bdim, scale_bdim = batch_dims
         amax_bdim = scale_bdim
 
         out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim, x_bdim
         return (
-            DBiasQuantizePrimitive.outer_primitive.bind(
+            BaseDBiasQuantizePrimitive.outer_primitive.bind(
                 x,
                 scale,
                 out_dtype=out_dtype,
@@ -302,7 +302,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*x_spec),
-            desc="DBiasQuantizePrimitive.out_sharding",
+            desc="BaseDBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if ScalingMode(scaling_mode).is_tensor_scaling():
@@ -314,14 +314,14 @@ class DBiasQuantizePrimitive(BasePrimitive):
         colwise_out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_out_spec),
-            desc="DBiasQuantizePrimitive.colwise_out_sharding",
+            desc="BaseDBiasQuantizePrimitive.colwise_out_sharding",
         )
 
         dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DBiasQuantizePrimitive.dbias_sharding",
+            desc="BaseDBiasQuantizePrimitive.dbias_sharding",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -334,15 +334,15 @@ class DBiasQuantizePrimitive(BasePrimitive):
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="DBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="BaseDBiasQuantizePrimitive.scale_inv"
         )
         amax_sharding = NamedSharding(
-            mesh, PartitionSpec(*amax_spec), desc="DBiasQuantizePrimitive.amax"
+            mesh, PartitionSpec(*amax_spec), desc="BaseDBiasQuantizePrimitive.amax"
         )
         colwise_scale_inv_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_scale_inv_spec),
-            desc="DBiasQuantizePrimitive.colwise_scale_inv",
+            desc="BaseDBiasQuantizePrimitive.colwise_scale_inv",
         )
 
         return (
@@ -374,7 +374,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*x_spec),
-            desc="DBiasQuantizePrimitive.out_sharding",
+            desc="BaseDBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if ScalingMode(scaling_mode).is_tensor_scaling():
@@ -386,14 +386,14 @@ class DBiasQuantizePrimitive(BasePrimitive):
         colwise_out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_out_spec),
-            desc="DBiasQuantizePrimitive.colwise_out_sharding",
+            desc="BaseDBiasQuantizePrimitive.colwise_out_sharding",
         )
 
         dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DBiasQuantizePrimitive.dbias_sharding",
+            desc="BaseDBiasQuantizePrimitive.dbias_sharding",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -406,15 +406,15 @@ class DBiasQuantizePrimitive(BasePrimitive):
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="DBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="BaseDBiasQuantizePrimitive.scale_inv"
         )
         amax_sharding = NamedSharding(
-            mesh, PartitionSpec(*amax_spec), desc="DBiasQuantizePrimitive.amax"
+            mesh, PartitionSpec(*amax_spec), desc="BaseDBiasQuantizePrimitive.amax"
         )
         colwise_scale_inv_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_scale_inv_spec),
-            desc="DBiasQuantizePrimitive.colwise_scale_inv",
+            desc="BaseDBiasQuantizePrimitive.colwise_scale_inv",
         )
 
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
@@ -435,7 +435,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 local_colwise_scale_inv,
                 local_amax,
                 local_dbias,
-            ) = DBiasQuantizePrimitive.impl(
+            ) = BaseDBiasQuantizePrimitive.impl(
                 x,
                 scale,
                 out_dtype=out_dtype,
@@ -485,7 +485,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             len(value_types[0].shape),
-            unique_var="DBiasQuantizePrimitive_i",
+            unique_var="BaseDBiasQuantizePrimitive_i",
             flatten_axis=flatten_axis,
         )
 
@@ -512,7 +512,15 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
 
 
-register_primitive(DBiasQuantizePrimitive)
+register_primitive(BaseDBiasQuantizePrimitive)
+
+
+class DBiasQuantizePrimitive(BaseDBiasQuantizePrimitive):
+    """Subclass of BaseDBiasQuantizePrimitive for DBias quantization. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
+
+
+class QuantizePrimitive(BaseDBiasQuantizePrimitive):
+    """Subclass of BaseDBiasQuantizePrimitive for quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
 
 
 def _jax_quantize(
@@ -565,7 +573,8 @@ def _quantize_dbias_impl(
 
     dq_dtype = dq_dtype or x.dtype
 
-    if not DBiasQuantizePrimitive.enabled():
+    PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
+    if not PrimitiveClass.enabled():
         if is_dbias:
             return _jax_quantize_dbias(
                 x,
@@ -627,7 +636,7 @@ def _quantize_dbias_impl(
         colwise_scale_inv,
         updated_amax,
         dbias,
-    ) = DBiasQuantizePrimitive.outer_primitive.bind(
+    ) = PrimitiveClass.outer_primitive.bind(
         x,
         scale,
         out_dtype=quantizer.q_dtype,

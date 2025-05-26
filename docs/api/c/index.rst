@@ -14,10 +14,13 @@ directly from C/C++, without Python.
 
    transformer_engine.h <transformer_engine>
    activation.h <activation>
+   cast_transpose_noop.h <cast_transpose_noop>
    cast.h <cast>
+   cudnn.h <cudnn>
    fused_attn.h <fused_attn>
    fused_rope.h <fused_rope>
    gemm.h <gemm>
+   multi_tensor.h <multi_tensor>
    normalization.h <normalization>
    padding.h <padding>
    permutation.h <permutation>

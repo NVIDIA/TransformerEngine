@@ -22,6 +22,7 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
+    cuda_toolkit_include_path,
 )
 
 frameworks = get_frameworks()
@@ -88,15 +89,19 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     """
 
     # Common requirements
-    setup_reqs: List[str] = [
-        "nvidia-cuda-runtime-cu12",
-        "nvidia-cublas-cu12",
-        "nvidia-cudnn-cu12",
-        "nvidia-cuda-cccl-cu12",
-        "nvidia-cuda-nvcc-cu12",
-        "nvidia-nvtx-cu12",
-        "nvidia-cuda-nvrtc-cu12",
-    ]
+    setup_reqs: List[str] = []
+    if cuda_toolkit_include_path() is None:
+        setup_reqs.extend(
+            [
+                "nvidia-cuda-runtime-cu12",
+                "nvidia-cublas-cu12",
+                "nvidia-cudnn-cu12",
+                "nvidia-cuda-cccl-cu12",
+                "nvidia-cuda-nvcc-cu12",
+                "nvidia-nvtx-cu12",
+                "nvidia-cuda-nvrtc-cu12",
+            ]
+        )
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -123,7 +128,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             )
             # Blackwell is not supported as of Triton 3.2.0, need custom internal build
             # install_reqs.append("triton")
-            test_reqs.extend(["numpy", "torchvision", "prettytable", "PyYAML"])
+            test_reqs.extend(["numpy", "torchvision", "transformers"])
         if "jax" in frameworks:
             setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
             install_reqs.extend(["jax", "flax>=0.7.1"])
@@ -144,7 +149,6 @@ if __name__ == "__main__":
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         ext_modules = []
-        cmdclass = {}
         package_data = {}
         include_package_data = False
         setup_requires = []
@@ -156,7 +160,6 @@ if __name__ == "__main__":
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}

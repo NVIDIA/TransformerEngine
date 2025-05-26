@@ -49,7 +49,7 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):
             fp8_dtype = tex.DType.kFloat8E5M2
         amax = tensor.abs().max().float()
         one = torch.ones(1, device=tensor.device)
-        scale = _default_sf_compute(amax, one, fp8_max)
+        scale = _default_sf_compute(amax, one, fp8_max, 0)
 
         quantizer = Float8Quantizer(scale, amax, fp8_dtype)
     else:

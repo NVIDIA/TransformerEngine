@@ -216,8 +216,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Unflatten list of saved tensors
+        saved_tensors = func_ctx.saved_tensors
         for ctx in basic_op_ctxs:
-            ctx.saved_tensors = func_ctx.saved_tensors[slice(*ctx._saved_tensors_range)]
+            ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
 
         # Unflatten list of extra tensor output grads

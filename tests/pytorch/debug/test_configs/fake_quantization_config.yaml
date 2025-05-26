@@ -1,0 +1,14 @@
+test_fake_quant_fp8:
+  enabled: True
+  layers:
+    layer_numbers: [1]
+    layer_types: [fc1, fc2]
+  transformer_engine:
+    FakeQuant:
+      enabled: True
+      gemms: [fprop, dgrad]
+      tensors_struct:
+        - tensor: activation
+          quant_format: FP8E4M3
+        - tensor: gradient
+          quant_format: FP8E5M2

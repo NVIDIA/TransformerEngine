@@ -19,11 +19,12 @@ class TestParallelCrossEntropy:
             label_smoothing=label_smoothing, reduction="mean" if reduce_loss else "none"
         )
 
-    def generate_input(self, dtype: torch.dtype, swap_dim: bool):
+    def generate_input(self, dtype: torch.dtype, swap_dim: bool, ignore_idx: bool):
 
         SQ = random.choice([64, 128])
         batch = random.choice([1, 2])
         vocab = random.choice([64000, 128000])
+        ignore = random.sample(range(0, SQ - 1), 5)
 
         if swap_dim:
             self.input_test = torch.rand((SQ, batch, vocab), dtype=dtype).cuda()
@@ -32,14 +33,27 @@ class TestParallelCrossEntropy:
             self.input_test = torch.rand((batch, SQ, vocab), dtype=dtype).cuda()
             self.tar_test = torch.randint(0, vocab, (batch, SQ)).cuda()
 
+        if ignore_idx:
+            for i in ignore:
+                # Ignore 5 indices
+                if swap_dim:
+                    self.tar_test[i][0] = -100
+                else:
+                    self.tar_test[0][i] = -100
+
         self.input_ref = torch.reshape(self.input_test.clone().detach(), (batch * SQ, vocab))
         self.tar_ref = torch.reshape(self.tar_test.clone().detach(), (batch * SQ,))
 
     def one_iteration_test(
-        self, dtype: torch.dtype, swap_dim: bool, label_smoothing: float, reduce_loss: bool
+        self,
+        dtype: torch.dtype,
+        swap_dim: bool,
+        label_smoothing: float,
+        reduce_loss: bool,
+        ignore_idx: bool = False,
     ):
 
-        self.generate_input(dtype, swap_dim)
+        self.generate_input(dtype, swap_dim, ignore_idx)
 
         self.input_test.requires_grad_(True)
         self.input_ref.requires_grad_(True)
@@ -57,6 +71,8 @@ class TestParallelCrossEntropy:
         test_loss = torch.flatten(test_loss) if not reduce_loss else test_loss
 
         torch.testing.assert_close(test_loss, ref_loss, check_dtype=False)
+        if ignore_idx:
+            print(test_loss, ref_loss)
         if reduce_loss:
             torch.testing.assert_close(
                 torch.flatten(self.input_test.grad, start_dim=0, end_dim=1), self.input_ref.grad
@@ -105,4 +121,16 @@ class TestParallelCrossEntropy:
         for i in range(self.iters):
             self.one_iteration_test(
                 dtype=torch.float32, swap_dim=False, label_smoothing=0, reduce_loss=False
+            )
+
+    def test_ignore_idx(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                ignore_idx=True,
             )

@@ -1,0 +1,8 @@
+test_disable_fp8_gemm_1:
+  enabled: True
+  layers:
+    layer_types: [qkv, fc2]
+  transformer_engine:
+    DisableFP8GEMM:
+      enabled: True
+      gemms: [dgrad, wgrad]
