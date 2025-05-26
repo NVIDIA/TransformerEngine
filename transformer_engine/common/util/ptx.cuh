@@ -104,6 +104,51 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint3
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
+constexpr uint32_t FP32_MANTISSA_BITS = 23;
+constexpr uint32_t FP32_EXPONENT_BIAS = 127;
+
+__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
+  return (biased_exp == 0) ? 1 : __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);   // 127 - (biased_exp - 127)
+}
+
+__device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
+  return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
+}
+
+__device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
+#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+  uint16_t out;
+  asm volatile(
+    "{\n"
+      "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
+      "}"
+      : "=h"(out)
+      : "f"(val));
+  return *reinterpret_cast<e8m0_t *>(&out);
+#else
+  // TODO: nan/inf needs to be set for any value
+  // of nan/inf in input not just amax.
+  if (isnan(val)) {
+    return 0xFF;
+  }
+  if (isinf(val)) {
+    return 0xFE;
+  }
+  if (val == 0.0f) {
+    return 0x00;
+  }
+  uint32_t val_u32 = *reinterpret_cast<uint32_t *>(&val);
+  e8m0_t exponent = (val_u32 >> FP32_MANTISSA_BITS);
+  uint32_t mantissa = val_u32 & 0x7FFFFF;
+  // Round up exponent and deal with satfinite.
+  if ((mantissa > 0 && exponent != 0xFE) && !(exponent == 0 && mantissa <= 0x400000)) {
+    ++exponent;
+  }
+  return exponent;
+#endif
+}
+
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor

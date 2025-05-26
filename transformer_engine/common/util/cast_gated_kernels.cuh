@@ -483,11 +483,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
           after_act_elt = dact_x * grad_elt * gate_elt;
           after_gate_elt = act_x * grad_elt;
-          after_act_colwise[i] = after_act_elt;
-          after_gate_colwise[i] = after_gate_elt;
         } else {
           after_act_elt = ActOP(act_elt, {}) * gate_elt;
-          after_act_colwise[i] = after_act_elt;
+        }
+        // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+        if constexpr (!std::is_same_v<IType, float>) {
+          after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
+          if constexpr (IS_DGATED) {
+            after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
+          }
+        }
+
+        after_act_colwise[i] = after_act_elt;
+        if constexpr (IS_DGATED) {
+          after_gate_colwise[i] = after_gate_elt;
         }
 
         // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
@@ -560,7 +569,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent_act =
-          float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
 
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
@@ -572,18 +581,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_colwise[scale_idx] = biased_exponent_act;
       }
 
-      float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
+      float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
       float block_scale_inverse_gate;
 
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
-            float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
+            ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
         // const int scale_idx_gate = scale_idx + scale_stride_colwise / 2;
         const int scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
           scales_colwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
       }
 
 // 3. Scale elements
@@ -722,6 +731,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               after_act_rowwise[j] = after_act_elt;
             }
 
+            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+            if constexpr (!std::is_same_v<IType, float>) {
+              after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
+              if constexpr (IS_DGATED) {
+                after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
+              }
+            }
+
             const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
             const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
             const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
@@ -737,7 +754,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent_act =
-          float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
@@ -747,7 +764,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_rowwise[scale_idx] = biased_exponent_act;
       }
 
-      const float block_scale_inverse_act = exp2f_rcp(biased_exponent_act);
+      const float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
       const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act,
                                                        block_scale_inverse_act};
 
@@ -755,12 +772,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       ptx::floatx2 block_scale_inverse_2x_gate;
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
-            float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
+            ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
         const int scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
         if (!out_of_bounds_rowwise) {
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
         block_scale_inverse_2x_gate = {block_scale_inverse_gate, block_scale_inverse_gate};
       }
 
