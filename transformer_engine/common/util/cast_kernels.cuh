@@ -204,7 +204,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       thread_amax = 0.0f;
       float in_compute_colwise[BUFF_DIM_Y];
       IType in_colwise_IType[BUFF_DIM_Y];
-
+      
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
         IType thread_amax_f16 = static_cast<IType>(0.0f);
@@ -227,6 +227,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           if constexpr (IS_DACT) {
             float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
             elt *= OP(act_in_elt, {});
+          }
+          // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+          if constexpr (!std::is_same_v<IType, float>) {
+            elt = static_cast<float>(static_cast<IType>(elt));
           }
           if constexpr (IS_DBIAS) {
             partial_dbias_colwise += elt;
@@ -252,14 +256,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent =
-          float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
 
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       scales_colwise[scale_idx] = biased_exponent;
 
-      const float block_scale_inverse = exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
@@ -369,6 +373,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               elt *= OP(act_in_elt, {});
             }
 
+            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+            if constexpr (!std::is_same_v<IType, float>) {
+              elt = static_cast<float>(static_cast<IType>(elt));
+            }
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
             if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
               thread_dbias_rowwise[j] += elt;
@@ -392,13 +400,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E8M0 scaling factor
       const e8m0_t biased_exponent =
-          float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+          ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
       scales_rowwise[scale_idx] = biased_exponent;
 
-      const float block_scale_inverse = exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
       // 3. Scale elements

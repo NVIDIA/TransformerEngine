@@ -413,7 +413,12 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  if (biased_exp == 0) {
+    return 1.0f;
+  }
+  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
+  float fp32_val = *reinterpret_cast<float*>(&int_val);
+  return fp32_val;
 }
 
 inline float identity(const float x) { return x; }

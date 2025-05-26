@@ -37,96 +37,33 @@ enum ActivationType {
 };
 
 template <typename InputType, typename OutputType>
-void scale_block(const ProcessingMethod processing_method,
+void compute_ref(const ProcessingMethod processing_method,
                  float (*OP)(const float),
+                 const bool rowwise,
+                 const bool colwise,
                  const InputType* input,
                  const InputType* grad,
-                 OutputType* output_c,
-                 float* dbias,
-                 fp8e8m0* output_scales,
-                 const size_t scale_idx,
-                 const size_t i_min,
-                 const size_t i_max,
-                 const size_t j_min,
-                 const size_t j_max,
-                 const size_t cols) {
-    float amax = 0.0f;
-
-    // Find the absolute maximum value in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            const size_t idx = i * cols + j;
-            float elt = static_cast<float>(input[idx]);
-            if (processing_method == ProcessingMethod::CAST_DBIAS) {
-              // grad is the input
-              elt = static_cast<float>(grad[idx]);
-            }
-            if (processing_method != ProcessingMethod::CAST_ONLY
-                && processing_method != ProcessingMethod::CAST_DBIAS) {
-                elt = OP(elt);
-            }
-            if (processing_method == ProcessingMethod::CAST_DACT ||
-                processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(grad[idx]);
-            }
-            dbias[j] += elt;
-            if (isinf(elt) || isnan(elt)) {
-                continue;
-            }
-            amax = std::max(amax, std::abs(elt));
-        }
-    }
-
-    const fp8e8m0 biased_exponent = float_to_e8m0(amax * Quantized_Limits<OutputType>::max_reciprocal());
-    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-    output_scales[scale_idx] = biased_exponent;
-
-    // Quantize elements in the block
-    for (size_t i = i_min; i < i_max; ++i) {
-        for (size_t j = j_min; j < j_max; ++j) {
-            const size_t idx = i * cols + j;
-            float elt = static_cast<float>(input[idx]);
-            if (processing_method == ProcessingMethod::CAST_DBIAS) {
-              // grad is the input
-              elt = static_cast<float>(grad[idx]);
-            }
-            if (processing_method != ProcessingMethod::CAST_ONLY
-                && processing_method != ProcessingMethod::CAST_DBIAS) {
-                elt = OP(elt);
-            }
-            if (processing_method == ProcessingMethod::CAST_DACT ||
-                processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(grad[idx]);
-            }
-            output_c[idx] = static_cast<OutputType>(elt * scale_reciprocal);
-        }
-    }
-}
-
-template <typename InputType, typename OutputType>
-void compute_ref_x1(const ProcessingMethod processing_method,
-                    float (*OP)(const float),
-                    const InputType* input,
-                    const InputType* grad,
-                    OutputType* output_c,
-                    fp8e8m0* output_scales,
-                    InputType* output_dbias,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride)
+                 OutputType* output_rowwise,
+                 OutputType* output_colwise,
+                 fp8e8m0* output_scales_rowwise,
+                 fp8e8m0* output_scales_colwise,
+                 InputType* output_dbias,
+                 const size_t rows,
+                 const size_t cols,
+                 const size_t scales_stride_rowwise,
+                 const size_t scales_stride_colwise)
 {
-    const size_t tile_size_Y = std::max(32lu, block_size_Y);
-    const size_t tile_size_X = std::max(64lu, block_size_X);
+    const size_t tile_size_Y = 32;
+    const size_t tile_size_X = 32;
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
-    const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
-    const size_t blocks_per_tile_X = tile_size_X / block_size_X;
 
     std::vector<float> output_dbias_fp32(cols, 0);
     #pragma omp parallel proc_bind(spread)
     {
+        // Buffers to cache intermediate computations
+        std::vector<float> cache_buffer(tile_size_Y * tile_size_X);
+
         std::vector<float> thread_dbias(cols, 0);
         #pragma omp for schedule(static)
         for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
@@ -135,24 +72,83 @@ void compute_ref_x1(const ProcessingMethod processing_method,
             const size_t tile_offset_Y = tile_Y * tile_size_Y;
             const size_t tile_offset_X = tile_X * tile_size_X;
 
-            for (size_t ii = 0; ii < blocks_per_tile_Y; ++ii) {
-                const size_t block_idx_Y = tile_Y * blocks_per_tile_Y + ii;
-                const size_t block_offset_Y = ii * block_size_Y;
-                const size_t i_min = tile_offset_Y + block_offset_Y;
-                if (i_min >= rows) continue;
-                const size_t i_max = std::min(i_min + block_size_Y, rows);
+            const size_t i_min = tile_offset_Y;
+            const size_t i_max = std::min(i_min + tile_size_Y, rows);
 
-                for (size_t jj = 0; jj < blocks_per_tile_X; ++jj) {
-                    const size_t block_idx_X = tile_X * blocks_per_tile_X + jj;
-                    const size_t block_offset_X = jj * block_size_X;
-                    const size_t j_min = tile_offset_X + block_offset_X;
-                    if (j_min >= cols) continue;
-                    const size_t j_max = std::min(j_min + block_size_X, cols);
+            const size_t j_min = tile_offset_X;
+            const size_t j_max = std::min(j_min + tile_size_X, cols);
 
-                    const size_t scale_idx = block_idx_Y * scales_stride + block_idx_X;
-                    scale_block<InputType, OutputType>(
-                        processing_method, OP, input, grad, output_c, thread_dbias.data(),
-                        output_scales, scale_idx, i_min, i_max, j_min, j_max, cols);
+            // Cache computations
+            for (size_t i = i_min; i < i_max; ++i) {
+                for (size_t j = j_min; j < j_max; ++j) {
+                    const int idx = i * cols + j;
+                    const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+
+                    float elt = static_cast<float>(input[idx]);
+                    if (processing_method == ProcessingMethod::CAST_DBIAS) {
+                        // grad is the input
+                        elt = static_cast<float>(grad[idx]);
+                    }
+                    if (processing_method != ProcessingMethod::CAST_ONLY
+                        && processing_method != ProcessingMethod::CAST_DBIAS) {
+                        elt = OP(elt);
+                    }
+                    if (processing_method == ProcessingMethod::CAST_DACT ||
+                        processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+                        elt *= static_cast<float>(grad[idx]);
+                    }
+                    
+                    // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
+                    elt = static_cast<float>(static_cast<InputType>(elt));
+
+                    cache_buffer[cache_idx] = elt;
+                    thread_dbias[j] += elt;
+                    if (isinf(elt) || isnan(elt)) {
+                        continue;
+                    }
+                }
+            }
+
+            if (rowwise) {
+                for (size_t i = i_min; i < i_max; ++i) {
+                    float block_amax = 0.0f;
+
+                    for (size_t j = j_min; j < j_max; ++j) {
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                    }
+
+                    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
+                    const int scale_idx = i * scales_stride_rowwise + tile_X;
+                    output_scales_rowwise[scale_idx] = biased_exponent;
+                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+
+                    for (size_t j = j_min; j < j_max; ++j) {
+                        const int idx = i * cols + j;
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        output_rowwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
+                    }
+                }
+            }
+            if (colwise) {
+                for (size_t j = j_min; j < j_max; ++j) {
+                    float block_amax = 0.0f;
+
+                    for (size_t i = i_min; i < i_max; ++i) {
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
+                    }
+
+                    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
+                    const int scale_idx = tile_Y * scales_stride_colwise + j;
+                    output_scales_colwise[scale_idx] = biased_exponent;
+                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
+
+                    for (size_t i = i_min; i < i_max; ++i) {
+                        const int idx = i * cols + j;
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        output_colwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
+                    }
                 }
             }
         }
@@ -166,30 +162,6 @@ void compute_ref_x1(const ProcessingMethod processing_method,
     for (size_t j = 0; j < cols; ++j) {
         output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
     }
-}
-
-template <typename InputType, typename OutputType>
-void compute_ref_x2(const ProcessingMethod processing_method,
-                    float (*OP)(const float),
-                    const InputType* input,
-                    const InputType* grad,
-                    OutputType* output_rowwise,
-                    OutputType* output_colwise,
-                    fp8e8m0* scales_rowwise,
-                    fp8e8m0* scales_colwise,
-                    InputType* output_dbias,
-                    const size_t rows,
-                    const size_t cols,
-                    const size_t block_size_Y,
-                    const size_t block_size_X,
-                    const size_t scales_stride_rowwise,
-                    const size_t scales_stride_colwise) {
-    compute_ref_x1<InputType, OutputType>(
-        processing_method, OP, input, grad, output_rowwise, scales_rowwise, output_dbias,
-        rows, cols, 1, block_size_X, scales_stride_rowwise);
-    compute_ref_x1<InputType, OutputType>(
-        processing_method, OP, input, grad, output_colwise, scales_colwise, output_dbias,
-        rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
 /**
@@ -313,18 +285,21 @@ void performTest_x1(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref_x1<InputType, OutputType>(processing_method,
-                                          OP,
-                                          input.rowwise_cpu_dptr<InputType>(),
-                                          grad.rowwise_cpu_dptr<InputType>(),
-                                          ref_output_c.get(),
-                                          ref_output_scales.get(),
-                                          ref_output_dbias.get(),
-                                          rows,
-                                          cols,
-                                          block_size_rows,
-                                          block_size_cols,
-                                          scales_stride);
+    compute_ref<InputType, OutputType>(processing_method,
+                                       OP,
+                                       rowwise,
+                                       colwise,
+                                       input.rowwise_cpu_dptr<InputType>(),
+                                       grad.rowwise_cpu_dptr<InputType>(),
+                                       ref_output_c.get(),
+                                       ref_output_c.get(),
+                                       ref_output_scales.get(),
+                                       ref_output_scales.get(),
+                                       ref_output_dbias.get(),
+                                       rows,
+                                       cols,
+                                       scales_stride,
+                                       scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
@@ -473,21 +448,21 @@ void performTest_x2(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref_x2<InputType, OutputType>(processing_method,
-                                          OP,
-                                          input.rowwise_cpu_dptr<InputType>(),
-                                          grad.rowwise_cpu_dptr<InputType>(),
-                                          ref_output_c_rowwise.get(),
-                                          ref_output_c_colwise.get(),
-                                          ref_scales_rowwise.get(),
-                                          ref_scales_colwise.get(),
-                                          ref_output_dbias.get(),
-                                          rows,
-                                          cols,
-                                          block_size_rows,
-                                          block_size_cols,
-                                          scales_stride_rowwise,
-                                          scales_stride_colwise);
+    compute_ref<InputType, OutputType>(processing_method,
+                                       OP,
+                                       true,
+                                       true,
+                                       input.rowwise_cpu_dptr<InputType>(),
+                                       grad.rowwise_cpu_dptr<InputType>(),
+                                       ref_output_c_rowwise.get(),
+                                       ref_output_c_colwise.get(),
+                                       ref_scales_rowwise.get(),
+                                       ref_scales_colwise.get(),
+                                       ref_output_dbias.get(),
+                                       rows,
+                                       cols,
+                                       scales_stride_rowwise,
+                                       scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);

@@ -73,14 +73,23 @@ void compute_ref(const IType* grad,
                         const float dact_x = x * s * (1 - s) + s;
 
                         const float grad_elt = static_cast<float>(grad[i * cols + j]);
-                        const float after_dsilu = dact_x * grad_elt * gate_elt;
-                        const float after_dgate = act_x * grad_elt;
+                        float after_dsilu = dact_x * grad_elt * gate_elt;
+                        float after_dgate = act_x * grad_elt;
+
+                        // Numerical truncation: after downcast to IType (BF16/FP16), upcast it back to FP32
+                        after_dsilu = static_cast<float>(static_cast<IType>(after_dsilu));
+                        after_dgate = static_cast<float>(static_cast<IType>(after_dgate));
+
                         cache_buffer_act[cached_idx] = after_dsilu;
                         cache_buffer_gate[cached_idx] = after_dgate;
                         thread_amax = std::max(thread_amax, std::abs(after_dsilu));
                         thread_amax = std::max(thread_amax, std::abs(after_dgate));
                     } else {
-                        const float after_silu = silu(silu_elt) * gate_elt;
+                        float after_silu = silu(silu_elt) * gate_elt;
+
+                        // Numerical truncation: after downcast to IType (BF16/FP16), upcast it back to FP32
+                        after_silu = static_cast<float>(static_cast<IType>(after_silu));
+
                         cache_buffer_act[cached_idx] = after_silu;
                         thread_amax = std::max(thread_amax, std::abs(after_silu));
                     }
@@ -105,10 +114,10 @@ void compute_ref(const IType* grad,
 
                     float scale_reciprocal_gate;
                     if (IS_DGATED) {
-                    const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
-                    scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
-                    const int scale_idx_gate = scale_idx_act + (cols + 32 - 1) / 32;
-                    output_scales_rowwise[scale_idx_gate] = biased_exponent_gate;
+                        const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
+                        scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
+                        const int scale_idx_gate = scale_idx_act + (cols + 32 - 1) / 32;
+                        output_scales_rowwise[scale_idx_gate] = biased_exponent_gate;
                     }
                     for (size_t j = j_min; j < j_max; ++j) {
                         const int cached_idx = (i - i_min) * tile_size_X + (j - j_min);
@@ -143,10 +152,10 @@ void compute_ref(const IType* grad,
 
                     float scale_reciprocal_gate;
                     if (IS_DGATED) {
-                    const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
-                    const int scale_idx_gate = scale_idx_act + cols;
-                    scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
-                    output_scales_colwise[scale_idx_gate] = biased_exponent_gate;
+                        const fp8e8m0 biased_exponent_gate = float_to_e8m0(block_amax_gate * Quantized_Limits<OType>::max_reciprocal());
+                        const int scale_idx_gate = scale_idx_act + cols;
+                        scale_reciprocal_gate = exp2f_rcp(biased_exponent_gate);
+                        output_scales_colwise[scale_idx_gate] = biased_exponent_gate;
                     }
                     for (size_t i = i_min; i < i_max; ++i) {
                         const int cached_idx = (i - i_min) * tile_size_X + (j - j_min);

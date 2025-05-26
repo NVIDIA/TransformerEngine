@@ -166,7 +166,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
-    const float block_scale = exp2f(static_cast<float>(biased_exponent) - FP32_EXPONENT_BIAS);
+    const float block_scale = ptx::exp2f(biased_exponent);
 
     if constexpr (USE_ROWWISE_SCALING) {
       Vec<IType, ELEMS_PER_THREAD> in;
