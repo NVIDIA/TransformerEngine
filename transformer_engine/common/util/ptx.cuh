@@ -108,7 +108,9 @@ constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
 __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
-  return (biased_exp == 0) ? 1 : __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);   // 127 - (biased_exp - 127)
+  return (biased_exp == 0) ? 1
+                           : __int_as_float((254 - biased_exp)
+                                            << FP32_MANTISSA_BITS);  // 127 - (biased_exp - 127)
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
@@ -120,7 +122,7 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
   uint16_t out;
   asm volatile(
-    "{\n"
+      "{\n"
       "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
       "}"
       : "=h"(out)

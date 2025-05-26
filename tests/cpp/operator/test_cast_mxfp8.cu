@@ -97,7 +97,7 @@ void compute_ref(const ProcessingMethod processing_method,
                         processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
                         elt *= static_cast<float>(grad[idx]);
                     }
-                    
+
                     // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
                     elt = static_cast<float>(static_cast<InputType>(elt));
 
