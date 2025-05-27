@@ -108,9 +108,10 @@ def _get_shared_object_file(library: str) -> Path:
 
     # Case 1: Typical user workflow: Both locations are the same, return any result.
     if te_install_dir == site_packages_dir:
-        assert (
-            so_path_in_install_dir is not None
-        ), f"Could not find shared object file for Transformer Engine {library} lib."
+        if so_path_in_install_dir is None:
+            raise RuntimeError(
+                f"Could not find shared object file for Transformer Engine {library} lib."
+            )
         return so_path_in_install_dir
 
     # Case 2: ERR! Both locations are different but returned a valid result.
