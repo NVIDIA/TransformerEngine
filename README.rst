@@ -225,7 +225,7 @@ When installing from GitHub, you can explicitly specify frameworks using the env
     NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 conda Installation
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^
 
 To install the latest stable version with conda from conda-forge:
 
