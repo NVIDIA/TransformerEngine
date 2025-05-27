@@ -54,7 +54,6 @@ from ..distributed import (
     use_reentrant_activation_recompute,
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
-    _post_process_fp8_blockwise_gather,
 )
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo

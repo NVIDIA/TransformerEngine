@@ -20,6 +20,7 @@ __all__ = [
     "general_grouped_gemm",
 ]
 
+
 # for fp8 blockwise recipe, we supproted options to output compact format versus GEMM_READY format for quantization
 # but for FP8 GEMMs, only TN layout is supported in hopper, so there transpose needs to be done before calling the GEMM
 # sanity check here to make sure all the data & scale formats have been set to GEMM_READY, not compact

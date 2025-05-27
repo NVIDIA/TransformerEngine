@@ -49,7 +49,6 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
-    _post_process_fp8_blockwise_gather,
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -1697,6 +1696,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].set_usage(need_compact=True)
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
+                    need_compact=True
+                )

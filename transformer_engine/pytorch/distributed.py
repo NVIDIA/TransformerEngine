@@ -20,6 +20,8 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
+import transformer_engine_torch as tex
+
 from . import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
@@ -43,8 +45,6 @@ try:
     HAS_TORCH_SYMMETRIC = True
 except ImportError:
     HAS_TORCH_SYMMETRIC = False
-
-import transformer_engine_torch as tex
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -1014,8 +1014,10 @@ def _post_process_fp8_blockwise_gather(
         out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
     return out
 
+
 @dataclass
 class _FP8BlockwiseAllGatherAsyncHandle:
+    """Handle for asynchronous FP8 blockwise all-gather."""
 
     tensor: Float8BlockwiseQTensorBase
     quantizer: Float8BlockQuantizer
@@ -1023,6 +1025,7 @@ class _FP8BlockwiseAllGatherAsyncHandle:
     _synchronized: bool = False
 
     def wait(self) -> None:
+        """Wait for the async operation to complete and post-process the tensor."""
         if self._synchronized:
             return
         self.async_handle.wait()
