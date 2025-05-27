@@ -327,19 +327,19 @@ def _grouped_dense_bwd_rule(
 
     # GEMM NT
     # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we need to use
-    # g_contracting_dim = (1,) and k_contracting_dim = (2,) to make it work after the 
+    # g_contracting_dim = (1,) and k_contracting_dim = (2,) to make it work after the
     # extra transpose for FP8 in grouped_gemm
     # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
-    g_contracting_dim = (1, )
-    k_contracting_dim = (2, )
+    g_contracting_dim = (1,)
+    k_contracting_dim = (2,)
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    #g_contracting_dim = tuple(
+    # g_contracting_dim = tuple(
     #    range(1 + grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
-    #)
+    # )
     # k_non_contracting_dims
-    #k_contracting_dim = tuple(
+    # k_contracting_dim = tuple(
     #    dim for dim in range(1, len(kernel_shape)) if dim not in fwd_k_contracting_dims
-    #)
+    # )
     dgrad = tex.grouped_gemm(
         casted_grad.get_rowwise_tensor(),
         rowwise_casted_kernel,
@@ -354,12 +354,12 @@ def _grouped_dense_bwd_rule(
     # We need to use g_contracting_dim = (0,) and x_contracting_dim = (1,) to make it work
     # after the extra transpose for FP8 in grouped_gemm
     # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
-    g_contracting_dim = (0, )
-    x_contracting_dim = (1, )
+    g_contracting_dim = (0,)
+    x_contracting_dim = (1,)
     # g_non_contracting_dims and x_non_contracting_dims
-    #g_contracting_dim = x_contracting_dim = tuple(
+    # g_contracting_dim = x_contracting_dim = tuple(
     #    range(0, len(x_shape) - len(fwd_x_contracting_dims))
-    #)
+    # )
     wgrad = tex.grouped_gemm(
         colwise_casted_x,
         casted_grad.get_colwise_tensor(),
