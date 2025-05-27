@@ -105,11 +105,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   // Compute FP8 transpose if required
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
-    Tensor transpose_data;
-    transpose_data.data = z->columnwise_data;
-    transpose_data.scaling_mode = z->scaling_mode;
-    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
-                   stream);
+    NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
+    Tensor& t = *convertNVTETensor(transpose_data);
+    t.data = z->columnwise_data;
+    nvte_transpose(*z, transpose_data, stream);
+    nvte_destroy_tensor(transpose_data);
   }
 
   return;

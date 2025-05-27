@@ -90,16 +90,12 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   // Compute FP8 transpose if required
   if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
-    NVTETensor transpose_data = tensor_allocator.Allocate(z->scaling_mode);
+    NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
     auto *t = convertNVTETensor(transpose_data);
     t->data = z->columnwise_data;
-    NVTETensor z_copy = tensor_allocator.Allocate(z->scaling_mode);
-    auto *z_copy_ptr = convertNVTETensor(z_copy);
-    *z_copy_ptr = *z;
 
-    nvte_transpose(z_copy, transpose_data, stream);
-    tensor_allocator.Free(transpose_data);
-    tensor_allocator.Free(z_copy);
+    nvte_transpose(*z, transpose_data, stream);
+    nvte_destroy_tensor(transpose_data);
   }
 
   return;

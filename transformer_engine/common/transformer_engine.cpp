@@ -193,104 +193,128 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   CheckScaleTensorShape(t, name);
 }
 
-TensorAllocator tensor_allocator;
+class TensorAllocator {
+ public:
+  static TensorAllocator& instance() {
+    static TensorAllocator allocator;
+    return allocator;
+  }
 
-Tensor *convertNVTETensor(const NVTETensor t) { return tensor_allocator.convertNVTETensor(t); }
+  ~TensorAllocator() {}
 
-Tensor *convertNVTETensorCheck(const NVTETensor t) {
-  Tensor *ptr = tensor_allocator.convertNVTETensor(t);
-  NVTE_CHECK(ptr != nullptr, "Invalid tensor.");
-  return ptr;
-}
-
-NVTETensor TensorAllocator::Allocate(NVTEScalingMode mode) {
-  std::lock_guard<std::mutex> lock(mutex);
-  if (!free_list.empty()) {
-    uintptr_t index = free_list.back();
-    NVTETensor ret = reinterpret_cast<NVTETensor>(index);
-    free_list.pop_back();
-    if (debug) {
-      std::cout << "Allocated " << index << " from free list. Free list size: " << free_list.size()
-                << " and capacity " << free_list.capacity() << std::endl;
+  NVTETensor Allocate(NVTEScalingMode mode) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!free_list.empty()) {
+      uintptr_t index = free_list.back();
+      NVTETensor ret = reinterpret_cast<NVTETensor>(index);
+      free_list.pop_back();
+      if (debug) {
+        std::cout << "Allocated " << index << " from free list. Free list size: " << free_list.size()
+                  << " and capacity " << free_list.capacity() << std::endl;
+      }
+      // 1-based indexing
+      memory[index - 1].scaling_mode = mode;
+      return ret;
     }
-    // 1-based indexing
-    memory[index - 1].scaling_mode = mode;
-    return ret;
-  }
-  if (memory.size() < memory.capacity()) {
-    memory.emplace_back();
-    size = memory.size();
-    // 1-based indexing
-    uintptr_t index = memory.size();
-    if (debug) {
-      std::cout << "Allocated " << index << ". Memory size: " << memory.size() << " and capacity "
-                << memory.capacity() << std::endl;
+    if (memory.size() < memory.capacity()) {
+      memory.emplace_back();
+      Tensor& t = memory.back();
+      size = memory.size();
+      // 1-based indexing
+      uintptr_t index = memory.size();
+      if (debug) {
+        std::cout << "Allocated " << index << ". Memory size: " << memory.size() << " and capacity "
+                  << memory.capacity() << std::endl;
+      }
+      t.scaling_mode = mode;
+      t.nvte_tensor = reinterpret_cast<NVTETensor>(index);
+      return reinterpret_cast<NVTETensor>(index);
     }
-    // 1-based indexing
-    memory[index - 1].scaling_mode = mode;
-    return reinterpret_cast<NVTETensor>(index);
+    NVTE_ERROR("Cannot allocate a new NVTETensor. Maximum number of tensors reached: ",
+               MAX_TENSOR_NUM, ". There is probably a memory leak in your application.");
   }
-  NVTE_ERROR("Cannot allocate a new NVTETensor. Maximum number of tensors reached: ",
-             MAX_TENSOR_NUM, ". There is probably a memory leak in your application.");
-}
 
-void TensorAllocator::Free(NVTETensor t) {
-  std::lock_guard<std::mutex> lock(mutex);
-  uintptr_t index = reinterpret_cast<uintptr_t>(t);
-  if (index == 0) return;
-  NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
-  free_list.push_back(index);
-  // Clean up
-  memory[index - 1].clear();
-  if (debug) {
-    std::cout << "Freed " << index << ". Free list size: " << free_list.size() << " and capacity "
-              << free_list.capacity() << std::endl;
-  }
-}
-
-void TensorAllocator::Free(NVTETensor *t, size_t N) {
-  std::lock_guard<std::mutex> lock(mutex);
-  for (size_t i = 0; i < N; ++i) {
-    uintptr_t index = reinterpret_cast<uintptr_t>(t[i]);
-    if (index == 0) continue;
+  void Free(NVTETensor t) {
+    std::lock_guard<std::mutex> lock(mutex);
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    if (index == 0) return;
     NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
     free_list.push_back(index);
     // Clean up
     memory[index - 1].clear();
+    if (debug) {
+      std::cout << "Freed " << index << ". Free list size: " << free_list.size() << " and capacity "
+        << free_list.capacity() << std::endl;
+    }
   }
-  if (debug) {
-    std::cout << "Freed range of" << N << " tensors. Free list size: " << free_list.size()
-              << " and capacity " << free_list.capacity() << std::endl;
-  }
-}
 
-Tensor *TensorAllocator::convertNVTETensor(NVTETensor t) {
-  uintptr_t index = reinterpret_cast<uintptr_t>(t);
-  // 1-based indexing to enable 0-initialization of NVTETensor
-  // to be invalid tensor
-  static_assert(nullptr == 0);
-  if (index != 0 && index <= size) {
-    return &(memory[index - 1]);
+  void Free(NVTETensor *t, size_t N) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (size_t i = 0; i < N; ++i) {
+      uintptr_t index = reinterpret_cast<uintptr_t>(t[i]);
+      if (index == 0) continue;
+      NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
+      free_list.push_back(index);
+      // Clean up
+      memory[index - 1].clear();
+    }
+    if (debug) {
+      std::cout << "Freed range of" << N << " tensors. Free list size: " << free_list.size()
+        << " and capacity " << free_list.capacity() << std::endl;
+    }
   }
-  return nullptr;
-}
 
-void TensorAllocator::setDebug(bool debug) {
-  std::lock_guard<std::mutex> lock(mutex);
-  this->debug = debug;
+  Tensor *convertNVTETensor(NVTETensor t) {
+    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    // 1-based indexing to enable 0-initialization of NVTETensor
+    // to be invalid tensor
+    static_assert(nullptr == 0);
+    if (index != 0 && index <= size) {
+      return &(memory[index - 1]);
+    }
+    return nullptr;
+  }
+
+  void setDebug(bool debug) {
+    std::lock_guard<std::mutex> lock(mutex);
+    this->debug = debug;
+  }
+
+ private:
+  TensorAllocator() {
+    std::lock_guard<std::mutex> lock(mutex);
+    memory.reserve(MAX_TENSOR_NUM);
+  }
+
+  std::mutex mutex;
+  std::atomic<size_t> size;
+  // Allocate at most 20 MB for tensors
+  // Should be replaced by virtual memory allocation
+  const size_t MAX_TENSOR_NUM = 20 * 1024 * 1024 / sizeof(Tensor);
+  std::vector<uintptr_t> free_list;
+  std::vector<Tensor> memory;
+  bool debug = false;
+};
+
+Tensor *convertNVTETensor(const NVTETensor t) { return TensorAllocator::instance().convertNVTETensor(t); }
+
+Tensor *convertNVTETensorCheck(const NVTETensor t) {
+  Tensor *ptr = TensorAllocator::instance().convertNVTETensor(t);
+  NVTE_CHECK(ptr != nullptr, "Invalid tensor.");
+  return ptr;
 }
 
 }  // namespace transformer_engine
 
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
-  NVTETensor ret = transformer_engine::tensor_allocator.Allocate(scaling_mode);
+  NVTETensor ret = transformer_engine::TensorAllocator::instance().Allocate(scaling_mode);
   return ret;
 }
 
-void nvte_destroy_tensor(NVTETensor tensor) { transformer_engine::tensor_allocator.Free(tensor); }
+void nvte_destroy_tensor(NVTETensor tensor) { transformer_engine::TensorAllocator::instance().Free(tensor); }
 
 void nvte_destroy_tensors(NVTETensor *tensors, size_t N) {
-  transformer_engine::tensor_allocator.Free(tensors, N);
+  transformer_engine::TensorAllocator::instance().Free(tensors, N);
 }
 
 NVTEDType nvte_tensor_type(const NVTETensor tensor) {
@@ -468,12 +492,12 @@ NVTEScalingMode nvte_tensor_scaling_mode(const NVTETensor tensor) {
 
 void nvte_tensor_pack_create(NVTETensorPack *pack) {
   for (int i = 0; i < pack->MAX_SIZE; i++) {
-    pack->tensors[i] = transformer_engine::tensor_allocator.Allocate(NVTE_DELAYED_TENSOR_SCALING);
+    pack->tensors[i] = transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING);
   }
 }
 
 void nvte_tensor_pack_destroy(NVTETensorPack *pack) {
-  transformer_engine::tensor_allocator.Free(pack->tensors, pack->MAX_SIZE);
+  transformer_engine::TensorAllocator::instance().Free(pack->tensors, pack->MAX_SIZE);
 }
 
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
