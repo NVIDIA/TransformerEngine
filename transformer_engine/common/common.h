@@ -77,7 +77,7 @@ struct SimpleTensor {
 
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
-  explicit operator NVTEBasicTensor() const {
+  operator NVTEBasicTensor() const {
     return {dptr, static_cast<NVTEDType>(dtype),
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
@@ -129,7 +129,7 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   }
 
-  operator NVTETensor() const noexcept { return nvte_tensor; }
+  explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
   size_t numel() const {
     size_t acc = 1;
