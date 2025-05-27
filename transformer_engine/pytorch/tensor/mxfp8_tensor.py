@@ -10,8 +10,9 @@ from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -161,6 +162,9 @@ class MXFP8Quantizer(Quantizer):
 
     def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
         return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return MXFP8BlockScaling
 
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
