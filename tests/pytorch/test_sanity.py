@@ -1358,10 +1358,7 @@ def test_quantized_weight_heuristics(
     """Test heuristics for initializing quantized weights"""
 
     # Skip invalid configurations
-    if (
-        quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
-        and not fp8_available
-    ):
+    if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
