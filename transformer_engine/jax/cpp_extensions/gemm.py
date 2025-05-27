@@ -159,10 +159,12 @@ def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
 
     dim_nums = (((2,), (2,)), ((0,), (0,)))
-    out_fp8 = jax.lax.dot_general(lhs_3d, rhs_3d, dim_nums, preferred_element_type=jnp.float32)
-    out_fp32 = out_fp8 * (lhs.scale_inv * rhs.scale_inv).astype(jnp.float32)
-
-    return out_fp32.astype(lhs.dq_dtype)
+    out_fp8 = jax.lax.dot_general(
+        lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=jnp.float32
+    )
+    scale_inv = (lhs.scale_inv * rhs.scale_inv).astype(jnp.float32)
+    
+    return (out_fp8 * scale_inv).astype(lhs.dq_dtype)
 
 
 def _jax_gemm_tensor_scaling_fp8(
