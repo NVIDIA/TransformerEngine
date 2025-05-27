@@ -7,9 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_H_
 
-#include <stdint.h>
-
 #include <nccl.h>
+#include <stdint.h>
 
 #include "transformer_engine.h"
 

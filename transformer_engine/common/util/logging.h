@@ -84,7 +84,6 @@
     }                                                                \
   } while (false)
 
-
 #define NVTE_CHECK_NVRTC(expr)                                                   \
   do {                                                                           \
     const nvrtcResult status_NVTE_CHECK_NVRTC = (expr);                          \

@@ -6,18 +6,18 @@
 
 #include "transformer_engine/comm_gemm.h"
 
-#include <memory>
-#include <tuple>
-#include <type_traits>
-#include <map>
-#include <utility>
-#include <vector>
-
 #include <cublasmp.h>
 #include <cuda_runtime.h>
 #include <mpi.h>
 #include <nccl.h>
 #include <nvshmem.h>
+
+#include <map>
+#include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -121,8 +121,8 @@ struct CommGemmCtx {
 namespace {
 
 int64_t block_size(CommGemmCtx* ctx, int64_t global_size) {
-    // Use non-cyclic layout to maximize opportunity for comm overlap.
-    return (global_size + ctx->nranks - 1) / ctx->nranks;
+  // Use non-cyclic layout to maximize opportunity for comm overlap.
+  return (global_size + ctx->nranks - 1) / ctx->nranks;
 }
 
 void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
@@ -332,8 +332,8 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
   if (bias && bias->data.dptr) {
     cudaDataType_t bias_type = get_cuda_dtype(bias->data.dtype);
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
-        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_DATA_TYPE,
-        &bias_type, sizeof bias_type));
+        ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_DATA_TYPE, &bias_type,
+        sizeof bias_type));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorAttributeSet(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_BIAS_POINTER, &bias->data.dptr,
         sizeof bias->data.dptr));
