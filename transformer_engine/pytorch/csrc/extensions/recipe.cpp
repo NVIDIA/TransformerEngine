@@ -43,15 +43,13 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reductio
     NVTETensor& amax_history = te_amax_histories.back();
     NVTEShape amax_shape = convertTorchShape(amax_histories[i].sizes());
     NVTEBasicTensor amax_history_data = {amax_histories[i].data_ptr(),
-                                         static_cast<NVTEDType>(DType::kFloat32),
-                                         amax_shape};
+                                         static_cast<NVTEDType>(DType::kFloat32), amax_shape};
     nvte_set_tensor_param(&amax_history, kNVTERowwiseData, &amax_history_data);
 
     te_scales.push_back(nvte_create_tensor(NVTE_DELAYED_TENSOR_SCALING));
     NVTETensor& scale = te_scales.back();
     NVTEShape scale_shape = convertTorchShape(scales[i].sizes());
-    NVTEBasicTensor scale_data = {scales[i].data_ptr(),
-                                  static_cast<NVTEDType>(DType::kFloat32),
+    NVTEBasicTensor scale_data = {scales[i].data_ptr(), static_cast<NVTEDType>(DType::kFloat32),
                                   scale_shape};
     nvte_set_tensor_param(&scale, kNVTERowwiseData, &scale_data);
   }
