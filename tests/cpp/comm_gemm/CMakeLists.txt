@@ -4,6 +4,7 @@
 
 add_executable(test_comm_gemm
                test_comm_gemm.cu
+               ../../../transformer_engine/common/transformer_engine.cpp
                ../test_common.cu)
 
 find_package(OpenMP REQUIRED)

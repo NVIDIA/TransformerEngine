@@ -37,6 +37,7 @@ find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)
 include_directories(../../transformer_engine/common)
+include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
 find_package(CUDAToolkit REQUIRED)
