@@ -26,7 +26,7 @@ NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
   constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
   NVTE_CHECK(ret.ndim < max_dimensions,
              "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
-             ret.ndim, ".")
+             ret.ndim, ".");
   for (size_t i = 0; i < ret.ndim; ++i) {
     const auto& v = torch_shape[i];
     ret.data[i] = static_cast<size_t>(v);
