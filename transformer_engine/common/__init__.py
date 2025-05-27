@@ -15,6 +15,7 @@ import platform
 import importlib
 import functools
 from pathlib import Path
+from typing import Optional
 from importlib.metadata import version, metadata, PackageNotFoundError
 
 
@@ -77,7 +78,7 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
 
 
 @functools.lru_cache(maxsize=None)
-def _get_shared_object_file(library: str) -> Path:
+def _get_shared_object_file(library: str) -> Optional[Path]:
     """
     Return the path of the shared object file for the given TE
     library, one of 'core', 'torch', or 'jax'.
@@ -108,9 +109,10 @@ def _get_shared_object_file(library: str) -> Path:
 
     # Case 1: Typical user workflow: Both locations are the same, return any result.
     if te_install_dir == site_packages_dir:
-        assert (
-            so_path_in_install_dir is not None
-        ), f"Could not find shared object file for Transformer Engine {library} lib."
+        if so_path_in_install_dir is None:
+            raise FileNotFoundError(
+                f"Could not find shared object file for Transformer Engine {library} lib."
+            )
         return so_path_in_install_dir
 
     # Case 2: ERR! Both locations are different but returned a valid result.
@@ -129,12 +131,13 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path_in_install_dir is not None:
         return so_path_in_install_dir
 
-    assert (
-        so_path_in_default_dir is not None
-    ), f"Could not find shared object file for Transformer Engine {library} lib."
-
     # Case 4: Executing from inside a TE directory without an inplace build available.
-    return so_path_in_default_dir
+    if so_path_in_default_dir is not None:
+        return so_path_in_default_dir
+
+    raise FileNotFoundError(
+        f"Could not find shared object file for Transformer Engine {library} lib."
+    )
 
 
 @functools.lru_cache(maxsize=None)
