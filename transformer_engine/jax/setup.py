@@ -44,7 +44,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers, install_and_import
+from build_tools.utils import copy_common_headers, install_and_import, cuda_toolkit_include_path
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
@@ -94,6 +94,20 @@ if __name__ == "__main__":
         )
     ]
 
+    setup_requires = ["jax[cuda12]", "flax>=0.7.1"]
+    if cuda_toolkit_include_path() is None:
+        setup_requires.extend(
+            [
+                "nvidia-cuda-runtime-cu12",
+                "nvidia-cublas-cu12",
+                "nvidia-cudnn-cu12",
+                "nvidia-cuda-cccl-cu12",
+                "nvidia-cuda-nvcc-cu12",
+                "nvidia-nvtx-cu12",
+                "nvidia-cuda-nvrtc-cu12",
+            ]
+        )
+
     # Configure package
     setuptools.setup(
         name="transformer_engine_jax",
@@ -101,17 +115,7 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        setup_requires=[
-            "jax[cuda12]",
-            "flax>=0.7.1",
-            "nvidia-cuda-runtime-cu12",
-            "nvidia-cublas-cu12",
-            "nvidia-cudnn-cu12",
-            "nvidia-cuda-cccl-cu12",
-            "nvidia-cuda-nvcc-cu12",
-            "nvidia-nvtx-cu12",
-            "nvidia-cuda-nvrtc-cu12",
-        ],
+        setup_requires=setup_requires,
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy"],
     )

@@ -15,6 +15,7 @@
 
 #include "../../common.h"
 #include "../common.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 
@@ -64,9 +65,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   bool is_aligned = true;
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
+  bool gamma_in_weight_dtype = false;
   if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
@@ -83,7 +86,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training,
+      gamma_in_weight_dtype);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
@@ -150,9 +154,11 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+  bool gamma_in_weight_dtype = false;
   if (use_cudnn_norm_bwd()) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
   } else {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr,
@@ -165,7 +171,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
       gamma.data.dtype,  // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
+      gamma_in_weight_dtype);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
