@@ -60,7 +60,7 @@ std::vector<T> CopyMatrix(const std::vector<T>& data, size_t mstart, size_t nsta
 
 template <typename T>
 test::Tensor Make(size_t m, size_t n, float scale) {
-  test::Tensor ret("", {n, m}, TypeInfo<T>::dtype);
+  test::Tensor ret("", std::vector{n, m}, TypeInfo<T>::dtype);
   ret.set_scale(scale);
   ret.set_scale_inv(1.0 / scale);
   return ret;
@@ -69,7 +69,7 @@ test::Tensor Make(size_t m, size_t n, float scale) {
 template <typename T>
 test::Tensor MakeFromData(const std::vector<T>& data, size_t mstart, size_t nstart, size_t msize,
                           size_t nsize, size_t ld, float scale) {
-  test::Tensor ret("", {nsize, msize}, TypeInfo<T>::dtype);
+  test::Tensor ret("", std::vector{nsize, msize}, TypeInfo<T>::dtype);
   ret.set_scale(scale);
   ret.set_scale_inv(1.0 / scale);
   auto local = CopyMatrix(data, mstart, nstart, msize, nsize, ld);
