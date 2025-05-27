@@ -15,7 +15,6 @@ import platform
 import importlib
 import functools
 from pathlib import Path
-from typing import Optional
 from importlib.metadata import version, metadata, PackageNotFoundError
 
 
@@ -78,7 +77,7 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str):
 
 
 @functools.lru_cache(maxsize=None)
-def _get_shared_object_file(library: str) -> Optional[Path]:
+def _get_shared_object_file(library: str) -> Path:
     """
     Return the path of the shared object file for the given TE
     library, one of 'core', 'torch', or 'jax'.
