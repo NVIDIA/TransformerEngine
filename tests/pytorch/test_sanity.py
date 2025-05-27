@@ -10,6 +10,7 @@ import torch
 import pytest
 import os
 
+import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import (
     fp8_autocast,
     FP8GlobalStateManager,
@@ -36,11 +37,14 @@ from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
+import transformer_engine.pytorch.ops
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
 from test_numerics import reset_rng_states, dtype_tols
@@ -1338,3 +1342,72 @@ def test_sanity_checkpointing_on_callables():
 
     # Assert that gradients are the same
     torch.testing.assert_close(grad_checkpoint, grad_standard)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ("Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"),
+)
+@pytest.mark.parametrize("quantization", ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"))
+@pytest.mark.parametrize("heuristic", ("performance", "inference"))
+def test_quantized_weight_heuristics(
+    module_name: str,
+    quantization: Optional[str],
+    heuristic: str,
+) -> None:
+    """Test heuristics for initializing quantized weights"""
+
+    # Skip invalid configurations
+    if (
+        quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
+        and not fp8_available
+    ):
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    # Construct quantization recipe
+    quantization_recipe = None
+    if quantization == "fp8_delayed_scaling":
+        quantization_recipe = recipe.DelayedScaling(heuristic=heuristic)
+    elif quantization == "fp8_current_scaling":
+        quantization_recipe = recipe.Float8CurrentScaling(heuristic=heuristic)
+    elif quantization == "mxfp8":
+        quantization_recipe = recipe.MXFP8BlockScaling(heuristic=heuristic)
+
+    # Construct module
+    module = None
+    with fp8_model_init(recipe=quantization_recipe):
+        if module_name == "Linear":
+            module = Linear(32, 32)
+        elif module_name == "LayerNormLinear":
+            module = LayerNormLinear(32, 32)
+        elif module_name == "LayerNormMLP":
+            module = LayerNormMLP(32, 32)
+        elif module_name == "GroupedLinear":
+            module = GroupedLinear(1, 32, 32)
+        elif module_name == "ops.Linear":
+            module = transformer_engine.pytorch.ops.Linear(32, 32)
+
+    # Check that weight parameters have expected data
+    for param in module.parameters():
+        if isinstance(param, Float8Tensor):
+            assert param._data is not None, "Missing FP8 data"
+            if heuristic == "performance" and get_device_compute_capability() < (10, 0):
+                assert (
+                    param._transpose is not None and not param._transpose_invalid
+                ), "FP8 transpose is expected with 'performance' heuristic on Hopper"
+            if heuristic == "inference":
+                assert (
+                    param._transpose is None and param._transpose_invalid
+                ), "FP8 transpose is not expected for inference"
+        if isinstance(param, MXFP8Tensor):
+            assert param._rowwise_data is not None, "Missing row-wise MXFP8 data"
+            if heuristic == "inference":
+                assert (
+                    param._columnwise_data is None
+                ), "Column-wise MXFP8 data is not expected for inference"
+            else:
+                assert (
+                    param._columnwise_data is not None
+                ), "Column-wise MXFP8 data is expected for training"

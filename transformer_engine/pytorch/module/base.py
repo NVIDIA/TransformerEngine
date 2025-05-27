@@ -1152,18 +1152,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     with get_rng_state_tracker().fork():
                         init_fn(param)
 
-            # If primary weights are in fp8, wrap the parameter as FP8Tensor
+            # Wrap parameters in QuantizedTensor if needed
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+
+                # Keep high-precision values on CPU if needed
                 if self.preserve_high_precision_init_val:
                     high_precision_init_val = param.detach().cpu()
 
+                # Get quantizer
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
-                assert (
-                    quantizer is not None
-                )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                if quantizer is None:
+                    raise RuntimeError("Weight quantizer has not been initialized")
                 quantizer.internal = False
+
+                # Recipe-specific quantizer configuration
+                recipe = self.fp8_meta["recipe"]
+                if recipe is not None:
+                    if recipe.heuristic == "inference":
+                        # Weight needs column-wise usage for dgrad
+                        # GEMM, so not needed for inference
+                        quantizer.set_usage(rowwise=True, columnwise=False)
+
+                # Quantize parameter
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
@@ -1171,6 +1183,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             param = torch.nn.Parameter(param)
+
+            # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
 
                 # - Master weights are initialized from model weights, if we use fp8 primary

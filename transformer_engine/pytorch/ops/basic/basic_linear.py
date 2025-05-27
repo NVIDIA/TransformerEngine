@@ -290,10 +290,13 @@ class BasicLinear(BasicOperation):
         # Quantize if needed
         if self._with_quantized_weight:
             quantizer = self.get_quantizer("forward", 1)
-            quantizer.set_usage(
-                rowwise=True,
-                columnwise=torch.is_grad_enabled(),
-            )
+            recipe = self._fp8_metas["forward"]["recipe"]
+            with_columnwise_usage = True
+            if recipe.heuristic == "inference":
+                # Weight needs column-wise usage for dgrad GEMM, so
+                # not needed for inference
+                with_columnwise_usage = False
+            quantizer.set_usage(rowwise=True, columnwise=with_columnwise_usage)
             with torch.no_grad():
                 weight = quantizer(weight)
 

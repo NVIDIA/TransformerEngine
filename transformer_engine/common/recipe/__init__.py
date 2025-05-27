@@ -61,10 +61,12 @@ class QParams:
     amax_epsilon: float = 0.0
 
 
+@dataclass
 class Recipe:
-    """
-    Base recipe class.
-    """
+    """Configuration for quantization scheme."""
+
+    # Recipe-specific heuristics (options: "performance", "inference")
+    heuristic: str = "performance"
 
     def mxfp8(self):
         """Whether the given recipe is MXFP8 block scaling."""
@@ -185,7 +187,8 @@ class DelayedScaling(Recipe):
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"heuristic={self.heuristic}"
         )
 
 
@@ -228,7 +231,8 @@ class Float8CurrentScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"heuristic={self.heuristic}"
         )
 
 
@@ -269,7 +273,8 @@ class MXFP8BlockScaling(Recipe):
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
-            f"format={str(self.fp8_format).split('.')[1]}"
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"heuristic={self.heuristic}"
         )
 
 
@@ -349,5 +354,6 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"heuristic={self.heuristic}"
         )
