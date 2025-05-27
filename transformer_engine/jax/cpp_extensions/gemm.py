@@ -398,9 +398,6 @@ def gemm(
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
 
 
-import pdb
-
-
 def grouped_gemm(
     lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
     rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
@@ -411,11 +408,10 @@ def grouped_gemm(
     preferred_element_type: jnp.dtype = None,
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
-    is_grouped_dense_wgrad: bool = False,
 ) -> jnp.ndarray:
     """
     lhs: [M, K]
-    rhs: [G, N, K]
+    rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
     # TODO(Phuong): implement the group_offset
     group_offset = group_offset or jnp.zeros((1,), jnp.int32)
@@ -456,8 +452,10 @@ def grouped_gemm(
     rhs_is_trans = rhs_contract_dim[0] != 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
+    is_grouped_dense_wgrad = False
     if len(rhs_shape) == 2:
         rhs_is_trans = rhs_contract_dim[0] != 0
+        is_grouped_dense_wgrad = True
 
     # TODO(Hua): thses are for fp16 dense wgrad, any better way to handle this?
     if (
@@ -465,10 +463,6 @@ def grouped_gemm(
         and not isinstance(lhs, ScaledTensor)
         and not isinstance(rhs, ScaledTensor)
     ):
-        print(
-            f"[DEBUG] original {lhs_is_trans=}, {rhs_is_trans=}, {lhs_flatten_axis=},"
-            f" {rhs_flatten_axis=}"
-        )
         lhs_is_trans = True
         rhs_is_trans = False
         lhs_flatten_axis = 1
@@ -501,7 +495,6 @@ def grouped_gemm(
         rhs_q = grouped_quantize(
             rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
         )
-
         lhs_data = lhs_q.data
         rhs_data = rhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
@@ -513,6 +506,7 @@ def grouped_gemm(
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
+    # TODO(Phuong): we force Blackwell to also use NT layout for now, need to fix later
     if scaling_mode.is_tensor_scaling():  # and not is_gemm_with_all_layouts_supported():
         lhs_is_trans = False
         rhs_is_trans = True
@@ -524,17 +518,12 @@ def grouped_gemm(
             rhs_layout_is_T = rhs_q.data_layout == "T"
         lhs_ndim = len(lhs_shape)
         rhs_ndim = len(rhs_shape)
-        print(f"[DEBUG] original {lhs_contract_dim=}, {rhs_contract_dim=}")
         if lhs_layout_is_T:
             lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
         if rhs_layout_is_T:
             rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
         lhs_data = _shape_normalization(lhs_data, (lhs_contract_dim, ()), not lhs_layout_is_T)
         rhs_data = _shape_normalization(rhs_data, (rhs_contract_dim, ()), rhs_layout_is_T)
-
-    print(f"[DEBUG] {lhs_shape=}, {rhs_shape=}")
-    print(f"[DEBUG] {lhs_contract_dim=}, {rhs_contract_dim=}")
-    print(f"[DEBUG] {lhs_is_trans=}, {rhs_is_trans=}")
 
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
