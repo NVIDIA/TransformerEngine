@@ -108,7 +108,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     NVTETensor transpose_data = nvte_create_tensor(z->scaling_mode);
     Tensor& t = *convertNVTETensor(transpose_data);
     t.data = z->columnwise_data;
-    nvte_transpose(*z, transpose_data, stream);
+    nvte_transpose(static_cast<NVTETensor>(*z), transpose_data, stream);
     nvte_destroy_tensor(transpose_data);
   }
 

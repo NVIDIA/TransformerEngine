@@ -94,7 +94,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     auto *t = convertNVTETensor(transpose_data);
     t->data = z->columnwise_data;
 
-    nvte_transpose(*z, transpose_data, stream);
+    nvte_transpose(static_cast<NVTETensor>(*z), transpose_data, stream);
     nvte_destroy_tensor(transpose_data);
   }
 

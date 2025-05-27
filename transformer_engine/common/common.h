@@ -14,11 +14,8 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <atomic>
-#include <climits>
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -80,7 +77,7 @@ struct SimpleTensor {
 
   SimpleTensor() : SimpleTensor(nullptr, {}, DType::kFloat32) {}
 
-  operator NVTEBasicTensor() const {
+  explicit operator NVTEBasicTensor() const {
     return {dptr, static_cast<NVTEDType>(dtype),
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
