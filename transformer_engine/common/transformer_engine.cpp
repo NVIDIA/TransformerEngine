@@ -6,11 +6,11 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <atomic>
+#include <climits>
 #include <cstring>
 #include <iostream>
-#include <atomic>
 #include <mutex>
-#include <climits>
 
 #include "common.h"
 #include "common/util/cuda_runtime.h"
