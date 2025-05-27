@@ -351,7 +351,7 @@ std::vector<size_t> convertShape(const NVTEShape& shape);
 
 int roundup(const int value, const int multiple);
 
-NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 }  // namespace transformer_engine::pytorch
 
 namespace std {
