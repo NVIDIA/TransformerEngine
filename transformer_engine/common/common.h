@@ -132,9 +132,7 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   }
 
-  operator NVTETensor() const noexcept {
-    return nvte_tensor;
-  }
+  operator NVTETensor() const noexcept { return nvte_tensor; }
 
   size_t numel() const {
     size_t acc = 1;

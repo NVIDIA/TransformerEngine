@@ -195,7 +195,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 class TensorAllocator {
  public:
-  static TensorAllocator& instance() {
+  static TensorAllocator &instance() {
     static TensorAllocator allocator;
     return allocator;
   }
@@ -209,8 +209,9 @@ class TensorAllocator {
       NVTETensor ret = reinterpret_cast<NVTETensor>(index);
       free_list.pop_back();
       if (debug) {
-        std::cout << "Allocated " << index << " from free list. Free list size: " << free_list.size()
-                  << " and capacity " << free_list.capacity() << std::endl;
+        std::cout << "Allocated " << index
+                  << " from free list. Free list size: " << free_list.size() << " and capacity "
+                  << free_list.capacity() << std::endl;
       }
       // 1-based indexing
       memory[index - 1].scaling_mode = mode;
@@ -218,7 +219,7 @@ class TensorAllocator {
     }
     if (memory.size() < memory.capacity()) {
       memory.emplace_back();
-      Tensor& t = memory.back();
+      Tensor &t = memory.back();
       size = memory.size();
       // 1-based indexing
       uintptr_t index = memory.size();
@@ -244,7 +245,7 @@ class TensorAllocator {
     memory[index - 1].clear();
     if (debug) {
       std::cout << "Freed " << index << ". Free list size: " << free_list.size() << " and capacity "
-        << free_list.capacity() << std::endl;
+                << free_list.capacity() << std::endl;
     }
   }
 
@@ -260,7 +261,7 @@ class TensorAllocator {
     }
     if (debug) {
       std::cout << "Freed range of" << N << " tensors. Free list size: " << free_list.size()
-        << " and capacity " << free_list.capacity() << std::endl;
+                << " and capacity " << free_list.capacity() << std::endl;
     }
   }
 
@@ -296,7 +297,9 @@ class TensorAllocator {
   bool debug = false;
 };
 
-Tensor *convertNVTETensor(const NVTETensor t) { return TensorAllocator::instance().convertNVTETensor(t); }
+Tensor *convertNVTETensor(const NVTETensor t) {
+  return TensorAllocator::instance().convertNVTETensor(t);
+}
 
 Tensor *convertNVTETensorCheck(const NVTETensor t) {
   Tensor *ptr = TensorAllocator::instance().convertNVTETensor(t);
@@ -311,7 +314,9 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   return ret;
 }
 
-void nvte_destroy_tensor(NVTETensor tensor) { transformer_engine::TensorAllocator::instance().Free(tensor); }
+void nvte_destroy_tensor(NVTETensor tensor) {
+  transformer_engine::TensorAllocator::instance().Free(tensor);
+}
 
 void nvte_destroy_tensors(NVTETensor *tensors, size_t N) {
   transformer_engine::TensorAllocator::instance().Free(tensors, N);
@@ -492,7 +497,8 @@ NVTEScalingMode nvte_tensor_scaling_mode(const NVTETensor tensor) {
 
 void nvte_tensor_pack_create(NVTETensorPack *pack) {
   for (int i = 0; i < pack->MAX_SIZE; i++) {
-    pack->tensors[i] = transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING);
+    pack->tensors[i] =
+        transformer_engine::TensorAllocator::instance().Allocate(NVTE_DELAYED_TENSOR_SCALING);
   }
 }
 
