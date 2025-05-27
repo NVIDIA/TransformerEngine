@@ -473,7 +473,7 @@ void nvte_tensor_pack_create(NVTETensorPack *pack) {
 }
 
 void nvte_tensor_pack_destroy(NVTETensorPack *pack) {
-    transformer_engine::tensor_allocator.Free(pack->tensors, pack->MAX_SIZE);
+  transformer_engine::tensor_allocator.Free(pack->tensors, pack->MAX_SIZE);
 }
 
 void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
