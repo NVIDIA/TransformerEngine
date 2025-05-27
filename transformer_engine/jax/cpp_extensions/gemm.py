@@ -163,9 +163,6 @@ def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     rhs_3d = _shape_normalization(rhs.data, rhs_dn, rhs.data_layout == "T")
 
     dim_nums = (((2,), (2,)), ((0,), (0,)))
-    out_3d = jax.lax.dot_general(
-        lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
-    )
     out_fp8 = jax.lax.dot_general(
         lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
     )
@@ -177,7 +174,7 @@ def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
 def _jax_gemm_tensor_scaling_fp8(
     lhs: ScaledTensor, rhs: ScaledTensor, dim_nums: Tuple[Tuple[Sequence[int], Sequence[int]]]
 ):
-    """FP8 GEMM for XLA pattern match"""
+    """FP8 GEMM"""
     assert rhs.scaling_mode.is_tensor_scaling(), "rhs does not have tensor scaling mode"
 
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
