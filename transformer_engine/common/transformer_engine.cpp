@@ -251,7 +251,7 @@ void TensorAllocator::Free(NVTETensor t) {
 void TensorAllocator::Free(NVTETensor *t, size_t N) {
   std::lock_guard<std::mutex> lock(mutex);
   for (size_t i = 0; i < N; ++i) {
-    uintptr_t index = reinterpret_cast<uintptr_t>(t);
+    uintptr_t index = reinterpret_cast<uintptr_t>(t[i]);
     if (index == 0) continue;
     NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
     free_list.push_back(index);
