@@ -108,9 +108,10 @@ def _get_shared_object_file(library: str) -> Path:
 
     # Case 1: Typical user workflow: Both locations are the same, return any result.
     if te_install_dir == site_packages_dir:
-        assert (
-            so_path_in_install_dir is not None
-        ), f"Could not find shared object file for Transformer Engine {library} lib."
+        if so_path_in_install_dir is None:
+            raise FileNotFoundError(
+                f"Could not find shared object file for Transformer Engine {library} lib."
+            )
         return so_path_in_install_dir
 
     # Case 2: ERR! Both locations are different but returned a valid result.
@@ -118,13 +119,12 @@ def _get_shared_object_file(library: str) -> Path:
     # editable builds. In case developers are executing inside a TE directory via
     # an inplace build, and then move to a regular build, the local shared object
     # file will be incorrectly picked up without the following logic.
-    if so_path_in_install_dir is not None and so_path_in_default_dir is not None:
-        raise RuntimeError(
-            f"Found multiple shared object files: {so_path_in_install_dir} and"
-            f" {so_path_in_default_dir}. Remove local shared objects installed"
-            f" here {so_path_in_install_dir} or change the working directory to"
-            "execute from outside TE."
-        )
+    assert so_path_in_install_dir is None or so_path_in_default_dir is None, (
+        f"Found multiple shared object files: {so_path_in_install_dir} and"
+        f" {so_path_in_default_dir}. Remove local shared objects installed"
+        f" here {so_path_in_install_dir} or change the working directory to"
+        "execute from outside TE."
+    )
 
     # Case 3: Typical dev workflow: Editable install
     if so_path_in_install_dir is not None:
@@ -134,7 +134,9 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path_in_default_dir is not None:
         return so_path_in_default_dir
 
-    raise RuntimeError(f"Could not find shared object file for Transformer Engine {library} lib.")
+    raise FileNotFoundError(
+        f"Could not find shared object file for Transformer Engine {library} lib."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -198,6 +200,7 @@ def load_framework_extension(framework: str):
 @functools.lru_cache(maxsize=None)
 def _get_sys_extension():
     system = platform.system()
+
     if system == "Linux":
         extension = "so"
     elif system == "Darwin":
