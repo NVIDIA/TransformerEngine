@@ -92,12 +92,21 @@ class _GroupedLinear(torch.autograd.Function):
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
         inp_view = inp.view(-1, in_features)
-        inputmats = torch.split(inp_view, m_splits)
-        if fp8:
-            assert_dim_for_fp8_exec(*inputmats, *weights)
 
-        # Cast input to expected dtype
-        inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+        with_multi_quantize_split = (
+            fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
+        )
+
+        if with_multi_quantize_split:
+            inp_view = cast_if_needed(inp_view, activation_dtype)
+            inputmats_no_fp8 = []
+        else:
+            inputmats = torch.split(inp_view, m_splits)
+            if fp8:
+                assert_dim_for_fp8_exec(*inputmats, *weights)
+            # Cast input to expected dtype
+            inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+
         inputmats = []
 
         weight_requires_grad = weights[0].requires_grad
@@ -254,7 +263,10 @@ class _GroupedLinear(torch.autograd.Function):
 
             grad_output = grad_output.contiguous()
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
-            grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+            if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling() and (not ctx.use_bias):
+                grad_output_mats = []
+            else:
+                grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
 

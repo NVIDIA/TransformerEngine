@@ -18,6 +18,7 @@ namespace transformer_engine::pytorch {
 void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits,
                                std::vector<std::unique_ptr<Quantizer>>& quantizers,
                                std::vector<py::handle> quantizer_list,
+                               std::vector<TensorWrapper>& input_list,
                                std::vector<TensorWrapper>& output_list,
                                std::vector<py::object>& output_list_py) {
   using namespace py::literals;
@@ -39,8 +40,16 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
   bool is_2D_scaled = scaling_mode == NVTE_BLOCK_SCALING_2D;
   transformer_engine::DType fp8_dtype = blockwise_quantizers[0]->dtype;
 
+  transformer_engine::DType inp_dtype = GetTransformerEngineDType(input_view.scalar_type());
+
   size_t fp8_elem_size = 1;
   size_t scale_elem_size = 4;
+  // get element size of input_view
+  size_t input_elem_size = input_view.element_size();
+
+  // this list might also contain zeros when an expert does receive tokens
+  std::vector<std::vector<size_t>> input_shapes;
+  std::vector<size_t> input_sizes;
 
   std::vector<std::vector<size_t>> rowwise_data_shapes;
   std::vector<std::vector<size_t>> rowwise_scale_shapes;
@@ -53,6 +62,9 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
   for (int i = 0; i < num_splits; i++) {
     std::vector<size_t> input_view_i_shape =
         std::vector<size_t>{static_cast<size_t>(m_splits[i]), static_cast<size_t>(hidden_dim)};
+    input_shapes.emplace_back(input_view_i_shape);
+    input_sizes.emplace_back(input_view_i_shape[0] * input_view_i_shape[1] * input_elem_size);
+
     if (rowwise_usage) {
       rowwise_data_shapes.emplace_back(input_view_i_shape);
       rowwise_scale_shapes.emplace_back(
@@ -172,6 +184,18 @@ void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits
     }
   }
 
+  {
+    // split input_view into input_list
+    uint8_t* input_data_ptr = static_cast<uint8_t*>(input_view.data_ptr());
+    for (int i = 0; i < num_splits; i++) {
+      // Note: input_list wrappers might wanna skip empty tensors here
+      if (input_sizes[i] == 0) continue;
+      input_list.emplace_back(
+          makeTransformerEngineTensor(input_data_ptr, input_shapes[i], inp_dtype));
+      input_data_ptr += input_sizes[i];
+    }
+  }
+
   for (int i = 0; i < num_splits; i++) {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
@@ -222,11 +246,6 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   std::vector<TensorWrapper> tensor_wrappers_input;
   std::vector<TensorWrapper> tensor_wrappers_output;
 
-  NVTE_CHECK(input_list.size() == quantizer_list.size(),
-             "Input list and quantizer list must have the same size");
-  NVTE_CHECK(input_list.size() == m_splits.size(),
-             "Input list and m_splits must have the same size");
-
   // Choose implementation
   // Note: Currently only have fused kernel for FP8 cast-transpose
   bool with_fused_kernel = true;
@@ -250,13 +269,20 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // create TE tensors from input
   if (use_fused_bulk_alloc) {
-    for (size_t i = 0; i < input_list.size(); i++) {
-      if (m_splits[i] == 0) continue;
-      tensor_wrappers_input.emplace_back(makeTransformerEngineTensor(input_list[i]));
-    }
+    // for (size_t i = 0; i < input_list.size(); i++) {
+    //   if (m_splits[i] == 0) continue;
+    //   tensor_wrappers_input.emplace_back(makeTransformerEngineTensor(input_list[i]));
+    // }
+    NVTE_CHECK(input_list.size() == 0, "Input list must be empty because we want to split in C++");
     _fused_bulk_alloc_outputs(input_view, m_splits, quantizers, quantizer_list,
-                              tensor_wrappers_output, py_output_objects_list);
+                              tensor_wrappers_input, tensor_wrappers_output,
+                              py_output_objects_list);
   } else {
+    NVTE_CHECK(input_list.size() == quantizer_list.size(),
+               "Input list and quantizer list must have the same size");
+    NVTE_CHECK(input_list.size() == m_splits.size(),
+               "Input list and m_splits must have the same size");
+
     for (size_t i = 0; i < input_list.size(); i++) {
       // raise error is each input[i] is not contiguous
       NVTE_CHECK(input_list[i].is_contiguous(), "Input tensor is not contiguous");
