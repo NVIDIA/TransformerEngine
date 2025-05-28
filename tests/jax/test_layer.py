@@ -27,6 +27,8 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     is_fp8_available,
     update_collections,
+    UsageContext,
+    UsageType,
 )
 
 
@@ -354,7 +356,13 @@ class BaseRunner:
                     test_others,
                     test_layer,
                 )
-                if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
+                if (
+                    QuantizeConfig.RECIPE_MANAGER is not None
+                    and QuantizeConfig.RECIPE_MANAGER.get_quantizer_params(
+                        UsageContext(UsageType.X)
+                    ).scaling_mode
+                    == ScalingMode.DELAYED_TENSOR_SCALING
+                ):
                     _, updated_quantize_meta = flax.core.pop(
                         updated_state[0], QuantizeConfig.COLLECTION_NAME
                     )
