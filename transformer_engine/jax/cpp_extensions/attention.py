@@ -465,6 +465,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                config.context_parallel_load_balanced,
             )
         )
 
@@ -863,6 +864,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 config.qkv_layout,
                 config.window_size,
                 config.max_segments_per_seq,
+                config.context_parallel_load_balanced,
             )
         )
 
@@ -2156,6 +2158,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             batch, q_max_seqlen, head, _ = q.shape
@@ -2176,21 +2179,32 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
 
-                output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
-                    q,
-                    kv,
-                    _not_used,
-                    bias,
-                    seed,
-                    q_seqlen,
-                    kv_seqlen,
-                    q_seq_offsets,
-                    k_seq_offsets,
-                    q_segment_ids,
-                    kv_segment_ids,
-                    q_segment_pos,
-                    kv_segment_pos,
-                    subblock_config,
+                def compute(config):
+                    return FusedAttnFwdPrimitive.impl(
+                        q,
+                        kv,
+                        _not_used,
+                        bias,
+                        seed,
+                        q_seqlen,
+                        kv_seqlen,
+                        q_seq_offsets,
+                        k_seq_offsets,
+                        q_segment_ids,
+                        kv_segment_ids,
+                        q_segment_pos,
+                        kv_segment_pos,
+                        config,
+                    )
+
+                causal_padding_config = subblock_config
+                padding_config = replace(subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK)
+
+                kv_src_rank = (cp_size + cp_rank - idx) % cp_size
+                output_per_step, softmax_aux_per_step, _ = lax.cond(
+                    not config.context_parallel_load_balanced and cp_rank > kv_src_rank,
+                    partial(compute, padding_config),
+                    partial(compute, causal_padding_config),
                 )
 
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
@@ -2290,13 +2304,14 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             dq = jnp.zeros_like(q)
             dkv = jnp.zeros_like(kv)
             dbias = jnp.zeros_like(bias)
 
-            def scan_kv_block(_idx, carry):
+            def scan_kv_block(idx, carry):
                 kv, kv_segment_ids, kv_segment_pos, dq, dkv, dbias = carry
 
                 # Start communication that feeds the next iteration.
@@ -2306,7 +2321,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
 
-                def compute():
+                def compute(config):
                     dq_per_step, dkv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
                         q,
                         kv,
@@ -2324,11 +2339,18 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                         kv_segment_ids,
                         q_segment_pos,
                         kv_segment_pos,
-                        config=subblock_config,
+                        config=config,
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
-                dq_per_step, dkv_per_step, dbias_per_step = compute()
+                causal_padding_config = subblock_config
+                padding_config = replace(subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK)
+
+                dq_per_step, dkv_per_step, dbias_per_step = lax.cond(
+                    not config.context_parallel_load_balanced and cp_rank > idx,
+                    partial(compute, padding_config),
+                    partial(compute, causal_padding_config),
+                )
 
                 kv_next, dkv = jnp.unstack(kv_dkv)
                 dq += dq_per_step
