@@ -20,6 +20,13 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
+try:
+    import torch.distributed._symmetric_memory as symm_mem
+
+    HAS_TORCH_SYMMETRIC = True
+except ImportError:
+    HAS_TORCH_SYMMETRIC = False
+
 import transformer_engine_torch as tex
 
 from . import torch_version
@@ -39,12 +46,6 @@ from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-try:
-    import torch.distributed._symmetric_memory as symm_mem
-
-    HAS_TORCH_SYMMETRIC = True
-except ImportError:
-    HAS_TORCH_SYMMETRIC = False
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
