@@ -630,10 +630,9 @@ def _quantize_dbias_impl(
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
-    # On arch >= 100, it is faster to use 1x quantization for tensor scaling
+    # It is faster to use 1x quantization for tensor scaling
     force_1x_quantization = (
-        get_max_device_compute_capability() >= 100
-        and quantizer.scaling_mode.is_tensor_scaling()
+        quantizer.scaling_mode.is_tensor_scaling()
         and quantizer.is_2x2x()
     )
 
