@@ -163,7 +163,7 @@ def __jitted_jax_gemm_tensor_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
         lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=jnp.float32
     )
     scale_inv = (lhs.scale_inv * rhs.scale_inv).astype(jnp.float32)
-    
+
     return (out_fp8 * scale_inv).astype(lhs.dq_dtype)
 
 
