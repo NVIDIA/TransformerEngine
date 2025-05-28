@@ -23,7 +23,6 @@ from .misc import (
     jax_dtype_to_te_dtype,
     multidim_transpose,
     should_apply_1x_fused_dbias_war_for_arch_l_100,
-    get_max_device_compute_capability,
     NamedSharding,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
@@ -631,10 +630,7 @@ def _quantize_dbias_impl(
         scale = quantizer.scale
 
     # It is faster to use 1x quantization for tensor scaling
-    force_1x_quantization = (
-        quantizer.scaling_mode.is_tensor_scaling()
-        and quantizer.is_2x2x()
-    )
+    force_1x_quantization = quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
 
     q_layout = quantizer.q_layout
     if force_1x_quantization:
