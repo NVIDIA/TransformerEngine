@@ -7,27 +7,15 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 
-#include <transformer_engine/multi_stream.h>
-
-#include <mutex>
-#include <vector>
-
 #include "cuda_runtime.h"
-#include "logging.h"
 
 namespace transformer_engine::detail {
 
-static std::once_flag init_flag;
-static cudaStream_t compute_streams[num_streams];
-static cudaEvent_t events[num_streams];
+constexpr size_t num_compute_streams = 4;
 
-// Warning: only call once per device!
-static void init_streams_and_events() {
-  for (int i = 0; i < num_streams; i++) {
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
-    NVTE_CHECK_CUDA(cudaEventCreate(&events[i]));
-  }
-}
+cudaStream_t get_compute_stream(int idx);
+
+cudaEvent_t get_compute_stream_event(int idx);
 
 }  // namespace transformer_engine::detail
 

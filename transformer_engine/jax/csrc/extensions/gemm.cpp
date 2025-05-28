@@ -170,6 +170,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
   auto workspace_get = output_list.get<Buffer_Type>(num_gemms);
   Result_Type workspace = workspace_get.value();
   uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
+  auto num_streams = nvte_get_num_compute_streams();
   size_t workspace_size = workspace->dimensions()[0] / num_streams;
   auto workspace_shape = std::vector<size_t>{workspace_size};
   for (int i = 0; i < num_streams; i++) {

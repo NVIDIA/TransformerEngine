@@ -8,6 +8,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/cast.h>
+#include <transformer_engine/multi_stream.h>
 
 #include <cfloat>
 #include <limits>
@@ -172,28 +173,27 @@ void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const in
   constexpr NVTETensor workspace = nullptr;
   constexpr const NVTETensor grad = nullptr;
 
-  // Inits streams and events (once, globally)
-  std::call_once(detail::init_flag, detail::init_streams_and_events);
+  int num_streams = nvte_get_num_compute_streams();
 
   int num_stream_used = std::min(num_streams, num_groups);
   // wait for current stream to finish
-  NVTE_CHECK_CUDA(cudaEventRecord(detail::events[0], stream));
+  NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(detail::compute_streams[s], detail::events[0]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
   for (int i = 0; i < num_groups; i++) {
     detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
         input[i], grad, output[i], dbias, workspace, nullptr,
-        detail::compute_streams[i % num_streams]);
+        detail::get_compute_stream(i % num_streams));
   }
 
   // record events on compute streams
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaEventRecord(detail::events[s], detail::compute_streams[s]));
+    NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
   }
   // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::events[s]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
 }

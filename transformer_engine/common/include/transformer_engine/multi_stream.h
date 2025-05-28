@@ -11,12 +11,15 @@
 #ifndef TRANSFORMER_ENGINE_MULTI_STREAM_H
 #define TRANSFORMER_ENGINE_MULTI_STREAM_H
 
-/*! \namespace transformer_engine
- */
-namespace transformer_engine {
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-constexpr int num_streams = 4;
+/*! \brief Number of CUDA streams to use in multi-stream operations */
+size_t nvte_get_num_compute_streams();
 
-}  // namespace transformer_engine
+#ifdef __cplusplus
+}   // extern "C"
+#endif
 
 #endif  // TRANSFORMER_ENGINE_MULTI_STREAM_H
