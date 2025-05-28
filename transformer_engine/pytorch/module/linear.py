@@ -117,6 +117,7 @@ class _Linear(torch.autograd.Function):
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
         debug: Optional[bool] = False,
+        needs_columnwise_after_validation: bool = True,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -229,7 +230,7 @@ class _Linear(torch.autograd.Function):
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
-                    )
+                    ) or needs_columnwise_after_validation
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
             # Get quantized weight
