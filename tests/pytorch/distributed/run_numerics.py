@@ -185,7 +185,8 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1e-4, "atol": 1e-4}
+        # TF32 has same mantissa bits as FP16
+        return {"rtol": 1e-3, "atol": 1e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
