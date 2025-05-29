@@ -259,15 +259,15 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_inp
  */
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
-/*! \brief Casts a group of input tensors to FP8/MXFP8/BlockwiseFP8.
- *         The type of quantized tensor in the output depends on the scaling mode of the output
- *         tensor. See file level comments.
+/*! \brief Casts multiple input tensors to quantized output tensors.
  *
- *  \param[in]     input            List of input tensor to be cast.
- *  \param[in,out] output           List of output FP8/MXFP8/BlockwiseFP8 tensor.
- *  \param[in]     stream           CUDA stream used for the operation.
+ *  \param[in]      inputs           List of input tensors to be cast.
+ *  \param[in,out]  outputs          List of output quantized tensors.
+ *  \param[in]      quant_config    (Optional) Quantization configurations.
+ *  \param[in]      stream           CUDA stream used for the operation.
  */
-void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const int num_groups,
+void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
+                           const NVTEQuantizationConfig quant_config, const size_t num_tensors,
                            cudaStream_t stream);
 
 #ifdef __cplusplus
