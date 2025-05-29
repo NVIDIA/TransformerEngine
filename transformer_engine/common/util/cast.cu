@@ -179,7 +179,8 @@ void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const in
   // wait for current stream to finish
   NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
+    NVTE_CHECK_CUDA(
+        cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
   for (int i = 0; i < num_groups; i++) {
@@ -190,7 +191,8 @@ void nvte_grouped_quantize(const NVTETensor *input, NVTETensor *output, const in
 
   // record events on compute streams
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
+    NVTE_CHECK_CUDA(
+        cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
   }
   // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {

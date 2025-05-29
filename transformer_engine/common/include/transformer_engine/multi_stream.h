@@ -19,7 +19,7 @@ extern "C" {
 size_t nvte_get_num_compute_streams();
 
 #ifdef __cplusplus
-}   // extern "C"
+}  // extern "C"
 #endif
 
 #endif  // TRANSFORMER_ENGINE_MULTI_STREAM_H
