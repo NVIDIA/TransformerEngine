@@ -44,7 +44,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers, cuda_toolkit_include_path
+from build_tools.utils import copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
@@ -92,20 +92,6 @@ if __name__ == "__main__":
             "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
         )
     ]
-
-    setup_requires = ["jax[cuda12]", "flax>=0.7.1"]
-    if cuda_toolkit_include_path() is None:
-        setup_requires.extend(
-            [
-                "nvidia-cuda-runtime-cu12",
-                "nvidia-cublas-cu12",
-                "nvidia-cudnn-cu12",
-                "nvidia-cuda-cccl-cu12",
-                "nvidia-cuda-nvcc-cu12",
-                "nvidia-nvtx-cu12",
-                "nvidia-cuda-nvrtc-cu12",
-            ]
-        )
 
     # Configure package
     setuptools.setup(
