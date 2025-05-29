@@ -1242,11 +1242,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # FP8 primary weights
         if isinstance(tensor, QuantizedTensor):
-            if update_workspace and quantizer is not None and quantizer.columnwise_usage:
-                tensor.update_usage(
-                    rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
-                )
             return tensor
 
         # Try getting workspace from cache

@@ -346,8 +346,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         casts to FP8.
 
         """
-        if isinstance(tensor, MXFP8TensorBase):
-            return
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
         if not devices_match(new_device, tensor.device):
@@ -385,6 +383,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
         # Quantize to FP8
         assert self._quantizer is not None, "Can't quantize without a quantizer"
+        self._quantizer.internal = False
         self.data = self._quantizer.quantize(tensor)
         if self.requires_grad != tensor.requires_grad:
             self.requires_grad_(requires_grad=tensor.requires_grad)
