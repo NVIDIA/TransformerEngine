@@ -38,6 +38,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   //   C: column-major with size [m, n] --> row-major with size [n, m].
   // To make the output compatible with JAX, we need to swap A and B in cuBLAS GEMM call.
 
+  int num_streams = nvte_get_num_compute_streams();
+
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
