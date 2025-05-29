@@ -34,6 +34,10 @@ class _FromMXFP8Func(torch.autograd.Function):
 
         # Make sure FP8 data is in expected format
         if tensor._rowwise_data is not None:
+            if tensor._rowwise_data.device.type == "cpu":
+                tensor_gpu = torch.empty_like(tensor, device="cuda")
+                tensor_gpu.copy_(tensor)
+                return tex.dequantize(tensor_gpu, dtype).cpu()
             return tex.dequantize(tensor, dtype)
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
@@ -131,8 +135,15 @@ class MXFP8TensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scaling_factors=False):
         """Get this Tensor's data."""
+        if scaling_factors:
+            return (
+                self._rowwise_data,
+                self._columnwise_data,
+                self._rowwise_scale_inv,
+                self._columnwise_scale_inv,
+            )
         return self._rowwise_data, self._columnwise_data
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
