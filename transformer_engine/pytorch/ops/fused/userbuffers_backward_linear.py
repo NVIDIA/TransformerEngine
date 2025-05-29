@@ -500,7 +500,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             bias_op = self.basic_ops[idx]
 
         # Saved tensors from forward pass
-        (x_local,) = linear_op_ctx.saved_tensors
+        (x_local, w) = linear_op_ctx.saved_tensors
 
         # wgrad fusion
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
@@ -520,7 +520,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         retval = UserbuffersBackwardLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
-            weight=linear_op.weight,
+            weight=w,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
             bias_requires_grad=(bias_op is not None),
             dtype=linear_op_ctx.dtype,
