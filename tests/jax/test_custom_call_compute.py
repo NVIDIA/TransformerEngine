@@ -1345,19 +1345,16 @@ class TestGroupedDense:
         self, x, kernel, bias, group_sizes, contracting_dims, quantizer_set=noop_quantizer_set
     ):
         out = grouped_dense(
-            x,
-            kernel,
-            group_sizes,
-            contracting_dims,
-            bias=bias,
-            quantizer_set=quantizer_set
+            x, kernel, group_sizes, contracting_dims, bias=bias, quantizer_set=quantizer_set
         )
         return jnp.sum(jnp.asarray(out))
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
-            dtype, input_shape, with_bias=True,
+            dtype,
+            input_shape,
+            with_bias=True,
         )
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
@@ -1388,7 +1385,9 @@ class TestGroupedDense:
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
-            dtype, input_shape, with_bias=True,
+            dtype,
+            input_shape,
+            with_bias=True,
         )
 
         quantizer_set = QuantizerFactory.create_set(
@@ -1402,7 +1401,11 @@ class TestGroupedDense:
         value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
         ref_out_mean, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
-            x, kernel, bias, group_sizes, contracting_dims,
+            x,
+            kernel,
+            bias,
+            group_sizes,
+            contracting_dims,
         )
         prim_out_mean, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
             x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
