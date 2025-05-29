@@ -12,7 +12,7 @@
 namespace transformer_engine {
 
 __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_fp8,
-                                                         bool force_pow_2_scales, float epsilon,
+                                                         bool force_pow_2_scales, bool epsilon,
                                                          float value_for_inf) {
   // NOTE: NAN amax evaluates false for <, handled further down.
   if (amax < epsilon) {
