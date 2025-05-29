@@ -41,7 +41,7 @@ from ..cpp_extensions import (
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..cpu_offload import is_cpu_offload_enabled
+from ..cpu_offload import is_cpu_offload_enabled, mark_is_weight
 
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
@@ -175,16 +175,19 @@ class _GroupedLinear(torch.autograd.Function):
                     input_quantizers[i].calibrate(inputmats[i])
                 for i in range(num_gemms):
                     weight_quantizers[i].calibrate(weights[i])
+        
+        if cpu_offloading:
+            mark_is_weight(*weights_fp8, *weights)
 
         if is_grad_enabled:
             ctx.weight_quantizers = weight_quantizers
             ctx.weights_shape_1 = weights[0].shape[1]
 
             # TODO: update after #1638 is merged. # pylint: disable=fixme
-            if weight_requires_grad:
-                for inputmat in inputmats:
-                    if isinstance(inputmat, QuantizedTensor):
-                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+            #if weight_requires_grad:
+            #    for inputmat in inputmats:
+            #        if isinstance(inputmat, QuantizedTensor):
+            #            inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
             if inp.requires_grad:
                 for weight in weights_fp8:
                     if isinstance(weight, QuantizedTensor):
@@ -725,6 +728,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             else:
                 linear_fn = _GroupedLinear.forward
                 args = [None]
+            print(is_cpu_offload_enabled())
             args += (
                 inp,
                 m_splits,

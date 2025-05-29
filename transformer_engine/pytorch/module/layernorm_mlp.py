@@ -67,7 +67,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_can_start_offload, mark_is_weight
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -224,6 +224,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
+        mark_can_start_offload(inputmat)
+            
 
         # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
@@ -276,6 +278,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
+        mark_can_start_offload(ln_out)
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
@@ -431,6 +434,7 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 act_out = activation_func(fc1_out, fc2_input_quantizer)
 
+        mark_can_start_offload(fc1_out, act_out)
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
 
@@ -477,10 +481,6 @@ class _LayerNormMLP(torch.autograd.Function):
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
         else:
-            if cpu_offloading:
-                offload(
-                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                )
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -508,6 +508,12 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
+            
+            if cpu_offloading:
+                mark_is_weight(
+                    ln_weight, ln_bias, fc1_weight_final, fc1_weight, \
+                        fc1_bias, fc2_weight_final, fc2_weight, fc2_bias)
+                
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,

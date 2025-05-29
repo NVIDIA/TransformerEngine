@@ -66,7 +66,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..cpu_offload import  is_cpu_offload_enabled, offload, _manual_reload
+from ..cpu_offload import  is_cpu_offload_enabled, mark_can_start_offload, mark_is_weight
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 
@@ -135,6 +135,7 @@ class _Linear(torch.autograd.Function):
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
 
+        mark_can_start_offload(inp)
         inputmat = inp
         inputmat_total = None
         with_input_all_gather_nccl = (
@@ -334,8 +335,7 @@ class _Linear(torch.autograd.Function):
                     # weights if weights are externally touched outside this module
                     ctx.weight_object = weight
 
-            if cpu_offloading and saved_inputmat is not None:
-                offload(saved_inputmat, manual_reload=True)
+            mark_is_weight(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -404,6 +404,7 @@ class _Linear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        print("bwd  ")
         # pylint: disable=missing-function-docstring
 
         # NVTX label for profiling
@@ -434,8 +435,6 @@ class _Linear(torch.autograd.Function):
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
-            if ctx.cpu_offloading:
-                inputmat = _manual_reload(inputmat)
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None

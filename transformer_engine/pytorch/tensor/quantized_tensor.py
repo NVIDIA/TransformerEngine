@@ -31,24 +31,8 @@ def prepare_for_saving(
             t, t_obj = tensor.prepare_for_saving()
             tensor_list.extend(t)
             tensor_objects_list.append(t_obj)
-    final_tensor_list = []
 
-    # Logic for the CPU offloading. 
-    # If the tensor was offloaded with manual_reload=True,
-    # it is substituted with a CPU tensor inside prepare_for_saving.
-
-    for t in tensor_list:
-        if hasattr(t, "manual_reload"):
-            if t.manual_reload:
-                tensor = t.offload_handler.offload(t)
-                tensor.activation_offloading = True
-                final_tensor_list.append(tensor)
-            else:
-                final_tensor_list.append(t)
-        else:
-            final_tensor_list.append(t)
-
-    return final_tensor_list, tensor_objects_list
+    return tensor_list, tensor_objects_list
 
 
 def restore_from_saved(
