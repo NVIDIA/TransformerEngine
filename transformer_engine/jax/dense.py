@@ -261,7 +261,6 @@ def _grouped_dense_fwd_rule(
     quantizer_set,
 ):
     use_bias = bias is not None
-    assert not use_bias, "Fused Bias is not yet supported!"
 
     x_contracting_dims, k_contracting_dims = contracting_dims
     flatten_axis_x = -len(x_contracting_dims)
@@ -316,7 +315,7 @@ def _grouped_dense_bwd_rule(
         rowwise_casted_kernel,
         x_shape,
         kernel_shape,
-        _use_bias,
+        use_bias,
         quantizer_set,
         flatten_axis_k,
     ) = ctx
@@ -324,6 +323,8 @@ def _grouped_dense_bwd_rule(
     casted_grad = tex.grouped_quantize(
         grad, quantizer_set.dgrad, group_sizes, flatten_axis=flatten_axis_k
     )
+
+    dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
 
     # GEMM NT
     # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we need to use
@@ -369,7 +370,7 @@ def _grouped_dense_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
-    group_sizes_grad = dbias = None
+    group_sizes_grad = None
 
     return dgrad, wgrad, group_sizes_grad, dbias, quantizer_set
 
@@ -398,7 +399,6 @@ def _grouped_dense_no_quant_fwd_rule(
     x, kernel, group_sizes, contracting_dims, bias, precision, preferred_element_type, group_offset
 ):
     use_bias = bias is not None
-    assert not use_bias, "Fused Bias is not yet supported!"
 
     output = tex.grouped_gemm(
         x,
@@ -433,11 +433,13 @@ def _grouped_dense_no_quant_bwd_rule(
         kernel,
         x_shape,
         kernel_shape,
-        _use_bias,
+        use_bias,
     ) = ctx
 
     assert grad.ndim == 2, "Grouped dense backward expects a 2D grad tensor of shape (M, N)"
     assert kernel.ndim == 3, "Grouped dense backward expects a 3D kernel tensor of shape (G, K, N)"
+
+    dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
 
     # GEMM NT
     # The 1 in range is for excluding the group dimension (shall we use the hardcoded results below?)
@@ -477,7 +479,7 @@ def _grouped_dense_no_quant_bwd_rule(
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
-    group_sizes_grad = dbias = None
+    group_sizes_grad = None
 
     return dgrad, wgrad, group_sizes_grad, dbias
 

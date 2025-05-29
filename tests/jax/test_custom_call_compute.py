@@ -1232,24 +1232,30 @@ fwd_bwd_dtypes = [
 @pytest_parametrize_wrapper("input_shape", [(8, 64, 32, 128)])
 # @pytest_parametrize_wrapper("input_shape", [(2, 2, 32, 2)])
 class TestGroupedDense:
-    def _ref_grouped_gemm(self, lhs, rhs, group_sizes, contracting_dims):
+    def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
         lhs_contract_dim, _ = contracting_dims
-        assert len(lhs_contract_dim) == 1 and lhs.ndim == 2
+        assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
+        if bias is None:
+            bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
+        else:
+            assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
         remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
         lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
         rhs = jnp.split(rhs, rhs.shape[0], axis=0)
+        bias = jnp.split(bias, bias.shape[0], axis=0)
         ref_out = []
-        for lhs_i, rhs_i in zip(lhs, rhs):
-            out_i = jax.lax.dot_general(lhs_i, rhs_i, (contracting_dims, ((), ())))
+        dim_num = (contracting_dims, ((), ()))
+        for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
+            out_i = jax.lax.dot_general(lhs_i, rhs_i, dim_num) + jnp.expand_dims(bias_i, axis=0)
             ref_out.append(jnp.squeeze(out_i))
         return ref_out
 
-    def _generate_grouped_gemm_input(self, dtype, input_shape, data_layout="NN"):
+    def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
         key = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(key, 3)
+        subkeys = jax.random.split(key, 4)
         n_groups, m, n, k = input_shape
 
-        group_sizes = jnp.sort(jax.random.randint(subkeys[2], (n_groups - 1,), 0, m))
+        group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
         group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
         group_sizes = jnp.diff(group_sizes)
         assert group_sizes.sum() == m
@@ -1260,21 +1266,17 @@ class TestGroupedDense:
 
         lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
         rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
+        bias_shape = (n_groups, n)
 
-        lhs = jax.random.uniform(subkeys[0], lhs_shape, dtype=dtype)
-        rhs = jax.random.uniform(subkeys[1], rhs_shape, dtype=dtype)
-        import math
-
-        # rhs = jax.numpy.arange(math.prod(rhs_shape), dtype=dtype).reshape(rhs_shape)
-        # lhs = jax.numpy.arange(math.prod(lhs_shape), dtype=dtype).reshape(lhs_shape)
-        # lhs = jax.numpy.ones(lhs_shape, dtype=dtype)
-        # rhs = jax.numpy.ones(rhs_shape, dtype=dtype)
+        lhs = jax.random.uniform(subkeys[1], lhs_shape, dtype=dtype)
+        rhs = jax.random.uniform(subkeys[2], rhs_shape, dtype=dtype)
+        bias = jax.random.uniform(subkeys[3], bias_shape, dtype=dtype) if with_bias else None
 
         lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
         rhs_contracting_dim = (1,) if data_layout[1] == "N" else (2,)
         contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
-        return lhs, rhs, group_sizes, contracting_dims
+        return lhs, rhs, group_sizes, contracting_dims, bias
 
     def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
         assert out.dtype == ref_list[0].dtype
@@ -1285,13 +1287,13 @@ class TestGroupedDense:
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
-        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
         )
         # f_jit = jax.jit(tex.grouped_gemm, static_argnums=3)
         # primitive_out = f_jit(lhs, rhs, group_sizes, contracting_dims=contracting_dims)
         primitive_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
-        ref_out = self._ref_grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -1311,20 +1313,20 @@ class TestGroupedDense:
             n_groups=input_shape[0],
         )
 
-        # quantizer_set.x and quantizer_set.kernel has fwd_dtype, while quantizer_set.grad has bwd_dtype
+        # quantizer_set.{x, kernel} has fwd_dtype, while quantizer_set.grad has bwd_dtype
         # We want to test E4M3 * E5M2, manually set the quantizer_set.kernel.q_dtype to bwd_dtype
         quantizer_set.kernel.q_dtype = bwd_dtype
         for quantizer in quantizer_set.kernel.quantizers:
             quantizer.q_dtype = bwd_dtype
 
         out_dtype = jnp.bfloat16
-        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             out_dtype, input_shape, layout
         )
         primitive_out = tex.grouped_gemm(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
-        ref_out = self._ref_grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         allclose_dtype = jnp.float8_e4m3fn
         if jnp.float8_e5m2 in fwd_bwd_dtype:
@@ -1332,52 +1334,46 @@ class TestGroupedDense:
 
         self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, allclose_dtype)
 
-    def _ref_sum_grouped_gemm(self, x, kernel, group_sizes, contracting_dims):
-        out_list = self._ref_grouped_gemm(x, kernel, group_sizes, contracting_dims)
+    def _ref_sum_grouped_dense(self, x, kernel, bias, group_sizes, contracting_dims):
+        out_list = self._ref_grouped_dense(x, kernel, bias, group_sizes, contracting_dims)
         # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
         # and prevent them from being clamp to zero
         out_sum_list = [jnp.sum(out) for out in out_list]
         return jnp.sum(jnp.asarray(out_sum_list))
 
-    def _primitive_sum_grouped_gemm(
-        self, x, kernel, group_sizes, contracting_dims, quantizer_set=noop_quantizer_set
+    def _primitive_sum_grouped_dense(
+        self, x, kernel, bias, group_sizes, contracting_dims, quantizer_set=noop_quantizer_set
     ):
-        out = grouped_dense(x, kernel, group_sizes, contracting_dims, quantizer_set=quantizer_set)
+        out = grouped_dense(
+            x,
+            kernel,
+            group_sizes,
+            contracting_dims,
+            bias=bias,
+            quantizer_set=quantizer_set
+        )
         return jnp.sum(jnp.asarray(out))
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
-        # TODO (add bias)
-        x, kernel, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
-            dtype,
-            input_shape,
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype, input_shape, with_bias=True,
         )
 
-        value_n_grad_ref_func = value_and_grad(
-            self._ref_sum_grouped_gemm,
-            (
-                0,
-                1,
-            ),
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+
+        ref_out_mean, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x, kernel, bias, group_sizes, contracting_dims
         )
-        value_n_grad_primitive_func = value_and_grad(
-            self._primitive_sum_grouped_gemm,
-            (
-                0,
-                1,
-            ),
+        prim_out_mean, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims
         )
 
-        ref_out_mean, (ref_dgrad, ref_wgrad) = value_n_grad_ref_func(
-            x, kernel, group_sizes, contracting_dims
-        )
-        primitive_out_mean, (primitive_dgrad, primitive_wgrad) = value_n_grad_primitive_func(
-            x, kernel, group_sizes, contracting_dims
-        )
-
-        assert_allclose(primitive_out_mean, ref_out_mean, dtype=dtype)
-        assert_allclose(primitive_dgrad, ref_dgrad, dtype=dtype)
-        assert_allclose(primitive_wgrad, ref_wgrad, dtype=dtype)
+        assert_allclose(prim_out_mean, ref_out_mean, dtype=dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
+        assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize(
@@ -1391,8 +1387,8 @@ class TestGroupedDense:
 
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
-        x, kernel, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
-            dtype, input_shape
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype, input_shape, with_bias=True,
         )
 
         quantizer_set = QuantizerFactory.create_set(
@@ -1402,19 +1398,17 @@ class TestGroupedDense:
             is_2x2x=True,
             n_groups=group_sizes.size,
         )
-        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_gemm, (0, 1))
-        value_n_grad_primitive_func = value_and_grad(self._primitive_sum_grouped_gemm, (0, 1))
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
-        ref_out_mean, (ref_dgrad, ref_wgrad) = value_n_grad_ref_func(
-            x,
-            kernel,
-            group_sizes,
-            contracting_dims,
+        ref_out_mean, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x, kernel, bias, group_sizes, contracting_dims,
         )
-        primitive_out_mean, (primitive_dgrad, primitive_wgrad) = value_n_grad_primitive_func(
-            x, kernel, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        prim_out_mean, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
-        assert_allclose(primitive_out_mean, ref_out_mean, dtype=fwd_dtype)
-        assert_allclose(primitive_dgrad, ref_dgrad, dtype=bwd_dtype)
-        assert_allclose(primitive_wgrad, ref_wgrad, dtype=bwd_dtype)
+        assert_allclose(prim_out_mean, ref_out_mean, dtype=fwd_dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
+        assert_allclose(prim_dbias, ref_dbias, dtype=dtype)

@@ -540,8 +540,8 @@ def grouped_gemm(
     assert group_offset.size == 1
 
     has_bias = bias is not None
-    assert not has_bias or bias.size == N
-    bias = bias or jnp.empty((), jnp.float32)
+    assert not has_bias or bias.shape == (group_sizes.size, N)
+    bias = jnp.empty((), jnp.float32) if bias is None else bias
 
     # TODO(Phuong): support MXFP8_1D_SCALING
     assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
