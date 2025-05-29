@@ -1228,7 +1228,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fsdp_group: Optional[dist_group_type] = None,
         workspace_dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
-        """Get FP8 workspace buffer and maybe update its values
+        """Get workspace buffer for weights and maybe update its values
 
         The workspace buffer may be cached for future function calls.
 
@@ -1252,15 +1252,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         workspace_dtype: torch.dtype, default = None
             If weight workspace contains high-precision tensor - for example
             for debug quantization, this is dtype of the tensor.
+
         """
 
-        # FP8 primary weights
+        # Handle case where weights are already quantized
+        # Note: Make sure weights have required usages, but do not
+        # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
-            if update_workspace and quantizer is not None:
-                tensor.update_usage(
-                    rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
-                )
+            update_rowwise_usage = True if quantizer.rowwise_usage else None
+            update_columnwise_usage = True if quantizer.columnwise_usage else None
+            tensor.update_usage(
+                rowwise_usage=update_rowwise_usage,
+                columnwise_usage=update_columnwise_usage,
+            )
             return tensor
 
         # Try getting workspace from cache
