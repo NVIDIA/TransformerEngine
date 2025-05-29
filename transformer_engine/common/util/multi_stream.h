@@ -7,11 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 
-#include "cuda_runtime.h"
 
 namespace transformer_engine::detail {
 
-constexpr size_t num_compute_streams = 4;
+int get_num_compute_streams();
 
 cudaStream_t get_compute_stream(int idx);
 

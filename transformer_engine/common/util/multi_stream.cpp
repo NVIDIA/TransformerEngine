@@ -14,12 +14,8 @@
 #include <mutex>
 #include <vector>
 
+#include "logging.h"
 #include "cuda_runtime.h"
-
-size_t nvte_get_num_compute_streams() {
-  NVTE_API_CALL(nvte_get_num_compute_streams);
-  return detail::num_compute_streams;
-}
 
 namespace transformer_engine::detail {
 
@@ -53,6 +49,16 @@ cudaEvent_t get_compute_stream_event(int idx) {
   return events[idx];
 }
 
+int get_num_compute_streams(){
+  static constexpr int num_compute_streams = 4;
+  return num_compute_streams;
+}
+
 }  // namespace transformer_engine::detail
+
+
+int nvte_get_num_compute_streams(){ 
+  return transformer_engine::detail::get_num_compute_streams();
+}
 
 #endif  // TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_

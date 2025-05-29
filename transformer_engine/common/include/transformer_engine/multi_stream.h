@@ -16,7 +16,7 @@ extern "C" {
 #endif
 
 /*! \brief Number of CUDA streams to use in multi-stream operations */
-size_t nvte_get_num_compute_streams();
+int nvte_get_num_compute_streams();
 
 #ifdef __cplusplus
 }  // extern "C"
