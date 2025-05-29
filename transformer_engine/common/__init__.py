@@ -108,7 +108,9 @@ def _get_shared_object_file(library: str) -> Path:
     if so_path is not None:
         return so_path
 
-    raise RuntimeError(f"Could not find shared object file for Transformer Engine {library} lib.")
+    raise FileNotFoundError(
+        f"Could not find shared object file for Transformer Engine {library} lib."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -173,6 +175,7 @@ def load_framework_extension(framework: str) -> None:
 def _get_sys_extension() -> str:
     """File extension for shared objects."""
     system = platform.system()
+
     if system == "Linux":
         return ".so"
     if system == "Darwin":
