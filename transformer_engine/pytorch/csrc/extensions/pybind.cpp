@@ -258,8 +258,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-  m.def("get_num_cublas_streams", &nvte_get_num_compute_streams,
-        "Get number of compute streams", py::call_guard<py::gil_scoped_release>());
+  m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
+        py::call_guard<py::gil_scoped_release>());
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
