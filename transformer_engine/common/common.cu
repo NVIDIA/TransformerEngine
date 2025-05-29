@@ -200,7 +200,7 @@ std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensor
   for (size_t i = 0; i < outer_size; ++i) {
     ret.emplace_back();
     for (size_t j = 0; j < inner_size; ++j) {
-      ret.back().push_back(reinterpret_cast<Tensor *>(nvte_tensors[i][j]));
+      ret.back().push_back(convertNVTETensor(nvte_tensors[i][j]));
     }
   }
   return ret;
