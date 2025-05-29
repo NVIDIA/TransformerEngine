@@ -2383,9 +2383,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2396,9 +2396,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
@@ -2582,9 +2582,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2595,9 +2595,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
@@ -2779,9 +2779,9 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2792,9 +2792,9 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
