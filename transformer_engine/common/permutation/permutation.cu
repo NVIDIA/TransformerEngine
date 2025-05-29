@@ -318,22 +318,16 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
                   NVTETensor row_id_map, const NVTETensor prob, NVTETensor prob_grad,
                   const NVTETensor input_fwd, const int num_rows, const int topK,
                   const int num_cols, const int num_out_tokens, cudaStream_t stream) {
+  using namespace transformer_engine;
   NVTE_API_CALL(nvte_permute);
 
-  const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
-  const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
-  const transformer_engine::Tensor *sorted_row_id_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(sorted_row_id);
-  const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
-  const transformer_engine::Tensor *prob_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob);
-  const transformer_engine::Tensor *prob_grad_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob_grad);
-  const transformer_engine::Tensor *input_fwd_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input_fwd);
+  const Tensor *input_cu = convertNVTETensorCheck(input);
+  const Tensor *output_cu = convertNVTETensorCheck(output);
+  const Tensor *sorted_row_id_cu = convertNVTETensorCheck(sorted_row_id);
+  const Tensor *row_id_map_cu = convertNVTETensorCheck(row_id_map);
+  const Tensor *prob_cu = convertNVTETensorCheck(prob);
+  const Tensor *prob_grad_cu = convertNVTETensorCheck(prob_grad);
+  const Tensor *input_fwd_cu = convertNVTETensorCheck(input_fwd);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,
@@ -350,16 +344,13 @@ void nvte_permute(const NVTETensor input, NVTETensor output, const NVTETensor so
 void nvte_unpermute(const NVTETensor input, NVTETensor output, NVTETensor row_id_map,
                     const NVTETensor prob, const int num_rows, const int topK, const int num_cols,
                     cudaStream_t stream) {
+  using namespace transformer_engine;
   NVTE_API_CALL(nvte_unpermute);
 
-  const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
-  const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
-  const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
-  const transformer_engine::Tensor *prob_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(prob);
+  const Tensor *input_cu = convertNVTETensorCheck(input);
+  const Tensor *output_cu = convertNVTETensorCheck(output);
+  const Tensor *row_id_map_cu = convertNVTETensorCheck(row_id_map);
+  const Tensor *prob_cu = convertNVTETensorCheck(prob);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input_cu->data.dtype, T,

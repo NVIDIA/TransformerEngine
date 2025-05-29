@@ -1239,12 +1239,12 @@ void fused_attn_max_512_fwd_qkvpacked(
 
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 1;
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     output_S->data.dptr = nullptr;
     output_S->data.shape = {batch, num_head, max_seqlen, max_seqlen};
     output_S->data.dtype = input_QKV->data.dtype;
   } else if (Aux_CTX_Tensors->size == 1) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1317,12 +1317,12 @@ void fused_attn_max_512_fwd_kvpacked(size_t batch, size_t num_head, size_t q_max
 
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 1;
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     output_S->data.dptr = nullptr;
     output_S->data.shape = {batch, num_head, q_max_seqlen, kv_max_seqlen};
     output_S->data.dtype = q_type;
   } else if (Aux_CTX_Tensors->size == 1) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1386,12 +1386,12 @@ void fused_attn_max_512_fwd(size_t batch, size_t num_head, size_t q_max_seqlen,
 
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 1;
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     output_S->data.dptr = nullptr;
     output_S->data.shape = {batch, num_head, q_max_seqlen, kv_max_seqlen};
     output_S->data.dtype = q_type;
   } else if (Aux_CTX_Tensors->size == 1) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
