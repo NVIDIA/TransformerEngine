@@ -20,7 +20,6 @@ from build_tools.utils import (
     found_ninja,
     found_pybind11,
     get_frameworks,
-    install_and_import,
     remove_dups,
     cuda_toolkit_include_path,
 )
@@ -36,7 +35,6 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
