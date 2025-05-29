@@ -7,7 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 #define TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_
 
-
 namespace transformer_engine::detail {
 
 int get_num_compute_streams();

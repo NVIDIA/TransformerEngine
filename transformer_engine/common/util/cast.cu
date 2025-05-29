@@ -162,8 +162,8 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
 }
 
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
-                           const NVTEQuantizationConfig quant_configs, const size_t num_tensors,
-                           cudaStream_t stream){
+                                const NVTEQuantizationConfig quant_configs,
+                                const size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
 

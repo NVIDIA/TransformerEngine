@@ -7,8 +7,8 @@
 
 #include "extensions.h"
 #include "transformer_engine/cast.h"
-#include "transformer_engine/transformer_engine.h"
 #include "transformer_engine/recipe.h"
+#include "transformer_engine/transformer_engine.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
@@ -374,8 +374,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   }
 
   QuantizationConfigWrapper quant_config;
-  nvte_multi_tensor_quantize(input_list.data(), output_list.data(),
-                             quant_config, num_groups, stream);
+  nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config, num_groups,
+                             stream);
 
   return ffi_with_cuda_error_check();
 }

@@ -267,8 +267,8 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
  *  \param[in]      stream           CUDA stream used for the operation.
  */
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
-                           const NVTEQuantizationConfig quant_config, const size_t num_tensors,
-                           cudaStream_t stream);
+                                const NVTEQuantizationConfig quant_config, const size_t num_tensors,
+                                cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
