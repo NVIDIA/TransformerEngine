@@ -100,7 +100,6 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        setup_requires=setup_requires,
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy"],
     )
