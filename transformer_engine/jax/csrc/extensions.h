@@ -68,6 +68,8 @@ pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_s
 // Quantization
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,

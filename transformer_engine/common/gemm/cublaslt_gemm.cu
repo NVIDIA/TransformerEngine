@@ -8,6 +8,7 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
 
 namespace {
@@ -568,18 +570,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
 }
 
-static std::once_flag init_flag;
-static cudaStream_t compute_streams[num_streams];
-static cudaEvent_t cublas_event[num_streams];
-
-// Warning: only call once per device!
-static void init_streams_and_events() {
-  for (int i = 0; i < num_streams; i++) {
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
-    NVTE_CHECK_CUDA(cudaEventCreate(&cublas_event[i]));
-  }
-}
-
 }  // namespace transformer_engine
 
 void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, const NVTETensor bias,
@@ -641,29 +631,31 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
-  // Inits streams and events (once, globally)
-  std::call_once(init_flag, init_streams_and_events);
+
+  int num_streams = nvte_get_num_compute_streams();
 
   int num_stream_used = std::min(num_streams, num_gemms);
   // wait for current stream to finish
-  NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
+  NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
+    NVTE_CHECK_CUDA(
+        cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
   for (int i = 0; i < num_gemms; i++) {
     nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                      workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     compute_streams[i % num_streams]);
+                     detail::get_compute_stream(i % num_streams));
   }
 
   // record events on compute streams
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[s], compute_streams[s]));
+    NVTE_CHECK_CUDA(
+        cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
   }
   // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
 }
 

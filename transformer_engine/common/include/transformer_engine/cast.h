@@ -259,6 +259,17 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor act_inp
  */
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Casts multiple input tensors to quantized output tensors.
+ *
+ *  \param[in]      inputs           List of input tensors to be cast.
+ *  \param[in,out]  outputs          List of output quantized tensors.
+ *  \param[in]      quant_config    (Optional) Quantization configurations.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
+                                const NVTEQuantizationConfig quant_config, const size_t num_tensors,
+                                cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
