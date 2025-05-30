@@ -271,8 +271,12 @@ def _grouped_dense_fwd_rule(
         )
         k_contracting_dims = (0,)
 
-        casted_x = tex.grouped_quantize(x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x)
-        casted_kernel = tex.grouped_quantize(kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k)
+        casted_x = tex.grouped_quantize(
+            x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
+        )
+        casted_kernel = tex.grouped_quantize(
+            kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k
+        )
         contracting_dims = (x_contracting_dims, k_contracting_dims)
 
         # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we should have
@@ -331,7 +335,7 @@ def _grouped_dense_bwd_rule(
         # g_contracting_dim = (1, )
         # k_contracting_dim = (2, )
         g_contracting_dim = tuple(
-        range(1 + grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
+            range(1 + grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
         )
         k_contracting_dim = tuple(
             dim for dim in range(1, len(kernel_shape)) if dim not in fwd_k_contracting_dims
@@ -357,8 +361,8 @@ def _grouped_dense_bwd_rule(
         # g_contracting_dim = (1,) and k_contracting_dim = (2,) to make it work after the
         # extra transpose for FP8 in grouped_gemm
         # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
-        g_contracting_dim = (1, )
-        k_contracting_dim = (2, )
+        g_contracting_dim = (1,)
+        k_contracting_dim = (2,)
         dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
         dgrad_grad = casted_grad.get_rowwise_tensor()
         dgrad_kernel_T = ctx_kernel
@@ -366,8 +370,8 @@ def _grouped_dense_bwd_rule(
         # We need to use g_contracting_dim = (0,) and x_contracting_dim = (1,) to make it work
         # after the extra transpose for FP8 in grouped_gemm
         # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
-        g_contracting_dim = (0, )
-        x_contracting_dim = (1, )
+        g_contracting_dim = (0,)
+        x_contracting_dim = (1,)
         wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
         wgrad_x_T = ctx_x
         wgrad_grad = casted_grad.get_colwise_tensor()
@@ -399,4 +403,3 @@ def _grouped_dense_bwd_rule(
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
-
