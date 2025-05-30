@@ -448,9 +448,10 @@ def grouped_gemm(
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
         scaling_mode = quantizer_set.x.scaling_mode
         if (
-            scaling_mode.is_tensor_scaling()
-            and is_gemm_with_all_layouts_supported()
-            or scaling_mode.is_1d_block_scaling()
+            # TODO(Phuong): we force Blackwell to also use NT layout for now, need to fix later
+            # scaling_mode.is_tensor_scaling()
+            # and is_gemm_with_all_layouts_supported()
+            scaling_mode.is_1d_block_scaling()
         ):
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
