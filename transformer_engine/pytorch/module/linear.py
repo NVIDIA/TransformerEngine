@@ -354,9 +354,9 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
-            if inp.requires_grad:
+            if inp.requires_grad and not module.primary_weights_in_fp8:
                 if isinstance(weightmat, QuantizedTensorBase):
-                    weightmat.update_usage(columnwise_usage=True)
+                    weightmat.update_usage(columnwise_usage=True, rowwise_usage=False)
 
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
