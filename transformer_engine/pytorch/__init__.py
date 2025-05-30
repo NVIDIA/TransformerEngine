@@ -53,6 +53,7 @@ from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
+from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
 try:
