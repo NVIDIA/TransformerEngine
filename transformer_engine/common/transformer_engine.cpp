@@ -18,7 +18,7 @@
 
 namespace transformer_engine {
 
-double typeToSize(const DType type) {
+size_t typeToNumBits(const DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
                                      return TypeInfo<T>::size;);  // NOLINT(*)
 }
@@ -394,7 +394,7 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) return sizeof(float);
-  return transformer_engine::typeToSize(t->dtype());
+  return transformer_engine::typeToNumBits(t->dtype());
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -521,7 +521,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-    size_t size_in_bytes = static_cast<size_t>(nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor));
+    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
     cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
   }
   // Set amax to 0 if allocated

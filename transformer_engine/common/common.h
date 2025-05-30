@@ -11,7 +11,11 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+
+#if CUDA_VERSION >= 12080
 #include <cuda_fp4.h>
+#endif
+
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -355,6 +359,19 @@ struct TypeExtrema {
 }  // namespace detail
 
 template <typename T>
+struct BitsNumber;
+
+template <>
+struct BitsNumber<fp4e2m1> {
+  static constexpr size_t num_bits = 4; 
+};
+
+template <typename T>
+struct BitsNumber {
+  static constexpr size_t num_bits = 8 * sizeof(T); 
+};
+
+template <typename T>
 struct TypeInfo {
   using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp4e2m1>;
 
@@ -381,7 +398,7 @@ struct TypeInfo {
   }
 
   constexpr static DType dtype = getType<T>();
-  constexpr static double size = std::is_same_v<T, fp4e2m1> ? 0.5 : static_cast<double>(sizeof(T));
+  constexpr static size_t size = BitsNumber<T>::num_bits;
   constexpr static float max_finite_value = detail::TypeExtrema<T>::max;
   constexpr static const char *name = detail::type_name<T>();
 };
@@ -644,35 +661,37 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
   return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
 }
 
-double typeToSize(const DType type);
+inline size_t typeToNumBits(const DType type);
+inline size_t getSizeInBytes(const DType type);
 
-void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name);
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+inline void CheckNoopTensor(const Tensor &t, const std::string &name);
+inline void CheckInputTensor(const Tensor &t, const std::string &name);
+inline void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
-bool is_fp8_dtype(const DType t);
+inline bool is_fp8_dtype(const DType t);
+inline bool is_fp4_dtype(const DType t);
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
  * The FP8 scale-inverse (dequantization scaling factor) is updated
  * with the reciprocal of the FP8 scale (quantization scaling factor).
  */
-void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
+inline void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 
 #define NVTE_API_CALL(api_name) \
   transformer_engine::nvtx::NVTXWrapper _##api_name##_nvtx_wrapper(#api_name);
 
-void checkCuDriverContext(CUstream stream);
+inline void checkCuDriverContext(CUstream stream);
 
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 // Set up parameters to create TMA descriptor.
-void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
-                          const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                          const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const double type_size);
+inline void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
+                                 const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
+                                 const uint32_t shmemX, const uint32_t stride_elems,
+                                 const uint32_t offset_elems, const double type_size);
 
-bool is_supported_by_CC_100();
+inline bool is_supported_by_CC_100();
 
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size);

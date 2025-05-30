@@ -192,9 +192,9 @@ size_t nvte_tensor_numel(const NVTETensor tensor);
  *
  *  \param[in] tensor Tensor.
  *
- *  \return Byte size of the tensor's data type.
+ *  \return Bit size of the tensor's data type.
  */
-double nvte_tensor_element_size(const NVTETensor tensor);
+size_t nvte_tensor_element_size(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data type.
  *
@@ -402,14 +402,14 @@ enum class DType {
  * Return true if TE datatype is FP8
  *  \param[in] DType      TE Datatype of interest
  */
-bool is_fp8_dtype(const DType t);
+inline bool is_fp8_dtype(const DType t);
 
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
  *  \param[in] DType      TE Datatype of interest
  */
-bool is_fp4_dtype(const DType t);
+inline bool is_fp4_dtype(const DType t);
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -629,11 +629,11 @@ class TensorWrapper {
     return nvte_tensor_numel(tensor_);
   }
 
-  /*! \brief Get the tensor's element size in bytes.
+  /*! \brief Get the tensor's element size in bits.
    *
-   *  \return Element size in bytes.
+   *  \return Element size in bits.
    */
-  double element_size() const noexcept {
+  size_t element_size() const noexcept {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_element_size(tensor_);
   }
@@ -645,7 +645,21 @@ class TensorWrapper {
    */
   size_t bytes() const noexcept {
     if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
-    return static_cast<size_t>(nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_));
+
+    const auto &shape = nvte_tensor_shape(tensor_);
+    if (shape.data.back()) {
+
+    }
+    size_t numel = 1;
+    for (size_t i = 0; i < shape.ndim; i++) {
+      numel *= shape.data[i];
+    }
+    return numel;
+
+
+
+
+    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
   }
 
   /*! \brief Get the data type of this TensorWrapper.

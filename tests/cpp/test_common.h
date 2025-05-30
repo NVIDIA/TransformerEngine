@@ -14,7 +14,9 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#if CUDA_VERSION >= 12080
 #include <cuda_fp4.h>
+#endif
 #include <cuda_runtime_api.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -56,7 +58,9 @@ using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
+#if CUDA_VERSION >= 12080
 using fp4e2m1 = __nv_fp4_e2m1;
+#endif
 
 template <typename T>
 struct TypeInfo{
@@ -419,7 +423,7 @@ inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
-double typeToSize(DType type);
+size_t typeToNumBits(DType type);
 size_t product(const NVTEShape &shape);
 size_t product(const std::vector<size_t> &shape);
 

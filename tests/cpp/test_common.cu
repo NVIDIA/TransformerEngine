@@ -45,7 +45,7 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2) {
   return true;
 }
 
-double typeToSize(DType type) {
+double typeToNumBits(DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
   {
       return TypeInfo<T>::size;
@@ -335,7 +335,7 @@ Tensor::Tensor(const std::string& name,
 
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = static_cast<size_t>(product(s) * typeToSize(tensor_.dtype()));
+  const size_t size = static_cast<size_t>(product(s) * typeToNumBits(tensor_.dtype()));
   if (rowwise_) {
     cudaMemcpy(cpu_data_rowwise_.get(),
                tensor_.get_rowwise_data().data_ptr,
@@ -382,7 +382,7 @@ void Tensor::to_cpu() const {
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = static_cast<size_t>(product(s) * typeToSize(tensor_.dtype()));
+  const size_t size = static_cast<size_t>(product(s) * typeToNumBits(tensor_.dtype()));
   if (rowwise_) {
     cudaMemcpy(tensor_.get_rowwise_data().data_ptr, cpu_data_rowwise_.get(), size,
                cudaMemcpyHostToDevice);
