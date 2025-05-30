@@ -294,7 +294,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                holds configuration about quantization and dequantization modes.
     """
 
-    # TODO(zhongbo): experimental to use positional arguments for base class
+    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorBase with positional args,
+    # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
     def __new__(
         cls,
         *args,
