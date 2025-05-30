@@ -20,8 +20,8 @@ bool tensor_is_reusable(const at::Tensor& tensor,
   if (!tensor_shape.equals(shape)) return false;
   const at::TensorOptions& tensor_opts = tensor.options();
   if (opts.dtype() != tensor_opts.dtype()) return false;
-  if (opts.device() != tensor_opts.device()) return false;
-  if (opts.device_index() != tensor_opts.device_index()) return false;
+  if (opts.device().type() != tensor_opts.device().type()) return false;
+  if (opts.device_index() != tensor_opts.device_index() && opts.device_index() != -1) return false;
   return true;
 }
 
