@@ -437,7 +437,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 if ctx.grad_added_to_main_grad:
                     # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off tfhe Parameter wrapper.
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
                     # You need to preserve the weight object to have all the attributes user
                     # sets for the weights. Because of this, it is not recommended to offload
                     # weights if weights are externally touched outside this module
