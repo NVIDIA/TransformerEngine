@@ -17,11 +17,11 @@ bool tensor_is_reusable(const at::Tensor& tensor,
                         const std::vector<int64_t>& shape,
                         const at::TensorOptions& opts) {
   const auto& tensor_shape = tensor.sizes();
-  if (tensor_shape.equals(shape)) return false;
+  if (!tensor_shape.equals(shape)) return false;
   const at::TensorOptions& tensor_opts = tensor.options();
-  if (opts.dtype() == tensor_opts.dtype()) return false;
-  if (opts.device() == tensor_opts.device()) return false;
-  if (opts.device_index() == tensor_opts.device_index()) return false;
+  if (opts.dtype() != tensor_opts.dtype()) return false;
+  if (opts.device() != tensor_opts.device()) return false;
+  if (opts.device_index() != tensor_opts.device_index()) return false;
   return true;
 }
 
