@@ -176,7 +176,36 @@ class TestFloat8BlockwiseTensor:
     )
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     @pytest.mark.parametrize("dq_columnwise", [True, False])
+    @pytest.mark.parametrize("need_compact", [True, False])
     def test_quantize_dequantize_dims(
+        self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool, need_compact: bool
+    ) -> None:
+        if need_compact and block_scaling_dim != 1:
+            pytest.skip("need_compact only implemented for 1D block quantization.")
+        atol = _tols[tex.DType.kFloat8E4M3]["atol"]
+        rtol = _tols[tex.DType.kFloat8E4M3]["rtol"]
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=dq_columnwise,
+            block_scaling_dim=block_scaling_dim,
+            need_compact=need_compact,
+        )
+        self._test_quantize_dequantize(
+            quantizer=quantizer,
+            dims=dims,
+            atol=atol,
+            rtol=rtol,
+            dequant_columnwise=dq_columnwise,
+        )
+
+    @pytest.mark.parametrize(
+        "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
+    )
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    @pytest.mark.parametrize("dq_columnwise", [True, False])
+    @pytest.mark.xfail(raises=NotImplementedError)
+    def test_quantize_dequantize_compact_format(
         self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool
     ) -> None:
         atol = _tols[tex.DType.kFloat8E4M3]["atol"]
@@ -187,6 +216,7 @@ class TestFloat8BlockwiseTensor:
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
         )
+        quantizer.set_usage(need_compact=True)
         self._test_quantize_dequantize(
             quantizer=quantizer,
             dims=dims,
@@ -250,8 +280,13 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
-    def test_serialization(self, dims: DimsType, block_scaling_dim: int) -> None:
+    @pytest.mark.parametrize("need_compact", [True, False])
+    def test_serialization(
+        self, dims: DimsType, block_scaling_dim: int, need_compact: bool
+    ) -> None:
         """Test serialization of Float8BlockwiseQTensor"""
+        if need_compact and block_scaling_dim != 1:
+            pytest.skip("need_compact only implemented for 1D block quantization.")
         device = "cuda"
         dtype = torch.bfloat16
         x_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
@@ -260,6 +295,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
+            need_compact=need_compact,
         )
 
         # Create FP8 tensor
@@ -283,6 +319,8 @@ class TestFloat8BlockwiseTensor:
         assert x_fp8_loaded._is_2D_scaled == x_fp8._is_2D_scaled
         assert x_fp8_loaded.dtype == x_fp8.dtype
         assert x_fp8_loaded._fp8_dtype == x_fp8._fp8_dtype
+        assert x_fp8_loaded._rowwise_fmt == x_fp8._rowwise_fmt
+        assert x_fp8_loaded._columnwise_fmt == x_fp8._columnwise_fmt
 
         # Test that dequantized values match
         x_fp8_dequant = x_fp8.dequantize()

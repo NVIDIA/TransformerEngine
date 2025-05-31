@@ -33,6 +33,9 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
+    # currently rowwise and columnwise format only applies to 1D quantizer
+    _rowwise_fmt: tex.RowwiseFmt
+    _columnwise_fmt: tex.ColwiseFmt
 
     def __init__(
         self,
@@ -43,6 +46,7 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
+        need_compact: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -50,6 +54,37 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
+        self._rowwise_fmt = (
+            tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+            if need_compact
+            else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
+        )
+        self._columnwise_fmt = (
+            tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+            if need_compact
+            else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
+        )
+
+    # override base class set_usage method
+    def set_usage(
+        self,
+        *,
+        rowwise: Optional[bool] = None,
+        columnwise: Optional[bool] = None,
+        need_compact: Optional[bool] = None,
+    ) -> None:
+        super().set_usage(rowwise=rowwise, columnwise=columnwise)
+        if need_compact is not None:
+            self._rowwise_fmt = (
+                tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+                if need_compact
+                else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
+            )
+            self._columnwise_fmt = (
+                tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+                if need_compact
+                else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
+            )
 
     def update_quantized(
         self,
@@ -126,22 +161,36 @@ class Float8BlockQuantizer(Quantizer):
             M *= shape[i]
         if len(shape) > 0:
             K = shape[-1]
+        # 2D 128x128 quantization block scaling
+        # CuBLAS requries 128x128 scaling factor to be padded
+        # currently rowwise and columnwise format option doesn't apply to 2D scaling
         if self.block_scaling_dim == 2:
             if columnwise:
                 outer = math.ceil(K / self.block_len)
                 inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
                 return (outer, inner)
+            # rowwise
             outer = math.ceil(M / self.block_len)
             inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
             return (outer, inner)
+        # 1D 1x128 quantization block scaling
+        # CuBLAS requries 1x128 scaling factor to be padded and transposed
         assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
         if columnwise:
+            columnwise_compact = self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
             outer = math.ceil(M / self.block_len)
-            inner = round_up_to_nearest_multiple(K, 4)
+            inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
+            # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
+            # for COMPACT case, since we apply 1x128 scaling here without transposing columnwise data, scaling factor is also [outer, inner]
+            # so no need to swap inner outer here
             return (outer, inner)
+        # rowwise
+        rowwise_compact = self._rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
         outer = math.ceil(K / self.block_len)
-        inner = round_up_to_nearest_multiple(M, 4)
-        return (outer, inner)
+        inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
+        # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
+        # for COMPACT case, since we apply 128x1 scaling, scaling block applies to inner dim, so we need to swap outer and inner here
+        return (outer, inner) if not rowwise_compact else (inner, outer)
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
         """Calculate the shape of a tensor after columnwise permutation.
@@ -163,15 +212,28 @@ class Float8BlockQuantizer(Quantizer):
         """
         if len(shape) == 0:
             return tuple()
+        # currently columnwise format option only applies to 1D quantizer
+        # for 2D scaling, columnwise format should always be GEMM_READY_DATA_AND_SCALES
+        # since currently 2D scaling only applies to module weights
+        if (
+            self.block_scaling_dim == 1
+            and self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+        ):
+            return shape
         colwise_shape = [shape[-1]]
         for i in range(len(shape) - 1):
             colwise_shape.append(shape[i])
         return tuple(colwise_shape)
 
-    # TODO(kwyss): With FP8 gather support, we need to implement a
-    # shape/layout/swizzle check to know whether FP8 gather works
-    # cleanly by stacking data without aliasing tiles and whether
-    # the scales also stack on the proper dimensions.
+    def is_quantizable(self, inp: torch.Tensor) -> bool:
+        """Returns whether or not given inp can be quantized"""
+        if inp.ndim < 2:
+            return False
+        if inp.shape[-1] % self.block_len != 0:
+            return False
+        if math.prod(inp.shape[:-1]) % self.block_len != 0:
+            return False
+        return True
 
     def make_empty(
         self,
@@ -222,6 +284,8 @@ class Float8BlockQuantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             is_2D_scaled=self.block_scaling_dim == 2,
+            rowwise_fmt=self._rowwise_fmt,
+            columnwise_fmt=self._columnwise_fmt,
             requires_grad=requires_grad,
         )
 
@@ -263,7 +327,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         return (
             f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
             f" is_2D_scaled={self._is_2D_scaled},"
-            f" data={self.dequantize(dtype=self.dtype)})"
+            f" data={self.dequantize(dtype=self.dtype)}),"
+            f" rowwise_fmt={self._rowwise_fmt},"
+            f" columnwise_fmt={self._columnwise_fmt})"
         )
 
     def _get_quantizer(self) -> Quantizer:
@@ -396,6 +462,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        rowwise_fmt: tex.RowwiseFmt,
+        columnwise_fmt: tex.ColwiseFmt,
     ) -> Float8BlockwiseQTensor:
         """Build Float8BlockwiseQTensor, for use in __reduce__
 
@@ -413,6 +481,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dtype=dtype,
             quantizer=quantizer,
             is_2D_scaled=is_2D_scaled,
+            rowwise_fmt=rowwise_fmt,
+            columnwise_fmt=columnwise_fmt,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -429,6 +499,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
+                self._rowwise_fmt,
+                self._columnwise_fmt,
             ),
         )
 
