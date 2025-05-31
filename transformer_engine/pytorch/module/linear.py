@@ -138,6 +138,7 @@ class _Linear(torch.autograd.Function):
 
         # Do TP communication in high precision if quantized format
         # does not support communication
+        # from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
         # force_hp_input_gather = (
         #     fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
         # )
@@ -192,7 +193,7 @@ class _Linear(torch.autograd.Function):
                     tp_group,
                     quantizer=quantizer if not force_hp_input_gather else None,
                 )
-                if not isinstance(inputmat_total, QuantizedTensorBase):
+                if force_hp_input_gather:
                     inputmat_total = quantizer(inputmat_total)
             elif ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
                 inputmat_total, _ = fill_userbuffers_buffer_for_all_gather(

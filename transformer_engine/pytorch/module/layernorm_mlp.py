@@ -321,7 +321,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         tp_group,
                         quantizer=quantizer if not force_hp_fc1_input_gather else None,
                     )
-                    if not isinstance(ln_out_total, QuantizedTensorBase):
+                    if force_hp_fc1_input_gather:
                         ln_out_total = quantizer(ln_out_total)
         else:
             if (fp8 or debug) and not with_quantized_norm:
