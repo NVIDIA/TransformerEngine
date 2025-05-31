@@ -423,6 +423,7 @@ def _test_sanity_common(
     loss.backward()
     torch.cuda.synchronize()
 
+
 def _test_sanity_normalization_amp(block, dtype, config, skip_wgrad, skip_dgrad):
     if skip_dgrad and skip_wgrad:
         pytest.skip("No gradient computation; Skipping to avoid PyTorch RuntimeError.")

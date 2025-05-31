@@ -116,8 +116,8 @@ std::vector<py::object> dbias_dact(const at::Tensor& grad_output, const at::Tens
   auto act_input_tensor = makeTransformerEngineTensor(act_input);
 
   const auto& shape = convertShape(grad_tensor.shape());
-  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype(),
-                                                         py::none());
+  auto [dact_tensor, dact] =
+      my_quantizer->create_tensor(shape, act_input_tensor.dtype(), py::none());
 
   auto dbias_tensor = makeTransformerEngineTensor(grad_bias);
 
