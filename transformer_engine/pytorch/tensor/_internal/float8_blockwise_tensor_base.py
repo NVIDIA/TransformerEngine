@@ -40,7 +40,6 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
 
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
@@ -48,6 +47,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        *args,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
