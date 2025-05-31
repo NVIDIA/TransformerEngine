@@ -397,6 +397,7 @@ def _test_sanity_common(
 
     # now try eval with weight caching
     block.eval()
+    te_inp.requires_grad = False
 
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         te_out = block(te_inp, is_first_microbatch=True)
@@ -406,6 +407,7 @@ def _test_sanity_common(
 
     # now try regular execution again with weight caching
     block.train()
+    te_inp.requires_grad = True
 
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         te_out = block(te_inp, is_first_microbatch=True)
