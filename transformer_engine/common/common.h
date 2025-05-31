@@ -260,6 +260,8 @@ struct QuantizationConfig {
   };
 };
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t);
+
 template <typename T>
 constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
@@ -336,7 +338,12 @@ struct TypeExtrema {
 
 template <typename T>
 struct TypeInfo {
-  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2>;
+  using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2
+#if CUDA_VERSION >= 12080
+                           ,
+                           fp8e8m0
+#endif
+                           >;
 
   template <typename U, DType current>
   struct Helper {
