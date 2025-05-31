@@ -25,7 +25,6 @@ from transformer_engine.common.recipe import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from run_layer_with_overlap import _compare_tensors
-from utils import maybe_dump_outputs, maybe_dump_gradients
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64
@@ -510,24 +509,6 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
 
-    maybe_dump_outputs(
-        output_distributed,
-        kwargs,
-        prefix="Linear",
-        recipe=QUANTIZATION,
-        parallel_mode=parallel_mode,
-        sequence_parallel=sequence_parallel,
-    )
-
-    maybe_dump_gradients(
-        model_distributed,
-        kwargs,
-        prefix="Linear",
-        recipe=QUANTIZATION,
-        parallel_mode=parallel_mode,
-        sequence_parallel=sequence_parallel,
-    )
-
 
 def test_linear():
     """Run linear layer tests with various configurations."""
@@ -705,24 +686,6 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
             main_grad_check=("fuse_wgrad_accumulation" in kwargs),
         )
 
-    maybe_dump_outputs(
-        output_distributed,
-        kwargs,
-        prefix="LayernormLinear",
-        recipe=QUANTIZATION,
-        parallel_mode=parallel_mode,
-        sequence_parallel=sequence_parallel,
-    )
-
-    maybe_dump_gradients(
-        model_distributed,
-        kwargs,
-        prefix="LayernormLinear",
-        recipe=QUANTIZATION,
-        parallel_mode=parallel_mode,
-        sequence_parallel=sequence_parallel,
-    )
-
 
 def test_layernorm_linear():
     kwargs_list = [
@@ -734,7 +697,6 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
-        {"return_layernorm_output": True, "return_layernorm_output_gathered": True},
         {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
@@ -843,7 +805,6 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
-        {"return_layernorm_output": True, "return_layernorm_output_gathered": True},
         {"delay_wgrad_compute": True},
     ]
 
