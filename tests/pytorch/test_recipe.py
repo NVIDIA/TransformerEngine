@@ -20,7 +20,7 @@ from transformer_engine.pytorch.fp8 import (
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch import Linear
+from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
 from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
@@ -470,3 +470,34 @@ class TestFP8Recipe:
         # Final check
         for quantizer in linear.quantizers["scaling_fwd"]:
             assert isinstance(quantizer, expected_quantizer_type)
+
+    @pytest.mark.parametrize(
+        "module_class",
+        [
+            Linear,
+            LayerNormLinear,
+            LayerNormMLP,
+            GroupedLinear,
+        ],
+    )
+    def test_quantizer_update(self, module_class):
+        in_features = 32
+        out_features = 32
+        batch_size = 32
+
+        recipe = DelayedScaling(amax_history_len=1024)
+        with fp8_model_init(recipe=recipe):
+            if module_class == GroupedLinear:
+                module = module_class(1, in_features, out_features).cuda()
+            else:
+                module = module_class(in_features, out_features).cuda()
+
+        x = torch.randn(batch_size, in_features, device="cuda")
+        recipe = DelayedScaling(amax_history_len=1)
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            warn_msg = "Quantizer is being updated, this may affect model behavior"
+            with pytest.warns(UserWarning, match=warn_msg):
+                if module_class == GroupedLinear:
+                    y = module(x, [batch_size])
+                else:
+                    y = module(x)
