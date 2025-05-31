@@ -229,6 +229,12 @@ model_configs_base = {
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
     "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
     "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_4_0": ModelConfig(8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_4_1": ModelConfig(8, 16, 16, 192, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_5_0": ModelConfig(8, 16, 16, 512, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
 }
 
 
@@ -270,12 +276,15 @@ def test_dot_product_attention(
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
+
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
+        is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -296,7 +305,6 @@ def test_dot_product_attention(
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
 
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
         unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
@@ -1024,6 +1032,8 @@ def _run_dot_product_attention(
         layer_number=1,
         attention_type=config.attn_type,
     ).to(dtype=dtype, device="cuda")
+    if not is_training:
+        block = block.eval()
 
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
@@ -1134,10 +1144,12 @@ def test_transformer_layer(
     workspace_opt = True
 
     # Test backend availability
+    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
+        is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1156,6 +1168,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     # FusedAttention backend
@@ -1169,6 +1182,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     # FlashAttention backend
@@ -1182,6 +1196,7 @@ def test_transformer_layer(
             workspace_opt,
             fused_qkv_params,
             RoPE,
+            is_training,
         )
 
     if unfused_attn_supported and fused_attn_supported:
@@ -1250,6 +1265,7 @@ def _run_transformer_layer(
     workspace_opt: bool,
     fused_qkv_params: bool,
     RoPE: bool,
+    is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run TransformerLayer module with one forward pass and one backward pass"""
 
@@ -1367,6 +1383,8 @@ def _run_transformer_layer(
         bias=True,
         attn_input_format=qkv_format,
     ).to(dtype=dtype, device="cuda")
+    if not is_training:
+        block = block.eval()
 
     # Create ALiBi slopes
     alibi_slopes = None
@@ -1384,8 +1402,9 @@ def _run_transformer_layer(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
     )
-    loss = out.sum()
-    loss.backward()
+    if is_training:
+        loss = out.sum()
+        loss.backward()
 
     return out, inp.grad
 
