@@ -56,7 +56,7 @@ def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
-            if name_extension is not None and name_extension not in name:
+            if name_extension is not None and not name.endswith(f".{name_extension}"):
                 continue
             all_files.append(Path(dirname, name))
     return all_files
@@ -242,9 +242,12 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 def cuda_archs() -> str:
     version = cuda_version()
     if os.getenv("NVTE_CUDA_ARCHS") is None:
-        os.environ["NVTE_CUDA_ARCHS"] = (
-            "70;80;89;90;100;120" if version >= (12, 8) else "70;80;89;90"
-        )
+        if version >= (13, 0):
+            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+        elif version >= (12, 8):
+            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+        else:
+            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
     return os.getenv("NVTE_CUDA_ARCHS")
 
 

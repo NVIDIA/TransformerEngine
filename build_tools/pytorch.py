@@ -8,7 +8,7 @@ from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs
+from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
 
 
 def setup_pytorch_extension(
@@ -19,11 +19,7 @@ def setup_pytorch_extension(
     """Setup CUDA extension for PyTorch support"""
 
     # Source files
-    csrc_source_files = Path(csrc_source_files)
-    extensions_dir = csrc_source_files / "extensions"
-    sources = [
-        csrc_source_files / "common.cpp",
-    ] + all_files_in_dir(extensions_dir)
+    sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
 
     # Header files
     include_dirs = get_cuda_include_dirs()
@@ -37,10 +33,12 @@ def setup_pytorch_extension(
     )
 
     # Compiler flags
-    cxx_flags = [
-        "-O3",
-        "-fvisibility=hidden",
-    ]
+    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    if debug_build_enabled():
+        cxx_flags.append("-g")
+        cxx_flags.append("-UNDEBUG")
+    else:
+        cxx_flags.append("-g0")
 
     # Version-dependent CUDA options
     try:

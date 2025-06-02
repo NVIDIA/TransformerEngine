@@ -9,6 +9,7 @@
 #include "c10/util/ArrayRef.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+
 namespace transformer_engine::pytorch {
 
 std::vector<size_t> getTensorShape(at::Tensor t) {
@@ -17,6 +18,20 @@ std::vector<size_t> getTensorShape(at::Tensor t) {
     shape.push_back(s);
   }
   return shape;
+}
+
+NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape) {
+  NVTEShape ret;
+  ret.ndim = torch_shape.size();
+  constexpr int max_dimensions = sizeof(ret.data) / sizeof(size_t);
+  NVTE_CHECK(ret.ndim < max_dimensions,
+             "Torch tensor has too many dimensions. Max supported: ", max_dimensions, " and got ",
+             ret.ndim, ".");
+  for (size_t i = 0; i < ret.ndim; ++i) {
+    const auto& v = torch_shape[i];
+    ret.data[i] = static_cast<size_t>(v);
+  }
+  return ret;
 }
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer) {

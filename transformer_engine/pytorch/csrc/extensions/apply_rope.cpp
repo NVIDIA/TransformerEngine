@@ -4,15 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "common.h"
 #include "extensions.h"
+
+namespace transformer_engine::pytorch {
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const std::optional<at::Tensor> start_positions,
                               const NVTE_QKV_Format qkv_format, const bool interleaved,
                               const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                               const int cp_rank) {
-  using namespace transformer_engine::pytorch;
-
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
@@ -27,7 +28,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  auto start_positions_cu = transformer_engine::TensorWrapper();  // empty start_positions tensor
+  auto start_positions_cu = TensorWrapper();  // empty start_positions tensor
   if (start_positions) {
     start_positions_cu = makeTransformerEngineTensor(start_positions.value());
     TORCH_CHECK(start_positions_cu.ndim() == 1, "expected 1D tensor");
@@ -93,7 +94,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
               "expected the last dim of the input tensor equals or is "
               "greater than the freqs tensor");
 
-  auto cu_seqlens_cu = transformer_engine::TensorWrapper();  // empty cu_seqlens tensor
+  auto cu_seqlens_cu = TensorWrapper();  // empty cu_seqlens tensor
   nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                           start_positions_cu.data(), output_cu.data(), qkv_format, interleaved,
                           cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
@@ -106,7 +107,6 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
                                const NVTE_QKV_Format qkv_format, const bool interleaved,
                                const std::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank) {
-  using namespace transformer_engine::pytorch;
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.size(1) == 1 && freqs.size(2) == 1,
               "expected the second and third dims of the freqs tensor equal 1");
@@ -185,7 +185,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
               "expected the last dim of the output_grads tensor equals or is "
               "greater than the freqs tensor");
 
-  auto cu_seqlens_cu = transformer_engine::TensorWrapper();  // empty cu_seqlens tensor
+  auto cu_seqlens_cu = TensorWrapper();  // empty cu_seqlens tensor
   nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                            input_grads_cu.data(), qkv_format, interleaved, cp_size, cp_rank, s, b,
                            h, d, d2, stride_s, stride_b, stride_h, stride_d,
@@ -193,3 +193,5 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 
   return input_grads;
 }
+
+}  // namespace transformer_engine::pytorch

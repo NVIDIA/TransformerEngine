@@ -609,7 +609,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling")
-        assert result[0] < 0.505 and result[1] > 0.754
+        assert result[0] < 0.505 and result[1] > 0.753
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"

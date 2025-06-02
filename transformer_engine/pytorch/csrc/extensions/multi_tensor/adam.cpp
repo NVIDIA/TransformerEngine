@@ -6,14 +6,13 @@
 
 #include "extensions.h"
 
+namespace transformer_engine::pytorch {
+
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -29,9 +28,6 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
                                             const float lr, const float beta1, const float beta2,
                                             const float epsilon, const int step, const int mode,
                                             const int bias_correction, const float weight_decay) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -48,9 +44,6 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                                 const float beta1, const float beta2, const float epsilon,
                                 const int step, const int mode, const int bias_correction,
                                 const float weight_decay, DType fp8_dtype) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -68,9 +61,6 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        const float epsilon, at::Tensor step, const int mode,
                                        const int bias_correction, const float weight_decay,
                                        at::Tensor inv_scale) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -91,9 +81,6 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_fl
                                               const float epsilon, at::Tensor step, const int mode,
                                               const int bias_correction, const float weight_decay,
                                               at::Tensor inv_scale) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
@@ -107,3 +94,5 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_fl
       lr_cu.data(), beta1, beta2, epsilon, step_cu.data(), mode, bias_correction, weight_decay,
       inv_scale_cu.data(), device_id, at::cuda::getCurrentCUDAStream());
 }
+
+}  // namespace transformer_engine::pytorch

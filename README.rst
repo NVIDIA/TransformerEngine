@@ -146,7 +146,7 @@ Installation
 ============
 
 System Requirements
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^
 
 * **Hardware:** Blackwell, Hopper, Grace Hopper/Blackwell, Ada, Ampere
 
@@ -164,10 +164,10 @@ System Requirements
 * **Notes:** FP8 features require Compute Capability 8.9+ (Ada/Hopper/Blackwell)
 
 Installation Methods
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 Docker (Recommended)
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 The quickest way to get started with Transformer Engine is by using Docker images on
 `NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
 
@@ -192,7 +192,7 @@ Where 25.04 (corresponding to April 2025 release) is the container version.
 * NGC PyTorch 23.08+ containers include FlashAttention-2
 
 pip Installation
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^
 
 **Prerequisites for pip installation:**
 
@@ -224,13 +224,25 @@ When installing from GitHub, you can explicitly specify frameworks using the env
 
     NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
+conda Installation
+^^^^^^^^^^^^^^^^^^
+
+To install the latest stable version with conda from conda-forge:
+
+.. code-block:: bash
+
+    # For PyTorch integration
+    conda install -c conda-forge transformer-engine-torch
+    
+    # JAX integration (coming soon)
+
 Source Installation
 ^^^^^^^^^^^^^^^^^^^
 
 `See the installation guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/installation.html#installation-from-source>`_
 
 Environment Variables
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^
 These environment variables can be set before installation to customize the build process:
 
 * **CUDA_PATH**: Path to CUDA installation
@@ -241,7 +253,7 @@ These environment variables can be set before installation to customize the buil
 * **NVTE_BUILD_THREADS_PER_JOB**: Control threads per build job
 
 Compiling with FlashAttention
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Transformer Engine supports both FlashAttention-2 and FlashAttention-3 in PyTorch for improved performance. FlashAttention-3 was added in release v1.11 and is prioritized over FlashAttention-2 when both are present in the environment.
 
 You can verify which FlashAttention version is being used by setting these environment variables:
@@ -253,8 +265,9 @@ You can verify which FlashAttention version is being used by setting these envir
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 
 .. troubleshooting-begin-marker-do-not-remove
+
 Troubleshooting
-^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^
 
 **Common Issues and Solutions:**
 
@@ -388,7 +401,7 @@ Papers
 Videos
 ======
 
-* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc24-s62457/>`_
+* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc24-s62457/>`__
 * `Blackwell Numerics for AI | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72458/>`_
 * `Building LLMs: Accelerating Pretraining of Foundational Models With FP8 Precision | GTC 2025 <https://www.nvidia.com/gtc/session-catalog/?regcode=no-ncid&ncid=no-ncid&tab.catalogallsessionstab=16566177511100015Kus&search=zoho#/session/1726152813607001vnYK>`_
 * `From FP8 LLM Training to Inference: Language AI at Scale | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72799/>`_

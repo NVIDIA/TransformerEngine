@@ -196,7 +196,7 @@ void nvte_multi_tensor_sgd_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor
   using namespace transformer_engine;
 
   multi_tensor_sgd::multi_tensor_sgd_cuda(
-      chunk_size, *reinterpret_cast<Tensor*>(noop_flag),
+      chunk_size, *convertNVTETensorCheck(noop_flag),
       convert_tensor_array(tensor_lists, num_tensor_lists, num_tensors_per_list), wd, momentum,
       dampening, lr, nesterov, first_run, wd_after_momentum, scale, device_id, stream);
 }

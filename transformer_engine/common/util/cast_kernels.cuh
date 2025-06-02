@@ -1222,23 +1222,23 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
   const Tensor *activation_input_tensor;
   if constexpr (IS_DBIAS || IS_DACT) {
     // backward - input is incoming gradient
-    input_tensor = reinterpret_cast<const Tensor *>(grad);
-    activation_input_tensor = reinterpret_cast<const Tensor *>(input);
+    input_tensor = convertNVTETensorCheck(grad);
+    activation_input_tensor = convertNVTETensor(input);
   } else {
     // forward = input is activation input
-    input_tensor = reinterpret_cast<const Tensor *>(input);
+    input_tensor = convertNVTETensorCheck(input);
     activation_input_tensor = nullptr;
   }
-  auto output_tensor = reinterpret_cast<Tensor *>(output);
-  auto dbias_tensor = reinterpret_cast<Tensor *>(dbias);
-  auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
+  auto output_tensor = convertNVTETensorCheck(output);
+  auto dbias_tensor = convertNVTETensor(dbias);
+  auto workspace_tensor = convertNVTETensor(workspace);
 
   const QuantizationConfig *quant_config_cpp =
       reinterpret_cast<const QuantizationConfig *>(quant_config);
 
   // extract noop tensor from quant_config_cpp if it's not null
   const NVTETensor noop = quant_config_cpp ? quant_config_cpp->noop_tensor : nullptr;
-  const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
+  const auto noop_tensor = noop != nullptr ? *(convertNVTETensorCheck(noop)) : Tensor();
 
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
