@@ -149,10 +149,6 @@ endif()
 
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
-    find_package(MPI REQUIRED)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDE_PATH})
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
     find_library(CUBLASMP_LIB

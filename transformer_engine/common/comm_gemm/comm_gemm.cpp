@@ -6,9 +6,7 @@
 
 #include "transformer_engine/comm_gemm.h"
 
-#include <cublasmp.h>
 #include <cuda_runtime.h>
-#include <mpi.h>
 #include <nccl.h>
 #include <nvshmem.h>
 
@@ -465,37 +463,37 @@ void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) {
 void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_all_gather_gemm);
-  cublasmp_gemm(AgGemmInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
-                static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
-                static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
-                static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+  cublasmp_gemm(AgGemmInitMatrices, ctx, algo, m, n, k, static_cast<const Tensor*>(a),
+                static_cast<const Tensor*>(b), static_cast<const Tensor*>(d),
+                static_cast<const Tensor*>(bias), static_cast<const Tensor*>(pre_act_out), transa,
+                transb, grad, accumulate, comm_sm_count, main_stream);
 }
 
 void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                               const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                               const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                              bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
+                              bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                              cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_gemm_reduce_scatter);
-  cublasmp_gemm(GemmRsInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
-                static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
-                static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
-                static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+  cublasmp_gemm(GemmRsInitMatrices, ctx, algo, m, n, k, static_cast<const Tensor*>(a),
+                static_cast<const Tensor*>(b), static_cast<const Tensor*>(d),
+                static_cast<const Tensor*>(bias), static_cast<const Tensor*>(pre_act_out), transa,
+                transb, grad, accumulate, comm_sm_count, main_stream);
 }
 
 void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
-                          bool accumulate, int comm_sm_count, cudaStream_t main_stream) {
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_gemm_all_reduce);
-  cublasmp_gemm(GemmArInitMatrices, ctx, CUBLASMP_MATMUL_ALGO_TYPE_DEFAULT, m, n, k,
-                static_cast<const Tensor*>(a), static_cast<const Tensor*>(b),
-                static_cast<const Tensor*>(d), static_cast<const Tensor*>(bias),
-                static_cast<const Tensor*>(pre_act_out), transa, transb, grad, accumulate,
-                comm_sm_count, main_stream);
+  cublasmp_gemm(GemmArInitMatrices, ctx, algo, m, n, k, static_cast<const Tensor*>(a),
+                static_cast<const Tensor*>(b), static_cast<const Tensor*>(d),
+                static_cast<const Tensor*>(bias), static_cast<const Tensor*>(pre_act_out), transa,
+                transb, grad, accumulate, comm_sm_count, main_stream);
 }
 
 int64_t nvte_comm_gemm_numroc(CommGemmCtx* ctx, int64_t global_size) {
