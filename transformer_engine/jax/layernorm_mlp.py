@@ -22,7 +22,12 @@ from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
-from .quantize import with_sharding_constraint_by_logical_axes, QuantizerSet, noop_quantizer_set
+from .quantize import (
+    with_sharding_constraint_by_logical_axes,
+    QuantizerSet,
+    noop_quantizer_set,
+    TensorUsage,
+)
 from .sharding import get_non_contracting_logical_axes
 
 
@@ -270,8 +275,8 @@ def _layernorm_mlp_fwd_rule(
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out)
     dot_1_output = tex.gemm(
-        casted_ln_out.get_rowwise_tensor(),
-        casted_kernel_1.get_colwise_tensor(),
+        casted_ln_out.get_tensor(TensorUsage.LHS),
+        casted_kernel_1.get_tensor(TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -299,8 +304,8 @@ def _layernorm_mlp_fwd_rule(
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
     dot_2_output = tex.gemm(
-        casted_act_out.get_rowwise_tensor(),
-        casted_kernel_2.get_colwise_tensor(),
+        casted_act_out.get_tensor(TensorUsage.LHS),
+        casted_kernel_2.get_tensor(TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -317,11 +322,11 @@ def _layernorm_mlp_fwd_rule(
         rsigma,
         gamma,
         beta,
-        casted_ln_out.get_colwise_tensor(),
-        casted_kernel_1.get_rowwise_tensor(),
+        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
+        casted_kernel_1.get_tensor(TensorUsage.RHS_TRANS),
         dot_1_output,
-        casted_act_out.get_colwise_tensor(),
-        casted_kernel_2.get_rowwise_tensor(),
+        casted_act_out.get_tensor(TensorUsage.LHS_TRANS),
+        casted_kernel_2.get_tensor(TensorUsage.RHS_TRANS),
         x_contracting_dims,
         k_contracting_dims,
         kernel_1.shape,
@@ -369,11 +374,11 @@ def _layernorm_mlp_bwd_rule(
         rsigma,
         gamma,
         beta,
-        colwise_casted_ln_out,
-        rowwise_casted_kernel_1,
+        casted_ln_out,
+        casted_kernel_1,
         dot_1_output,
-        colwise_casted_act_out,
-        rowwise_casted_kernel_2,
+        casted_act_out,
+        casted_kernel_2,
         x_contracting_dims_in_fwd,
         k_contracting_dims_in_fwd,
         kernel_1_shape,
@@ -404,8 +409,8 @@ def _layernorm_mlp_bwd_rule(
     # NT GEMM
     # (batch..., hidden_out) x (hidden_in, hidden_out)
     dgrad_2 = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel_2,
+        casted_grad.get_tensor(TensorUsage.LHS),
+        casted_kernel_2,
         (g_contracting_dims_2, k_contracting_dims_2),
     )
 
@@ -418,8 +423,8 @@ def _layernorm_mlp_bwd_rule(
     # TN GEMM
     # (hidden, batch...,) x (hidden, batch...)
     wgrad_2 = tex.gemm(
-        colwise_casted_act_out,
-        casted_grad.get_colwise_tensor(),
+        casted_act_out,
+        casted_grad.get_tensor(TensorUsage.RHS),
         (x_contracting_dims, g_contracting_dims),
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
@@ -433,7 +438,7 @@ def _layernorm_mlp_bwd_rule(
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
-    dact_out_ndim = casted_dact_out.get_rowwise_tensor().data.ndim
+    dact_out_ndim = casted_dact_out.get_tensor(TensorUsage.LHS).data.ndim
     g_contracting_dims_1 = tuple(
         range(dact_out_ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dact_out_ndim)
     )
@@ -444,8 +449,8 @@ def _layernorm_mlp_bwd_rule(
 
     # NT GEMM
     dgrad_1 = tex.gemm(
-        casted_dact_out.get_rowwise_tensor(),
-        rowwise_casted_kernel_1,
+        casted_dact_out.get_tensor(TensorUsage.LHS),
+        casted_kernel_1,
         (g_contracting_dims_1, k_contracting_dims_1),
     )
 
@@ -454,8 +459,8 @@ def _layernorm_mlp_bwd_rule(
     # TN GEMM
     # (hidden, batch...) x (hidden, batch...)
     wgrad_1 = tex.gemm(
-        colwise_casted_ln_out,
-        casted_dact_out.get_colwise_tensor(),
+        casted_ln_out,
+        casted_dact_out.get_tensor(TensorUsage.RHS),
         (x_contracting_dims, g_contracting_dims),
     )
 

@@ -22,6 +22,7 @@ from .helper import (
     QuantizeConfig,
     AmaxComputeAlgo,
 )
+from .device_utils import is_gemm_with_all_layouts_supported
 
 __all__ = [
     "QuantizeLayout",
@@ -659,9 +660,11 @@ class QuantizerFactory:
         if is_2x2x:
             q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE_COLWISE
         else:
-            q_layout_x = QuantizeLayout.ROWWISE
-            q_layout_kernel = QuantizeLayout.COLWISE
-            q_layout_dgrad = None
+            q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE
+            if scaling_mode.is_1d_block_scaling():
+                q_layout_kernel = QuantizeLayout.COLWISE
+            if QuantizeConfig.INFERENCE_MODE:
+                q_layout_dgrad = None
 
         if "quantize_meta_set" in kwargs:
             quantize_meta_set = kwargs.get("quantize_meta_set")
@@ -712,7 +715,9 @@ class QuantizerFactory:
         scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
         fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
         bwd_dtype = bwd_dtype or QuantizeConfig.BWD_DTYPE
-        is_2x2x = is_2x2x or QuantizeConfig.IF_QUANTIZE_2X
+        is_2x2x = is_2x2x or not is_gemm_with_all_layouts_supported()
+        is_inference_mode = QuantizeConfig.INFERENCE_MODE
+        assert not is_inference_mode, "Inference mode is not supported yet!"
 
         q_set = []
         for _ in range(n_quantizer_sets):

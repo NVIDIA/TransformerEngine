@@ -21,6 +21,7 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    TensorUsage,
 )
 
 
@@ -198,8 +199,8 @@ def _layernorm_dense_fwd_rule(
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
     output = tex.gemm(
-        casted_ln_out.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
+        casted_ln_out.get_tensor(TensorUsage.LHS),
+        casted_kernel.get_tensor(TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -209,8 +210,8 @@ def _layernorm_dense_fwd_rule(
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_ln_out.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
+        casted_kernel.get_tensor(TensorUsage.RHS_TRANS),
         x.shape,
         kernel.shape,
         mu,
@@ -250,8 +251,8 @@ def _layernorm_dense_bwd_rule(
         Tuple of gradients for all input parameters
     """
     (
-        colwise_casted_ln_out,
-        rowwise_casted_kernel,
+        casted_ln_out,
+        casted_kernel,
         x_shape,
         kernel_shape,
         mu,
@@ -281,8 +282,8 @@ def _layernorm_dense_bwd_rule(
 
     # NT GEMM
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
+        casted_grad.get_tensor(TensorUsage.LHS),
+        casted_kernel,
         (g_constracting_dim, k_constracting_dim),
     )
 
@@ -294,8 +295,8 @@ def _layernorm_dense_bwd_rule(
 
     # TN GEMM
     wgrad = tex.gemm(
-        colwise_casted_ln_out,
-        casted_grad.get_colwise_tensor(),
+        casted_ln_out,
+        casted_grad.get_tensor(TensorUsage.RHS),
         (x_constracting_dim, g_constracting_dim),
     )
 
