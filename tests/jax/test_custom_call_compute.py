@@ -36,6 +36,7 @@ from transformer_engine.jax.quantize import (
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
+    QuantizerParams,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -193,9 +194,11 @@ class TestActivation:
         )
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=scaling_mode,
-            q_dtype=output_type,
-            q_layout=QuantizeLayout.ROWWISE,
+            QuantizerParams(
+                scaling_mode=scaling_mode,
+                q_dtype=output_type,
+                q_layout=QuantizeLayout.ROWWISE,
+            )
         )
 
         prim_out, (prim_grad,) = value_n_grad_primitive_func(x, activation_type, quantizer)
@@ -224,9 +227,11 @@ class TestActivation:
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
             n_quantizers=2,
-            scaling_mode=scaling_mode,
-            q_dtype=output_type,
-            q_layout=q_layout,
+            q_params=QuantizerParams(
+                scaling_mode=scaling_mode,
+                q_dtype=output_type,
+                q_layout=q_layout,
+            ),
         )
 
         te_output = tex.act_lu(x, activation_type, te_quantizer)
@@ -249,7 +254,9 @@ class TestActivation:
         self.activation_type = activation_type
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
+            QuantizerParams(
+                scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_layout=q_layout
+            )
         )
 
         output = tex.act_lu(x, activation_type, quantizer)
@@ -383,7 +390,7 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout
+            QuantizerParams(scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout)
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -411,7 +418,12 @@ class TestNorm:
         gamma = jnp.asarray(gamma, inp_dtype)
 
         quantizer, ref_quantizer = QuantizerFactory.create(
-            n_quantizers=2, scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout
+            n_quantizers=2,
+            q_params=QuantizerParams(
+                scaling_mode=scaling_mode,
+                q_dtype=out_dtype,
+                q_layout=q_layout,
+            ),
         )
         if norm_type == "layernorm":
             beta = jax.random.uniform(subkeys[2], (hidden,), jnp.float32, -1, 1)
@@ -573,9 +585,11 @@ class TestQuantize:
 
         # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
         quantizer = QuantizerFactory.create(
-            scaling_mode=scaling_mode,
-            q_dtype=q_dtype,
-            q_layout=q_layout,
+            QuantizerParams(
+                scaling_mode=scaling_mode,
+                q_dtype=q_dtype,
+                q_layout=q_layout,
+            )
         )
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
@@ -593,7 +607,8 @@ class TestQuantize:
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
+            n_quantizers=2,
+            q_params=QuantizerParams(q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout),
         )
 
         jax_output = _jax_quantize(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
@@ -624,7 +639,10 @@ class TestFusedQuantize:
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         jax_quantizer, te_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
+            n_quantizers=2,
+            q_params=QuantizerParams(
+                q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
+            ),
         )
 
         te_output, te_dbias = jit(
@@ -654,7 +672,10 @@ class TestFusedQuantize:
         dz = jax.random.uniform(subkeys[1], input_shape, in_dtype, -1, 1)
 
         jax_quantizer, te_quantizer = QuantizerFactory.create(
-            n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
+            n_quantizers=2,
+            q_params=QuantizerParams(
+                q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
+            ),
         )
         is_casted_output = te_quantizer is not None
 
