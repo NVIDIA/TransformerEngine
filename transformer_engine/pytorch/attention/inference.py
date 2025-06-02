@@ -220,7 +220,6 @@ class InferenceParams:
             device=torch.cuda.current_device(),
         )
 
-
     def reset(self):
         """Reset InferenceParams state"""
         self.sequences = OrderedDict()
@@ -290,7 +289,7 @@ class InferenceParams:
             dtype=torch.int32, device="cpu"
         )
         # return seqlens.cuda()
-        self.cu_pre_step_seqlens[:len(seqlens)].copy_(seqlens, non_blocking=True)
+        self.cu_pre_step_seqlens[: len(seqlens)].copy_(seqlens, non_blocking=True)
         return self.cu_pre_step_seqlens
 
     def convert_paged_to_nonpaged(self, layer_number: int):

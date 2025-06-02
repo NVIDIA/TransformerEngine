@@ -29,6 +29,7 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 from te_llama import TELlamaForCausalLM, TELlamaForCausalLMCudaGraphs
 
+
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
@@ -132,6 +133,7 @@ def init_te_llama_model(hyperparams):
     if hyperparams.generation_cuda_graphs:
         model.record()
     return model.cuda()
+
 
 def init_te_gemma_model(hyperparams):
     cls = TEGemmaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TEGemmaForCausalLM
@@ -265,8 +267,8 @@ def run_forward_pass(model, hyperparams, num_iters):
     for _ in range(num_iters):
         _, batch = next(train_dataloader)
         batch["input_ids"] = batch["input_ids"].cuda()
-        batch['attention_mask'] = batch["attention_mask"].cuda()
-        model(input_ids = batch["input_ids"], attention_mask = batch['attention_mask'])
+        batch["attention_mask"] = batch["attention_mask"].cuda()
+        model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
 
 
 """
@@ -281,7 +283,6 @@ def print_sample_of_generated_texts(model):
     prompts = ["Here are the two facts about GPUs:", "Some facts about NVIDIA:"]
     prompts *= 32
     inputs = tokenizer(prompts, return_tensors="pt", padding=True)
-
 
     max_length = inputs["input_ids"].size(1)
     new_length = ((max_length + 63) // 64) * 128

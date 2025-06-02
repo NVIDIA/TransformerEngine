@@ -1,6 +1,8 @@
 from utils import *
 
-hyperparams.model_name = "/perfhome/repos/ckpt/models/gemma-7b-hf/" # "/tmp/gemma-7b-hf/" # <== Add model weight location here e.g. "/path/to/downloaded/gemma/weights"
+hyperparams.model_name = (  # "/tmp/gemma-7b-hf/" # <== Add model weight location here e.g. "/path/to/downloaded/gemma/weights"
+    "/perfhome/repos/ckpt/models/gemma-7b-hf/"
+)
 hyperparams.qkv_format = "thd"
 
 # hyperparams.generation_cuda_graphs = True # 709.8s

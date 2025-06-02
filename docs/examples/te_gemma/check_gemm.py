@@ -8,10 +8,12 @@ from transformer_engine.pytorch.utils import assert_dim_for_fp8_exec
 from transformer_engine.pytorch.module.base import get_workspace
 import transformer_engine.pytorch.cpp_extensions as cpp_tex
 
+
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor()
+
 
 def gemm(
     A: torch.Tensor,
@@ -100,20 +102,23 @@ def gemm(
         assert ub is not None, "ub object is None!"
     _ = fn(*args)
 
-    import pdb; pdb.set_trace()
+    import pdb
+
+    pdb.set_trace()
     return out, grad_bias, gelu_input
+
 
 if __name__ == "__main__":
     fc2_weight = torch.load("fc2_weight.pth").cuda()
-    
+
     base_repo = "/perfhome/mnt/wkstn/work/repos/te_gemma_gen_support/TransformerEngine/docs/examples/te_gemma/"
     base_repo = ""
     gelu_out = torch.load(base_repo + "gelu_out.pth").cuda()
-    
+
     activation_dtype = torch.bfloat16
     fc2_bias = _empty_tensor()
     use_fc2_bias = False
-    
+
     dim_size = list(gelu_out.size())
     dim_size[1] = fc2_weight.size(0)
     fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
