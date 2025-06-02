@@ -312,8 +312,17 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   size_t sinv_size = 0;
   size_t colwise_sinv_size = 0;
   size_t non_group_m = flatten_axis > 1 ? product(input_dims, 1, flatten_axis) : 1;
+  size_t num_non_empty_groups = 0;
   for (size_t i = 0; i < num_groups; i++) {
     size_t m_i = dim_list_host[i] * non_group_m;
+    // Skip for zero-size input + shiff the scale ptr
+    if (m_i == 0) {
+      scale_ptr += scale_dtype_bytes;
+      sinv_ptr += sinv_size * sinv_dtype_bytes;
+      colwise_sinv_ptr += colwise_sinv_size * colwise_sinv_dtype_bytes;
+      continue;
+    }
+    num_non_empty_groups++;
     auto shape_i = std::vector<size_t>{m_i, n};
     auto shape_trans_i = std::vector<size_t>{n, m_i};
 
@@ -361,6 +370,9 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     input_holders.push_back(std::move(inp_i));
     output_holders.push_back(std::move(out_i));
 
+    input_list.push_back(input_holders.back().data());
+    output_list.push_back(output_holders.back().data());
+
     input_ptr += m_i * n * input_dtype_bytes;
     scale_ptr += scale_dtype_bytes;
     output_ptr += m_i * n * output_dtype_bytes;
@@ -368,13 +380,10 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     sinv_ptr += sinv_size * sinv_dtype_bytes;
     colwise_sinv_ptr += colwise_sinv_size * colwise_sinv_dtype_bytes;
     amax_ptr += amax_dtype_bytes;
-
-    input_list.push_back(input_holders.back().data());
-    output_list.push_back(output_holders.back().data());
   }
 
   QuantizationConfigWrapper quant_config;
-  nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config, num_groups,
+  nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config, num_non_empty_groups,
                              stream);
 
   return ffi_with_cuda_error_check();
