@@ -764,8 +764,8 @@ class MultiheadAttention(torch.nn.Module):
                 # sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 
-                q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
-                k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
+                # q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
+                # k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
 
             query_layer = apply_rotary_pos_emb(
                 query_layer,
@@ -775,6 +775,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=cu_seqlens_q,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start,
             )
             key_layer = apply_rotary_pos_emb(
                 key_layer,
@@ -784,6 +785,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=cu_seqlens_kv,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                start_positions=sequence_start,
             )
 
         # ===========================

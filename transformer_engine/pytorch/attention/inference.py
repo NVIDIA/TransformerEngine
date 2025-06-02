@@ -214,6 +214,12 @@ class InferenceParams:
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
+        self.cu_pre_step_seqlens = torch.zeros(
+            self.max_batch_size,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+
 
     def reset(self):
         """Reset InferenceParams state"""
@@ -280,9 +286,12 @@ class InferenceParams:
 
     def get_seqlens_pre_step(self):
         """Get cached sequence lengths before the stepping"""
-        return torch.Tensor(list(self.sequences_pre_step.values())).to(
+        seqlens = torch.Tensor(list(self.sequences_pre_step.values())).to(
             dtype=torch.int32, device="cpu"
         )
+        # return seqlens.cuda()
+        self.cu_pre_step_seqlens[:len(seqlens)].copy_(seqlens, non_blocking=True)
+        return self.cu_pre_step_seqlens
 
     def convert_paged_to_nonpaged(self, layer_number: int):
         """
@@ -455,14 +464,14 @@ class NonPagedKVCacheManager(KVCacheManager):
         finished_seqs = self.sequences.keys() - unfinished_seqs
         unfinished_indices = [i for i, j in enumerate(self.sequences) if j in unfinished_seqs]
         finished_indices = [i for i, j in enumerate(self.sequences) if j in finished_seqs]
-        self.batch_indices.copy_(
+        self.batch_indices.data[:].copy_(
             torch.Tensor(
                 (
                     unfinished_indices
                     + finished_indices
                     + list(range(prev_batch_size, self.max_batch_size))
                 )
-            ).to(dtype=torch.int32, device="cpu")
+            )
         )
 
         # Advance unfinished sequences
