@@ -456,8 +456,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     output.attr("_columnwise_data") = data_colwise;
     output.attr("_quantizer") = this->quantizer;
     output.attr("_fp8_dtype") = this->dtype;
-    output.attr("_rowwise_scale_inv") = scale_inv_colwise;
-    output.attr("_columnwise_scale_inv") = scale_inv_rowwise;
+    output.attr("_rowwise_scale_inv") = scale_inv_rowwise;
+    output.attr("_columnwise_scale_inv") = scale_inv_colwise;
     output.attr("_is_2D_scaled") = (block_scaling_dim == 2);
     ret = output;
   }

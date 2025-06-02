@@ -610,7 +610,9 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.debug = debug
 
             ctx.requires_dgrad = (
-                inp.requires_grad or ln_weight.requires_grad or ln_bias.requires_grad
+                inp.requires_grad or
+                ln_weight.requires_grad or
+                (ln_bias.requires_grad if ln_bias is not None else False)
             )
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
