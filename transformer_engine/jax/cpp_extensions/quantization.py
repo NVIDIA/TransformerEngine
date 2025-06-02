@@ -951,14 +951,13 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             scale = scale.at[i].set(quantizer_i.scale[0])
 
-    # TODO(Phuong): for CurrentScaling, move this amax reduction to C++ so that the amax is
-    # calculated for each individual matrix in the group
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
-        tmp_scale = compute_scale_from_amax(amax, quantizer.q_dtype)
-        tmp_scale = tmp_scale.reshape(())
+        row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
+        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes)
+        grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
-            scale = scale.at[i].set(tmp_scale)
+            tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)
+            scale = scale.at[i].set(tmp_scale[0])
 
     is_tensor_scaling = quantizer.scaling_mode in (
         ScalingMode.DELAYED_TENSOR_SCALING,
