@@ -18,8 +18,8 @@
 namespace transformer_engine {
 namespace jax {
 
-Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_scale,
-                          Buffer_Type rhs_data, Buffer_Type rhs_scale, Buffer_Type bias,
+Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
+                          Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
                           Buffer_Type group_sizes, Buffer_Type group_offset, Result_Type output,
                           Result_Type workspace, size_t m, size_t n, size_t k, bool lhs_is_trans,
                           bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias,
@@ -43,12 +43,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // Inputs
   auto lhs_ptr = reinterpret_cast<uint8_t *>(lhs_data.untyped_data());
   auto rhs_ptr = reinterpret_cast<uint8_t *>(rhs_data.untyped_data());
-  auto lhs_scale_ptr = reinterpret_cast<uint8_t *>(lhs_scale.untyped_data());
-  auto rhs_scale_ptr = reinterpret_cast<uint8_t *>(rhs_scale.untyped_data());
+  auto lhs_sinv_ptr = reinterpret_cast<uint8_t *>(lhs_sinv.untyped_data());
+  auto rhs_sinv_ptr = reinterpret_cast<uint8_t *>(rhs_sinv.untyped_data());
   auto lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs_data.element_type());
   auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_data.element_type());
-  auto lhs_scale_dtype = convert_ffi_datatype_to_te_dtype(lhs_scale.element_type());
-  auto rhs_scale_dtype = convert_ffi_datatype_to_te_dtype(rhs_scale.element_type());
+  auto lhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(lhs_sinv.element_type());
+  auto rhs_sinv_dtype = convert_ffi_datatype_to_te_dtype(rhs_sinv.element_type());
   auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
 
@@ -61,8 +61,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   auto workspace_total_size = product(workspace->dimensions()) / num_streams;
 
-  auto lhs_sinv_size = product(lhs_scale.dimensions());
-  auto rhs_sinv_size = product(rhs_scale.dimensions());
+  auto lhs_sinv_size = product(lhs_sinv.dimensions());
+  auto rhs_sinv_size = product(rhs_sinv.dimensions());
   auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size) / num_streams;
   auto swizzled_lhs_sinv_ptr = workspace_ptr;
   auto swizzled_rhs_sinv_ptr = workspace_ptr + lhs_sinv_size;
@@ -70,14 +70,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
-  size_t lhs_scale_dtype_bytes = te_dtype_bytes(lhs_scale_dtype);
-  size_t rhs_scale_dtype_bytes = te_dtype_bytes(rhs_scale_dtype);
+  size_t lhs_sinv_dtype_bytes = te_dtype_bytes(lhs_sinv_dtype);
+  size_t rhs_sinv_dtype_bytes = te_dtype_bytes(rhs_sinv_dtype);
   size_t bias_dtype_bytes = te_dtype_bytes(bias_dtype);
   size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
 
   NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
-  NVTE_CHECK(lhs_scale_dtype_bytes == rhs_scale_dtype_bytes,
-             "sizeof(lhs_scale_dtype) != sizeof(rhs_scale_dtype)");
+  NVTE_CHECK(lhs_sinv_dtype_bytes == rhs_sinv_dtype_bytes,
+             "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
 
   size_t expected_lhs_size = m * k;
   size_t expected_rhs_size = is_grouped_dense_wgrad ? (k * n) : (num_gemms * k * n);
@@ -124,7 +124,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
 
-  if (arch < 100 && is_fp8_dtype(lhs_dtype)) {
+  // It is weird that TE/Common GEMM only use colwise for MXFP8
+  const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
+  const bool is_mxfp8_scaling = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
+  const bool rhs_use_colwise = is_mxfp8_scaling && !rhs_is_trans;
+  const bool lhs_use_colwise = is_mxfp8_scaling && lhs_is_trans;
+
+  if (arch < 100 && is_fp8_gemm) {
     NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
                "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
                "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
@@ -146,11 +152,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   std::vector<NVTETensor> out_list;
   std::vector<NVTETensor> workspace_list;
 
-  // It is weird that TE/Common GEMM only use colwise for MXFP8
-  bool rhs_use_colwise = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) && !rhs_is_trans;
-  bool lhs_use_colwise = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) && lhs_is_trans;
-
   for (size_t i = 0; i < num_gemms; i++) {
+    // Matrix data shapes
     size_t m_i = dim_list_host[i];
     auto lhs_shape = std::vector<size_t>{m_i, k};
     auto rhs_shape = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
@@ -165,64 +168,66 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       out_shape[1] = n;
     }
 
-    auto lhs_scale_shape = std::vector<size_t>{1, 1};
-    auto rhs_scale_shape = std::vector<size_t>{1, 1};
-
+    // Set matrix data pointers
     auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
     auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-
+    auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
+    void *lhs_vptr = static_cast<void *>(lhs_ptr);
+    void *rhs_vptr = static_cast<void *>(rhs_ptr);
     if (rhs_use_colwise)  // MatA to enter cuBLAS
-      rhs_i.set_columnwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
+      rhs_i.set_columnwise_data(rhs_vptr, rhs_dtype, rhs_shape);
     else
-      rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
-
+      rhs_i.set_rowwise_data(rhs_vptr, rhs_dtype, rhs_shape);
     if (lhs_use_colwise)  // MatB to enter cuBLAS
-      lhs_i.set_columnwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
+      lhs_i.set_columnwise_data(lhs_vptr, lhs_dtype, lhs_shape);
     else
-      lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
+      lhs_i.set_rowwise_data(lhs_vptr, lhs_dtype, lhs_shape);
 
-    auto lhs_scale_size = std::vector<size_t>{1};
-    auto rhs_scale_size = std::vector<size_t>{1};
-    if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
+    // Scale_inv shapes
+    auto lhs_sinv_size = std::vector<size_t>{1};
+    auto rhs_sinv_size = std::vector<size_t>{1};
+    if (is_mxfp8_scaling) {
       NVTE_CHECK(k % MXFP8_BLOCK_SIZE == 0, "MXFP8 K-dim being divisble by %d (got %d)",
                  MXFP8_BLOCK_SIZE, k);
       size_t scale_k = k / MXFP8_BLOCK_SIZE;
-      lhs_scale_size[0] = m_i * scale_k;
-      rhs_scale_size[0] = n * scale_k;
+      lhs_sinv_size[0] = m_i * scale_k;
+      rhs_sinv_size[0] = n * scale_k;
       // Need to add swizzle here
     }
-    if (is_fp8_dtype(lhs_dtype)) {
-      void *rhs_scale_vptr = static_cast<void *>(rhs_scale_ptr);
-      if (rhs_use_colwise)  // MatA to enter cuBLAS
-        rhs_i.set_columnwise_scale_inv(rhs_scale_vptr, rhs_scale_dtype, rhs_scale_size);
-      else
-        rhs_i.set_rowwise_scale_inv(rhs_scale_vptr, rhs_scale_dtype, rhs_scale_size);
 
-      void *lhs_scale_vptr = static_cast<void *>(lhs_scale_ptr);
-      if (lhs_use_colwise)  // MatB to enter cuBLAS
-        lhs_i.set_columnwise_scale_inv(lhs_scale_vptr, lhs_scale_dtype, lhs_scale_size);
+    // Set scale_inv pointers
+    void *rhs_sinv_vptr = static_cast<void *>(rhs_sinv_ptr);
+    void *lhs_sinv_vptr = static_cast<void *>(lhs_sinv_ptr);
+    if (is_fp8_gemm) {
+      if (rhs_use_colwise)  // MatA to enter cuBLAS
+        rhs_i.set_columnwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_size);
       else
-        lhs_i.set_rowwise_scale_inv(lhs_scale_vptr, lhs_scale_dtype, lhs_scale_size);
+        rhs_i.set_rowwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, rhs_sinv_size);
+      if (lhs_use_colwise)  // MatB to enter cuBLAS
+        lhs_i.set_columnwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_size);
+      else
+        lhs_i.set_rowwise_scale_inv(lhs_sinv_vptr, lhs_sinv_dtype, lhs_sinv_size);
     } else {
       NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
                  "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
-    lhs_wrapper_list.push_back(std::move(lhs_i));
-    rhs_wrapper_list.push_back(std::move(rhs_i));
 
-    auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
+    auto bias_i = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
+    auto pre_gelu_i = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
+
+    // Update pointer for the next GEMM pair
     lhs_ptr += lhs_shape[0] * lhs_shape[1] * lhs_dtype_bytes;
     rhs_ptr += rhs_shape[0] * rhs_shape[1] * rhs_dtype_bytes;
     out_ptr += out_shape[0] * out_shape[1] * out_dtype_bytes;
-    if (is_fp8_dtype(lhs_dtype)) {
-      lhs_scale_ptr += lhs_scale_size[0] * lhs_scale_dtype_bytes;
-      rhs_scale_ptr += rhs_scale_size[0] * rhs_scale_dtype_bytes;
+    if (is_fp8_gemm) {
+      lhs_sinv_ptr += lhs_sinv_size[0] * lhs_sinv_dtype_bytes;
+      rhs_sinv_ptr += rhs_sinv_size[0] * rhs_sinv_dtype_bytes;
     }
-
-    auto bias_i = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
     if (has_bias) bias_ptr += n * bias_dtype_bytes;
-    auto pre_gelu_i = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
 
+    // Move objects to the lists to keep them alive
+    lhs_wrapper_list.push_back(std::move(lhs_i));
+    rhs_wrapper_list.push_back(std::move(rhs_i));
     out_wrapper_list.push_back(std::move(out_i));
     bias_wrapper_list.push_back(std::move(bias_i));
     pre_gelu_wrapper_list.push_back(std::move(pre_gelu_i));
@@ -255,9 +260,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // lhs_data
-                                  .Arg<Buffer_Type>()      // lhs_scale
+                                  .Arg<Buffer_Type>()      // lhs_sinv
                                   .Arg<Buffer_Type>()      // rhs_data
-                                  .Arg<Buffer_Type>()      // rhs_scale
+                                  .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // group_sizes
                                   .Arg<Buffer_Type>()      // group_offset
