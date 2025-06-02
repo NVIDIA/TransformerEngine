@@ -383,8 +383,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   }
 
   QuantizationConfigWrapper quant_config;
-  nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config, num_non_empty_groups,
-                             stream);
+  nvte_multi_tensor_quantize(input_list.data(), output_list.data(), quant_config,
+                             num_non_empty_groups, stream);
 
   return ffi_with_cuda_error_check();
 }

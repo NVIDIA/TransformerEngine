@@ -663,7 +663,7 @@ class TestGroupedQuantize:
             group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
             group_sizes = jnp.diff(group_sizes)
             assert group_sizes.sum() == m
-            assert jnp.any(group_sizes == 0)    # make sure that at least one group has 0 row
+            assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
             group_sizes = group_sizes * 32
         else:
             group_sizes = None

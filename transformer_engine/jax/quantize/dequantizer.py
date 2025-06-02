@@ -205,13 +205,13 @@ def _grouped_dequantize(grouped_scaled_tensor):
             out_i = []
         else:
             out_i = dequantizer_type._dequantize_func(
-                    data_i.reshape(data_shape_i),
-                    scale_inv_i.reshape(scale_shape_i),
-                    grouped_scaled_tensor.dq_dtype,
-                    scaling_mode=grouped_scaled_tensor.scaling_mode,
-                    is_colwise=grouped_scaled_tensor.is_colwise,
-                    flatten_axis=grouped_scaled_tensor.flatten_axis,
-                    )
+                data_i.reshape(data_shape_i),
+                scale_inv_i.reshape(scale_shape_i),
+                grouped_scaled_tensor.dq_dtype,
+                scaling_mode=grouped_scaled_tensor.scaling_mode,
+                is_colwise=grouped_scaled_tensor.is_colwise,
+                flatten_axis=grouped_scaled_tensor.flatten_axis,
+            )
         scale_inv_ptr += scale_shape_i_size
 
     return output
