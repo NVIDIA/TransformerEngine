@@ -247,7 +247,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
              attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))) ||
           // 9.11: d_qk = 192, d_v = 128 + Blackwell + fprop/bprop (>= 9.11)
           (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
-           cudnn_runtime_version >= 91100 && max_seqlen_q > 1))) &&
+           cudnn_runtime_version >= 91100))) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
          (cudnn_runtime_version >= 8906 &&
