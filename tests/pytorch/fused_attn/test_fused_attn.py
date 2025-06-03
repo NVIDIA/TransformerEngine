@@ -297,6 +297,7 @@ def test_dot_product_attention(
             pad_between_seqs=pad_between_seqs,
             is_training=is_training,
         )
+        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
@@ -378,6 +379,7 @@ def test_dot_product_attention(
             is_training,
         )
 
+    logging.info(f"[test_dot_product_attention]: is_training = {is_training}")
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
@@ -1184,6 +1186,7 @@ def test_transformer_layer(
             ),
             is_training=is_training,
         )
+        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -1234,6 +1237,7 @@ def test_transformer_layer(
             is_training,
         )
 
+    logging.info(f"[test_transformer_layer]: is_training = {is_training}")
     if unfused_attn_supported and fused_attn_supported:
         logging.info("[test_transformer_layer]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
