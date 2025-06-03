@@ -23,7 +23,7 @@ from .misc import (
     jax_dtype_to_te_dtype,
     multidim_transpose,
     should_apply_1x_fused_dbias_war_for_arch_l_100,
-    get_max_device_compute_capability,
+    get_min_device_compute_capability,
     NamedSharding,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
@@ -630,7 +630,7 @@ def _quantize_dbias_impl(
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
-    is_1x_kernel_supported = not (is_dbias and get_max_device_compute_capability() < 100)
+    is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
     # It is faster to use 1x quantization for tensor scaling
     force_1x_quantization = (
         quantizer.scaling_mode.is_tensor_scaling()

@@ -183,11 +183,11 @@ def get_xla_flag(flag: str, default=None, cast=str):
     return default
 
 
-def get_max_device_compute_capability():
+def get_min_device_compute_capability():
     """
-    Returns the maximum compute capability of all local devices.
+    Returns the minimum compute capability of all local devices.
     """
-    return max(
+    return min(
         transformer_engine_jax.get_device_compute_capability(local_gpu_id)
         for local_gpu_id in range(len(jax.local_devices()))
     )
