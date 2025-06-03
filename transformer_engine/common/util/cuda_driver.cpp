@@ -35,6 +35,7 @@ void *get_symbol(const char *symbol, int cuda_version) {
     NVTE_CHECK_CUDA(driver_entrypoint_versioned_fun(symbol, &entry_point, cuda_version,
                                                     cudaEnableDefault, &driver_result));
   } else {
+    NVTE_CHECK(driver_entrypoint_fun != nullptr, "Error finding the CUDA Runtime-Driver interop.");
     // Versioned entrypoint function not found
     NVTE_CHECK_CUDA(driver_entrypoint_fun(symbol, &entry_point, cudaEnableDefault, &driver_result));
   }
