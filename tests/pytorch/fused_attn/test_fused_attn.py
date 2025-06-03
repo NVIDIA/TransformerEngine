@@ -222,19 +222,19 @@ def _get_attention_backends(
 
 
 model_configs_base = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
-    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
-    "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),  # cross, 0
-    "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),  # self , 1
-    "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
-    "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_4_0": ModelConfig(8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_4_1": ModelConfig(8, 16, 16, 192, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_5_0": ModelConfig(8, 16, 16, 512, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),  # inference
+    #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
+    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
+    "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
+    "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),
+    "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),
+    "base_4_0": ModelConfig(8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias"),
+    "base_4_1": ModelConfig(8, 16, 16, 192, 128, 2048, 0.0, "no_mask", "no_bias"),
+    "base_5_0": ModelConfig(8, 16, 16, 512, 1, 2048, 0.0, "no_mask", "no_bias"),
+    "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),
+    "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),
+    "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),
 }
 
 
@@ -277,7 +277,7 @@ def test_dot_product_attention(
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
+    is_training = True
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -287,6 +287,16 @@ def test_dot_product_attention(
         is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if not fused_attn_supported:
+        is_training = False
+        available_backends, _, fused_attn_backends = _get_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            window_size=config.window_size,
+            pad_between_seqs=pad_between_seqs,
+            is_training=is_training,
+        )
 
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
@@ -407,11 +417,17 @@ model_configs_mla = {
     "mla_1_1": ModelConfig(
         4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),  # cross, 0
+    "mla_1_2": ModelConfig(
+        4, 16, 16, 192, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # cross, 0
     "mla_2_0": ModelConfig(
         2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64
     ),  # self , 1
     "mla_2_1": ModelConfig(
         1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64
+    ),  # cross, 1
+    "mla_2_2": ModelConfig(
+        1, 24, 24, 192, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=128
     ),  # cross, 1
     "mla_3_0": ModelConfig(
         8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64
@@ -1146,7 +1162,7 @@ def test_transformer_layer(
     workspace_opt = True
 
     # Test backend availability
-    is_training = config.head_dim_qk <= 128 and config.head_dim_v <= 128
+    is_training = True
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -1156,6 +1172,16 @@ def test_transformer_layer(
         is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if not fused_attn_supported:
+        is_training = False
+        available_backends, _, fused_attn_backends = _get_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=(
+                qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
+            ),
+            is_training=is_training,
+        )
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
