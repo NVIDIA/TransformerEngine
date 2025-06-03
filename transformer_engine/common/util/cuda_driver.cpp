@@ -14,9 +14,9 @@ namespace transformer_engine {
 namespace cuda_driver {
 
 typedef cudaError_t (*VersionedGetEntryPoint)(const char *, void **, unsigned int,
-                                              unsigned long long,
+                                              unsigned long long,  // NOLINT(*)
                                               cudaDriverEntryPointQueryResult *);
-typedef cudaError_t (*GetEntryPoint)(const char *, void **, unsigned long long,
+typedef cudaError_t (*GetEntryPoint)(const char *, void **, unsigned long long,  // NOLINT(*)
                                      cudaDriverEntryPointQueryResult *);
 
 void *get_symbol(const char *symbol, int cuda_version) {
