@@ -437,6 +437,9 @@ model_configs_mla = {
     "mla_3_1": ModelConfig(
         8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
     ),  # inference
+    "mla_3_2": ModelConfig(
+        8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
+    ),  # inference
 }
 
 
