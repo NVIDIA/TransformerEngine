@@ -195,6 +195,24 @@ def grouped_dense(
     group_offset: jnp.array = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
+    """
+    Perform grouped dense (linear) layer transformation with optional quantization.
+
+    Args:
+        x: Input tensor of shape (M, K)
+        kernel: Weight matrix of shape (G, K, N)
+        group_sizes: 1D array of shape (G,) specifying the size of each group
+        contracting_dims: Tuple of sequences specifying which dimensions to contract
+                          (currently only supports ((1,), (1,)))
+        bias: Bias tensor of shape (G, N)
+        precision: JAX precision for the GEMM operation
+        preferred_element_type: Preferred data type for the output tensor
+        group_offset: 1D array containing offsets for each group (not yet implemented)
+        quantizer_set: Set of quantizers for FP8 quantization of the input and output
+
+    Returns:
+        A jnp.ndarray containing the result of the grouped linear operation
+    """
     output = _grouped_dense(
         x,
         kernel,

@@ -381,13 +381,32 @@ def grouped_gemm(
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ) -> jnp.ndarray:
     """
-    lhs: [M, K]
-    rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
+    Grouped GEMM operation.
+
+    Args:
+        lhs: Left-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
+        rhs: Right-hand side input matrix, can be a jnp.ndarray or GroupedScaledTensor1x
+        group_sizes: 1D array containing the sizes of each group
+        contracting_dims: Tuple of two sequences representing the contracting dimensions
+        bias: Bias tensor of shape (G, N)
+        precision: JAX precision for the GEMM operation
+        preferred_element_type: Preferred data type for the output tensor
+        group_offset: 1D array containing offsets for each group (not yet implemented)
+        quantizer_set: Set of quantizers for FP8 quantization of the input and output
+
+    Returns:
+        A jnp.ndarray containing the result of the grouped GEMM operation
+
+    Note:
+        Tested shapes:
+        lhs: [M, K] or [K, N]
+        rhs: [G, N, K] or [G, K, N] or [G * K, N] or [N, G * K]
     """
     # TODO(Phuong): implement the group_offset
     group_offset = group_offset or jnp.zeros((1,), jnp.int32)
 
     # TODO(Phuong): implement the precision
+    del precision
 
     if isinstance(lhs, jnp.ndarray):
         assert isinstance(rhs, jnp.ndarray)
