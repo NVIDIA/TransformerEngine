@@ -250,6 +250,11 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
 
   // Keep swizzling factors alive here in order to de-allocate the memory later
   std::vector<std::optional<NVTEBasicTensor>> swizzled_scale_inverses_list;
+  swizzled_scale_inverses_list.emplace_back(
+      std::move(SwizzleScalingFactors(stream, lhs_, lhs_trans)));
+  swizzled_scale_inverses_list.emplace_back(
+      std::move(SwizzleScalingFactors(stream, rhs_, rhs_trans)));
+
   if (comm_type == CommOverlapType::NONE) {
     // No comm. overlap, do plain cuBLAS GEMM
     auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
@@ -258,12 +263,6 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
                      grad, workspace_.data(), accumulate, use_split_accumulator,
                      num_math_sm, stream);
   } else {
-    // Swizzle scaling factors
-    swizzled_scale_inverses_list.emplace_back(
-        std::move(SwizzleScalingFactors(stream, lhs_, lhs_trans)));
-    swizzled_scale_inverses_list.emplace_back(
-        std::move(SwizzleScalingFactors(stream, rhs_, rhs_trans)));
-
     // Prepare the auxiliary output tensor
     auto aux_out_shape = std::vector<size_t>(aux_out->dimensions().begin(),
                                              aux_out->dimensions().end());
@@ -296,11 +295,12 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
                                  workspace_, grad, accumulate, use_split_accumulator,
                                  aux_out_, stream);
     }
-    for (auto &scale_inv : swizzled_scale_inverses_list) {
-      if (scale_inv.has_value()) {
-        // Free memory we allocated when swizzling
-        NVTE_CHECK_CUDA(cudaFree(scale_inv.value().data_ptr));
-      }
+  }
+
+  for (auto &scale_inv : swizzled_scale_inverses_list) {
+    if (scale_inv.has_value()) {
+      // Free memory we allocated when swizzling
+      NVTE_CHECK_CUDA(cudaFree(scale_inv.value().data_ptr));
     }
   }
 
