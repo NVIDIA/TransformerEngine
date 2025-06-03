@@ -211,8 +211,8 @@ void nvte_multi_padding(size_t num_tensors, const NVTETensor* input_list, NVTETe
   std::vector<Tensor*> input_list_, output_list_;
   std::vector<int> padded_num_rows_list_;
   for (size_t i = 0; i < num_tensors; ++i) {
-    input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
-    output_list_.push_back(reinterpret_cast<Tensor*>(output_list[i]));
+    input_list_.push_back(convertNVTETensorCheck(input_list[i]));
+    output_list_.push_back(convertNVTETensorCheck(output_list[i]));
     padded_num_rows_list_.push_back(padded_num_rows_list[i]);
   }
   multi_padding(input_list_, output_list_, padded_num_rows_list_, stream);

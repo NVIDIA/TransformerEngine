@@ -5,7 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 
@@ -1471,20 +1471,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
-                if self.fp8:
-                    if len(unfused_weights) != 1:
-                        raise RuntimeError(
-                            "Splitting QuantizedTensor into multiple params is not supported"
-                        )
-                else:
-                    warnings.warn(
-                        "You are using quantized weights without quantized compute. "
-                        "Please make sure this is intentional."
-                    )
-                    unfused_weights = [w.dequantize() for w in unfused_weights]
-
+            unfused_weights = self._get_weight_tensors()
             weight_tensor = noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
@@ -1590,8 +1577,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
-        weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
+        (weight_quantizer,) = self._get_weight_quantizers()
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
@@ -1666,3 +1652,28 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        unfused_weights = [getattr(self, name) for name in self.weight_names]
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                warnings.warn(
+                    "You are using quantized weights without quantized compute. "
+                    "Please make sure this is intentional."
+                )
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+        return unfused_weights
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        if not self.fp8:
+            return [None]
+        weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+        weight_quantizer.internal = True
+        return [weight_quantizer]
