@@ -33,8 +33,8 @@ break the code here
 #include "extensions/utils.h"
 #include "transformer_engine/activation.h"
 
-// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+    // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
+    XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 
 namespace transformer_engine {
 namespace jax {
