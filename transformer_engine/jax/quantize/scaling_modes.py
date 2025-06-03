@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Tuple, Dict
 from functools import reduce
 import operator
+import numpy as np
 
 from jax.experimental.custom_partitioning import CompoundFactor
 from jax.tree_util import register_pytree_node_class
@@ -151,7 +152,9 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The shape for scale tensors - (1,)
         """
-        del data_shape, is_colwise
+        del is_colwise
+        if np.prod(data_shape) == 0:
+            return (0,)
         return (1,)
 
     def get_grouped_scale_shape(

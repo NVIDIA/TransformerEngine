@@ -317,9 +317,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     size_t m_i = dim_list_host[i] * non_group_m;
     // Skip for zero-size input + shiff the scale ptr
     if (m_i == 0) {
-      scale_ptr += scale_dtype_bytes;
-      sinv_ptr += sinv_size * sinv_dtype_bytes;
-      colwise_sinv_ptr += colwise_sinv_size * colwise_sinv_dtype_bytes;
+      if (is_tensor_scaling) scale_ptr += scale_dtype_bytes;
       continue;
     }
     num_non_empty_groups++;
