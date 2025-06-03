@@ -125,6 +125,8 @@ def assert_dequantized_grouped_scaled_tensor(
         b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
         dq_a = a.dequantize()
         for dq_a_i, b_i in zip(dq_a, b):
+            if len(dq_a_i) == 0:
+                continue
             if a.data_layout == "T":
                 data_ndim = len(a.original_shape)
                 flatten_axis = a.flatten_axis
@@ -638,7 +640,7 @@ class TestQuantize:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("input_shape", [(8, 64, 32)])
+@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
@@ -662,6 +664,7 @@ class TestGroupedQuantize:
             group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
             group_sizes = jnp.diff(group_sizes)
             assert group_sizes.sum() == m
+            assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
             group_sizes = group_sizes * 32
         else:
             group_sizes = None
@@ -683,7 +686,6 @@ class TestGroupedQuantize:
             x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
         )
 
-        # Dequantize and compare with original
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
 
