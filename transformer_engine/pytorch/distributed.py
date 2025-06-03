@@ -44,7 +44,7 @@ from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -981,6 +981,15 @@ def _all_gather_fp8(
     return out, handle
 
 
+def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
+    """Make quantizer compact"""
+    _quantizer = quantizer
+    if isinstance(quantizer, DebugQuantizer):
+        _quantizer = quantizer.parent_quantizer
+    if isinstance(_quantizer, Float8BlockQuantizer):
+        _quantizer.set_usage(need_compact=compact)
+
+
 def _post_process_fp8_blockwise_gather(
     out: Float8BlockwiseQTensorBase,
     quantizer: Float8BlockQuantizer,
@@ -1406,6 +1415,9 @@ def gather_along_first_dim(
         )
         if isinstance(inp, QuantizedTensor):
             inp = inp.dequantize()
+        # Falling back to high-precision all-gather for Float8BlockQuantizer
+        # means that it should directly output GEMM_READY format
+        _set_quantizer_format(quantizer, compact=False)
         out = torch.empty(
             out_shape,
             dtype=inp.dtype,
