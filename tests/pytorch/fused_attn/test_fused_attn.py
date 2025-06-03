@@ -1178,7 +1178,9 @@ def test_transformer_layer(
             config,
             qkv_dtype=dtype,
             qkv_layout=(
-                qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
+                qkv_format.replace("hd", "h3d")
+                if fused_qkv_params
+                else qkv_format.replace("hd", "3hd")
             ),
             is_training=is_training,
         )

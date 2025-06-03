@@ -227,27 +227,27 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         ((cudnn_runtime_version < 8907 && num_attn_heads == num_gqa_groups) ||
          (cudnn_runtime_version >= 8907)) &&
         // head dimension
-	// multiples of 8
+        // multiples of 8
         (head_dim_qk % 8 == 0 && head_dim_v % 8 == 0 &&
-	 // <= 128
+         // <= 128
          ((head_dim_qk <= 128 && head_dim_v <= 128) ||
-	  // 9.1: <= 256 + Hopper + fprop
-	  // 9.5: <= 256 + Hopper + bprop
+          // 9.1: <= 256 + Hopper + fprop
+          // 9.5: <= 256 + Hopper + bprop
           (head_dim_qk <= 256 && head_dim_v <= 256 &&
            ((!is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90100) ||
             (is_training && sm_arch_ == 90 && cudnn_runtime_version >= 90500))) ||
-	  // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
+          // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
           (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
-	  // 9.10: any head_dim + any arch + fprop + {non_paged + sq > 1, paged}
-	  // 9.10: any head_dim + Blackwell + fprop + non_paged + sq = 1 + no_mask
+          // 9.10: any head_dim + any arch + fprop + {non_paged + sq > 1, paged}
+          // 9.10: any head_dim + Blackwell + fprop + non_paged + sq = 1 + no_mask
           (!is_training && cudnn_runtime_version >= 91000 &&
            (max_seqlen_q > 1 || layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD ||
             (max_seqlen_q == 1 && sm_arch_ >= 100 &&
              attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))) ||
-	  // 9.11: d_qk = 192, d_v = 128 + Blackwell + fprop/bprop (>= 9.11)
-          (head_dim_qk == 192 && head_dim_v == 128 &&
-           is_training && sm_arch_ == 100 && cudnn_runtime_version >= 91100 && max_seqlen_q > 1))) &&
+          // 9.11: d_qk = 192, d_v = 128 + Blackwell + fprop/bprop (>= 9.11)
+          (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ == 100 &&
+           cudnn_runtime_version >= 91100 && max_seqlen_q > 1))) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
          (cudnn_runtime_version >= 8906 &&
