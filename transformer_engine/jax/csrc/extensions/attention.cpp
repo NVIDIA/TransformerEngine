@@ -199,6 +199,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     }
   }
 
+  nvte_tensor_pack_destroy(&aux_output_tensors);
+
   auto workspace_shape = MakeShapeVector(query_workspace_tensor.shape());
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
@@ -484,6 +486,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
       NVTE_ERROR("Unsupported qkv_layout.");
     }
   }
+
+  nvte_tensor_pack_destroy(&aux_input_tensors);
 
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
