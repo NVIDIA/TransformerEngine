@@ -13,22 +13,23 @@ namespace transformer_engine {
 
 namespace cuda_driver {
 
-typedef cudaError_t (*VersionedGetEntryPoint)(const char*, void**, unsigned int,
-                                              unsigned long long, cudaDriverEntryPointQueryResult*);
-typedef cudaError_t (*GetEntryPoint)(const char*, void**, unsigned long long,
-                                     cudaDriverEntryPointQueryResult*);
+typedef cudaError_t (*VersionedGetEntryPoint)(const char *, void **, unsigned int,
+                                              unsigned long long,
+                                              cudaDriverEntryPointQueryResult *);
+typedef cudaError_t (*GetEntryPoint)(const char *, void **, unsigned long long,
+                                     cudaDriverEntryPointQueryResult *);
 
 void *get_symbol(const char *symbol, int cuda_version) {
   constexpr char driver_entrypoint[] = "cudaGetDriverEntryPoint";
   constexpr char driver_entrypoint_versioned[] = "cudaGetDriverEntryPointByVersion";
   // We link to the libcudart.so already, so can search for it in the current context
   static GetEntryPoint driver_entrypoint_fun =
-    reinterpret_cast<GetEntryPoint>(dlsym(RTLD_DEFAULT, driver_entrypoint));
+      reinterpret_cast<GetEntryPoint>(dlsym(RTLD_DEFAULT, driver_entrypoint));
   static VersionedGetEntryPoint driver_entrypoint_versioned_fun =
-    reinterpret_cast<VersionedGetEntryPoint>(dlsym(RTLD_DEFAULT, driver_entrypoint_versioned));
+      reinterpret_cast<VersionedGetEntryPoint>(dlsym(RTLD_DEFAULT, driver_entrypoint_versioned));
 
   cudaDriverEntryPointQueryResult driver_result;
-  void* entry_point = nullptr;
+  void *entry_point = nullptr;
   if (driver_entrypoint_versioned_fun != nullptr) {
     // Found versioned entrypoint function
     NVTE_CHECK_CUDA(driver_entrypoint_versioned_fun(symbol, &entry_point, cuda_version,
