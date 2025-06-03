@@ -274,9 +274,6 @@ LOGGING_CONFIG = """logging_config:
 """
 
 
-
-
-
 DISABLE_FP8_CONFIG = Template(
     """disable_fp8_config:
   enabled: True
@@ -288,6 +285,7 @@ DISABLE_FP8_CONFIG = Template(
       gemms: [$gemms]
 """
 )
+
 
 @create_config_file
 def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
@@ -302,8 +300,10 @@ def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
     _ = _run_forward_backward(x1, model)
     _ = _run_forward_backward(x, model)
 
+
 def test_logging_zero_numel_tensor(feature_dirs):
     run_logging_zero_numel_tensor(feature_dirs)
+
 
 @pytest.mark.parametrize("fprop_fp8", all_boolean)
 @pytest.mark.parametrize("dgrad_fp8", all_boolean)
