@@ -497,8 +497,8 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         and not is_cuda_graph
     ):
         pytest.skip(
-            "No support for KV caching with head dim > 128, non-paged attention, sq = 1, and mask"
-            " != no_mask"
+            "No support for KV caching with head dim > 128, non-paged attention,"
+            " sq = 1, and mask != no_mask"
         )
 
     # create full model
