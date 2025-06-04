@@ -16,12 +16,8 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
-    found_cmake,
-    found_ninja,
-    found_pybind11,
     get_frameworks,
     remove_dups,
-    cuda_toolkit_include_path,
 )
 
 frameworks = get_frameworks()
