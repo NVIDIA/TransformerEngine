@@ -216,7 +216,6 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<i
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
-
 void CommOverlap::current_stream_wait_on_memcpy() {
   auto current_stream = at::cuda::getCurrentCUDAStream();
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
