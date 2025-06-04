@@ -14,8 +14,8 @@
 
 #include <stdexcept>
 
-#include "../../extensions.h"
 #include "../common.h"
+#include "../extensions.h"
 #include "common.h"
 
 namespace transformer_engine::pytorch {

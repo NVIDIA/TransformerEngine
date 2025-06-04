@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../../extensions.h"
+#include "../extensions.h"
 
 #ifdef NVTE_ENABLE_NVSHMEM
 #include <nvshmem.h>
