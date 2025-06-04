@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_FFI
+#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_FFI
+
 #include <transformer_engine/transformer_engine.h>
 #include <xla/ffi/api/ffi.h>
 
@@ -108,3 +111,5 @@ inline static size_t te_dtype_bytes(const DType& type) {
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_CSRC_EXTENSIONS_FFI

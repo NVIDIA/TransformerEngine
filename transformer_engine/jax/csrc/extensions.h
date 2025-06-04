@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
-#define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
+#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -13,6 +13,8 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <transformer_engine/activation.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -29,10 +31,11 @@
 #include "extensions/ffi.h"
 #include "extensions/misc.h"
 #include "extensions/utils.h"
-#include "transformer_engine/activation.h"
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::CommOverlapType);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::CommOverlapMethod);
 
 namespace transformer_engine {
 namespace jax {
@@ -116,6 +119,21 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);
 
+// cuBLAS GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmHandler);
+
+int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod method,
+                                const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                int tp_size, int num_splits = 3, int num_max_streams = 3,
+                                int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
+                                int num_comm_sm = 16, int set_sm_margin = false, bool use_ce = true,
+                                bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
+                                bool aggregate_ag = false);
+
+void DestroyCommOverlapBuffer(size_t unique_id);
+
+void DestroyAllCommOverlapBuffers();
+
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
@@ -128,4 +146,4 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 }  // namespace jax
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#endif  // TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS

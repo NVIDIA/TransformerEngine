@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_CSRC_EXTENSIONS_UTILS
+#define TRANSFORMER_ENGINE_CSRC_EXTENSIONS_UTILS
+
 #include <pybind11/pybind11.h>
 #include <transformer_engine/fused_attn.h>
 
@@ -20,11 +23,13 @@ namespace jax {
 
 int GetCudaRuntimeVersion();
 size_t GetCudnnRuntimeVersion();
-int GetDeviceComputeCapability(int gpu_id);
+int GetDeviceComputeCapability(int gpu_id = -1);
+
+std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 
 class cudaDevicePropertiesManager {
  public:
-  static cudaDevicePropertiesManager &Instance() {
+  static cudaDevicePropertiesManager& Instance() {
     static thread_local cudaDevicePropertiesManager instance;
     return instance;
   }
@@ -56,3 +61,5 @@ class cudaDevicePropertiesManager {
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_CSRC_EXTENSIONS_UTILS

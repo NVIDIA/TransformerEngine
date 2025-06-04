@@ -41,6 +41,26 @@ class ScaledTensor(ABC):
     providing methods for dequantization and accessing row/column-wise components.
     """
 
+    @property
+    @abstractmethod
+    def ndim(self):
+        """Return the number of dimensions of the tensor."""
+
+    @property
+    @abstractmethod
+    def shape(self):
+        """Return the shape of the tensor."""
+
+    @property
+    @abstractmethod
+    def dtype(self):
+        """Return the (quantized) data type of the tensor."""
+
+    @property
+    @abstractmethod
+    def device(self):
+        """Return the device that the data resides on."""
+
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         """Reconstructs the tensor from its flattened representation.
@@ -123,6 +143,26 @@ class ScaledTensor1x(ScaledTensor):
     is_colwise: bool
     data_layout: str
     flatten_axis: int = -1
+
+    @property
+    def ndim(self):
+        """Return the number of dimensions for the underlying data array."""
+        return self.data.ndim
+
+    @property
+    def shape(self):
+        """Return the shape of the underlying data array."""
+        return self.data.shape
+
+    @property
+    def dtype(self):
+        """Return the (quantized) data type of the underlying data array."""
+        return self.data.dtype
+
+    @property
+    def device(self):
+        """Return the device that the underlying data array resides on."""
+        return self.data.device
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -268,6 +308,26 @@ class ScaledTensor2x(ScaledTensor):
 
     rowwise_tensor: ScaledTensor1x
     colwise_tensor: ScaledTensor1x
+
+    @property
+    def ndim(self):
+        """Return the number of dimensions of the underlying rowwise (non-transposed) tensor."""
+        return self.rowwise_tensor.ndim
+
+    @property
+    def shape(self):
+        """Return the shape of the underlying rowwise (non-transposed) tensor."""
+        return self.rowwise_tensor.shape
+
+    @property
+    def dtype(self):
+        """Return the (quantized) dtype of the underlying rowwise (non-transposed) tensor."""
+        return self.rowwise_tensor.dtype
+
+    @property
+    def device(self):
+        """Return the device that the underlying rowwise (non-transposed) tensor resides on."""
+        return self.rowwise_tensor.device
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.

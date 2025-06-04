@@ -4,11 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_MISC
+#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_MISC
+
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
 #include <string>
 #include <vector>
+
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -34,10 +39,10 @@ inline size_t product(const std::vector<size_t> &shape) {
   return ret;
 }
 
-enum class QuantizeLayout {
-  ROWWISE,
-  COLWISE,
-  ROWWISE_COLWISE,
+enum class QuantizeLayout : int64_t {
+  ROWWISE = 0,
+  COLWISE = 1,
+  ROWWISE_COLWISE = 2,
 };
 
 enum class JAXX_Scaling_Mode : int64_t {
@@ -67,5 +72,13 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
   }
 }
 
+template <typename T, typename... Rest>
+void hash_combine(int64_t &seed, const T &v, Rest... rest) {
+  seed ^= std::hash<T>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  (hash_combine(seed, rest), ...);
+}
+
 }  // namespace jax
 }  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_CSRC_EXTENSIONS_MISC

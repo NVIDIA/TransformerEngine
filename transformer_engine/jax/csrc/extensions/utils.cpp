@@ -24,5 +24,13 @@ size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 
+std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape) {
+  std::vector<size_t> shape;
+  for (size_t i = 0; i < nvte_shape.ndim; i++) {
+    shape.push_back(nvte_shape.data[i]);
+  }
+  return shape;
+}
+
 }  // namespace jax
 }  // namespace transformer_engine
