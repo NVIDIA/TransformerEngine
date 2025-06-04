@@ -84,7 +84,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch jax[cuda] flax pydantic importlib-metadata>=1.0 packaging pybind11[global]
+          pip install cmake torch jax[cuda12] flax pydantic importlib-metadata>=1.0 packaging pybind11[global]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
