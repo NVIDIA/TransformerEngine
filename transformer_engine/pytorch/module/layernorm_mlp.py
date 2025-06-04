@@ -1759,9 +1759,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias = self.fc2_bias if self.use_bias else None
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
-                    fc1_weight = fc1_weight.from_float8()
+                    fc1_weight = fc1_weight.dequantize()
                 if isinstance(fc2_weight, Float8Tensor):
-                    fc2_weight = fc2_weight.from_float8()
+                    fc2_weight = fc2_weight.dequantize()
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
