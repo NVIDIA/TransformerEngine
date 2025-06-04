@@ -47,11 +47,6 @@ if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     )
 
 
-# Disable TF32
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-
-
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "fp8":
@@ -161,8 +156,8 @@ def _gather(tensor, dim=0):
     return torch.cat(gathered, dim=dim)
 
 
-def _init_uniform(tensor):
-    return nn.init.uniform_(tensor, a=0.0, b=0.05)
+def _constant(tensor):
+    return nn.init.constant_(tensor, 0.05)
 
 
 def dist_print(msg, src=None, end="\n", error=False):
@@ -512,7 +507,7 @@ def test_linear():
     kwargs_list = [
         {},
         {"bias": False},
-        {"init_method": _init_uniform},
+        {"init_method": _constant},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
@@ -688,7 +683,7 @@ def test_layernorm_linear():
     kwargs_list = [
         {},
         {"bias": False},
-        {"init_method": _init_uniform},
+        {"init_method": _constant},
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
@@ -792,8 +787,8 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
 def test_layernorm_mlp():
     kwargs_list = [
         {},
-        {"init_method": _init_uniform},
-        {"output_layer_init_method": _init_uniform},
+        {"init_method": _constant},
+        {"output_layer_init_method": _constant},
         {"normalization": "RMSNorm"},
         {"zero_centered_gamma": True},
         {"bias": False},
@@ -882,8 +877,8 @@ def test_transformer_layer():
     kwargs_list = [
         {},
         {"num_gqa_groups": 4},
-        {"init_method": _init_uniform},
-        {"output_layer_init_method": _init_uniform},
+        {"init_method": _constant},
+        {"output_layer_init_method": _constant},
         {"apply_residual_connection_post_layernorm": True},
         {"output_layernorm": True},
         {"parallel_attention_mlp": True},
