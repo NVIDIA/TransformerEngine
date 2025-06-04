@@ -43,7 +43,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11
+          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11 numpy
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
