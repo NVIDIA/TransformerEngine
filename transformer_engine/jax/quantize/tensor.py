@@ -65,7 +65,8 @@ class ScaledTensor(ABC):
 
     @abstractmethod
     def get_tensor(self, usage: TensorUsage):
-        """Returns the tensor based on the tensor usage.
+        """Returns the appropriate tensor based on the tensor usage and the scaling mode.
+        If the tensor usage is not valid for the scaling mode, an error is raised.
 
         Args:
             usage: The usage of the tensor

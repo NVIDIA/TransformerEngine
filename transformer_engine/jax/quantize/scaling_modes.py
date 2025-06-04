@@ -32,9 +32,16 @@ __all__ = [
 
 
 class TensorUsage(Enum):
-    """Enum for tensor usage.
+    """Enum indicating tensor usage in GEMM operations.
 
-    This enum for the usage of a tensor.
+    Given a GEMM operation: C = A * B in which A and B can be in the normal or transposed form.
+    The tensor usage can be:
+    - LHS: A is in the normal form
+    - LHS_TRANS: A is in the transposed form
+    - RHS: B is in the normal form
+    - RHS_TRANS: B is in the transposed form
+
+    The tensor usage is used in the ScaledTensor.get_tensor() method.
     """
 
     # LHS: Left-hand side, RHS: Right-hand side
