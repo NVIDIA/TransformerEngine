@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
-#define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
+#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -115,6 +115,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);
+
+// GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);

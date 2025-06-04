@@ -54,6 +54,11 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
 
+  // GEMM
+  dict["te_gemm_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(cublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
+
   // Grouped GEMM
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
