@@ -98,7 +98,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
-        _stream_compute.push_back(std::move(stream));
+    _stream_compute.push_back(std::move(stream));
   }
 
   _num_splits = num_splits;
@@ -119,7 +119,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
     NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
     _counter = TensorWrapper(counter_ptr, std::vector<size_t>{static_cast<size_t>(_num_splits * 2)},
-                            DType::kInt32);
+                             DType::kInt32);
   }
   // CUDA event creation
   cudaEventCreateWithFlags(&_start_compute, 0);
@@ -332,11 +332,11 @@ void CommOverlapBase::copy_into_buffer(const TensorWrapper &input, bool local_ch
 
   // Input data
   const size_t input_size = input.numel();
-  const void* src_ptr = input.dptr();
+  const void *src_ptr = input.dptr();
 
   // Userbuffers data
   const size_t ubuf_size = _ubuf.numel();
-  void* dst_ptr = _ubuf.dptr();
+  void *dst_ptr = _ubuf.dptr();
   if (local_chunk) {
     NVTE_CHECK(input_size * _tp_size == ubuf_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",

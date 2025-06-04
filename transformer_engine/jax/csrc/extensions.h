@@ -7,6 +7,17 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
 #define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
 
+#include <cublasLt.h>
+#include <cublas_v2.h>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <transformer_engine/activation.h>
+#include <transformer_engine/comm_gemm_overlap.h>
+#include <transformer_engine/normalization.h>
+#include <transformer_engine/transformer_engine.h>
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -15,22 +26,8 @@
 #include <string>
 #include <vector>
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda_runtime_api.h>
-#include <cudnn.h>
-
-#include <transformer_engine/activation.h>
-#include <transformer_engine/comm_gemm_overlap.h>
-#include <transformer_engine/normalization.h>
-#include <transformer_engine/transformer_engine.h>
-
 #include "common/common.h"
 #include "common/util/logging.h"
-
 #include "extensions/ffi.h"
 #include "extensions/misc.h"
 #include "extensions/utils.h"
@@ -125,12 +122,13 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // cuBLAS GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmHandler);
 
-int64_t CreateCommOverlapBuffer(
-    CommOverlapType comm_type, CommOverlapMethod method, const std::vector<size_t> &buffer_shape,
-    DType buffer_dtype, int tp_size, int num_splits = 3, int num_max_streams = 3,
-    int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
-    int set_sm_margin = false, bool use_ce = true, bool atomic_gemm = false,
-    bool rs_overlap_first_gemm = false, bool aggregate_ag = false);
+int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod method,
+                                const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                int tp_size, int num_splits = 3, int num_max_streams = 3,
+                                int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
+                                int num_comm_sm = 16, int set_sm_margin = false, bool use_ce = true,
+                                bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
+                                bool aggregate_ag = false);
 
 void DestroyCommOverlapBuffer(size_t unique_id);
 

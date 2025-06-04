@@ -29,7 +29,7 @@ std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 
 class cudaDevicePropertiesManager {
  public:
-  static cudaDevicePropertiesManager &Instance() {
+  static cudaDevicePropertiesManager& Instance() {
     static thread_local cudaDevicePropertiesManager instance;
     return instance;
   }

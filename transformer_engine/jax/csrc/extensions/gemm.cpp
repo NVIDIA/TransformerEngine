@@ -4,6 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <transformer_engine/gemm.h>
+#include <transformer_engine/swizzle.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -14,12 +17,8 @@
 #include <tuple>
 #include <unordered_map>
 
-#include <transformer_engine/gemm.h>
-#include <transformer_engine/swizzle.h>
-
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
-
 #include "extensions.h"
 #include "extensions/ffi.h"
 #include "extensions/misc.h"
@@ -29,13 +28,14 @@ namespace transformer_engine {
 
 namespace jax {
 
-static std::unordered_map<int64_t, CommOverlapCore*> comm_overlaps;
+static std::unordered_map<int64_t, CommOverlapCore *> comm_overlaps;
 
-int64_t CreateCommOverlapBuffer(
-    CommOverlapType comm_type, CommOverlapMethod method, const std::vector<size_t> &buffer_shape,
-    DType buffer_dtype, int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-    int gemm_priority, int comm_priority, int num_comm_sm, int set_sm_margin, bool use_ce,
-    bool atomic_gemm, bool rs_overlap_first_gemm, bool aggregate_ag) {
+int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod method,
+                                const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
+                                int gemm_priority, int comm_priority, int num_comm_sm,
+                                int set_sm_margin, bool use_ce, bool atomic_gemm,
+                                bool rs_overlap_first_gemm, bool aggregate_ag) {
   int64_t unique_id = 0;
   hash_combine(unique_id, static_cast<int>(comm_type), static_cast<int>(method), buffer_shape[0],
                buffer_shape[0], static_cast<int>(buffer_dtype), tp_size, num_splits,
@@ -46,16 +46,14 @@ int64_t CreateCommOverlapBuffer(
   if (it == comm_overlaps.end()) {
     if (method == CommOverlapMethod::RING_EXCHANGE) {
       comm_overlaps[unique_id] = reinterpret_cast<CommOverlapCore *>(
-          new CommOverlapP2PBase(
-              buffer_shape, buffer_dtype, tp_size, comm_type, num_max_streams, comm_cga_size,
-              gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
-              aggregate_ag));
+          new CommOverlapP2PBase(buffer_shape, buffer_dtype, tp_size, comm_type, num_max_streams,
+                                 comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
+                                 set_sm_margin, use_ce, atomic_gemm, aggregate_ag));
     } else {
       comm_overlaps[unique_id] = reinterpret_cast<CommOverlapCore *>(
-          new CommOverlapBase(
-              buffer_shape, buffer_dtype, tp_size, num_splits, num_max_streams, comm_cga_size,
-              gemm_priority, comm_priority, num_comm_sm, set_sm_margin, atomic_gemm,
-              rs_overlap_first_gemm));
+          new CommOverlapBase(buffer_shape, buffer_dtype, tp_size, num_splits, num_max_streams,
+                              comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
+                              set_sm_margin, atomic_gemm, rs_overlap_first_gemm));
     }
   }
 
@@ -77,7 +75,7 @@ void DestroyAllCommOverlapBuffers() {
   }
 }
 
-std::optional<NVTEBasicTensor> SwizzleScalingFactors(cudaStream_t stream, TensorWrapper& input,
+std::optional<NVTEBasicTensor> SwizzleScalingFactors(cudaStream_t stream, TensorWrapper &input,
                                                      bool rowwise) {
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
@@ -95,7 +93,7 @@ std::optional<NVTEBasicTensor> SwizzleScalingFactors(cudaStream_t stream, Tensor
   }
   auto input_shape = nvte_shape_to_vector(input.shape());
   auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
-  void* scale_inv_dptr = scale_inv.data_ptr;
+  void *scale_inv_dptr = scale_inv.data_ptr;
 
   // Allocate memory for swizzled output.
   void *swizzled_scale_inv_dptr;
@@ -148,10 +146,8 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
   TensorWrapper lhs_(scaling_mode_), rhs_(scaling_mode_);
 
   // LHS flips row/colwise for cuBLAS column-major layout
-  auto lhs_shape = std::vector<size_t>{
-    product(lhs.dimensions(), 0, lhs.dimensions().size() - 1),
-    static_cast<size_t>(lhs.dimensions().back())
-  };
+  auto lhs_shape = std::vector<size_t>{product(lhs.dimensions(), 0, lhs.dimensions().size() - 1),
+                                       static_cast<size_t>(lhs.dimensions().back())};
   auto lhs_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
   if (lhs_trans) {
     lhs_.set_columnwise_data(lhs.untyped_data(), lhs_dtype, lhs_shape);
@@ -159,10 +155,8 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
     lhs_.set_rowwise_data(lhs.untyped_data(), lhs_dtype, lhs_shape);
   }
 
-  auto rhs_shape = std::vector<size_t>{
-    product(rhs.dimensions(), 0, rhs.dimensions().size() - 1),
-    static_cast<size_t>(rhs.dimensions().back())
-  };
+  auto rhs_shape = std::vector<size_t>{product(rhs.dimensions(), 0, rhs.dimensions().size() - 1),
+                                       static_cast<size_t>(rhs.dimensions().back())};
   auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs.element_type());
   if (rhs_trans) {
     rhs_.set_columnwise_data(rhs.untyped_data(), rhs_dtype, rhs_shape);
@@ -171,11 +165,11 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
   }
 
   if (scaling_mode != JAXX_Scaling_Mode::NO_SCALING) {
-    DType scale_inv_dtype = (scaling_mode_ == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0
-                                                                     : DType::kFloat32;
+    DType scale_inv_dtype =
+        (scaling_mode_ == NVTE_MXFP8_1D_SCALING) ? DType::kFloat8E8M0 : DType::kFloat32;
 
-    auto lhs_scale_inv_shape = std::vector<size_t>(lhs_scale_inv.dimensions().begin(),
-                                                   lhs_scale_inv.dimensions().end());
+    auto lhs_scale_inv_shape =
+        std::vector<size_t>(lhs_scale_inv.dimensions().begin(), lhs_scale_inv.dimensions().end());
     if (lhs_trans) {
       lhs_.set_columnwise_scale_inv(lhs_scale_inv.untyped_data(), scale_inv_dtype,
                                     lhs_scale_inv_shape);
@@ -184,34 +178,32 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
                                  lhs_scale_inv_shape);
     }
 
-    auto rhs_scale_inv_shape = std::vector<size_t>(rhs_scale_inv.dimensions().begin(),
-                                                   rhs_scale_inv.dimensions().end());
+    auto rhs_scale_inv_shape =
+        std::vector<size_t>(rhs_scale_inv.dimensions().begin(), rhs_scale_inv.dimensions().end());
     if (rhs_trans) {
       rhs_.set_columnwise_scale_inv(rhs_scale_inv.untyped_data(), scale_inv_dtype,
-                                 rhs_scale_inv_shape);
+                                    rhs_scale_inv_shape);
     } else {
       rhs_.set_rowwise_scale_inv(rhs_scale_inv.untyped_data(), scale_inv_dtype,
-                                    rhs_scale_inv_shape);
+                                 rhs_scale_inv_shape);
     }
   }
 
   // Output buffer
-  auto out_shape = std::vector<size_t>{
-    product(out->dimensions(), 0, out->dimensions().size() - 1),
-    static_cast<size_t>(out->dimensions().back())
-  };
-  auto out_ = TensorWrapper(
-      out->untyped_data(), out_shape, convert_ffi_datatype_to_te_dtype(out->element_type()));
+  auto out_shape = std::vector<size_t>{product(out->dimensions(), 0, out->dimensions().size() - 1),
+                                       static_cast<size_t>(out->dimensions().back())};
+  auto out_ = TensorWrapper(out->untyped_data(), out_shape,
+                            convert_ffi_datatype_to_te_dtype(out->element_type()));
 
   // Bias tensor
-  void* bias_ptr = nullptr;
+  void *bias_ptr = nullptr;
   auto bias_shape = std::vector<size_t>{0};
   DType bias_dtype = DType::kBFloat16;
   if (fuse_bias) {
     if (grad) {
       bias_ptr = bias_grad->untyped_data();
-      bias_shape = std::vector<size_t>(bias_grad->dimensions().begin(),
-                                       bias_grad->dimensions().end());
+      bias_shape =
+          std::vector<size_t>(bias_grad->dimensions().begin(), bias_grad->dimensions().end());
       bias_dtype = convert_ffi_datatype_to_te_dtype(bias_grad->element_type());
     } else {
       bias_ptr = bias.untyped_data();
@@ -222,7 +214,7 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
   auto bias_ = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
 
   // Pre-GeLU tensor
-  void* pre_gelu_ptr = nullptr;
+  void *pre_gelu_ptr = nullptr;
   auto pre_gelu_shape = std::vector<size_t>{0};
   DType pre_gelu_dtype = DType::kBFloat16;
   if (fuse_gelu) {
@@ -230,23 +222,21 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
       pre_gelu_ptr = pre_gelu_in.untyped_data();
       pre_gelu_shape = std::vector<size_t>{
           product(pre_gelu_in.dimensions(), 0, pre_gelu_in.dimensions().size() - 1),
-          static_cast<size_t>(pre_gelu_in.dimensions().back())
-      };
+          static_cast<size_t>(pre_gelu_in.dimensions().back())};
       pre_gelu_dtype = convert_ffi_datatype_to_te_dtype(pre_gelu_in.element_type());
     } else {
       pre_gelu_ptr = pre_gelu_out->untyped_data();
       pre_gelu_shape = std::vector<size_t>{
           product(pre_gelu_out->dimensions(), 0, pre_gelu_out->dimensions().size() - 1),
-          static_cast<size_t>(pre_gelu_out->dimensions().back())
-      };
+          static_cast<size_t>(pre_gelu_out->dimensions().back())};
       pre_gelu_dtype = convert_ffi_datatype_to_te_dtype(pre_gelu_out->element_type());
     }
   }
   auto pre_gelu_ = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, pre_gelu_dtype);
 
   // cuBLAS workspace
-  auto workspace_ = TensorWrapper(
-      workspace->untyped_data(), std::vector<size_t>{workspace->element_count()}, DType::kByte);
+  auto workspace_ = TensorWrapper(workspace->untyped_data(),
+                                  std::vector<size_t>{workspace->element_count()}, DType::kByte);
 
   // Keep swizzling factors alive here in order to de-allocate the memory later
   std::vector<std::optional<NVTEBasicTensor>> swizzled_scale_inverses_list;
@@ -258,22 +248,21 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
   if (comm_type == CommOverlapType::NONE) {
     // No comm. overlap, do plain cuBLAS GEMM
     auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-    nvte_cublas_gemm(rhs_.data(), lhs_.data(), bias_.data(),
-                     pre_gelu_.data(), out_.data(), rhs_trans, lhs_trans,
-                     grad, workspace_.data(), accumulate, use_split_accumulator,
-                     num_math_sm, stream);
+    nvte_cublas_gemm(rhs_.data(), lhs_.data(), bias_.data(), pre_gelu_.data(), out_.data(),
+                     rhs_trans, lhs_trans, grad, workspace_.data(), accumulate,
+                     use_split_accumulator, num_math_sm, stream);
   } else {
     // Prepare the auxiliary output tensor
-    auto aux_out_shape = std::vector<size_t>(aux_out->dimensions().begin(),
-                                             aux_out->dimensions().end());
+    auto aux_out_shape =
+        std::vector<size_t>(aux_out->dimensions().begin(), aux_out->dimensions().end());
     auto aux_out_dtype = convert_ffi_datatype_to_te_dtype(aux_out->element_type());
     auto aux_out_ = TensorWrapper(aux_out->untyped_data(), aux_out_shape, aux_out_dtype);
 
     auto executor = comm_overlaps[comm_overlap_id];
     if (comm_overlap_method == CommOverlapMethod::BULK) {
       // Copy the auxiliary data into the communications buffer
-      auto aux_in_shape = std::vector<size_t>(aux_in.dimensions().begin(),
-                                              aux_in.dimensions().end());
+      auto aux_in_shape =
+          std::vector<size_t>(aux_in.dimensions().begin(), aux_in.dimensions().end());
       auto aux_in_dtype = convert_ffi_datatype_to_te_dtype(aux_in.element_type());
       auto aux_in_ = TensorWrapper(aux_in.untyped_data(), aux_in_shape, aux_in_dtype);
       executor->copy_into_buffer(aux_in_, (comm_type == CommOverlapType::AG), stream);
@@ -284,16 +273,16 @@ Error_Type CollectiveGemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type l
     } else if (comm_type == CommOverlapType::RS) {
       // Launch GEMM+RS
       executor->split_overlap_rs(rhs_, rhs_trans, lhs_, lhs_trans, out_, bias_, pre_gelu_,
-                                 workspace_, grad, accumulate, use_split_accumulator,
-                                 aux_out_, stream);
+                                 workspace_, grad, accumulate, use_split_accumulator, aux_out_,
+                                 stream);
     } else {
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(lhs_, true, stream);
 
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, rhs_trans, lhs_, lhs_trans, out_, bias_, pre_gelu_,
-                                 workspace_, grad, accumulate, use_split_accumulator,
-                                 aux_out_, stream);
+                                 workspace_, grad, accumulate, use_split_accumulator, aux_out_,
+                                 stream);
     }
   }
 

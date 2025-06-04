@@ -7,13 +7,12 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 
-#include <cstdint>
-#include <functional>
-
 #include <cuda.h>
 #include <cuda_fp8.h>
-
 #include <transformer_engine/transformer_engine.h>
+
+#include <cstdint>
+#include <functional>
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
@@ -28,18 +27,9 @@ namespace transformer_engine {
  */
 bool ubuf_built_with_mpi();
 
-enum class CommOverlapType : int64_t {
-  NONE = 0,
-  RS = 1,
-  AG = 2
-};
+enum class CommOverlapType : int64_t { NONE = 0, RS = 1, AG = 2 };
 
-enum class CommOverlapMethod : int64_t {
-  NONE = 0,
-  PIPELINE = 1,
-  RING_EXCHANGE = 2,
-  BULK = 3
-};
+enum class CommOverlapMethod : int64_t { NONE = 0, PIPELINE = 1, RING_EXCHANGE = 2, BULK = 3 };
 
 enum class CommOverlapAlgo : int64_t {
   NO_OVERLAP = 0,
@@ -204,8 +194,8 @@ class CommOverlapBase : public CommOverlapCore {
 
   virtual ~CommOverlapBase();
 
-void copy_into_buffer(const TensorWrapper &source, bool local_chunk,
-                      cudaStream_t stream_main) override;
+  void copy_into_buffer(const TensorWrapper &source, bool local_chunk,
+                        cudaStream_t stream_main) override;
 
   /*
   ** Bulk GEMM + COMM

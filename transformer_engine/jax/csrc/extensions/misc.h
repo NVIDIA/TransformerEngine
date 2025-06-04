@@ -9,11 +9,11 @@
 
 #include <transformer_engine/transformer_engine.h>
 
-#include "common/util/logging.h"
-
 #include <cassert>
 #include <string>
 #include <vector>
+
+#include "common/util/logging.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -73,7 +73,7 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
 }
 
 template <typename T, typename... Rest>
-void hash_combine(int64_t& seed, const T& v, Rest... rest) {
+void hash_combine(int64_t &seed, const T &v, Rest... rest) {
   seed ^= std::hash<T>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
   (hash_combine(seed, rest), ...);
 }

@@ -141,12 +141,14 @@
            pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
   m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,                \
         pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);    \
-  m.def("get_stream_priority_range",                                                               \
-        [](int device_id = -1) {                                                                   \
-          int low_pri, high_pri;                                                                   \
-          transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);         \
-          return std::make_pair(low_pri, high_pri);                                                \
-        }, pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1); \
+  m.def(                                                                                           \
+      "get_stream_priority_range",                                                                 \
+      [](int device_id = -1) {                                                                     \
+        int low_pri, high_pri;                                                                     \
+        transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);           \
+        return std::make_pair(low_pri, high_pri);                                                  \
+      },                                                                                           \
+      pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);      \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
         pybind11::call_guard<pybind11::gil_scoped_release>());
 

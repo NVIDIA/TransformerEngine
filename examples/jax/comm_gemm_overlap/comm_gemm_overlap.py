@@ -32,7 +32,7 @@ jax.distributed.initialize(cluster_detection_method="mpi4py")
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
 parser.add_argument("-zp", "--fsdp-size", type=int, default=2)
-parser.add_argument("-tp", "--tp-size", type=int, default=numranks/2)
+parser.add_argument("-tp", "--tp-size", type=int, default=numranks / 2)
 parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
 parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
@@ -60,8 +60,8 @@ rhs_shape = (
 # Operand partitioning
 batched = not args.no_batch
 fsdp = not args.no_fsdp
-input_specs = [ None ] * len(lhs_shape)
-weight_specs = [ None ] * len(rhs_shape)
+input_specs = [None] * len(lhs_shape)
+weight_specs = [None] * len(rhs_shape)
 weight_no_fsdp = weight_specs.copy()
 if batched:
     lhs_shape = [args.batch_size] + lhs_shape
@@ -132,11 +132,7 @@ rhs = jax.device_put(rhs_data, weight_sharding)
 
 # Name of comm+GEMM overlap layer
 overlap_method = tex.CommOverlapMethod.RING_EXCHANGE
-comm_type = (
-    tex.CommOverlapType.AG
-    if args.comm_type == "AG"
-    else tex.CommOverlapType.RS
-)
+comm_type = tex.CommOverlapType.AG if args.comm_type == "AG" else tex.CommOverlapType.RS
 
 # Bootstrap Userbuffers communicators and communication buffers
 # NOTE: All-gather overlap requires buffer to be sized the LHS operand's global shape.
