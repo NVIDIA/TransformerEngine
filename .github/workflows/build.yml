@@ -77,20 +77,17 @@ jobs:
     name: 'All'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
+      image: ghcr.io/nvidia/jax:jax
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: |
-          apt-get update
-          apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch jax[cuda12] flax pydantic importlib-metadata>=1.0 packaging pybind11[global]
+        run: pip install torch pybind11[global]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install --no-build-isolation . -v --no-deps
+        run: pip install --no-build-isolation . -v
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1
