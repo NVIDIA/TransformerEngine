@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence, Union, Dict
+from typing import Tuple, Sequence, Union, Dict, Iterable
 from functools import partial, reduce
 import operator
 import jax
@@ -307,6 +307,135 @@ def gemm(
     """
 
     return _jax_gemm(lhs, rhs, contracting_dims, quantizer_set)
+
+
+def sanitize_dims(dims: Sequence[int], ndim: int) -> Sequence[int]:
+    """Convert relative (negative) dimension indexes to absolute (positive) dimensions."""
+    dims_ = dims if isinstance(dims, Iterable) else (dims, )
+    if len(dims_) == 0:
+        return dims_
+    return tuple([ ndim + dim if dim < 0 else dim for dim in dims_ ])
+
+
+def get_gemm_layout(contracting_dims: Tuple[Sequence[int], Sequence[int]],
+                    operand_ndims: Tuple[int, int]) -> Tuple[bool, bool]:
+    """Convert JAX-style contracting dimensions into cuBLAS-style transpose flags."""
+    lhs_contracting, rhs_contracting = map(sanitize_dims, contracting_dims, operand_ndims)
+
+    def _is_sequential(dims: Sequence[int]) -> bool:
+        if len(dims) > 1:
+            d = sorted(dims)
+            return all(d[i] - d[i - 1] for i in range(1, len(d)))
+        return True
+
+    assert _is_sequential(lhs_contracting) and _is_sequential(rhs_contracting), (
+        "Multiple contracting dimensions for a GEMM operand must be adjacent/sequential."
+    )
+
+    transpose_lhs = operand_ndims[0] - 1 not in lhs_contracting
+    transpose_rhs = operand_ndims[1] - 1 in rhs_contracting
+    return transpose_lhs, transpose_rhs
+
+
+def is_non_nt_fp8_gemm_supported():
+    """Check if the device compute capability supports cuBLAS FP8 GEMM with different layouts."""
+    arch = get_device_compute_capability(0)
+    return (100 <= arch < 120) or (arch >= 130)
+
+
+class GemmPrimitive(BasePrimitive):
+    """
+    Primitive for cuBLAS GEMM
+    """
+
+    name = "te_gemm_ffi"
+    multiple_results = True
+    impl_static_args = ()
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, contracting_dims,
+                 scaling_mode, grad, accumulate, use_split_accumulator):
+        del grad, accumulate, use_split_accumulator
+
+        # Verify operands
+        assert lhs.dtype == rhs.dtype, (
+            f"cuBLAS GEMM operands have incompatible dtypes: {lhs.dtype} X {rhs.dtype}"
+        )
+        transpose_lhs, transpose_rhs = get_gemm_layout(contracting_dims, (lhs.ndim, rhs.ndim))
+        assert not (transpose_lhs, transpose_rhs), (
+            "cuBLAS GEMM cannot transpose both operands at the same time."
+        )
+        if scaling_mode != ScalingMode.NO_SCALING:
+            assert lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0, (
+                "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
+            )
+            if not is_non_nt_fp8_gemm_supported():
+                assert not transpose_lhs and transpose_rhs, (
+                    "Quantized cuBLAS GEMM on devices with compute capability < 10.0 (Hopper) "
+                    "require non-transposed LHS and transposed RHS operands "
+                    "(`contracting_dims=((-1, ), (-1, ))`)."
+                )
+        lhs_contracting_dims, rhs_contracting_dims = map(sanitize_dims, contracting_dims,
+                                                         (lhs.ndim, rhs.ndim))
+        lhs_contracting_size, rhs_contracting_size = map(
+            lambda shape: reduce(operator.mul, shape),
+            (lhs_contracting_dims, rhs_contracting_dims)
+        )
+        assert lhs_contracting_size == rhs_contracting_size, (
+            "cuBLAS GEMM operands have incompatible shapes: "
+            f"{lhs.shape} @ idx {lhs_contracting_dims} X {rhs.shape} @ idx {rhs_contracting_dims}."
+        )
+
+        # Determine output shape and dtype
+        lhs_leading_dims, rhs_leading_dims = map(
+            lambda exclude_dims, ndim: [ dim for dim in range(ndim) if dim not in exclude_dims ]
+            (lhs_contracting_dims, rhs_contracting_dims),
+            (lhs.ndim, rhs.ndim)
+        )
+        lhs_leading_shape, rhs_leading_shape = map(
+            lambda shape, dims: [ shape[i] for i in dims ],
+            (lhs.shape, rhs.shape),
+            (lhs_leading_dims, rhs_leading_dims)
+        )
+        output_shape = (*lhs_leading_shape, reduce(operator.mul, rhs_leading_shape))
+        output_dtype = jnp.bfloat16 if scaling_mode != ScalingMode.NO_SCALING else lhs.dtype
+        output = jax.core.ShapedArray(shape=output_shape, dtype=output_dtype)
+
+        # Validate bias
+        if bias.size > 0:
+            assert bias.ndim == 1 and bias.size == output_shape[-1], (
+                "cuBLAS GEMM bias tensor has incorrect shape, "
+                f"expected ({output_shape[-1]}, ) but found {bias.shape}."
+            )
+            assert bias.dtype == output_dtype, (
+                "cuBLAS GEMM bias tensor has incorrect data type, "
+                f"expected {output_dtype} but found {bias.dtype}."
+            )
+        bias_grad = jax.core.ShapedArray(shape=bias.shape, dtype=bias.dtype)
+
+        # Validate pre-GeLU
+        if gelu_input.size > 0:
+            assert (
+                gelu_input.ndim == len(output_shape)
+                and all(gelu_input.shape[i] == output_shape[i] for i in range(gelu_input.ndim))
+            ), (
+                "cuBLAS GEMM pre-GeLU tensor has incorrect shape, "
+                f"expected {output_shape} but found {gelu_input.shape}."
+            )
+            assert gelu_input.dtype == output_dtype, (
+                "cuBLAS GEMM pre-GeLU tensor has incorrect data type, "
+                f"expected {output_dtype} but found {gelu_input.dtype}."
+            )
+        pre_gelu_out = jax.core.ShapedArray(shape=gelu_input.shape, dtype=gelu_input.dtype)
+
+        # Declare cuBLAS workspace
+        workspace = jax.core.ShapedArray(shape=(get_cublas_workspace_size_bytes(), ),
+                                         dtype=jnp.uint8)
+
+        return output, bias_grad, pre_gelu_out, workspace
+
 
 
 """

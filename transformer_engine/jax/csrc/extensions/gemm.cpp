@@ -79,8 +79,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
                    Buffer_Type gelu_input, Result_Type output, Result_Type bias_grad,
                    Result_Type pre_gelu_out, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
-                   bool transpose_lhs, bool transpose_rhs, bool grad, bool accumulate,
-                   bool use_split_accumulator) {
+                   bool transpose_lhs, bool transpose_rhs, bool fuse_bias, bool fuse_gelu,
+                   bool grad, bool accumulate, bool use_split_accumulator) {
   // Operands (includes swizzling MXFP8 scaling factors if needed)
   auto lhs_ = xla_buffer_to_nvte_gemm_operand(lhs, lhs_scale_inv, scaling_mode, transpose_lhs);
   auto rhs_ = xla_buffer_to_nvte_gemm_operand(rhs, rhs_scale_inv, scaling_mode, !transpose_rhs);
@@ -151,6 +151,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<JAXX_Scaling_mode>("scaling_mode")
                                   .Attr<bool>("transpose_lhs")
                                   .Attr<bool>("transpose_rhs")
+                                  .Attr<bool>("fuse_bias")
+                                  .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("accumulate")
                                   .Attr<bool>("use_split_accumulator"),
