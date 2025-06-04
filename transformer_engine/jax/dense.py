@@ -48,7 +48,7 @@ def dense(
         Transformed output tensor
     """
     # Remove when tex.quantize() can handle quantizer=None
-    if quantizer_set == noop_quantizer_set:
+    if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
         output = tex.gemm(x, kernel, contracting_dims)
         if bias is not None:
@@ -90,39 +90,50 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     Returns:
         Tuple of (output, context) for backward pass
     """
-    x_contracting_dims, k_contracting_dims = contracting_dims
+    x_cdims, k_cdims = map(
+        tex.sanitize_dims, (x.ndim, kernel.ndim), contracting_dims
+    )
+    x_is_transposed = x.ndim - 1 not in x_cdims
+    k_is_transposed = kernel.ndim - 1 in k_cdims
+    assert not x_is_transposed and not k_is_transposed, (
+        "Forward-mode Dense layer implementation only supports 'NN' layout inputs."
+    )
 
-    flatten_axis_x = -len(x_contracting_dims)
-    flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
-
-    casted_x = tex.quantize(x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x)
+    casted_x = tex.quantize(x, flatten_axis=min(x_cdims), quantizer=quantizer_set.x,
+                            noop_scaled_tensor=True)
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
+    rowwise_x = casted_x.get_rowwise_tensor()
+    colwise_x = casted_x.get_colwise_tensor()
 
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel
+        kernel, flatten_axis=max(k_cdims) + 1, quantizer=quantizer_set.kernel,
+        noop_scaled_tensor=True
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
+    colwise_k = casted_kernel.get_colwise_tensor()
+    rowwise_k = casted_kernel.get_rowwise_tensor()
 
-    # GEMM NN
+    # FPROP GEMM: (batch..., hidden_in) x (hidden_in, hidden_out) = (batch..., hidden_out)
+    # FPROP FP8 GEMM: (batch..., hidden_in) x (hidden_out, hidden_in)^T = (batch..., hidden_out)
+    use_bias = bias is not None
     output = tex.gemm(
-        casted_x.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
-        (x_contracting_dims, k_contracting_dims),
+        rowwise_x,
+        colwise_k,
+        bias=bias if not tex.gemm_uses_jax_dot() else None,
+        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
+        contracting_dims=(x_cdims, k_cdims),
+        grad=False,
     )
 
-    use_bias = bias is not None
-    if use_bias:
+    if use_bias and tex.gemm_uses_jax_dot():
         bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
-        x.shape,
-        kernel.shape,
+        colwise_x,
+        rowwise_k,
         use_bias,
         quantizer_set,
-        flatten_axis_k,
     )
     return output, ctx
 
@@ -135,46 +146,49 @@ def _dense_bwd_rule(
     Returns:
         Tuple of gradients with respect to inputs
     """
-    fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
-
     (
-        colwise_casted_x,
-        rowwise_casted_kernel,
-        x_shape,
-        kernel_shape,
+        colwise_x,
+        rowwise_k,
         use_bias,
         quantizer_set,
-        flatten_axis_k,
     ) = ctx
+    # Original non-contracting dimensions in the forward pass are contracting dimensions for the
+    # backward pass.
+    fwd_x_cdims, fwd_k_cdims = map(
+        tex.sanitize_dims, (colwise_x.ndim, rowwise_k.ndim), contracting_dims
+    )
+    fwd_x_non_cdims = tex.get_non_contracting_dims(colwise_x.ndim, fwd_x_cdims)
+    fwd_k_non_cdims = tex.get_non_contracting_dims(rowwise_k.ndim, fwd_k_cdims)
 
+    # Axis boundary for the gradient is the number of non-contracting dimensions of the FWD input
+    flatten_axis_grad = len(fwd_x_non_cdims)
     casted_grad, dbias = tex.quantize_dbias(
-        grad, is_dbias=use_bias, flatten_axis=flatten_axis_k, quantizer=quantizer_set.dgrad
+        grad, is_dbias=use_bias, flatten_axis=flatten_axis_grad, quantizer=quantizer_set.dgrad,
+        noop_scaled_tensor=True,
     )
 
-    # GEMM NT
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_contracting_dim = tuple(
-        range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
-    )
-    # k_non_contracting_dims
-    k_contracting_dim = tuple(
-        dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
-    )
+    # Prepare DGRAD and WGRAD operands and contracting dims
+    rowwise_g = casted_grad.get_rowwise_tensor()
+    rowwise_g_cdims = tuple(range(flatten_axis_grad, grad.ndim))
+    colwise_g = casted_grad.get_colwise_tensor()
+    colwise_g_cdims = tex.get_non_contracting_dims(grad.ndim, rowwise_g_cdims)
+
+    # DGRAD GEMM: (batch..., hidden_out) x (hidden_in, hidden_out)^T = (batch..., hidden_in)
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
-        (g_contracting_dim, k_contracting_dim),
+        rowwise_g,
+        rowwise_k,
+        contracting_dims=(rowwise_g_cdims, fwd_k_non_cdims),
+        grad=True
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
-    # GEMM TN
-    # x_non_contracting_dims
-    g_contracting_dim = x_contracting_dim = tuple(
-        range(0, len(x_shape) - len(fwd_x_contracting_dims))
-    )
-
+    # WGRAD GEMM: (batch..., hidden_in)^T x (batch..., hidden_out) = (hidden_in, hidden_out)
+    # WGRAD FP8 GEMM: (hidden_in, batch...) x (hidden_out, batch...)^T = (hidden_in, hidden_out)
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_contracting_dim, g_contracting_dim)
+        colwise_x,
+        colwise_g,
+        contracting_dims=(fwd_x_non_cdims, colwise_g_cdims),
+        grad=True,
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 

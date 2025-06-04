@@ -1276,6 +1276,7 @@ def normalization_fwd(
     epsilon: float,
     norm_type: str,
     quantizer: Optional[Quantizer],
+    noop_scaled_tensor: bool = False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1292,6 +1293,7 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
+        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         A tuple containing:
@@ -1318,6 +1320,11 @@ def normalization_fwd(
         mu = None
     else:
         raise ValueError(f"{norm_type=} is not supported.")
+
+    if quantizer is None and noop_scaled_tensor:
+        return ScaledTensorFactory.create_2x(
+            output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype
+        ), mu, rsigma
 
     return output, mu, rsigma
 
