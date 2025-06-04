@@ -407,16 +407,22 @@ class UserbuffersBackwardLinear(FusedOperation):
             # Initialize grad output
             if tensor_parallel_mode == "row" and isinstance(grad_output_quantizer, MXFP8Quantizer):
                 # UB does not support overlapping grad output
-                # all-gather with wgrad GEMM. Also, MXFP8 does not
-                # allow reusing the grad output that was gathered for
-                # the dgrad GEMM. We work around with blocking
-                # all-gather for column-scaled MXFP8 data.
+                # all-gather with wgrad GEMM. Also, we can't
+                # convert row-scaled MXFP8 to column-scaled, so we
+                # can't reuse the grad output that was gathered
+                # for the dgrad GEMM. We work around by explicitly
+                # overlapping the NCCL operation with the dgrad GEMM.
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                dy, _ = gather_along_first_dim(
-                    grad_output,
-                    tensor_parallel_group,
-                    quantizer=grad_output_quantizer,
-                )
+                s = ub_comm_dgrad.get_communication_stream()
+                with torch.cuda.stream(s):
+                    dy, dy_work = gather_along_first_dim(
+                        dy_local,
+                        tensor_parallel_group,
+                        async_op=True,
+                        quantizer=grad_output_quantizer,
+                    )
+                dy_work.wait()
+
             if tensor_parallel_mode == "column":
                 dy = dy_local
             if dy is None:

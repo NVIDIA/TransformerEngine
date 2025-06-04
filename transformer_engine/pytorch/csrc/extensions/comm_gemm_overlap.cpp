@@ -216,6 +216,16 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<i
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
+void CommOverlap::current_stream_wait_on_memcpy() {
+  auto current_stream = at::cuda::getCurrentCUDAStream();
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, (cudaStream_t)_stream_comm));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)current_stream, _stop_comm, 0));
+}
+
+at::Stream CommOverlap::get_communication_stream() {
+  return at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device());
+}
+
 /***************************************************************************************************
  * CommOverlapP2P
  **************************************************************************************************/
@@ -299,4 +309,14 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   // Construct PyTorch tensor
   const auto dtype = transformer_engine::pytorch::GetATenDType(_ubuf.dtype());
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
+}
+
+void CommOverlapP2P::current_stream_wait_on_memcpy() {
+  auto current_stream = at::cuda::getCurrentCUDAStream();
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, (cudaStream_t)_stream_recv));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)current_stream, _stop_recv, 0));
+}
+
+at::Stream CommOverlapP2P::get_communication_stream() {
+  return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
 }
