@@ -350,8 +350,10 @@ class FusedAttnRunner:
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
-            pytest.skip("For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
-            "is either BSHD_BSHD_BSHD or THD_THD_THD")
+            pytest.skip(
+                "For head_dim_qk != head_dim_v, it is necessary that the QKV layout "
+                "is either BSHD_BSHD_BSHD or THD_THD_THD"
+            )
 
         self.backend = FusedAttnHelper(
             self.is_training,
@@ -941,7 +943,9 @@ class FusedAttnRunner:
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
     [
-        pytest.param(2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+        ),
         pytest.param(
             2,
             2048,
@@ -953,9 +957,15 @@ class FusedAttnRunner:
             jnp.bfloat16,
             id="2-2048-1024-12-12-64-64-BF16-CROSS",
         ),
-        pytest.param(2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"),
-        pytest.param(4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"),
-        pytest.param(4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
+        ),
+        pytest.param(
+            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+        ),
     ],
 )
 @pytest.mark.parametrize(

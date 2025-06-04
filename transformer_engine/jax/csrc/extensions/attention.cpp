@@ -16,8 +16,8 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DTy
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_attn_heads, size_t kv_attn_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-                                            int64_t window_size_right) {
+                                            size_t qk_head_dim, size_t v_head_dim,
+                                            int64_t window_size_left, int64_t window_size_right) {
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
       bias_type, mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
@@ -288,7 +288,8 @@ static void FusedAttnForwardImpl(
                                   window_size_right, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
-    auto kv_shape = std::vector<size_t>{input_batch * kv_max_seqlen, 2, num_gqa_groups, qk_head_dim};
+    auto kv_shape =
+        std::vector<size_t>{input_batch * kv_max_seqlen, 2, num_gqa_groups, qk_head_dim};
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(k, kv_shape, dtype);
     nvte_fused_attn_fwd_kvpacked(
@@ -327,8 +328,8 @@ static void FusedAttnForwardImpl(
   size_t attn_heads = get_attr_value<int64_t>(attrs, "attn_heads");                     \
   size_t num_gqa_groups = get_attr_value<int64_t>(attrs, "num_gqa_groups");             \
   size_t bias_heads = get_attr_value<int64_t>(attrs, "bias_heads");                     \
-  size_t qk_head_dim = get_attr_value<int64_t>(attrs, "qk_head_dim");                      \
-  size_t v_head_dim = get_attr_value<int64_t>(attrs, "v_head_dim");                       \
+  size_t qk_head_dim = get_attr_value<int64_t>(attrs, "qk_head_dim");                   \
+  size_t v_head_dim = get_attr_value<int64_t>(attrs, "v_head_dim");                     \
   size_t max_segments_per_seq = get_attr_value<int64_t>(attrs, "max_segments_per_seq"); \
   auto window_size_left = get_attr_value<int64_t>(attrs, "window_size_left");           \
   auto window_size_right = get_attr_value<int64_t>(attrs, "window_size_right");         \
@@ -363,9 +364,9 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
       is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, output_buf->untyped_data(),
       softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(), workspace_buf->untyped_data(),
       input_batch, bias_batch, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads,
-      qk_head_dim, v_head_dim, max_segments_per_seq, wkspace_size, scaling_factor, dropout_probability, bias_type,
-      mask_type, qkv_layout, dtype, wkspace_dtype, is_training, deterministic, window_size_left,
-      window_size_right);
+      qk_head_dim, v_head_dim, max_segments_per_seq, wkspace_size, scaling_factor,
+      dropout_probability, bias_type, mask_type, qkv_layout, dtype, wkspace_dtype, is_training,
+      deterministic, window_size_left, window_size_right);
 
   return ffi_with_cuda_error_check();
 }
@@ -545,7 +546,8 @@ static void FusedAttnBackwardImpl(
                                   deterministic, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
-    auto kv_shape = std::vector<size_t>{input_batch * kv_max_seqlen, 2, num_gqa_groups, qk_head_dim};
+    auto kv_shape =
+        std::vector<size_t>{input_batch * kv_max_seqlen, 2, num_gqa_groups, qk_head_dim};
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(k, kv_shape, dtype);
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);

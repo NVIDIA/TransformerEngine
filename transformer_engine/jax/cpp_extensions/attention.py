@@ -148,7 +148,7 @@ class FusedAttnHelper:
         return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     @staticmethod
-    #TODO: This method needs some checking of dimensions to be re-done
+    # TODO: This method needs some checking of dimensions to be re-done
     def parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout):
         """Parse qkv aval"""
         if qkv_layout.get_qkv_format() == QKVFormat.SBHD:
@@ -171,16 +171,37 @@ class FusedAttnHelper:
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
             *k_batch_shape, k_max_seqlen, k_num_gqa_groups, k_head_dim = k_aval.shape
             *v_batch_shape, v_max_seqlen, v_num_gqa_groups, v_head_dim = v_aval.shape
-            assert q_head_dim == k_head_dim, f"Mismatched q_head_dim: {q_head_dim} and k_head_dim: {k_head_dim}"
-            assert k_max_seqlen == v_max_seqlen, f"Mismatched k_max_seqlen: {k_max_seqlen} and v_max_seqlen: {v_max_seqlen}"
+            assert (
+                q_head_dim == k_head_dim
+            ), f"Mismatched q_head_dim: {q_head_dim} and k_head_dim: {k_head_dim}"
+            assert (
+                k_max_seqlen == v_max_seqlen
+            ), f"Mismatched k_max_seqlen: {k_max_seqlen} and v_max_seqlen: {v_max_seqlen}"
             kv_max_seqlen = k_max_seqlen
-            assert q_batch_shape == k_batch_shape == v_batch_shape, f"Mismatched qkv batch size for q_batch_shape: {q_batch_shape}, k_batch_shape: {k_batch_shape} and v_batch_shape: {v_batch_shape}"
-            assert k_num_gqa_groups == v_num_gqa_groups, f"Mismatched k_num_gqa_groups: {k_num_gqa_groups} and v_num_gqa_groups: {v_num_gqa_groups}"
+            assert q_batch_shape == k_batch_shape == v_batch_shape, (
+                f"Mismatched qkv batch size for q_batch_shape: {q_batch_shape}, k_batch_shape:"
+                f" {k_batch_shape} and v_batch_shape: {v_batch_shape}"
+            )
+            assert k_num_gqa_groups == v_num_gqa_groups, (
+                f"Mismatched k_num_gqa_groups: {k_num_gqa_groups} and v_num_gqa_groups:"
+                f" {v_num_gqa_groups}"
+            )
             num_gqa_groups = k_num_gqa_groups
         else:
             raise ValueError(f"Unexpected {qkv_layout=}")
-        assert q_aval.dtype == k_aval.dtype == v_aval.dtype, f"Mismatched data types for q_aval: {q_aval.dtype}, k_aval: {k_aval.dtype}, v_aval: {v_aval.dtype}"
-        return (q_batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim, v_head_dim)
+        assert q_aval.dtype == k_aval.dtype == v_aval.dtype, (
+            f"Mismatched data types for q_aval: {q_aval.dtype}, k_aval: {k_aval.dtype}, v_aval:"
+            f" {v_aval.dtype}"
+        )
+        return (
+            q_batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        )
 
 
 @dataclass(frozen=True)
@@ -278,9 +299,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             f" kv_seqlen_or_cu_seqlen_aval={kv_seqlen_or_cu_seqlen_aval}"
         )
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim, v_head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         output_shape = (*batch_shape, q_max_seqlen, attn_heads, q_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
@@ -403,9 +430,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, q_head_dim, v_head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
 
@@ -723,9 +756,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         if config.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_batch = bias_heads = 0
@@ -804,9 +843,15 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
-        batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, qk_head_dim, v_head_dim = (
-            FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
-        )
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
         input_batch = reduce(operator.mul, batch_shape)
 
