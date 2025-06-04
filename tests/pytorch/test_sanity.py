@@ -1415,5 +1415,6 @@ def test_inference_mode(
         kwargs = {}
         if module_name == "GroupedLinear":
             kwargs["m_splits"] = [sequence_length]
-        y = module(x, **kwargs)
+        with fp8_autocast(enabled=with_quantization, fp8_recipe=quantization_recipe):
+            y = module(x, **kwargs)
     check_weights()
