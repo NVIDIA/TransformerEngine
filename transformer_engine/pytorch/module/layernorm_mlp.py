@@ -286,6 +286,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if fp8 or debug:
                     ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
+                        fc1_input_quantizer.all_gather_usage = False
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
                 quantizer = None
