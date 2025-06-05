@@ -185,7 +185,6 @@ class _Linear(torch.autograd.Function):
                     tp_group,
                     quantizer=quantizer,
                 )
-                inputmat_total = quantizer(inputmat_total)
             elif ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
                 inputmat_total, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_obj,
