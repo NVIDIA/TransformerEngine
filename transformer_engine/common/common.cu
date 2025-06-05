@@ -132,9 +132,10 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint32_t shmemX, const uint32_t stride_elems,
                           const uint32_t offset_elems, const size_t type_size) {
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
-  static PFN_cuTensorMapEncodeTiled cuDriverTensorMapEncodeTiled = []() {
+  // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
+  static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
     void *driver_ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
-    return reinterpret_cast<PFN_cuTensorMapEncodeTiled>(driver_ptr);
+    return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(driver_ptr);
   }();
   // rank is the number of dimensions of the array
   constexpr uint32_t rank = 2;
@@ -199,7 +200,7 @@ std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensor
   for (size_t i = 0; i < outer_size; ++i) {
     ret.emplace_back();
     for (size_t j = 0; j < inner_size; ++j) {
-      ret.back().push_back(reinterpret_cast<Tensor *>(nvte_tensors[i][j]));
+      ret.back().push_back(convertNVTETensor(nvte_tensors[i][j]));
     }
   }
   return ret;

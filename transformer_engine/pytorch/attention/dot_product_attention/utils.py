@@ -941,16 +941,24 @@ def get_attention_backend(
 @torch.no_grad()
 def get_padding_mask(
     batch_size: int,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
+    cu_seqlens_q: torch.Tensor = None,
+    cu_seqlens_kv: torch.Tensor = None,
+    max_seqlen_q: int = None,
+    max_seqlen_kv: int = None,
+    attention_type: str = "self",
 ):
     """Convert cu_seqlens to attention_mask"""
+    assert (
+        cu_seqlens_q is not None and max_seqlen_q is not None
+    ), "cu_seqlens_q and max_seqlen_q are required for self-attention and cross-attention"
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+    if attention_type == "cross":
+        assert (
+            cu_seqlens_kv is not None and max_seqlen_kv is not None
+        ), "cu_seqlens_kv and max_seqlen_kv are required for cross-attention"
+        seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+        attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
     for i in range(batch_size):
         attention_mask_q = torch.cat(
             [
@@ -963,21 +971,26 @@ def get_padding_mask(
             ],
             dim=0,
         )
-        attention_mask_kv = torch.cat(
-            [
-                attention_mask_kv,
-                torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
-                .to(dtype=torch.bool)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0),
-            ],
-            dim=0,
+        if attention_type == "cross":
+            attention_mask_kv = torch.cat(
+                [
+                    attention_mask_kv,
+                    torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
+                    .to(dtype=torch.bool)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .unsqueeze(0),
+                ],
+                dim=0,
+            )
+    attention_mask_q = attention_mask_q.to(device="cuda")
+    if attention_type == "self":
+        attention_mask = attention_mask_q
+    else:
+        attention_mask = (
+            attention_mask_q,
+            attention_mask_kv.to(device="cuda"),
         )
-    attention_mask = (
-        attention_mask_q.to(device="cuda"),
-        attention_mask_kv.to(device="cuda"),
-    )
     return attention_mask
 
 

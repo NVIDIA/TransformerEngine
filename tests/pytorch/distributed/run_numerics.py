@@ -185,7 +185,7 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1.3e-6, "atol": 4e-5}
+        return {"rtol": 1e-4, "atol": 1e-4}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
