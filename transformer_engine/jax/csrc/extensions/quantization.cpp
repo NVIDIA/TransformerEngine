@@ -296,6 +296,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   cudaMemcpyAsync(dim_list_host.data(), group_size_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
                   stream);
   // Note: This may break cudaGraph.
+  cudaStreamSynchronize(stream);
 
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
   NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
