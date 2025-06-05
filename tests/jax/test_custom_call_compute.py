@@ -1205,24 +1205,6 @@ class TestFusedDense:
         assert_allclose(prim_x_grad, ref_x_grad, dtype=q_dtype)
 
 
-# This function is modified from transformer_engine/jax/cpp_extensions/gemm.py::_jax_gemm()
-def _quantize_gemm_pair(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer):
-    ((lhs_contract_dim,), (rhs_contract_dim,)) = contracting_dims
-    lhs_is_rowwise = lhs_contract_dim == lhs.ndim - 1
-    rhs_is_rowwise = rhs_contract_dim == rhs.ndim - 1
-    lhs_q = lhs_quantizer.quantize(
-        lhs,
-        is_rowwise=lhs_is_rowwise,
-        is_colwise=not lhs_is_rowwise,
-    )
-    rhs_q = rhs_quantizer.quantize(
-        rhs,
-        is_rowwise=rhs_is_rowwise,
-        is_colwise=not rhs_is_rowwise,
-    )
-    return lhs_q, rhs_q
-
-
 # E5M2 * E5M2 is not supported
 fwd_bwd_dtypes = [
     [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
@@ -1292,11 +1274,9 @@ class TestGroupedDense:
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             dtype, input_shape, layout
         )
-        # f_jit = jax.jit(tex.grouped_gemm, static_argnums=3)
-        # primitive_out = f_jit(lhs, rhs, group_sizes, contracting_dims=contracting_dims)
-        primitive_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
-        self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, dtype)
+        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
@@ -1325,16 +1305,16 @@ class TestGroupedDense:
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             out_dtype, input_shape, layout
         )
-        primitive_out = tex.grouped_gemm(
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
+        prim_out = tex.grouped_gemm(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
-        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         allclose_dtype = jnp.float8_e4m3fn
         if jnp.float8_e5m2 in fwd_bwd_dtype:
             allclose_dtype = jnp.float8_e5m2
 
-        self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, allclose_dtype)
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, allclose_dtype)
 
     def _ref_sum_grouped_dense(self, x, kernel, bias, group_sizes, contracting_dims):
         out_list = self._ref_grouped_dense(x, kernel, bias, group_sizes, contracting_dims)
@@ -1362,14 +1342,14 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
-        ref_out_mean, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x, kernel, bias, group_sizes, contracting_dims
         )
-        prim_out_mean, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
             x, kernel, bias, group_sizes, contracting_dims
         )
 
-        assert_allclose(prim_out_mean, ref_out_mean, dtype=dtype)
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
         assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
@@ -1402,18 +1382,18 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
-        ref_out_mean, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x,
             kernel,
             bias,
             group_sizes,
             contracting_dims,
         )
-        prim_out_mean, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
             x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
-        assert_allclose(prim_out_mean, ref_out_mean, dtype=fwd_dtype)
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=fwd_dtype)
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)

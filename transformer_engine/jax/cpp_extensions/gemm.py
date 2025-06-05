@@ -77,12 +77,29 @@ class GroupedGemmPrimitive(BasePrimitive):
         is_grouped_dense_wgrad,
     ):
         """
-            scaling_mode: Scaling mode for the GEMM operations.
-            out_dtype: Data type of the output tensors.
-            has_bias: Boolean indicating if bias tensors are provided.
+        Grouped GEMM operation.
+
+        Args:
+            lhs_data: Left-hand side input matrix data, 1D flattened array
+            lhs_scale_inv: Left-hand side input scale_inv matrix, 1D flattened array
+            rhs_data: Right-hand side input matrix data, 1D flattened array
+            rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
+            bias: Bias matrix of shape (G, N)
+            group_sizes: 1D array containing the sizes of each group
+            group_offset: 1D array containing offsets for each group (not yet implemented)
+            M: Number of rows in the output matrix
+            N: Number of columns in the output matrix
+            K: Number of columns in the left-hand side matrix
+            lhs_is_trans: Boolean indicating if the left-hand side matrix is transposed
+            rhs_is_trans: Boolean indicating if the right-hand side matrix is transposed
+            scaling_mode: Scaling mode for the GEMM operations
+            out_dtype: Data type of the output tensors
+            has_bias: Boolean indicating if bias tensors are provided
+            is_grouped_dense_wgrad: Boolean indicating if this is a grouped dense wgrad operation
+                                    where both lhs and rhs are 2D matrices and output is (G, M, N)
 
         Returns:
-           1D flattened array of Grouped GEMM outputs
+            A jnp.ndarray containing the result of the grouped GEMM operation
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
         del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
