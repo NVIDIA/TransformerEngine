@@ -19,6 +19,7 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    TensorUsage,
 )
 
 
@@ -105,8 +106,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
 
     # GEMM NN
     output = tex.gemm(
-        casted_x.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
+        casted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -116,8 +117,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
         x.shape,
         kernel.shape,
         use_bias,
@@ -138,8 +139,8 @@ def _dense_bwd_rule(
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
     (
-        colwise_casted_x,
-        rowwise_casted_kernel,
+        casted_x_lhs,
+        casted_kernel_rhs,
         x_shape,
         kernel_shape,
         use_bias,
@@ -161,8 +162,8 @@ def _dense_bwd_rule(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
+        casted_grad.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel_rhs,
         (g_constracting_dim, k_constracting_dim),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
@@ -174,7 +175,9 @@ def _dense_bwd_rule(
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_constracting_dim, g_constracting_dim)
+        casted_x_lhs,
+        casted_grad.get_tensor(usage=TensorUsage.RHS),
+        (x_constracting_dim, g_constracting_dim),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
