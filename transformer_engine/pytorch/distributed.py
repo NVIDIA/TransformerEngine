@@ -987,7 +987,7 @@ def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
     if isinstance(quantizer, DebugQuantizer):
         _quantizer = quantizer.parent_quantizer
     if isinstance(_quantizer, Float8BlockQuantizer):
-        _quantizer.set_usage(need_compact=compact)
+        _quantizer.all_gather_usage = compact
 
 
 def _post_process_fp8_blockwise_gather(
