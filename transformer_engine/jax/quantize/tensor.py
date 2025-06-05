@@ -233,8 +233,8 @@ class ScaledTensor1x(ScaledTensor):
             assert len(logical_axis_names) == self.data.ndim
             flatten_axis = self.data.ndim - self.flatten_axis
             axis_names = (
-                *logical_axis_names[flatten_axis :],
-                *logical_axis_names[: flatten_axis],
+                *logical_axis_names[flatten_axis:],
+                *logical_axis_names[:flatten_axis],
             )
         else:
             axis_names = logical_axis_names
