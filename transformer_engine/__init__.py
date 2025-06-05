@@ -11,12 +11,12 @@ import transformer_engine.common
 
 try:
     from . import pytorch
-except (ImportError, StopIteration) as e:
+except (ImportError, FileNotFoundError):
     pass
 
 try:
     from . import jax
-except (ImportError, StopIteration) as e:
+except (ImportError, FileNotFoundError):
     pass
 
 __version__ = str(metadata.version("transformer_engine"))

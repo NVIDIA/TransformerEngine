@@ -84,6 +84,7 @@ if __name__ == "__main__":
         The script requires JAX to be installed for building.
         It will raise a RuntimeError if JAX is not available.
     """
+
     # Extensions
     common_headers_dir = "common_headers"
     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
@@ -100,6 +101,17 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
+        setup_requires=[
+            "jax[cuda12]",
+            "flax>=0.7.1",
+            "nvidia-cuda-runtime-cu12",
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
+            "nvidia-cuda-cccl-cu12",
+            "nvidia-cuda-nvcc-cu12",
+            "nvidia-nvtx-cu12",
+            "nvidia-cuda-nvrtc-cu12",
+        ],
         install_requires=["jax", "flax>=0.7.1"],
         tests_require=["numpy"],
     )

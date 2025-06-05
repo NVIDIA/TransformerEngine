@@ -27,11 +27,34 @@ __all__ = [
     "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
+    "CurrentScaleQuantizer",
     "DelayedScaleQuantizer",
     "BlockScaleQuantizer",
     "QuantizerFactory",
     "noop_quantizer_set",
+    "compute_scale_from_amax",
 ]
+
+
+def compute_scale_from_amax(
+    amax: jnp.ndarray, q_dtype: jnp.dtype, scale: Optional[jnp.ndarray] = None
+) -> jnp.ndarray:
+    """Compute scale from amax value.
+
+    Args:
+        amax: Maximum absolute value of the tensor
+        q_dtype: Quantization data type
+
+    Returns:
+        Scale value
+    """
+    fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
+    if scale is None:
+        scale = jnp.ones((1,))
+    sf = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
+    sf = jnp.where(amax > 0.0, sf, scale)
+    sf = jnp.where(jnp.isfinite(amax), sf, scale)
+    return sf
 
 
 @register_pytree_node_class
@@ -159,36 +182,18 @@ class Quantizer(ABC):
 
 @register_pytree_node_class
 @dataclass
-class DelayedScaleQuantizer(Quantizer):
-    """Quantizer implementation using delayed scaling.
+class CurrentScaleQuantizer(Quantizer):
+    """Quantizer implementation using current scaling.
 
-    This quantizer uses delayed scaling mode with float32 scales and maintains
-    a history of maximum absolute values for dynamic scaling.
+    This quantizer uses current scaling mode with float32 scales
 
     Attributes:
         scaling_mode: Set to NVTE_DELAYED_TENSOR_SCALING
         q_layout: Quantization axis (default: ROWWISE_COLWISE)
-        scale: Current scaling factor
-        amax_history: History of maximum absolute values
     """
 
-    scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
+    scaling_mode: ScalingMode = ScalingMode.CURRENT_TENSOR_SCALING
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
-
-    scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
-    amax_history: jnp.ndarray = field(
-        default_factory=lambda: jnp.zeros((QuantizeConfig.AMAX_HISTORY_LEN,), jnp.float32)
-    )
-
-    def tree_flatten(self):
-        """Flatten the quantizer for JAX tree operations.
-
-        Returns:
-            Tuple of (children, aux_data) for tree operations
-        """
-        children = (self.scale, self.amax_history)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
-        return (children, aux_data)
 
     def get_data_layout(self) -> str:
         """Get the data data_layout string.
@@ -217,15 +222,18 @@ class DelayedScaleQuantizer(Quantizer):
             x: Input tensor to quantize
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values
-            flatten_axis: The quantization axis for the tensor
+
         Returns:
             A ScaledTensor1x containing the quantized data
         """
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
 
-        compute_dtype = self.scale.dtype
+        compute_dtype = jnp.float32
         dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
-        scaled_x = x.astype(compute_dtype) * self.scale
+        amax = jnp.max(jnp.abs(x)).reshape((1,)).astype(compute_dtype)
+        fp8_max = jnp.astype(jnp.finfo(self.q_dtype).max, jnp.float32)
+        scale = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
+        scaled_x = x.astype(compute_dtype) * scale
 
         # quantize() in the old dot.py do this way, leave this code block here for future debugging
         # compute_dtype = x.dtype
@@ -233,8 +241,7 @@ class DelayedScaleQuantizer(Quantizer):
         # scaled_x = x * self.scale.astype(compute_dtype)
 
         clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
-        scale_inv = 1.0 / self.scale
-        self.update(jnp.max(jnp.abs(x)).reshape((1,)))
+        scale_inv = 1.0 / scale
         return ScaledTensorFactory.create_1x(
             data=clipped_scaled_x,
             scale_inv=scale_inv,
@@ -294,6 +301,75 @@ class DelayedScaleQuantizer(Quantizer):
             return colwise_tensor
         return rowwise_tensor
 
+
+@register_pytree_node_class
+@dataclass
+class DelayedScaleQuantizer(CurrentScaleQuantizer):
+    """Quantizer implementation using delayed scaling.
+
+    This quantizer uses delayed scaling mode with float32 scales and maintains
+    a history of maximum absolute values for dynamic scaling.
+
+    Attributes:
+        scaling_mode: Set to NVTE_DELAYED_TENSOR_SCALING
+        q_layout: Quantization axis (default: ROWWISE_COLWISE)
+        scale: Current scaling factor
+        amax_history: History of maximum absolute values
+    """
+
+    scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
+    q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+
+    scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
+    amax_history: jnp.ndarray = field(
+        default_factory=lambda: jnp.zeros((QuantizeConfig.AMAX_HISTORY_LEN,), jnp.float32)
+    )
+
+    def tree_flatten(self):
+        """Flatten the quantizer for JAX tree operations.
+
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = (self.scale, self.amax_history)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
+        return (children, aux_data)
+
+    def _quantize_func(
+        self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, flatten_axis=-1
+    ) -> ScaledTensor1x:
+        """Quantize function helper for delayed scaling FP8.
+
+        Args:
+            x: Input tensor to quantize
+            is_colwise: Whether to use column-wise quantization
+            dq_dtype: Data type for dequantized values
+            flatten_axis: The quantization axis for the tensor
+        Returns:
+            A ScaledTensor1x containing the quantized data
+        """
+        dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+
+        compute_dtype = jnp.float32
+        dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
+        scaled_x = x.astype(compute_dtype) * self.scale
+
+        # quantize() in the old dot.py do this way, leave this code block here for future debugging
+        # compute_dtype = x.dtype
+        # dtype_max = (jnp.finfo(self.q_dtype).max).astype(compute_dtype)
+        # scaled_x = x * self.scale.astype(compute_dtype)
+
+        clipped_scaled_x = jnp.clip(scaled_x, -dtype_max, dtype_max).astype(self.q_dtype)
+        scale_inv = 1.0 / self.scale
+        self.update(jnp.max(jnp.abs(x)).reshape((1,)))
+        return ScaledTensorFactory.create_1x(
+            data=clipped_scaled_x,
+            scale_inv=scale_inv,
+            scaling_mode=self.scaling_mode,
+            dq_dtype=dq_dtype,
+            flatten_axis=flatten_axis,
+        )
+
     @staticmethod
     @jax.jit
     def _update_amax_history(amax_history, new_amax):
@@ -323,18 +399,12 @@ class DelayedScaleQuantizer(Quantizer):
             Updated scale value
         """
         # 2. Calculate the current scale
-        fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
-
         if QuantizeConfig.AMAX_COMPUTE_ALGO is AmaxComputeAlgo.MAX:
             amax = jnp.max(amax_history, axis=-1, keepdims=True)
         else:
             amax = amax_history[0:1]
 
-        sf = (fp8_max / amax) / (2**QuantizeConfig.MARGIN)
-        sf = jnp.where(amax > 0.0, sf, scale)
-        sf = jnp.where(jnp.isfinite(amax), sf, scale)
-        scale = scale.at[0].set(sf[0])
-        return scale
+        return compute_scale_from_amax(amax, q_dtype, scale=scale)
 
     @staticmethod
     @jax.jit
@@ -531,6 +601,7 @@ class QuantizerFactory:
 
     quantizer_type_map = {
         ScalingMode.DELAYED_TENSOR_SCALING: DelayedScaleQuantizer,
+        ScalingMode.CURRENT_TENSOR_SCALING: CurrentScaleQuantizer,
         ScalingMode.MXFP8_1D_SCALING: BlockScaleQuantizer,
     }
 

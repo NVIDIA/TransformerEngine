@@ -35,6 +35,65 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   }
 }
 
+namespace {
+
+constexpr size_t kThreadsPerBlock = 256;
+template <typename TVectorized>
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    memset_kernel(void *__restrict__ ptr, int value, size_t size_in_bytes) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx * sizeof(TVectorized) >= size_in_bytes) {
+    return;  // Out of bounds
+  }
+
+  if ((idx + 1) * sizeof(TVectorized) > size_in_bytes) {
+    // If the buffer size is not an even multiple of the vectorization, manually set the remaining bytes unvectorized.
+    size_t remaining_bytes = size_in_bytes - idx * sizeof(TVectorized);
+    memset(reinterpret_cast<uint8_t *>(ptr) + idx * sizeof(TVectorized), value, remaining_bytes);
+    return;
+  }
+
+  union {
+    TVectorized value;
+    uint8_t data[sizeof(TVectorized)];
+  } data;
+  for (size_t i = 0; i < sizeof(TVectorized); ++i) {
+    data.data[i] = static_cast<uint8_t>(value);
+  }
+  reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
+}
+
+}  // namespace
+
+#define MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, vectorizedType, stream) \
+  if (size_in_bytes >= sizeof(vectorizedType) &&                                             \
+      reinterpret_cast<size_t>(ptr) % sizeof(vectorizedType) == 0) {                         \
+    size_t numBlocks = DIVUP(size_in_bytes, kThreadsPerBlock * sizeof(vectorizedType));      \
+    dim3 grid(numBlocks, 1, 1);                                                              \
+    memset_kernel<vectorizedType>                                                            \
+        <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    return;                                                                                  \
+  }
+
+extern "C" {
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_memset);
+  NVTE_CHECK(ptr != nullptr, "Pointer for memset must be allocated.");
+
+  if (size_in_bytes > 4096) {
+    // Use cudaMemsetAsync for larger sizes.
+    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    return;
+  }
+
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float4, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float2, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
+  MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
+}
+}  // extern "C"
+
 void checkCuDriverContext(CUstream stream) {
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
@@ -132,6 +191,18 @@ bool is_supported_by_CC_100() {
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
 
   return deviceComputeCapability >= 100;
+}
+
+std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
+                                                        size_t outer_size, size_t inner_size) {
+  std::vector<std::vector<Tensor *>> ret;
+  for (size_t i = 0; i < outer_size; ++i) {
+    ret.emplace_back();
+    for (size_t j = 0; j < inner_size; ++j) {
+      ret.back().push_back(reinterpret_cast<Tensor *>(nvte_tensors[i][j]));
+    }
+  }
+  return ret;
 }
 
 }  // namespace transformer_engine

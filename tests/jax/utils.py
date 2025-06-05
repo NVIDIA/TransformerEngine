@@ -13,7 +13,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import combine_masks
 from jax import lax, vmap
 from jax import nn as jax_nn
@@ -97,16 +96,16 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
-def parameterize_by_test_level(param_dict: dict, id_prefix: str = ""):
+def get_parameters_for_test_level(param_dict: dict):
     """
     Takes an input dictionary of parameters keyed by test type "L0", etc.
-    Returns a list of pytest parameters to be used in a parameterized test for the current test type
+    Returns the parameters for the test level specified in the environment variable
     """
     DEFAULT_TEST_LEVEL = "L0"
     test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", DEFAULT_TEST_LEVEL)
     if test_level not in param_dict:
         raise ValueError("Unsupported test level")
-    return values_to_named_params(param_dict[test_level], id_prefix)
+    return param_dict[test_level]
 
 
 def value_to_test_name_str(value):
@@ -139,14 +138,18 @@ def pytest_parametrize_wrapper(param_name, param_values):
     A wrapper for pytest.mark.parametrize to allow for automatic
     naming of tests based on the parameter values.
     """
-    id_prefix = param_name
     if isinstance(param_values, dict):
-        param_values = parameterize_by_test_level(param_values, id_prefix=param_name)
-    elif "," not in param_name:
-        param_values = values_to_named_params(param_values, id_prefix=id_prefix)
+        # If the values are split into a dictionary of test-levels, e.g. "L0", etc.,
+        # unwrap the selected level before proceeding.
+        param_values = get_parameters_for_test_level(param_values)
 
-    # Currently comma separated parameters in one parametrize call aren't supported for automatic naming
-    # and will just be passed through with default pytest names
+    if "," not in param_name:
+        # Multi-parameterize annotations are not supported in this wrapper
+        # and are just a passthrough to default pytest.mark.parametrize.
+        # E.g. @pytest_parametrize_wrapper("a,b", ((a_value1, b_value1), (a_value2, b_value2)))
+        # will be passed through to pytest.mark.parametrize as-is without pytest.param ids.
+        param_values = values_to_named_params(param_values, id_prefix=param_name)
+
     def decorator(func):
         return pytest.mark.parametrize(param_name, param_values)(func)
 
@@ -312,16 +315,22 @@ class DenseGeneral(nn.Module):
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]), np.prod(features))
-        kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
+        kernel = self.param(
+            "kernel",
+            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+            kernel_param_shape,
+            self.dtype,
         )
 
         kernel = jnp.asarray(kernel, input_dtype)
         kernel = jnp.reshape(kernel, kernel_shape)
 
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, self.features, self.dtype, axes=self.bias_axes
+            bias = self.param(
+                "bias",
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes),
+                self.features,
+                self.dtype,
             )
             bias = bias.astype(input_dtype)
         else:
@@ -418,9 +427,9 @@ class MlpBlock(nn.Module):
         )  # Broadcast along length.
 
         if self.transpose_batch_sequence:
-            x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "mlp"))
+            x = nn.with_logical_constraint(x, ("length", "batch", "mlp"))
         else:
-            x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "mlp"))
+            x = nn.with_logical_constraint(x, ("batch", "length", "mlp"))
         output = DenseGeneral(
             inputs.shape[-1],
             dtype=self.dtype,
@@ -684,21 +693,13 @@ class MultiHeadAttention(nn.Module):
         value = value.reshape((*value.shape[:2], self.num_gqa_groups, self.head_dim))
 
         if self.transpose_batch_sequence:
-            query = nn_partitioning.with_sharding_constraint(
-                query, ("length", "batch", "heads", "kv")
-            )
-            key = nn_partitioning.with_sharding_constraint(key, ("length", "batch", "heads", "kv"))
-            value = nn_partitioning.with_sharding_constraint(
-                value, ("length", "batch", "heads", "kv")
-            )
+            query = nn.with_logical_constraint(query, ("length", "batch", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("length", "batch", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("length", "batch", "heads", "kv"))
         else:
-            query = nn_partitioning.with_sharding_constraint(
-                query, ("batch", "length", "heads", "kv")
-            )
-            key = nn_partitioning.with_sharding_constraint(key, ("batch", "length", "heads", "kv"))
-            value = nn_partitioning.with_sharding_constraint(
-                value, ("batch", "length", "heads", "kv")
-            )
+            query = nn.with_logical_constraint(query, ("batch", "length", "heads", "kv"))
+            key = nn.with_logical_constraint(key, ("batch", "length", "heads", "kv"))
+            value = nn.with_logical_constraint(value, ("batch", "length", "heads", "kv"))
 
         if decode:
             # Detect if we're initializing by absence of existing cache data.
@@ -805,9 +806,9 @@ class MultiHeadAttention(nn.Module):
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
         if self.transpose_batch_sequence:
-            x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "joined_kv"))
+            x = nn.with_logical_constraint(x, ("length", "batch", "joined_kv"))
         else:
-            x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "joined_kv"))
+            x = nn.with_logical_constraint(x, ("batch", "length", "joined_kv"))
 
         # Back to the original inputs dimensions.
 
@@ -853,8 +854,11 @@ class LayerNorm(nn.Module):
         input_dtype = x.dtype
         features = x.shape[-1]
 
-        scale = nn_partitioning.param_with_axes(
-            "scale", self.scale_init, (features,), self.dtype, axes=("embed",)
+        scale = self.param(
+            "scale",
+            nn.with_logical_partitioning(self.scale_init, ("embed",)),
+            (features,),
+            self.dtype,
         )
         x_ = x.astype(jnp.float32)
         if self.layernorm_type == "layernorm":
@@ -862,8 +866,11 @@ class LayerNorm(nn.Module):
             var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
             y = (x_ - mean) * lax.rsqrt(var + self.epsilon)
 
-            bias = nn_partitioning.param_with_axes(
-                "ln_bias", self.bias_init, (features,), self.dtype, axes=("embed",)
+            bias = self.param(
+                "ln_bias",
+                nn.with_logical_partitioning(self.bias_init, ("embed",)),
+                (features,),
+                self.dtype,
             )
             bias = jnp.asarray(bias, input_dtype)
 
@@ -972,12 +979,11 @@ class RelativePositionBiases(nn.Module):
             num_buckets=self.num_buckets,
             max_distance=self.max_distance,
         )
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, ("heads", "relpos_buckets")),
             (self.num_heads, self.num_buckets),
             jnp.float32,
-            axes=("heads", "relpos_buckets"),
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)
@@ -1555,14 +1561,16 @@ def sync_params_values(dst, src, transformations, sep="/"):
     """
     src_values = {}
     for key, value in jax.tree_util.tree_leaves_with_path(src):
-        normalized_key = sep.join(x.key for x in key)
+        # Only select DictKey(key="...") entries, skip GetAttr(name="...") entries at the end of the tree path
+        normalized_key = sep.join(x.key for x in key if hasattr(x, "key"))
         src_values[normalized_key] = value
 
     flatten_dst, dst_tree_def = jax.tree_util.tree_flatten_with_path(dst)
     synced_dst_values = []
 
     for key, value in flatten_dst:
-        normalized_key = sep.join(x.key for x in key)
+        # Only select DictKey(key="...") entries, skip GetAttr(name="...") entries at the end of the tree path
+        normalized_key = sep.join(x.key for x in key if hasattr(x, "key"))
         if normalized_key in transformations:
             corresponding_src_key = transformations[normalized_key]
         else:

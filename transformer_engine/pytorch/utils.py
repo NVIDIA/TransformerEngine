@@ -9,12 +9,11 @@ import math
 import os
 from typing import Any, Callable, List, Optional, Tuple, Union
 import numpy as np
-
 import torch
-import transformer_engine.pytorch.cpp_extensions as ext
-from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
-from .tensor.quantized_tensor import QuantizedTensor
+import transformer_engine.pytorch.cpp_extensions as ext
+from . import torch_version
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -23,6 +22,12 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
         if tensor is not None and tensor.requires_grad:
             return True
     return False
+
+
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor().cuda()
 
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -34,17 +39,22 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     for t in tensors:
         if t is not None:
-            if isinstance(t, QuantizedTensor):
+            if hasattr(t, "clear"):
                 t.clear()
             else:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
             del t
+
+
+@functools.lru_cache
+def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
+    props = torch.cuda.get_device_properties(device)
+    return (props.major, props.minor)
 
 
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return (props.major, props.minor)
+    return _get_device_compute_capability(torch.cuda.current_device())
 
 
 def attention_mask_func(
@@ -416,10 +426,10 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
     """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
 
     for tensor in tensors:
-        assert tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0, (
-            "FP8 execution requires 2D input matrices with "
-            "height divisible by 8 and width divisible by 16, "
-            f"but got tensor with dims={list(tensor.size())}"
+        assert math.prod(tensor.shape[:-1]) % 8 == 0 and tensor.shape[-1] % 16 == 0, (
+            "FP8 execution requires the product of all dimensions except the last to be divisible"
+            " by 8 and the last dimension to be divisible by 16, but got tensor with"
+            f" dims={list(tensor.size())}"
         )
 
 
@@ -593,3 +603,16 @@ def canonicalize_process_group(
     if group is None:
         return torch.distributed.distributed_c10d._get_default_group()
     return group
+
+
+def torch_get_autocast_gpu_dtype() -> torch.dtype:
+    """Get PyTorch autocast GPU dtype."""
+    if torch_version() >= (2, 4, 0):
+        return torch.get_autocast_dtype("cuda")
+    return torch.get_autocast_gpu_dtype()
+
+
+if torch_version() >= (2, 4, 0):
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+else:
+    gpu_autocast_ctx = torch.cuda.amp.autocast

@@ -44,11 +44,16 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
 
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
+
   if (is_fp8_dtype(out_dtype)) {
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
-      cudaMemsetAsync(amax, 0, sizeof(float), stream);
+      nvte_memset(amax, 0, sizeof(float), stream);
       output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_rowwise_scale_inv(
@@ -152,6 +157,11 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
   auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
   auto dbias_shape = std::vector<size_t>{hidden_size};
 
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
+
   // Evil hack to specify TE impl
   // Note: nvte_quantize_dbias_dgelu chooses its internal impl based
   // on what pointers are allocated, e.g. whether to output with
@@ -219,6 +229,11 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   auto flatten_axis = output_buf->dimensions().size() - 2;  // output has act axis
 
+  NVTE_CHECK(
+      scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+      "Current tensor scaling does not support fused operations yet. Please call this primitive "
+      "in higher-precision then quantize with current scaling.");
+
   auto *output = output_buf->untyped_data();
   auto *colwise_output = colwise_output_buf->untyped_data();
   auto *dbias = dbias_buf->untyped_data();
@@ -230,8 +245,11 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   // m = x_batch_size = reduce(operator.mul, x_shape[:-2]), x_shape == act_input_dims
   // n = ir_dz_shape[-1] * act_len, ir_dz_shape == input_dims
   auto act_len = act_input_dims[act_input_dims.size() - 2];
-  NVTE_CHECK(act_input_dims.back() == input_dims.back(),
-             "Shape mismatch between activation input and gradient input");
+  NVTE_CHECK(act_len == 1 || act_len == 2,
+             "The value of the activation dimension (axis=-2) must be 1 for non-gated or 2 for "
+             "gated activation, got ",
+             act_len);
+
   auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
   auto n = input_dims.back();
 
@@ -242,8 +260,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto dbias_shape = std::vector<size_t>{n * act_len};
   std::vector<size_t> workspace_shape(workspace_dims.begin(), workspace_dims.end());
 
-  auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
-  auto act_input_tensor = TensorWrapper(act_input, act_input_shape, in_dtype);
+  auto input_tensor =
+      TensorWrapper(input, input_shape, convert_ffi_datatype_to_te_dtype(input_buf.element_type()));
+  auto act_input_tensor = TensorWrapper(
+      act_input, act_input_shape, convert_ffi_datatype_to_te_dtype(act_input_buf.element_type()));
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, out_dtype, output_shape);
@@ -251,7 +271,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
       NVTE_CHECK(amax != nullptr, "amax must be provided for delayed tensor scaling");
-      cudaMemsetAsync(amax, 0, sizeof(float), stream);
+      nvte_memset(amax, 0, sizeof(float), stream);
       output_tensor.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
       output_tensor.set_rowwise_scale_inv(

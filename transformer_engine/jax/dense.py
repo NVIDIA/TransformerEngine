@@ -49,6 +49,7 @@ def dense(
     """
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set:
+        x = with_sharding_constraint_by_logical_axes(x, input_axes)
         output = tex.gemm(x, kernel, contracting_dims)
         if bias is not None:
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
@@ -183,6 +184,7 @@ def _dense_bwd_rule(
 _dense.defvjp(_dense_fwd_rule, _dense_bwd_rule)
 
 
+"""
 def grouped_dense(
     x_list,
     kernel_list,
@@ -190,10 +192,8 @@ def grouped_dense(
     contracting_dims_list,
     quantizer_set_list=None,
 ):
-    """
-    Perform grouped_dense layer transformation with optional quantization.
+    # Perform grouped_dense layer transformation with optional quantization.
 
-    """
     output_list = _grouped_dense(
         x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
     )
@@ -315,3 +315,4 @@ def _grouped_dense_bwd_rule(contracting_dims_list, ctx, grad_list):
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
+"""

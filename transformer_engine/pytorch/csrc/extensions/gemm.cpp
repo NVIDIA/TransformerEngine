@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <Python.h>
 #include <pybind11/pybind11.h>
 
 #include <optional>
@@ -21,12 +20,12 @@
 
 namespace {
 
-void* get_data_ptr(MaybeTensor tensor) {
+void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
   if (tensor.has_value()) return tensor->data_ptr();
   return nullptr;
 }
 
-size_t get_size(MaybeTensor tensor, int dim) {
+size_t get_size(transformer_engine::pytorch::MaybeTensor tensor, int dim) {
   if (tensor.has_value()) return static_cast<size_t>(tensor->size(dim));
   return 0;
 }
@@ -167,8 +166,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
 
   // Workspace
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
@@ -197,38 +196,52 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
       // Direct GEMM call to the correct overlap
       if (bulk_overlap) {
-        comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
-                                   te_pre_gelu_out, te_workspace, grad, accumulate,
-                                   use_split_accumulator, comm_type.value(), extra_output_tensor,
-                                   main_stream);
+        NVTE_SCOPED_GIL_RELEASE({
+          comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
+                                     te_pre_gelu_out, te_workspace, grad, accumulate,
+                                     use_split_accumulator, comm_type.value(), extra_output_tensor,
+                                     main_stream);
+        });
       } else if (comm_type.value() == CommOverlapType::AG) {
         if (comm_overlap->is_atomic_gemm()) {
-          comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
-                                               bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                               accumulate, use_split_accumulator,
-                                               extra_output_tensor, main_stream);
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                 accumulate, use_split_accumulator,
+                                                 extra_output_tensor, main_stream);
+          });
         } else {
-          comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
-                                         te_pre_gelu_out, te_workspace, grad, accumulate,
-                                         use_split_accumulator, extra_output_tensor, main_stream);
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                           accumulate, use_split_accumulator, extra_output_tensor,
+                                           main_stream);
+          });
         }
       } else {
         if (comm_overlap->is_atomic_gemm()) {
-          comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
-                                               bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                               accumulate, use_split_accumulator,
-                                               extra_output_tensor, main_stream);
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
+                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                 accumulate, use_split_accumulator,
+                                                 extra_output_tensor, main_stream);
+          });
         } else {
-          comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
-                                         te_pre_gelu_out, te_workspace, grad, accumulate,
-                                         use_split_accumulator, extra_output_tensor, main_stream);
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
+                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                           accumulate, use_split_accumulator, extra_output_tensor,
+                                           main_stream);
+          });
         }
       }
     } else {
       // Launch GEMM
-      nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), bias_tensor.data(),
-                       te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                       accumulate, use_split_accumulator, num_math_sms, main_stream);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), bias_tensor.data(),
+                         te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
+                         accumulate, use_split_accumulator, num_math_sms, main_stream);
+      });
     }
   } else {
     if (D_tensor.numel() != 0 && !accumulate) {
@@ -258,20 +271,14 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   return out;
 }
 
-}  // namespace transformer_engine::pytorch
-
-void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
-                    at::Tensor B_scale_inverse, transformer_engine::DType B_type,
-                    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
-                    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
-                    at::Tensor bias, transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
-                    bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                    at::Tensor B_scale_inverse, DType B_type, std::vector<int64_t> B_scaling_mode,
+                    bool transb, at::Tensor D, at::Tensor D_scale, DType D_type, at::Tensor D_amax,
+                    at::Tensor bias, DType bias_type, at::Tensor pre_gelu_out, bool grad,
+                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
-
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
   NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
@@ -286,12 +293,13 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
       nvte_scaling_modeB);
   // TODO: D_scale_inv cannot be nullptr when D_type is FP8.
   auto te_D = makeTransformerEngineTensor(
-      D.data_ptr(), {static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
+      D.data_ptr(),
+      std::vector<size_t>{static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,
       D_amax.data_ptr(), D_scale.data_ptr(), nullptr);
-  auto te_bias =
-      makeTransformerEngineTensor(bias.data_ptr(), {static_cast<size_t>(bias.size(0))}, bias_type);
+  auto te_bias = makeTransformerEngineTensor(
+      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);
   auto te_counter = makeTransformerEngineTensor(
-      counter.data_ptr(), {static_cast<size_t>(counter.size(0))}, DType::kInt32);
+      counter.data_ptr(), std::vector<size_t>{static_cast<size_t>(counter.size(0))}, DType::kInt32);
 
   const auto gelu_shape = pre_gelu_out.data_ptr() == nullptr
                               ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}
@@ -299,24 +307,23 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine
                                                     static_cast<size_t>(pre_gelu_out.size(1))};
   auto te_pre_gelu_out = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
-  auto te_workspace =
-      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+  auto te_workspace = makeTransformerEngineTensor(workspace.data_ptr(),
+                                                  std::vector<size_t>{workspaceSize}, DType::kByte);
 
-  nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
-                          te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                          accumulate, use_split_accumulator, math_sm_count, m_split, n_split,
-                          gemm_producer, te_counter.data(), at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
+                            te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
+                            accumulate, use_split_accumulator, math_sm_count, m_split, n_split,
+                            gemm_producer, te_counter.data(), at::cuda::getCurrentCUDAStream());
+  });
 }
 
 std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
-    std::optional<std::vector<at::Tensor>> D, transformer_engine::DType D_type,
-    std::vector<int64_t> m_splits, std::vector<at::Tensor> bias,
-    transformer_engine::DType bias_type, bool single_output, std::vector<at::Tensor> pre_gelu_out,
-    bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
-    bool use_split_accumulator, int math_sm_count) {
-  using namespace transformer_engine;
-  using namespace transformer_engine::pytorch;
+    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
+    std::vector<at::Tensor> bias, DType bias_type, bool single_output,
+    std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
+    size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
   std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
       te_pre_gelu_out_vector, te_workspace_vector;
   std::vector<TensorWrapper> wrappers;
@@ -419,15 +426,20 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
   for (size_t i = 0; i < workspace.size(); i++) {
-    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
+                                           std::vector<size_t>{workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }
   // For now, we only have multi-stream cublas backend.
-  nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
-                                te_bias_vector.data(), te_pre_gelu_out_vector.data(),
-                                te_A_vector.size(), transa, transb, grad,
-                                te_workspace_vector.data(), accumulate, use_split_accumulator,
-                                math_sm_count, at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                  te_A_vector.size(), transa, transb, grad,
+                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                  math_sm_count, at::cuda::getCurrentCUDAStream());
+  });
   return bias;
 }
+
+}  // namespace transformer_engine::pytorch

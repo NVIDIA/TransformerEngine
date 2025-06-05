@@ -112,8 +112,8 @@ struct scale_inv_meta {
   size_t type_size;
 };
 
-NVTEShape convertShape(const std::vector<size_t>& shape) {
-  return {shape.data(), shape.size()};
+NVTEShape convertShape(const std::vector<size_t>& s) {
+  return nvte_make_shape(s.data(), s.size());
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
@@ -240,7 +240,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape{nullptr, 0};
+  NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -257,8 +257,7 @@ Tensor::Tensor(const std::string& name,
   }
 
   if (columnwise) {
-    columnwise_shape.data = columnwise_shape_vec.data();
-    columnwise_shape.ndim = columnwise_shape_vec.size();
+    columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
   }
 
   tensor_ = TensorWrapper(scaling_mode);
@@ -695,6 +694,19 @@ std::pair<double, double> getTolerances(const DType type) {
 
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
+  // Check how many RNG calls are required to generate one uniform random value
+  int rng_calls_per_val = 0;
+  {
+    std::mt19937 gen1 = *gen, gen2 = *gen;
+    std::uniform_real_distribution<> dis(-2.0, 1.0);
+    const float _ = dis(gen1);
+    while (gen2 != gen1) {
+      auto _ = gen2();
+      ++rng_calls_per_val;
+    }
+  }
+
+  // Generate uniform random values in parallel
   #pragma omp parallel proc_bind(spread)
   {
     std::mt19937 gen_local = *gen;
@@ -703,14 +715,14 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
     const int chunk_size = (size + threads_num - 1) / threads_num;
     const int idx_min = chunk_size * thread_ID;
     const int idx_max = std::min(chunk_size * (thread_ID + 1), static_cast<int>(size));
-    gen_local.discard(idx_min);
+    gen_local.discard(idx_min * rng_calls_per_val);
     std::uniform_real_distribution<> dis(-2.0, 1.0);
 
     for (int i = idx_min; i < idx_max; ++i) {
       data[i] = static_cast<T>(dis(gen_local));
     }
   }
-  gen->discard(size);
+  gen->discard(size * rng_calls_per_val);
 }
 
 void fillUniform(Tensor *t) {
@@ -739,8 +751,6 @@ void fillUniform(Tensor *t) {
 template<typename InputEncoding, InputsFillCase Case>
 void fillCase_special(Tensor *t) {
   const size_t size = product(t->rowwise_shape());
-  const size_t rows = t->rowwise_shape().data[0];
-  const size_t cols = t->rowwise_shape().data[1];
 
   if constexpr (Case == InputsFillCase::zeros) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
@@ -760,16 +770,13 @@ void fillCase_special(Tensor *t) {
     std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
       InputType *data = t->rowwise_cpu_dptr<InputType>();
-      for (size_t i = 0; i < rows; ++i) {
-        for (size_t j = 0; j < cols; ++j) {
-          const size_t idx = i * cols + j;
-          const bool is_negative = (dis_sign(t->gen()) < 0.0);
-          double val = dis(t->gen());
-          if (is_negative) {
-            val = -val;
-          }
-          data[idx] = static_cast<InputType>(val);
+      for (size_t idx = 0; idx < size; ++idx) {
+        const bool is_negative = (dis_sign(t->gen()) < 0.0);
+        double val = dis(t->gen());
+        if (is_negative) {
+          val = -val;
         }
+        data[idx] = static_cast<InputType>(val);
       }
     });
   }

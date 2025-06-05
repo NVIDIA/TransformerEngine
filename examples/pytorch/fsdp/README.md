@@ -8,7 +8,7 @@
 # FSDP without deferred initialization:
 #     Duplicate modules initialized on each device. Load on device memory reduced only after
 #     torch.distributed.fsdp.FullyShardedDataParallel mode shards model parameters.
-$ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py
+$ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py --no-defer-init
 # Sample output on 8xL40S:
 #    [GPU-0] WORLD_SIZE = 8
 #    [GPU-0] TransformerEngine Model:
@@ -40,7 +40,7 @@ $ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsd
 #    Modules initialized with empty parameters via `device='meta'` option. Zero load on device
 #    memory until torch.distributed.fsdp.FullyShardedDataParallel mode triggers a reset on
 #    on already sharded model parameters.
-$ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py --defer-init
+$ torchrun --standalone --nnodes=1 --nproc-per-node=$(nvidia-smi -L | wc -l) fsdp.py
 # Sample output on 8xL40S:
 #    [GPU-0] WORLD_SIZE = 8
 #    ...

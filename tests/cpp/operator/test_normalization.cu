@@ -48,16 +48,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
-  Tensor input("input", { N, H }, itype);
-  Tensor z("z", { N, H }, otype);
-  Tensor gamma("gamma", { H }, wtype);
-  Tensor beta("beta", { H }, wtype);
-  Tensor mu("mu", { N }, DType::kFloat32);
-  Tensor rsigma("rsigma", { N }, DType::kFloat32);
-  Tensor dz("dz", { N, H }, wtype);
-  Tensor dx("dx", { N, H }, itype);
-  Tensor dgamma("dgamma", { H }, wtype);
-  Tensor dbeta("dbeta", { H }, wtype);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor z("z", std::vector<size_t>{ N, H }, otype);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, wtype);
+  Tensor beta("beta", std::vector<size_t>{ H }, wtype);
+  Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor dz("dz", std::vector<size_t>{ N, H }, wtype);
+  Tensor dx("dx", std::vector<size_t>{ N, H }, itype);
+  Tensor dgamma("dgamma", std::vector<size_t>{ H }, wtype);
+  Tensor dbeta("dbeta", std::vector<size_t>{ H }, wtype);
   Tensor workspace_fwd, workspace_bwd;
 
   fillUniform(&input);
