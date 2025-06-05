@@ -1681,4 +1681,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].all_gather_usage = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].all_gather_usage = True

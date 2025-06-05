@@ -300,9 +300,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   size_t m_dim = numel / k_dim;
   constexpr size_t kBlockLen = 128;
 
-  Float8BlockScaleTensorFormat data_format = (all_gather_usage
-                                              ? Float8BlockScaleTensorFormat::COMPACT
-                                              : Float8BlockScaleTensorFormat::GEMM_READY);
+  Float8BlockScaleTensorFormat data_format =
+      (all_gather_usage ? Float8BlockScaleTensorFormat::COMPACT
+                        : Float8BlockScaleTensorFormat::GEMM_READY);
 
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
@@ -329,9 +329,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         std::swap(sinv0, sinv1);
       }
     } else {
-      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor rowwise. "
-                 "Expected 1 or 2. Got ",
-                 block_scaling_dim);
+      NVTE_ERROR(
+          "Unsupported block_scaling_dim in create_tensor rowwise. "
+          "Expected 1 or 2. Got ",
+          block_scaling_dim);
     }
     scale_inv_rowwise =
         at::empty({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts);
@@ -379,9 +380,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
       // for COMPACT case, since we apply 128x1 scaling here without transposing columnwise data, scaling factor is also [sinv0, sinv1]
       // so no need to swap sinv0 and sinv1 here
     } else {
-      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor columnwise. "
-                 "Expected 1 or 2. Got ",
-                 block_scaling_dim);
+      NVTE_ERROR(
+          "Unsupported block_scaling_dim in create_tensor columnwise. "
+          "Expected 1 or 2. Got ",
+          block_scaling_dim);
     }
     data_colwise = at::empty(torch_columnwise_shape, opts);
     scale_inv_colwise =
@@ -401,8 +403,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
         "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
-        "is_2D_scaled"_a = (block_scaling_dim == 2),
-        "data_format"_a = data_format);
+        "is_2D_scaled"_a = (block_scaling_dim == 2), "data_format"_a = data_format);
   } else {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass));

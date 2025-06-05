@@ -1486,8 +1486,12 @@ class Linear(TransformerEngineBaseModule):
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
                 # set compact for inp tensor X
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].all_gather_usage = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].all_gather_usage = True
         else:
             if self.sequence_parallel and self.parallel_mode == "row":
                 # set compact for grad_output tensor dY
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].all_gather_usage = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].all_gather_usage = True

@@ -795,8 +795,7 @@ class QuantizationConfigWrapper {
   void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
     nvte_set_quantization_config_attribute(config_,
                                            kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
-                                           &format,
-                                           sizeof(Float8BlockScaleTensorFormat));
+                                           &format, sizeof(Float8BlockScaleTensorFormat));
   }
 
  private:

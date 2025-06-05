@@ -1996,10 +1996,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].all_gather_usage = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].all_gather_usage = True
         else:
             if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2].all_gather_usage = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                ].all_gather_usage = True
 
     def backward_dw(self):
         """
