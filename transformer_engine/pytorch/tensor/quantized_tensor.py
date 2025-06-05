@@ -331,7 +331,14 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+    def __new__(
+        cls,
+        shape: Iterable[int],
+        dtype: torch.dtype,
+        *,
+        requires_grad: bool = False,
+        device: Optional[torch.device] = None,
+    ):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -342,7 +349,7 @@ class QuantizedTensor(torch.Tensor):
             dtype=dtype,
             layout=torch.strided,
             requires_grad=requires_grad,
-            device=torch.cuda.current_device(),
+            device=device if device is not None else torch.cuda.current_device(),
         )
 
         return instance
@@ -372,6 +379,15 @@ class QuantizedTensor(torch.Tensor):
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement clear function"
+        )
+
+    def empty_like(self, *args, **kwargs):
+        """Create a new empty tensor with the same shape and type as this tensor"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement empty_like function"
+        )
 
     def __repr__(self, *, tensor_contents=None) -> str:
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
@@ -424,6 +440,11 @@ class QuantizedTensor(torch.Tensor):
         # View op
         if func == torch.ops.aten.view.default:
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
+
+        # Empty like op
+        if func == torch.ops.aten.empty_like.default:
+            tensor = args[0]
+            return tensor.empty_like(*args[1:], **kwargs)
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):

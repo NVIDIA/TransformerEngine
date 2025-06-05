@@ -35,6 +35,12 @@ class _FromFloat8Func(torch.autograd.Function):
 
         # Make sure FP8 data is in expected format
         if tensor._data is not None:
+            if tensor._data.device.type == "cpu":
+                tensor_gpu = torch.empty_like(tensor, device="cuda")
+                tensor_gpu.copy_(tensor)
+                tensor = tensor_gpu
+                return tex.dequantize(tensor, te_dtype).cpu()
+
             if tensor._data.numel() == 0:
                 return torch.empty_like(tensor._data, dtype=dtype)
             # Cast from FP8
@@ -128,8 +134,10 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scaling_factors=False):
         """Get this Tensor's data."""
+        if scaling_factors:
+            return self._data, self._transpose, self._scale_inv
         return self._data, self._transpose
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:

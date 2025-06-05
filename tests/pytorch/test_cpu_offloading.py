@@ -14,18 +14,22 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_available, reason_for_no_fp8_block = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 fp8_recipes = [
     None,  # non-fp8
-    # recipe.MXFP8BlockScaling(), - scale inverse tensors offloading doest not work yet
+    recipe.MXFP8BlockScaling(),
     recipe.Float8CurrentScaling(),
     recipe.DelayedScaling(),
+    recipe.Float8BlockScaling(),
 ]
 
-SIZE = 512
+SIZE = 64
 NUM_HEADS = 8
 NUM_LAYERS = 5
-EPSILON = 0.1
+EPSILON = 0.05
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
@@ -94,6 +98,9 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
             tensor = model(tensor)
         tensor = sync_function(tensor)
 
+    import gc
+
+    gc.collect()
     max_mem_used = torch.cuda.memory_allocated() / (1024**2)
     torch.cuda.synchronize()
 
@@ -115,7 +122,6 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     the difference being the size of the FP8 cache that is not offloaded to the CPU.
     We also expect this memory consumption to be smaller than in scenario (1).
     """
-
     model_cls = model_types[model_key]
     models_list = [model_cls() for _ in range(NUM_LAYERS)]
 
@@ -124,6 +130,8 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     if fp8_recipe is not None:
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+        if fp8_recipe.float8_block_scaling() and not fp8_block_available:
+            pytest.skip(reason_for_no_fp8_block)
 
     without_offloading = _measure_memory_between_forward_and_backward(
         models_list, fp8_recipe, False
