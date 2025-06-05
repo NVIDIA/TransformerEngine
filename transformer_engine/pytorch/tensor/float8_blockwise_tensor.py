@@ -45,6 +45,7 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
+        all_gather_usage: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -52,7 +53,7 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
-        self.all_gather_usage = False
+        self.all_gather_usage = all_gather_usage
 
     def update_quantized(
         self,
