@@ -57,10 +57,9 @@ def _find_shared_object_in_te_dir(te_path: Path, prefix: str) -> Optional[Path]:
 
     files = []
     search_paths = (
-        te_path,
-        te_path / "transformer_engine",
-        te_path / "transformer_engine/wheel_lib",
-        te_path / "wheel_lib",
+        te_path,  # Editable build.
+        te_path / "transformer_engine",  # Regular source build.
+        te_path / "transformer_engine/wheel_lib",  # PyPI.
     )
 
     # Search.

@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/gemm.h"
 #include "xla/ffi/api/c_api.h"
 

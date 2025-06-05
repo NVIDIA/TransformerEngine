@@ -7,7 +7,7 @@
 
 #include <cuda_runtime.h>
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/cast.h"
 #include "xla/ffi/api/c_api.h"
 

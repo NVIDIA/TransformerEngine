@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
