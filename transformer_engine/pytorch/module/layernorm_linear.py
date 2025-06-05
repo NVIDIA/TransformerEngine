@@ -64,7 +64,6 @@ from ..tensor.quantized_tensor import (
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -184,13 +183,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 # All-gather is not supported with FP8 column-wise data
                 input_quantizer.set_usage(columnwise=False)
 
-        # Do TP communication in high precision if quantized format
-        # does not support communication
-        # force_hp_blockwise_ln_out_gather = (
-        #     fp8 and with_input_all_gather and isinstance(input_quantizer, Float8BlockQuantizer)
-        # )
-        force_hp_blockwise_ln_out_gather = False
-
         # Avoid quantized norm kernel if norm output will be returned
         # or if a gather of ln_out must be in high precision.
         with_quantized_norm = (
@@ -198,7 +190,6 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
-            and not force_hp_blockwise_ln_out_gather
         )
 
         # Apply normalization
@@ -235,15 +226,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    if not force_hp_blockwise_ln_out_gather:
-                        ln_out = input_quantizer(ln_out)
+                    ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 quantizer = None
                 if fp8 or debug:
                     quantizer = input_quantizer
-                    if not with_quantized_norm and not force_hp_blockwise_ln_out_gather:
+                    if not with_quantized_norm:
                         ln_out = quantizer(ln_out)
                     quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
@@ -257,10 +247,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_out_total, _ = gather_along_first_dim(
                         ln_out,
                         tp_group,
-                        quantizer=quantizer if not force_hp_blockwise_ln_out_gather else None,
+                        quantizer=quantizer,
                     )
-                    if force_hp_blockwise_ln_out_gather:
-                        ln_out_total = quantizer(ln_out_total)
         else:
             if (fp8 or debug) and not with_quantized_norm:
                 ln_out = input_quantizer(ln_out)
@@ -395,7 +383,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.ln_out_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
-            ctx.force_hp_blockwise_ln_out_gather = force_hp_blockwise_ln_out_gather
 
             # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
@@ -638,7 +625,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_total_work = None
             if ctx.ln_out_needs_gather:
                 quantizer = None
-                if ctx.input_quantizer is not None and not ctx.force_hp_blockwise_ln_out_gather:
+                if ctx.input_quantizer is not None:
                     quantizer = ctx.input_quantizer
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually

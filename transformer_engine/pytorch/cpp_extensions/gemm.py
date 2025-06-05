@@ -11,7 +11,7 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 
-from ..tensor.quantized_tensor import QuantizedTensorBase, Quantizer
+from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
