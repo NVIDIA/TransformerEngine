@@ -6,7 +6,7 @@
 
 #include "transformer_engine/softmax.h"
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
