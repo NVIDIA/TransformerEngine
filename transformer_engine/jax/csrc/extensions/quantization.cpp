@@ -5,7 +5,7 @@
  ************************************************************************/
 #include <cuda_runtime.h>
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
