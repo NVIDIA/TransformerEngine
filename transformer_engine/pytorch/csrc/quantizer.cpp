@@ -261,8 +261,7 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
   this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
              "Unsupported block scaling dim.");
-  this->rowwise_fmt = quantizer.attr("_rowwise_fmt").cast<RowwiseFmt>();
-  this->columnwise_fmt = quantizer.attr("_columnwise_fmt").cast<ColwiseFmt>();
+  this->all_gather_usage = quantizer.attr("all_gather_usage").cast<bool>();
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
@@ -301,6 +300,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   size_t m_dim = numel / k_dim;
   constexpr size_t kBlockLen = 128;
 
+  Float8BlockScaleTensorFormat data_format = (all_gather_usage
+                                              ? Float8BlockScaleTensorFormat::COMPACT
+                                              : Float8BlockScaleTensorFormat::GEMM_READY);
+
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
       data_rowwise = std::move(*rowwise_data);
@@ -311,13 +314,13 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
       // 2D scaling is always GEMM_READY for now
-      NVTE_CHECK(rowwise_fmt == RowwiseFmt::GEMM_READY_DATA_AND_SCALES,
-                 "2D scaling is always GEMM_READY_DATA_AND_SCALES for now.");
+      NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
+                 "2D scaling is always GEMM_READY for now.");
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup((k_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
-      // 1D scaling can be GEMM_READY_DATA_AND_SCALES or COMPACT_DATA_AND_SCALES
-      bool rowwise_compact = rowwise_fmt == RowwiseFmt::COMPACT_DATA_AND_SCALES;
+      // 1D scaling can be GEMM_READY or COMPACT
+      bool rowwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       // default rowwise scaling factor shape already transpose the scaling factor so it's GEMM_READY
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = rowwise_compact ? m_dim : roundup(m_dim, 4);
@@ -326,8 +329,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         std::swap(sinv0, sinv1);
       }
     } else {
-      NVTE_CHECK(false,
-                 "Unsupported block_scaling_dim in create_tensor rowwise."
+      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor rowwise. "
                  "Expected 1 or 2. Got ",
                  block_scaling_dim);
     }
@@ -344,7 +346,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape. Shape ",
                columnwise_shape, " torch shape: ", torch_columnwise_shape);
     if (torch_shape.size() > 0) {
-      if (columnwise_fmt == ColwiseFmt::GEMM_READY_DATA_AND_SCALES) {
+      if (!all_gather_usage) {
         torch_columnwise_shape.reserve(torch_shape.size());
         columnwise_shape.reserve(shape.size());
         torch_columnwise_shape.push_back(torch_shape[torch_shape.size() - 1]);
@@ -365,20 +367,19 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     size_t sinv1 = 0;
     if (block_scaling_dim == 2) {
       // 2D scaling is always GEMM_READY for now
-      NVTE_CHECK(columnwise_fmt == ColwiseFmt::GEMM_READY_DATA_AND_SCALES,
-                 "2D scaling is always GEMM_READY_DATA_AND_SCALES for now.");
+      NVTE_CHECK(data_format == Float8BlockScaleTensorFormat::GEMM_READY,
+                 "2D scaling is always GEMM_READY for now.");
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup((m_dim + kBlockLen - 1) / kBlockLen, 4);
     } else if (block_scaling_dim == 1) {
-      bool columnwise_compact = columnwise_fmt == ColwiseFmt::COMPACT_DATA_AND_SCALES;
+      bool columnwise_compact = data_format == Float8BlockScaleTensorFormat::COMPACT;
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = columnwise_compact ? k_dim : roundup(k_dim, 4);
       // GEMM READY case: scaling factor is [sinv0, sinv1], already transposed here for CuBLAS
       // for COMPACT case, since we apply 128x1 scaling here without transposing columnwise data, scaling factor is also [sinv0, sinv1]
       // so no need to swap sinv0 and sinv1 here
     } else {
-      NVTE_CHECK(false,
-                 "Unsupported block_scaling_dim in create_tensor columnwise."
+      NVTE_ERROR("Unsupported block_scaling_dim in create_tensor columnwise. "
                  "Expected 1 or 2. Got ",
                  block_scaling_dim);
     }
@@ -400,8 +401,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
         "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
-        "is_2D_scaled"_a = (block_scaling_dim == 2), "rowwise_fmt"_a = rowwise_fmt,
-        "columnwise_fmt"_a = columnwise_fmt);
+        "is_2D_scaled"_a = (block_scaling_dim == 2),
+        "data_format"_a = data_format);
   } else {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass));
@@ -410,7 +411,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = scale_inv_rowwise,
         "columnwise_scale_inv"_a = scale_inv_colwise, "fp8_dtype"_a = this->dtype,
         "quantizer"_a = this->quantizer, "is_2D_scaled"_a = (block_scaling_dim == 2),
-        "rowwise_fmt"_a = rowwise_fmt, "columnwise_fmt"_a = columnwise_fmt);
+        "data_format"_a = data_format);
   }
 
   return {std::move(tensor), std::move(ret)};

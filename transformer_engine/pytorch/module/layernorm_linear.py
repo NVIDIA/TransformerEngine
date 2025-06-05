@@ -238,8 +238,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     if not force_hp_blockwise_ln_out_gather:
                         ln_out = input_quantizer(ln_out)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    if isinstance(input_quantizer, Float8BlockQuantizer):
-                        input_quantizer.set_usage(need_compact=False)
                     ln_out_total = input_quantizer(ln_out_total)
             else:
                 quantizer = None
@@ -1696,6 +1694,4 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.parallel_mode == "column":
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
-                    need_compact=True
-                )
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].all_gather_usage = True

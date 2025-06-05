@@ -173,10 +173,8 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
-  // rowwise format
-  RowwiseFmt rowwise_fmt = RowwiseFmt::GEMM_READY_DATA_AND_SCALES;
-  // columnwise format
-  ColwiseFmt columnwise_fmt = ColwiseFmt::GEMM_READY_DATA_AND_SCALES;
+  // Whether quantized tensor will be used in an all-gather
+  bool all_gather_usage = false;
 
  private:
   int block_scaling_dim = 2;

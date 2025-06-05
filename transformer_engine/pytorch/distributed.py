@@ -1000,7 +1000,7 @@ def _post_process_fp8_blockwise_gather(
         handle.wait()
         handle = None
 
-    if out.is_gemm_ready_format():
+    if out._is_gemm_ready_format():
         return out
 
     needs_columnwise_data_transpose = (
@@ -1018,10 +1018,9 @@ def _post_process_fp8_blockwise_gather(
     # Thereforce, it turns out we don't need to transpose the scale inv, only columnwise data
     if needs_columnwise_data_transpose:
         out._transpose_columnwise_data()
-        out.set_columnwise_fmt(tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES)
     if need_rowwise_scale_transpose:
         out._rowwise_scale_inv = out._rowwise_scale_inv.transpose(-2, -1).contiguous()
-        out.set_rowwise_fmt(tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES)
+    out._data_format = tex.Float8BlockScaleTensorFormat.GEMM_READY
     return out
 
 
@@ -1106,21 +1105,20 @@ def _all_gather_fp8_blockwise(
             memory_format=torch.contiguous_format,
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
-        # since we are now doing bf16 allgather, the quantized output will be whole tensor
-        # so the format should not be compact, but GEMM_READY
-        quantizer.set_usage(need_compact=False)
+        orig_all_gather_usage = quantizer.all_gather_usage
+        quantizer.all_gather_usage = False
         out = quantizer(out)
+        quantizer.all_gather_usage = orig_all_gather_usage
         return out, None
 
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
-    # assert quantizer.is_quantizable(inp), "Input tensor is not quantizable"
 
     # Cast input tensor to Float8BlockwiseQTensor with required data
     # Set to compact usage in case the quantizer is not correctly configured
-    quantizer.set_usage(need_compact=True)
-
+    orig_all_gather_usage = quantizer.all_gather_usage
+    quantizer.all_gather_usage = True
     if not isinstance(inp, Float8BlockwiseQTensorBase):
         inp = quantizer(inp)
     elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
@@ -1131,11 +1129,14 @@ def _all_gather_fp8_blockwise(
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
         inp = quantizer(inp.dequantize())
+    quantizer.all_gather_usage = orig_all_gather_usage
 
     # Begin to do network communication, need to make sure compact format
-    assert (
-        inp.is_compact_format()
-    ), "FP8 Blockwise Quantized Input tensor must be in compact format to do FP8 allgather"
+    if inp._data_format != tex.Float8BlockScaleTensorFormat.COMPACT:
+        raise RuntimeError(
+            "All-gather with FP8 block-wise quantized tensor requires compact data format, "
+            f"but found data_format={inp._data_format}"
+        )
 
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)

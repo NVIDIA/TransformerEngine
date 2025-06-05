@@ -11,7 +11,7 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
-from transformer_engine_torch import RowwiseFmt, ColwiseFmt
+from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from ..quantized_tensor import QuantizedTensorBase
 
@@ -38,8 +38,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
-    _rowwise_fmt: RowwiseFmt
-    _columnwise_fmt: ColwiseFmt
+    _data_format: Float8BlockScaleTensorFormat
 
     def __new__(
         cls,
@@ -51,8 +50,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        rowwise_fmt: RowwiseFmt = RowwiseFmt.GEMM_READY_DATA_AND_SCALES,
-        columnwise_fmt: ColwiseFmt = ColwiseFmt.GEMM_READY_DATA_AND_SCALES,
+        data_format: Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat.GEMM_READY,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
@@ -63,8 +61,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
-        instance._rowwise_fmt = rowwise_fmt
-        instance._columnwise_fmt = columnwise_fmt
+        instance._data_format = data_format
 
         return instance
 
@@ -89,41 +86,12 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
-            "rowwise_fmt": self._rowwise_fmt,
-            "columnwise_fmt": self._columnwise_fmt,
+            "data_format": self._data_format,
         }
 
-    def _is_rowwise_fmt_compact(self) -> bool:
-        return self._rowwise_fmt == RowwiseFmt.COMPACT_DATA_AND_SCALES
-
-    def _is_columnwise_fmt_compact(self) -> bool:
-        return self._columnwise_fmt == ColwiseFmt.COMPACT_DATA_AND_SCALES
-
-    def is_compact_format(self) -> bool:
-        """Returns True if the format is compact for available usage, False otherwise."""
-        compact = True
-        if self._rowwise_data is not None:
-            compact = compact and self._is_rowwise_fmt_compact()
-        if self._columnwise_data is not None:
-            compact = compact and self._is_columnwise_fmt_compact()
-        return compact
-
-    def is_gemm_ready_format(self) -> bool:
-        """Returns True if the format is GEMM_READY for available usage, False otherwise."""
-        gemm_ready = True
-        if self._rowwise_data is not None:
-            gemm_ready = gemm_ready and (not self._is_rowwise_fmt_compact())
-        if self._columnwise_data is not None:
-            gemm_ready = gemm_ready and (not self._is_columnwise_fmt_compact())
-        return gemm_ready
-
-    def set_rowwise_fmt(self, rowwise_fmt: RowwiseFmt):
-        """Sets the rowwise format."""
-        self._rowwise_fmt = rowwise_fmt
-
-    def set_columnwise_fmt(self, columnwise_fmt: ColwiseFmt):
-        """Sets the columnwise format."""
-        self._columnwise_fmt = columnwise_fmt
+    def _is_gemm_ready_format(self) -> bool:
+        """Whether data is in GEMM_READY format"""
+        return self._data_format == Float8BlockScaleTensorFormat.GEMM_READY
 
     def prepare_for_saving(
         self,
@@ -178,29 +146,21 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
             inner_q_dimension_tiled = True
-            if self._is_rowwise_fmt_compact():
-                scales_untiled_dim, scales_tiled_dim = scale_inv.shape
-                inner_scale_dimension_tiled = True
-                scales_are_compact = True
-            else:
+            if self._is_gemm_ready_format():
                 scales_tiled_dim, scales_untiled_dim = scale_inv.shape
                 inner_scale_dimension_tiled = False
                 scales_are_compact = False
+            else:
+                scales_untiled_dim, scales_tiled_dim = scale_inv.shape
+                inner_scale_dimension_tiled = True
+                scales_are_compact = True
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
             scales_tiled_dim, scales_untiled_dim = scale_inv.shape
             inner_scale_dimension_tiled = False
-            if self._is_columnwise_fmt_compact():
-                inner_q_dimension_tiled = False
-                transpose_output = False
-                if len(q.shape) >= 1:
-                    q_K = q.shape[-1]
-                for i in range(len(q.shape) - 1):
-                    q_M *= q.shape[i]
-                scales_are_compact = True
-            else:
+            if self._is_gemm_ready_format():
                 inner_q_dimension_tiled = True
                 transpose_output = True
                 if len(q.shape) >= 1:
@@ -208,6 +168,14 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
                 for i in range(1, len(q.shape)):
                     q_K *= q.shape[i]
                 scales_are_compact = False
+            else:
+                inner_q_dimension_tiled = False
+                transpose_output = False
+                if len(q.shape) >= 1:
+                    q_K = q.shape[-1]
+                for i in range(len(q.shape) - 1):
+                    q_M *= q.shape[i]
+                scales_are_compact = True
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
@@ -258,20 +226,11 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
 
-        if self._is_rowwise_fmt_compact() or self._is_columnwise_fmt_compact():
+        if not self._is_gemm_ready_format():
             raise NotImplementedError(
-                "Dequantize is not implemented for 2D block scaling with compact formats."
+                "Dequantize is only supported with GEMM_READY data format, "
+                f"but found _data_format={self._data_format}"
             )
-        # 2D block scaling dequantize
-        # assert that the format is GEMM_READY_DATA_AND_SCALES for 2D scaling, raise clear error message if not
-        assert self._rowwise_fmt == RowwiseFmt.GEMM_READY_DATA_AND_SCALES, (
-            "for 2D block scaling dequantization, the rowwise format must be"
-            " GEMM_READY_DATA_AND_SCALES"
-        )
-        assert self._columnwise_fmt == ColwiseFmt.GEMM_READY_DATA_AND_SCALES, (
-            "for 2D block scaling dequantization, the columnwise format must be"
-            " GEMM_READY_DATA_AND_SCALES"
-        )
 
         def format_scale_as_logical_shape(q_K, scales, block_len):
             # The GEMM for 2D blocks required padding in the scales.
@@ -338,7 +297,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         dims = list(self._columnwise_data.size(*args, **kwargs))
-        if self._is_columnwise_fmt_compact():
+        if not self._is_gemm_ready_format():  # compact format
             return torch.Size(dims)
         reordered = []
         for i in range(1, len(dims)):

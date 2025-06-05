@@ -91,6 +91,12 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
   bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
 
+  NVTE_CHECK(
+      tensor.attr("_data_format").cast<Float8BlockScaleTensorFormat>() ==
+      Float8BlockScaleTensorFormat::GEMM_READY,
+    "Float8BlockwiseQTensor must be in GEMM_READY format to be used in "
+    "Transformer Engine core library");
+
   auto ret = TensorWrapper(is_2D_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
 
   if (rowwise_usage) {

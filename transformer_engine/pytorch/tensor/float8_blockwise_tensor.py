@@ -33,9 +33,8 @@ class Float8BlockQuantizer(Quantizer):
     amax_epsilon: float
     force_pow_2_scales: bool
     block_scaling_dim: int
-    # currently rowwise and columnwise format only applies to 1D quantizer
-    _rowwise_fmt: tex.RowwiseFmt
-    _columnwise_fmt: tex.ColwiseFmt
+    # Whether to produce tensors that will be used in all-gather
+    all_gather_usage: bool
 
     def __init__(
         self,
@@ -46,7 +45,6 @@ class Float8BlockQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
         force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
-        need_compact: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
@@ -54,37 +52,7 @@ class Float8BlockQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
         self.block_scaling_dim = block_scaling_dim
-        self._rowwise_fmt = (
-            tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
-            if need_compact
-            else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
-        )
-        self._columnwise_fmt = (
-            tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
-            if need_compact
-            else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
-        )
-
-    # override base class set_usage method
-    def set_usage(
-        self,
-        *,
-        rowwise: Optional[bool] = None,
-        columnwise: Optional[bool] = None,
-        need_compact: Optional[bool] = None,
-    ) -> None:
-        super().set_usage(rowwise=rowwise, columnwise=columnwise)
-        if need_compact is not None:
-            self._rowwise_fmt = (
-                tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
-                if need_compact
-                else tex.RowwiseFmt.GEMM_READY_DATA_AND_SCALES
-            )
-            self._columnwise_fmt = (
-                tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
-                if need_compact
-                else tex.ColwiseFmt.GEMM_READY_DATA_AND_SCALES
-            )
+        self.all_gather_usage = False
 
     def update_quantized(
         self,
@@ -177,7 +145,7 @@ class Float8BlockQuantizer(Quantizer):
         # CuBLAS requries 1x128 scaling factor to be padded and transposed
         assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
         if columnwise:
-            columnwise_compact = self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
+            columnwise_compact = self.all_gather_usage
             outer = math.ceil(M / self.block_len)
             inner = round_up_to_nearest_multiple(K, 4) if not columnwise_compact else K
             # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS
@@ -185,7 +153,7 @@ class Float8BlockQuantizer(Quantizer):
             # so no need to swap inner outer here
             return (outer, inner)
         # rowwise
-        rowwise_compact = self._rowwise_fmt == tex.RowwiseFmt.COMPACT_DATA_AND_SCALES
+        rowwise_compact = self.all_gather_usage
         outer = math.ceil(K / self.block_len)
         inner = round_up_to_nearest_multiple(M, 4) if not rowwise_compact else M
         # GEMM READY case: scaling factor is [outer, inner], already transposed here for CuBLAS need
@@ -215,10 +183,7 @@ class Float8BlockQuantizer(Quantizer):
         # currently columnwise format option only applies to 1D quantizer
         # for 2D scaling, columnwise format should always be GEMM_READY_DATA_AND_SCALES
         # since currently 2D scaling only applies to module weights
-        if (
-            self.block_scaling_dim == 1
-            and self._columnwise_fmt == tex.ColwiseFmt.COMPACT_DATA_AND_SCALES
-        ):
+        if self.block_scaling_dim == 1 and self.all_gather_usage:
             return shape
         colwise_shape = [shape[-1]]
         for i in range(len(shape) - 1):
@@ -246,6 +211,12 @@ class Float8BlockQuantizer(Quantizer):
         """Construct quantized tensor with uninitialized data"""
         if device is None:
             device = torch.device("cuda")
+
+        data_format = (
+            tex.Float8BlockScaleTensorFormat.COMPACT
+            if self.all_gather_usage
+            else tex.Float8BlockScaleTensorFormat.GEMM_READY
+        )
 
         # Allocate FP8 data
         data = None
@@ -284,8 +255,7 @@ class Float8BlockQuantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             is_2D_scaled=self.block_scaling_dim == 2,
-            rowwise_fmt=self._rowwise_fmt,
-            columnwise_fmt=self._columnwise_fmt,
+            data_format=data_format,
             requires_grad=requires_grad,
         )
 
@@ -328,8 +298,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
             f" is_2D_scaled={self._is_2D_scaled},"
             f" data={self.dequantize(dtype=self.dtype)}),"
-            f" rowwise_fmt={self._rowwise_fmt},"
-            f" columnwise_fmt={self._columnwise_fmt})"
+            f" data_format={self._data_format}"
         )
 
     def _get_quantizer(self) -> Quantizer:
@@ -462,8 +431,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         dtype: torch.dtype,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        rowwise_fmt: tex.RowwiseFmt,
-        columnwise_fmt: tex.ColwiseFmt,
+        data_format: tex.Float8BlockScaleTensorFormat,
     ) -> Float8BlockwiseQTensor:
         """Build Float8BlockwiseQTensor, for use in __reduce__
 
@@ -481,8 +449,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dtype=dtype,
             quantizer=quantizer,
             is_2D_scaled=is_2D_scaled,
-            rowwise_fmt=rowwise_fmt,
-            columnwise_fmt=columnwise_fmt,
+            data_format=data_format,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -499,8 +466,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
-                self._rowwise_fmt,
-                self._columnwise_fmt,
+                self._data_format,
             ),
         )
 
@@ -526,6 +492,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
+            dst._data_format = src._data_format
 
         # Check that tensor dimensions match
         if (
@@ -572,6 +539,13 @@ class _ViewFunc(torch.autograd.Function):
         shape: Optional[list[int]] = None,
     ) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
+
+        # Check for invalid configurations
+        if not tensor._is_gemm_ready_format():
+            raise NotImplementedError(
+                "View is only supported with GEMM_READY data format, "
+                f"but found data_format={tensor._data_format}"
+            )
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -641,6 +615,14 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8BlockwiseQTensor):
+
+            # Check for invalid configurations
+            if not grad._is_gemm_ready_format():
+                raise NotImplementedError(
+                    "View is only supported with GEMM_READY data format, "
+                    f"but found data_format={grad._data_format}"
+                )
+
             new_data = (
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
@@ -679,6 +661,13 @@ class _ReshapeFunc(torch.autograd.Function):
         shape: Optional[list[int]] = None,
     ) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
+
+        # Check for invalid configurations
+        if not tensor._is_gemm_ready_format():
+            raise NotImplementedError(
+                "Reshape is only supported with GEMM_READY data format, "
+                f"but found data_format={tensor._data_format}"
+            )
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -747,6 +736,14 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8BlockwiseQTensor):
+
+            # Check for invalid configurations
+            if not grad._is_gemm_ready_format():
+                raise NotImplementedError(
+                    "Reshape is only supported with GEMM_READY data format, "
+                    f"but found data_format={grad._data_format}"
+                )
+
             new_rowwise_data = None
             new_columnwise_data = None
             if grad._rowwise_data is not None:

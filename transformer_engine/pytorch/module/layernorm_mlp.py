@@ -295,8 +295,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     if not force_hp_fc1_input_gather:
                         ln_out = fc1_input_quantizer(ln_out)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    if isinstance(fc1_input_quantizer, Float8BlockQuantizer):
-                        fc1_input_quantizer.set_usage(need_compact=False)
                     ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
                 quantizer = None
@@ -2010,14 +2008,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].set_usage(
-                    need_compact=True
-                )
+                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].all_gather_usage = True
         else:
             if self.sequence_parallel and self.set_parallel_mode:
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2].set_usage(
-                    need_compact=True
-                )
+                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2].all_gather_usage = True
 
     def backward_dw(self):
         """

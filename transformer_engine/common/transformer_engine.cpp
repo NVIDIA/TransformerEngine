@@ -562,11 +562,8 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(buf, &config_.noop_tensor, attr_size);
       break;
-    case kNVTEQuantizationConfigColumnwiseFormat:
-      std::memcpy(buf, &config_.columnwise_fmt, attr_size);
-      break;
-    case kNVTEQuantizationConfigRowwiseFormat:
-      std::memcpy(buf, &config_.rowwise_fmt, attr_size);
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
+      std::memcpy(buf, &config_.float8_block_scale_tensor_format, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -600,11 +597,8 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNoopTensor:
       std::memcpy(&config_.noop_tensor, buf, attr_size);
       break;
-    case kNVTEQuantizationConfigColumnwiseFormat:
-      std::memcpy(&config_.columnwise_fmt, buf, attr_size);
-      break;
-    case kNVTEQuantizationConfigRowwiseFormat:
-      std::memcpy(&config_.rowwise_fmt, buf, attr_size);
+    case kNVTEQuantizationConfigFloat8BlockScaleTensorFormat:
+      std::memcpy(&config_.float8_block_scale_tensor_format, buf, attr_size);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

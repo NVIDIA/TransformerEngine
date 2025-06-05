@@ -252,15 +252,14 @@ struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
-  RowwiseFmt rowwise_fmt = RowwiseFmt::GEMM_READY_DATA_AND_SCALES;
-  ColwiseFmt columnwise_fmt = ColwiseFmt::GEMM_READY_DATA_AND_SCALES;
+  Float8BlockScaleTensorFormat float8_block_scale_tensor_format
+    = Float8BlockScaleTensorFormat::GEMM_READY;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(bool),        // force_pow_2_scales
       sizeof(float),       // amax_epsilon
-      sizeof(NVTETensor),  // noop_tensor,
-      sizeof(RowwiseFmt),  // rowwise_fmt
-      sizeof(ColwiseFmt)   // columnwise_fmt
+      sizeof(NVTETensor),  // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
   };
 };
 

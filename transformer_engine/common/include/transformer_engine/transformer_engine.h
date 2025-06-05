@@ -302,10 +302,13 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
-  /*! Columnwise format for FP8 Sub-tensor scaling recipes where scale_inv is not scalar tensor */
-  kNVTEQuantizationConfigColumnwiseFormat = 3,
-  /*! Rowwise format for FP8 Sub-tensor scaling recipes where scale_inv is not scalar tensor */
-  kNVTEQuantizationConfigRowwiseFormat = 4,
+  /*! Data format for an FP8 block-scaled tensor
+   *
+   *  This is not the right design since the tensor format is a
+   *  property of the tensor, not the quantization. This enum will
+   *  likely be refactored away in the future.
+   */
+  kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -725,15 +728,15 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
-/*! \enum RowwiseFmt
- *  \brief Rowwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
+/*! \enum Float8BlockScaleTensorFormat
+ *  \brief Data format for an FP8 block-scaled tensor
  */
-enum class RowwiseFmt { GEMM_READY_DATA_AND_SCALES = 0, COMPACT_DATA_AND_SCALES = 1 };
-
-/*! \enum ColwiseFmt
- *  \brief Columnwise format for Fp8 Sub-tensor scaling where scale_inv is not scalar tensor.
- */
-enum class ColwiseFmt { GEMM_READY_DATA_AND_SCALES = 0, COMPACT_DATA_AND_SCALES = 1 };
+enum class Float8BlockScaleTensorFormat {
+  /*! FP8 data is transposed if needed and scales are swizzled */
+  GEMM_READY = 0,
+  /*! FP8 data is untransposed and scales are not swizzled or padded */
+  COMPACT = 1
+};
 
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
@@ -788,16 +791,12 @@ class QuantizationConfigWrapper {
                                            sizeof(NVTETensor));
   }
 
-  /*! \brief Set rowwise format */
-  void set_rowwise_format(RowwiseFmt rowwise_format) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigRowwiseFormat,
-                                           &rowwise_format, sizeof(RowwiseFmt));
-  }
-
-  /*! \brief Set columnwise format */
-  void set_columnwise_format(ColwiseFmt columnwise_format) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigColumnwiseFormat,
-                                           &columnwise_format, sizeof(ColwiseFmt));
+  /*! \brief Set FP8 block-scaled tensor format */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
+                                           &format,
+                                           sizeof(Float8BlockScaleTensorFormat));
   }
 
  private:
