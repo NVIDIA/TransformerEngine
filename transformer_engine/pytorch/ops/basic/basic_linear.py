@@ -353,8 +353,9 @@ class BasicLinear(BasicOperation):
             # Make sure weight tensor has correct quantizer
             # Note: Quantizer might have changed if quantization
             # recipe changed
-            if isinstance(weight_quantizer, Float8Quantizer) and isinstance(
-                weight, Float8TensorBase
+            if (
+                isinstance(weight_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+                and isinstance(weight, Float8TensorBase)
             ):
                 weight._quantizer = weight_quantizer
 
