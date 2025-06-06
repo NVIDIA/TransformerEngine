@@ -4,9 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_UTILS
-#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_UTILS
-
 #include <pybind11/pybind11.h>
 #include <transformer_engine/fused_attn.h>
 
@@ -59,5 +56,3 @@ class cudaDevicePropertiesManager {
 
 }  // namespace jax
 }  // namespace transformer_engine
-
-#endif

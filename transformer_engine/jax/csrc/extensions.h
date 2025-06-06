@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
-#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
