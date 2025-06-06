@@ -48,14 +48,21 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
 }
 
 // Create torch tensor reusing existing data if possible
-at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-                               const py::object& tensor_to_reuse) {
+at::Tensor _create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
+                                const py::object& tensor_to_reuse,
+                                bool zero_out) {
   if (!tensor_to_reuse.is_none()) {
     // Reuse output
     const at::Tensor temp = tensor_to_reuse.cast<at::Tensor>();
     if (tensor_is_reusable(temp, shape, opts)) {
+      if (zero_out) {
+        temp.zero_();
+      }
       return temp;
     }
+  }
+  if (zero_out) {
+    return at::zeros(shape, opts);
   }
   return at::empty(shape, opts);
 }
@@ -64,12 +71,13 @@ at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::Tens
 // The reused tensor is tensor_to_reuse.attr_name
 at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
                                const py::object& tensor_to_reuse,
-                               const std::string_view& attr_name) {
+                               const std::string_view& attr_name,
+                               bool zero_out = false) {
   py::object tensor{py::none()};
   if (!tensor_to_reuse.is_none()) {
     tensor = tensor_to_reuse.attr(attr_name.data());
   }
-  return create_torch_tensor(shape, opts, tensor);
+  return _create_torch_tensor(shape, opts, tensor, zero_out);
 }
 
 std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
@@ -82,7 +90,7 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
   if (rowwise_data.has_value()) {
     ret = std::move(*rowwise_data);
   } else {
-    ret = create_torch_tensor(torch_shape, opts, output);
+    ret = _create_torch_tensor(torch_shape, opts, output, false);
   }
 
   TensorWrapper tensor;
@@ -517,7 +525,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     auto sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4lu);
     rowwise_scale_inv =
         create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
-                            output, "_rowwise_scale_inv");
+                            output, "_rowwise_scale_inv", true);
     tensor.set_rowwise_data(data_rowwise->data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(
         rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
@@ -530,7 +538,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     data_colwise = create_torch_tensor(torch_shape, opts, output, "_columnwise_data");
     columnwise_scale_inv =
         create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
-                            output, "_columnwise_scale_inv");
+                            output, "_columnwise_scale_inv", true);
 
     tensor.set_columnwise_data(data_colwise->data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
