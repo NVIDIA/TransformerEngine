@@ -49,11 +49,11 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 _devices: list[torch.device] = [torch.device("cpu"), torch.device("cuda")]
 
 # Supported quantization recipes
-_quantization_schemes: list[Optional[str]] = [None]
+_quantization_list: list[Optional[str]] = [None]
 if fp8_available:
-    _quantization_schemes.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
+    _quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
-    _quantization_schemes.append("mxfp8")
+    _quantization_list.append("mxfp8")
 
 
 def maybe_skip_quantization(
@@ -360,7 +360,7 @@ class TestFuser:
 
     @pytest.mark.parametrize("init_dtype", _dtypes)
     @pytest.mark.parametrize("final_dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_dtype_cast(
         self,
         *,
@@ -425,7 +425,7 @@ class TestFuser:
 
     @pytest.mark.parametrize("model_dtype", _dtypes)
     @pytest.mark.parametrize("autocast_dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_pyt_autocast(
         self,
         *,
@@ -488,7 +488,7 @@ class TestBasicOps:
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_identity(
         self,
         *,
@@ -616,7 +616,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (1, 3, -1), (2, 3, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", _devices)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_bias(
         self,
         *,
@@ -677,7 +677,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("cast_forward", (False, True))
     @pytest.mark.parametrize("cast_backward", (False, True))
     def test_quantize(
@@ -867,7 +867,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5)))
     @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     def test_basic_linear(
         self,
@@ -889,7 +889,7 @@ class TestBasicOps:
         )
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_input", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
@@ -922,7 +922,7 @@ class TestBasicOps:
         )
 
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
@@ -1035,7 +1035,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_layer_norm(
         self,
         *,
@@ -1205,7 +1205,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_rmsnorm(
         self,
         *,
@@ -1288,7 +1288,7 @@ class TestBasicOps:
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_add_in_place(
         self,
         *,
@@ -1355,7 +1355,7 @@ class TestBasicOps:
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_make_extra_output(
         self,
         *,
@@ -1421,7 +1421,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("cache_quantized_input", (False, True))
     def test_activation(
         self,
@@ -1509,7 +1509,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
     def test_swiglu(
@@ -1587,7 +1587,7 @@ class TestFusedOps:
     @pytest.mark.parametrize("weight_shape", ((32, 64), (3, 5)))
     @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (8, 2, 10, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
     def test_forward_linear_bias_activation(
         self,
@@ -1695,7 +1695,7 @@ class TestFusedOps:
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_forward_linear_bias_add(
         self,
         *,
@@ -1807,7 +1807,7 @@ class TestFusedOps:
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_backward_linear_add(
         self,
         *,
@@ -1918,7 +1918,7 @@ class TestCheckpointing:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-    @pytest.mark.parametrize("quantization", _quantization_schemes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
     def test_linear(
         self,

@@ -33,7 +33,7 @@ from transformer_engine.pytorch.utils import is_bf16_compatible
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import dtype_tols, str_to_dtype
+from utils import dtype_tols, make_recipe, str_to_dtype
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -155,21 +155,6 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
-
-
-def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
-    """Make recipe for quantization scheme"""
-    if name is None:
-        return None
-    if name == "fp8":
-        return transformer_engine.common.recipe.DelayedScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
-        )
-    if name == "mxfp8":
-        return transformer_engine.common.recipe.MXFP8BlockScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
-        )
-    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def _test_linear(
