@@ -107,6 +107,7 @@ struct communicator {
 
   CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
   void *ucbase_ptr[NVTE_MAX_REGIONS];  // only for cuMem allocated memory
+  size_t uc_offsets[NVTE_MAX_REGIONS];
   size_t mem_size[NVTE_MAX_REGIONS];
   bool mem_dealloc[NVTE_MAX_REGIONS];
 
@@ -125,7 +126,7 @@ struct communicator {
   // max value for running block counters in hostflags
   int basecounter[userbuffers_op_types];  // NOLINT(*)
 
-  int *flags, *map_flags;
+  int *flags_baseptr, *flags, *map_flags;
 
   void *mem_mr[NVTE_MAX_REGIONS];
 
