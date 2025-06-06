@@ -22,7 +22,7 @@ from ...distributed import (
 from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer, QuantizedTensor
-from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
@@ -323,6 +323,32 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+
+            # Recipe-specific configuration
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if recipe.float8_current_scaling():
+                if any(
+                    not isinstance(q, Float8CurrentScalingQuantizer)
+                    for q in (input_quantizer, weight_quantizer, grad_output_quantizer)
+                ):
+                    raise RuntimeError(
+                        "FP8 current-scaling recipe is enabled, "
+                        f"but input quantizer is {input_quantizer.__class__.__name__}, "
+                        f"weight quantizer is {weight_quantizer.__class__.__name__}, "
+                        f"grad output quantizer is {grad_output_quantizer.__class__.__name__}"
+                    )
+                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                if self.sequence_parallel and self.tensor_parallel_mode == "column":
+                    input_quantizer.with_amax_reduction = True
+                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                if self.sequence_parallel and self.tensor_parallel_mode == "row":
+                    grad_output_quantizer.with_amax_reduction = True
+                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
             # Make sure weight tensor has correct quantizer
             # Note: Quantizer might have changed if quantization
