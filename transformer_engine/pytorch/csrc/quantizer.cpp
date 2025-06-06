@@ -151,9 +151,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     columnwise_torch_shape.reserve(shape.size());
     if (!shape.empty()) {
       columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape.back()));
-    }
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-      columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+      for (size_t i = 0; i < shape.size() - 1; ++i) {
+        columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+      }
     }
     std::vector<size_t> transposed_shape(columnwise_torch_shape.begin(),
                                          columnwise_torch_shape.end());
@@ -276,9 +276,9 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     columnwise_torch_shape.reserve(shape.size());
     if (!shape.empty()) {
       columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape.back()));
-    }
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-      columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+      for (size_t i = 0; i < shape.size() - 1; ++i) {
+        columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+      }
     }
     columnwise_data = create_torch_tensor(columnwise_torch_shape, opts, output, "_transpose");
     std::vector<size_t> transposed_shape(columnwise_torch_shape.begin(),
