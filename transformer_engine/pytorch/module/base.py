@@ -43,7 +43,6 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import torch_get_autocast_gpu_dtype
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -1074,15 +1073,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
-                if not isinstance(
-                    grad_output,
-                    (
-                        QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
-                    ),
-                ):
+                if not isinstance(grad_output, QuantizedTensorBase):
                     grad_output = quantizer(grad_output)
 
                 # Copy into communication buffer, and replace original gradient with it
@@ -1104,18 +1095,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
             grad_output_ = quantizer(grad_output)
-            if (
-                isinstance(
-                    grad_output_.get_tensor(True),
-                    (
-                        QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
-                    ),
-                )
-                and ctx.use_bias
-            ):
+            if isinstance(grad_output_.get_tensor(True), QuantizedTensorBase) and ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias = None
@@ -1127,7 +1107,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(
                 grad_output,
-                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+                QuantizedTensorBase,
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
@@ -1138,7 +1118,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(
             grad_output,
-            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+            QuantizedTensorBase,
         ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
@@ -1280,13 +1260,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
-            if quantizer is not None and isinstance(out, MXFP8TensorBase):
-                if quantizer.rowwise_usage and out._rowwise_data is None:
-                    out = None
-                    del self._fp8_workspaces[cache_name]
-                elif quantizer.columnwise_usage and out._columnwise_data is None:
-                    out = None
-                    del self._fp8_workspaces[cache_name]
 
             is_debug = isinstance(quantizer, DebugQuantizer)
             is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)

@@ -313,16 +313,7 @@ class BasicLinear(BasicOperation):
 
         # Configure quantizers
         if FP8GlobalStateManager.is_fp8_enabled():
-            input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
-            grad_output_quantizer = self.get_quantizer("backward", 0)
-
-            # Specify required tensor formats
-            is_grad_enabled = torch.is_grad_enabled()
-            weight_requires_grad = is_grad_enabled and weight.requires_grad
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
             # Make sure weight tensor has correct quantizer
             # Note: Quantizer might have changed if quantization
@@ -897,12 +888,6 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer = self.get_quantizer("backward", 0)
             if prev_op is not None and prev_op.num_quantizers("backward") > 0:
                 grad_input_quantizer = prev_op.get_quantizer("backward", 0)
-
-            # Configure quantizers
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Get autocast dtype if needed
         dtype = None

@@ -97,7 +97,7 @@ class Quantizer {
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
   virtual std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const = 0;
 
   virtual ~Quantizer() = default;
@@ -120,7 +120,7 @@ class NoneQuantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
   std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -138,7 +138,7 @@ class Float8Quantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override;
 
   std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -160,7 +160,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override;
 
   std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -192,7 +192,7 @@ class Float8BlockQuantizer : public Quantizer {
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
   std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -207,7 +207,7 @@ class MXFP8Quantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override;
 
   std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
+      const std::vector<size_t>& shape, DType dtype, const py::object& output = py::none(),
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
@@ -349,7 +349,16 @@ void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
 
-int roundup(const int value, const int multiple);
+template <typename T>
+T divup(const T value, const T multiple) {
+  assert(multiple > 0);
+  return ((value + multiple - 1) / multiple);
+}
+
+template <typename T>
+T roundup(const T value, const T multiple) {
+  return divup(value, multiple) * multiple;
+}
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 }  // namespace transformer_engine::pytorch
