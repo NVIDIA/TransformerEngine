@@ -23,6 +23,7 @@ from .misc import (
     jax_dtype_to_te_dtype,
     multidim_transpose,
     should_apply_1x_fused_dbias_war_for_arch_l_100,
+    get_min_device_compute_capability,
     NamedSharding,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
@@ -629,6 +630,18 @@ def _quantize_dbias_impl(
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
+    is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
+    # It is faster to use 1x quantization for tensor scaling
+    force_1x_quantization = (
+        quantizer.scaling_mode.is_tensor_scaling()
+        and quantizer.is_2x2x()
+        and is_1x_kernel_supported
+    )
+
+    q_layout = quantizer.q_layout
+    if force_1x_quantization:
+        q_layout = QuantizeLayout.ROWWISE
+
     (
         rowwise_casted_output,
         colwise_casted_output,
@@ -641,7 +654,7 @@ def _quantize_dbias_impl(
         scale,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_layout=quantizer.q_layout.value,
+        q_layout=q_layout.value,
         flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
         is_dbias=is_dbias,
@@ -650,6 +663,15 @@ def _quantize_dbias_impl(
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
     if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
+
+        if q_layout == QuantizeLayout.ROWWISE:
+            # Quantizer requires 2x quantization, but we are using 1x quantization
+            # for performance reasons, so we need to generate the colwise data in JAX
+            if flatten_axis < 0:
+                flatten_axis += x.ndim
+            colwise_casted_output = jnp.transpose(
+                rowwise_casted_output, (*range(flatten_axis, x.ndim), *range(flatten_axis))
+            )
 
     quantizer.update(updated_amax)
 
