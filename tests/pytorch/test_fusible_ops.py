@@ -26,7 +26,11 @@ from transformer_engine.pytorch.ops.fused import (
     ForwardLinearBiasAdd,
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer, Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
@@ -69,10 +73,7 @@ def maybe_skip_quantization(
         return
 
     # Check if quantization scheme is supported
-    if (
-        quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling")
-        and not fp8_available
-    ):
+    if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
@@ -133,7 +134,8 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, device=test_device,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
@@ -761,14 +763,16 @@ class TestBasicOps:
         # Skip invalid configurations
         maybe_skip_quantization(quantization, dims=in_shape, device=device)
         maybe_skip_quantization(quantization, dims=out_shape)
-        quantization_needed = any((
-            quantized_compute,
-            quantized_input,
-            quantized_weight,
-            quantized_output,
-            quantized_grad_output,
-            quantized_grad_input,
-        ))
+        quantization_needed = any(
+            (
+                quantized_compute,
+                quantized_input,
+                quantized_weight,
+                quantized_output,
+                quantized_grad_output,
+                quantized_grad_input,
+            )
+        )
         if quantization is None and quantization_needed:
             pytest.skip("Quantization scheme is not specified")
         if quantization is not None and not quantization_needed:

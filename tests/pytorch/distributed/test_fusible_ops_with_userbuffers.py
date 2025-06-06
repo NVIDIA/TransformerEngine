@@ -26,7 +26,10 @@ from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
@@ -156,7 +159,8 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, device=test_device,
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
