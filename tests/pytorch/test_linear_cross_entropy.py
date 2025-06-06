@@ -12,15 +12,18 @@ import torch.distributed as dist
 import os
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
+torch.manual_seed(233376)
+
 def run_torch_entropy_with_token_entropy(hidden: torch.Tensor,
                                         weight: torch.Tensor,
-                                        labels: torch.Tensor) -> typing.List[torch.Tensor]:
-    logits = torch.matmul(hidden.to(torch.float32), weight.to(torch.float32)) # [num_tokens, vocab_size]
+                                        labels: torch.Tensor,
+                                        reduction: typing.Optional[str] = "mean") -> typing.List[torch.Tensor]:
+    logits = torch.matmul(hidden.to(torch.float32), weight.T.to(torch.float32)) # [num_tokens, vocab_size]
     pd = torch.nn.functional.softmax(logits, dim=-1) # [num_tokens, vocab_size]
     entropy_a = torch.logsumexp(logits, dim=-1) # [num_tokens]
     entropy_b = torch.sum(pd * logits, dim=-1) # [num_tokens]
     entropy = entropy_a - entropy_b
-    logprobs = torch.nn.functional.cross_entropy(logits, labels) # [1]
+    logprobs = torch.nn.functional.cross_entropy(logits, labels, reduction=reduction) # [1]
     return logprobs, entropy
 
 def run_torch_entropy(hidden: torch.Tensor,
@@ -43,18 +46,19 @@ class TestLinearCrossEntropyWithTokenEntropy:
     
 
     def generate_hyper(self):
-        self.num_tokens = 80
+        self.num_tokens = 13092
         self.hidden_size = 4096
         self.vocab_size = 152064
         self.dtype = torch.bfloat16
+        self.reduction = "mean"
 
     def generate_forward_input(self):
         hidden = (torch.empty((self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
                 .uniform_(-0.5, 0.5)
                 .requires_grad_())
-        weight = (torch.empty((self.hidden_size, self.vocab_size), dtype=self.dtype, device="cuda")
-                .uniform_(-0.5, 0.5)
-                .requires_grad_())
+        weight = (torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device="cuda")
+                  .uniform_(-0.5, 0.5)
+                  .requires_grad_())
         labels = torch.randint(0, self.vocab_size, (self.num_tokens,), device="cuda")
         return hidden, weight, labels
     
@@ -82,13 +86,15 @@ class TestLinearCrossEntropyWithTokenEntropy:
             end_event = torch.cuda.Event(enable_timing=True)
 
             start_event.record()
-            (torch_logprobs, torch_entropy) = run_torch_entropy_with_token_entropy(hidden, weight, labels)
+            (torch_logprobs, torch_entropy) = run_torch_entropy_with_token_entropy(hidden, weight, labels,
+                                                                                   self.reduction)
             end_event.record()
             torch.cuda.synchronize()
             torch_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
-            (kernel_logprobs, kernel_entropy) = linear_cross_entropy_with_token_entropy(hidden, weight, labels)
+            (kernel_logprobs, kernel_entropy) = linear_cross_entropy_with_token_entropy(hidden, weight, labels,
+                                                                                        self.reduction)
             end_event.record()
             torch.cuda.synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
@@ -139,7 +145,7 @@ class TestLinearCrossEntropyWithTokenEntropy:
         torch.cuda.reset_peak_memory_stats()
         (torch_logprobs, torch_entropy) = run_torch_entropy_with_token_entropy(hidden, weight, labels)
         torch.cuda.synchronize()
-        torch_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Torch Forward pass peak memory: {torch_max_memory:.2f} MB")
 
         torch.cuda.reset_peak_memory_stats()
@@ -148,7 +154,7 @@ class TestLinearCrossEntropyWithTokenEntropy:
                                                                             (g_entropy, g_logprobs),
                                                                             retain_graph=False)
         torch.cuda.synchronize()
-        torch_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        torch_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Torch Backward pass peak memory: {torch_backward_max_memory:.2f} MB")
         
     def test_kernel_storage(self):
@@ -161,7 +167,7 @@ class TestLinearCrossEntropyWithTokenEntropy:
         torch.cuda.reset_peak_memory_stats()
         (kernel_logprobs, kernel_entropy) = linear_cross_entropy_with_token_entropy(hidden, weight, labels)
         torch.cuda.synchronize()
-        kernel_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        kernel_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
 
         torch.cuda.reset_peak_memory_stats()
@@ -170,7 +176,7 @@ class TestLinearCrossEntropyWithTokenEntropy:
                                                                             (g_entropy, g_logprobs),
                                                                             retain_graph=False)
         torch.cuda.synchronize()
-        kernel_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        kernel_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Kernel Backward pass peak memory: {kernel_backward_max_memory:.2f} MB")
         
         
@@ -277,7 +283,7 @@ class TestLinearCrossEntropy:
         torch.cuda.reset_peak_memory_stats()
         torch_logprobs = run_torch_entropy(hidden, weight, labels)
         torch.cuda.synchronize()
-        torch_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        torch_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Torch Forward pass peak memory: {torch_max_memory:.2f} MB")
 
         torch.cuda.reset_peak_memory_stats()
@@ -287,7 +293,7 @@ class TestLinearCrossEntropy:
                                                                 (g_logprobs,),
                                                                 retain_graph=False)
         torch.cuda.synchronize()
-        torch_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        torch_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Torch Backward pass peak memory: {torch_backward_max_memory:.2f} MB")
 
     def test_kernel_storage(self):
@@ -300,7 +306,7 @@ class TestLinearCrossEntropy:
         torch.cuda.reset_peak_memory_stats()
         kernel_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", None, self.ignore_index)
         torch.cuda.synchronize()
-        kernel_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        kernel_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
 
         torch.cuda.reset_peak_memory_stats()
@@ -310,7 +316,7 @@ class TestLinearCrossEntropy:
                                                                 (g_logprobs,),
                                                                 retain_graph=False)
         torch.cuda.synchronize()
-        kernel_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        kernel_backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         print(f"[INFO]: Kernel Backward pass peak memory: {kernel_backward_max_memory:.2f} MB")
         
 
@@ -584,7 +590,7 @@ class _TestTensorParallel:
         logits_view = logits.view(-1, logits.shape[0], logits.shape[1])
         parallel_logprobs = parallel_cross_entropy(logits_view, labels, 0.0, True, self.group)
         torch.cuda.synchronize()
-        forward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        forward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
 
         g_logprobs = self.generate_backward_input()
         dist.broadcast(g_logprobs, src=0, group=self.group)
@@ -598,7 +604,7 @@ class _TestTensorParallel:
         d_hidden = torch.matmul(d_logits, weight.T.to(torch.float32))
         d_weight = torch.matmul(hidden.T.to(torch.float32), d_logits)
         torch.cuda.synchronize()
-        backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         dist.all_reduce(d_hidden, op=dist.ReduceOp.SUM, group=self.group)
 
         if self.local_rank == 0:
@@ -680,7 +686,7 @@ class _TestTensorParallel:
         torch.cuda.reset_peak_memory_stats()
         custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group, self.ignore_index)
         torch.cuda.synchronize()
-        forward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        forward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
 
         g_logprobs = self.generate_backward_input()
         dist.broadcast(g_logprobs, src=0, group=self.group)
@@ -691,7 +697,7 @@ class _TestTensorParallel:
                                                     (g_logprobs,),
                                                     retain_graph=False)
         torch.cuda.synchronize()
-        backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         dist.all_reduce(d_hidden, op=dist.ReduceOp.SUM, group=self.group)
 
         if self.local_rank == 0:
