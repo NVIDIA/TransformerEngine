@@ -902,6 +902,49 @@ class TestDense:
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
 
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 48)])
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN"])
+    def test_te_gemm_bf16(self, m, n, k, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
+
+        primitive_out = tex.te_gemm_impl(x, w, contracting_dims=contracting_dims)
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
+
+        assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 48)])
+    @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN"])
+    def test_te_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=False
+        )
+        x_q = quantizer_set.x.quantize(x)
+        w_q = quantizer_set.kernel.quantize(w)
+        primitive_out = tex.te_gemm_impl(
+            x_q.get_rowwise_tensor() if x_q.data_layout == "N" else x_q.get_colwise_tensor(),
+            w_q.get_rowwise_tensor() if w_q.data_layout == "N" else w_q.get_colwise_tensor(),
+            contracting_dims=contracting_dims,
+            scaling_mode=quantizer_set.x.scaling_mode,
+            lhs_scale_inv=(
+                x_q.get_rowwise_scale_inv()
+                if x_q.data_layout == "N"
+                else x_q.get_colwise_scale_inv()
+            ),
+            rhs_scale_inv=(
+                w_q.get_rowwise_scale_inv()
+                if w_q.data_layout == "N"
+                else w_q.get_colwise_scale_inv()
+            ),
+        )
+
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
+
+        assert_allclose(primitive_out, ref_out, dtype=q_dtype)
+
     @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     def test_dense_grad_bf16(self, m, n, k):
         data_layout = "NN"
