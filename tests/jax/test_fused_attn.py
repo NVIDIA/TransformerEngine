@@ -347,6 +347,7 @@ class FusedAttnRunner:
             )
 
         self.backend = FusedAttnHelper(
+            self.is_training,
             self.dtype,
             self.dtype,
             self.qkv_layout,
