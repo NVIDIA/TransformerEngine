@@ -838,7 +838,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     max_seqlen_q=max_seqlen_q,
                                     max_seqlen_kv=max_seqlen_kv,
                                 )
-                                # TODO: add MLA support once Flash Attention supports MLA
+                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -909,11 +909,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 if enable_mla:
                                     # [t, np, hn] -> [t/2, np, hn]
                                     k_part = tex.thd_read_half_tensor(
-                                        k_part.unsqueeze(0), cu_seqlens_kv_padded, 0
-                                    ).squeeze(0)
+                                        k_part, cu_seqlens_kv_padded, 0
+                                    )
                                     v_part = tex.thd_read_half_tensor(
-                                        v_part.unsqueeze(0), cu_seqlens_kv_padded, 0
-                                    ).squeeze(0)
+                                        v_part, cu_seqlens_kv_padded, 0
+                                    )
                                 else:
                                     # [2, t, np, hn] -> [2, t/2, np, hn]
                                     kv_inputs[i % 2] = tex.thd_read_half_tensor(
@@ -1001,7 +1001,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                # TODO: add MLA support once Flash Attention supports MLA
+                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -1160,7 +1160,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
-                                # TODO: add MLA support once Flash Attention supports MLA
+                                # Need to add MLA support once Flash Attention supports MLA
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -1278,7 +1278,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 max_seqlen_q=max_seqlen_q,
                                 max_seqlen_kv=max_seqlen_kv,
                             )
-                            # TODO: add MLA support once Flash Attention supports MLA
+                            # Need to add MLA support once Flash Attention supports MLA
                             fa_outputs = flash_attn_fwd(
                                 q,
                                 (
@@ -1895,7 +1895,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = 0
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # TODO: add MLA support once Flash Attention supports MLA
+                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -1935,11 +1935,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if ctx.enable_mla:
                             # [t, np, hn] -> [t/2, np, hn]
                             k_part = tex.thd_read_half_tensor(
-                                k_part.unsqueeze(0), cu_seqlens_kv_padded, 0
-                            ).squeeze(0)
+                                k_part, cu_seqlens_kv_padded, 0
+                            )
                             v_part = tex.thd_read_half_tensor(
-                                v_part.unsqueeze(0), cu_seqlens_kv_padded, 0
-                            ).squeeze(0)
+                                v_part, cu_seqlens_kv_padded, 0
+                            )
                         else:
                             # [2, t, np, hn] -> [2, t/2, np, hn]
                             kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_kv_padded, 0)
@@ -2050,7 +2050,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # TODO: add MLA support once Flash Attention supports MLA
+                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -2194,7 +2194,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fa_backward_kwargs["window_size_right"] = -1
                         if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                        # TODO: add MLA support once Flash Attention supports MLA
+                        # Need to add MLA support once Flash Attention supports MLA
                         flash_attn_bwd(
                             dout_,
                             q_,
@@ -2291,7 +2291,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         fa_backward_kwargs["window_size_right"] = -1
                     if not ctx.use_flash_attn_3:
                         fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
-                    # TODO: add MLA support once Flash Attention supports MLA
+                    # Need to add MLA support once Flash Attention supports MLA
                     flash_attn_bwd(
                         dout,
                         q,
