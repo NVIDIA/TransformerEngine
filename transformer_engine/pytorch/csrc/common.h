@@ -30,6 +30,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
