@@ -1934,12 +1934,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         q_, out_, dout_ = q, out, dout
                         if ctx.enable_mla:
                             # [t, np, hn] -> [t/2, np, hn]
-                            k_part = tex.thd_read_half_tensor(
-                                k_part, cu_seqlens_kv_padded, 0
-                            )
-                            v_part = tex.thd_read_half_tensor(
-                                v_part, cu_seqlens_kv_padded, 0
-                            )
+                            k_part = tex.thd_read_half_tensor(k_part, cu_seqlens_kv_padded, 0)
+                            v_part = tex.thd_read_half_tensor(v_part, cu_seqlens_kv_padded, 0)
                         else:
                             # [2, t, np, hn] -> [2, t/2, np, hn]
                             kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_kv_padded, 0)
