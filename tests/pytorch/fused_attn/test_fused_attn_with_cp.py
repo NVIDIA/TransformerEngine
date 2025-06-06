@@ -107,6 +107,18 @@ model_configs_fused_attn = {
     "cp_2_4": ModelConfig(
         2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
     ),  # GQA
+    "cp_3_0": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_1": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_2": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_3": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias", head_dim_v=64
+    ),  # MLA
 }
 
 
@@ -159,6 +171,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         )
     if dtype != "fp8" and fp8_mha:
         pytest.skip("Only fp8 works with fp8_mha=True!")
+    if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently only support KV P2P!")
 
     subprocess.run(
         get_bash_arguments(
