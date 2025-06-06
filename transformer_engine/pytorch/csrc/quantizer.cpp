@@ -49,8 +49,7 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
 
 // Create torch tensor reusing existing data if possible
 at::Tensor _create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-                                const py::object& tensor_to_reuse,
-                                bool zero_out) {
+                                const py::object& tensor_to_reuse, bool zero_out) {
   if (!tensor_to_reuse.is_none()) {
     // Reuse output
     const at::Tensor temp = tensor_to_reuse.cast<at::Tensor>();
@@ -70,8 +69,7 @@ at::Tensor _create_torch_tensor(const std::vector<int64_t>& shape, const at::Ten
 // Create torch tensor reusing existing data is possible
 // The reused tensor is tensor_to_reuse.attr_name
 at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-                               const py::object& tensor_to_reuse,
-                               const std::string_view& attr_name,
+                               const py::object& tensor_to_reuse, const std::string_view& attr_name,
                                bool zero_out = false) {
   py::object tensor{py::none()};
   if (!tensor_to_reuse.is_none()) {
