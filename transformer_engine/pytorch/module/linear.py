@@ -689,14 +689,20 @@ class _Linear(torch.autograd.Function):
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
-                    # for the dgrad GEMM. We work around with blocking
-                    # all-gather for column-scaled MXFP8 data.
+                    # for the dgrad GEMM. We work around by explicitly
+                    # overlapping the NCCL operation with the dgrad GEMM.
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    grad_output, _ = gather_along_first_dim(
-                        grad_output_arg,
-                        ctx.tp_group,
-                        quantizer=ctx.grad_output_quantizer,
-                    )
+                    s = ub_obj_dgrad.get_communication_stream()
+                    with torch.cuda.stream(s):
+                        grad_output, grad_output_work = gather_along_first_dim(
+                            grad_output_arg,
+                            ctx.tp_group,
+                            async_op=True,
+                            quantizer=ctx.grad_output_quantizer,
+                        )
+                    # Synchronize with the main stream
+                    grad_output_work.wait()
+
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorBase):
                         grad_output.update_usage(columnwise_usage=True)
