@@ -306,6 +306,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        data_format: tex.Float8BlockScaleTensorFormat,
         **kwargs,
     ):
         instance = super().__new__(
@@ -317,6 +318,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             fp8_dtype,
             quantizer,
             is_2D_scaled,
+            data_format,
             *args,
             **kwargs,
         )

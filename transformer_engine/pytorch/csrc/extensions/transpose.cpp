@@ -6,11 +6,9 @@
 
 #include <pybind.h>
 
-#include "../extensions.h"
-#include <iostream>
 #include <optional>
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
