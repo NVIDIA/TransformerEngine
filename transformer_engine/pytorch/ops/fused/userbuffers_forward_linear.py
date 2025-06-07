@@ -21,7 +21,7 @@ from ...module.base import (
     _2X_ACC_FPROP,
 )
 from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
-from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
@@ -208,7 +208,9 @@ class UserbuffersForwardLinear(FusedOperation):
             if input_quantizer is not None:
                 if not isinstance(x_local, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-                    if isinstance(input_quantizer, Float8Quantizer):
+                    if isinstance(
+                        input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                    ):
                         input_quantizer.set_usage(columnwise=False)
                     x_local = input_quantizer(x_local)
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -327,8 +329,10 @@ class UserbuffersForwardLinear(FusedOperation):
         grad_input_quantizer = None
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if not recipe.delayed() and not recipe.mxfp8():
-                raise RuntimeError("Userbuffers is only supported with FP8 delayed scaling recipe")
+            if not any((recipe.delayed(), recipe.float8_current_scaling(), recipe.mxfp8())):
+                raise RuntimeError(
+                    f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
+                )
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
