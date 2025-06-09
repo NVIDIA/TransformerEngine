@@ -29,12 +29,15 @@ def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
 
+
 clear_internal_tensors = True
+
 
 def disable_clear_internal_tensors():
     """Disable the clear_tensor_data function"""
     global clear_internal_tensors
     clear_internal_tensors = False
+
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """

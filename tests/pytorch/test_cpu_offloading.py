@@ -81,7 +81,7 @@ def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload
             num_layers=len(models) - 1,
             model_layers=len(models),
             offload_activations=True,
-            offload_weights=False
+            offload_weights=False,
         )
     else:
         offload_context = nullcontext()
@@ -117,7 +117,8 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     the difference being the size of the FP8 cache that is not offloaded to the CPU.
     We also expect this memory consumption to be smaller than in scenario (1).
     """
-    import gc 
+    import gc
+
     gc.collect()
 
     model_cls = model_types[model_key]
