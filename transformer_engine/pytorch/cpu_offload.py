@@ -12,6 +12,7 @@ import torch
 from .tensor.quantized_tensor import QuantizedTensorBase
 
 from .tensor.float8_tensor import Float8Tensor
+from .utils import disable_clear_internal_tensors
 
 __all__ = ["get_cpu_offload_context"]
 
@@ -265,6 +266,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
 
         copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
+        copy_buffer.cpu_reloaded_do_not_clear = True
 
         return copy_buffer
 
@@ -332,6 +334,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.double_buffering = double_buffering
         self.reload_double_buffer = [[], []]
         self.double_buffer_created = False
+
+        # We do not want to clear the internal tensors when double buffering is enabled,
+        # because it will release the buffer memory to early.
+        if double_buffering:
+            disable_clear_internal_tensors()
 
         # Logic to make offloading load balance across computation
         # for optimal CPU/GPU interconnect usage
@@ -600,6 +607,7 @@ def get_cpu_offload_context(
     model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = False,
+    double_buffering: bool = False,
 ):
     """
     This function returns the CPU Offload context and the synchronizer function that needs to be
@@ -628,6 +636,8 @@ def get_cpu_offload_context(
                          When set to `True`, offloads the activations for the TE layer.
     offload_weights: bool, default = `True`
                      When set to `True`, offloads the weights for the TE layer.
+    double_buffering: bool, default = `False`
+                      When set to `True`, uses double buffering for offloading.
 
     """
 
@@ -659,6 +669,7 @@ def get_cpu_offload_context(
         num_offload_group=num_layers,
         num_model_group=model_layers,
         tensor_need_offloading_checker=tensor_need_offloading_checker,
+        double_buffering=double_buffering,
     )
 
     def group_prefetch_offload_commit_async(tensor):
