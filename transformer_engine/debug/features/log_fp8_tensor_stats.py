@@ -141,6 +141,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 stat in self._get_supported_stats_list()
             ), f"[NVTORCH INSPECT ERROR] Statistic {stat} is not supported."
 
+
         STATS_BUFFERS.try_add_buffer(
             layer_name=layer_name,
             tensor_name=tensor_name,
