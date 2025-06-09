@@ -67,6 +67,7 @@ class Config:
     Config for the efficient entropy kernel.
     """
     _backward: BackwardEnum = BackwardEnum._Split_Dlogits_N
+    # _backward: BackwardEnum = BackwardEnum._Total_Separate
     _vocab_per_iter_bwd: int = 9504 # vocab-size per iteration in backward pass, only available for _Split_Dlogits_N
 
 _config: Config = Config()
