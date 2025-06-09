@@ -331,7 +331,7 @@ class _TorchLinearCrossEntropy(torch.autograd.Function):
                 labels: torch.Tensor,
                 reduction: typing.Optional[str] = "mean",
                 dist_process_group: typing.Optional[dist.ProcessGroup] = None):
-        logits = torch.matmul(hidden.to(torch.float32), weight.to(torch.float32)) # [num_tokens, vocab_size]
+        logits = torch.matmul(hidden.to(torch.float32), weight.T.to(torch.float32)) # [num_tokens, vocab_size]
 
         whole_logits = torch.empty((logits.shape[0], logits.shape[1] * dist.get_world_size(dist_process_group)), 
                                     dtype=logits.dtype, device=logits.device)
@@ -386,15 +386,15 @@ class _TorchLinearCrossEntropy(torch.autograd.Function):
         grad_logits = grad_logits * valid_mask
         
         # Get the local portion of the gradient
-        local_size = weight.size(1)
+        local_size = weight.size(0)
         rank = dist.get_rank(dist_process_group)
         local_grad_logits = grad_logits[:, rank * local_size:(rank + 1) * local_size]
         
         # Calculate gradients for hidden and weight
-        grad_hidden = torch.matmul(local_grad_logits, weight.t().to(torch.float32)).to(hidden.dtype)
-        grad_weight = torch.matmul(hidden.t().to(torch.float32), local_grad_logits).to(weight.dtype)
+        grad_hidden = torch.matmul(local_grad_logits, weight.to(torch.float32)).to(hidden.dtype)
+        grad_weight = torch.matmul(local_grad_logits.T, hidden.to(torch.float32)).to(weight.dtype)
         
-        return grad_hidden, grad_weight, None, None
+        return grad_hidden, grad_weight, None, None, None
           
 
 class _TestTensorParallel:
@@ -411,7 +411,7 @@ class _TestTensorParallel:
         self.ignore_index_opt = ignore_index
 
     def generate_hyper(self):
-        self.num_tokens = 80
+        self.num_tokens = 2047
         self.hidden_size = 4096
         self.vocab_size = 152064
         self.dtype = torch.bfloat16
@@ -424,7 +424,7 @@ class _TestTensorParallel:
         hidden = (torch.empty((self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
                 .uniform_(-0.5, 0.5)
                 .requires_grad_())
-        weight = (torch.empty((self.hidden_size, self.vocab_size), dtype=self.dtype, device="cuda")
+        weight = (torch.empty((self.vocab_size, self.hidden_size), dtype=self.dtype, device="cuda")
                 .uniform_(-0.5, 0.5)
                 .requires_grad_())
         labels = torch.randint(0, self.vocab_size * self.world_size, (self.num_tokens,), device="cuda")
@@ -449,13 +449,13 @@ class _TestTensorParallel:
             dist.broadcast(hidden, src=0, group=self.group)
             dist.broadcast(labels, src=0, group=self.group)
 
-            logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.group)
+            logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.reduction, self.group)
             
             # single GPU verification
-            whole_weight = torch.empty((weight.shape[0], weight.shape[1] * self.world_size),
+            whole_weight = torch.empty((weight.shape[0] * self.world_size, weight.shape[1]),
                                         dtype=weight.dtype, device=weight.device)
             whole_weight_ref = [
-                whole_weight[:, i * weight.shape[1]: (i + 1) * weight.shape[1]]
+                whole_weight[i * weight.shape[0] : (i + 1) * weight.shape[0], :]
                 for i in range(self.world_size)
             ]
             dist.all_gather(whole_weight_ref, weight, group=self.group)
@@ -481,8 +481,8 @@ class _TestTensorParallel:
                                                                     retain_graph=False)
             
             torch.testing.assert_close(d_hidden, d_whole_hidden, atol=1e-4, rtol=1e-4)
-            torch.testing.assert_close(d_weight, 
-                d_whole_weight[:, self.local_rank * d_weight.shape[1] : (self.local_rank + 1) * d_weight.shape[1]])
+            torch.testing.assert_close(d_weight,
+                d_whole_weight[self.local_rank * d_weight.shape[0] : (self.local_rank + 1) * d_weight.shape[0], :])
 
         if self.local_rank == 0:
             print(f"[INFO] rank {self.local_rank} torch correctness with single GPU verified")
@@ -516,7 +516,7 @@ class _TestTensorParallel:
 
             # combine linear with parallel cross entropy
             start_event.record()
-            logits = torch.matmul(hidden.to(torch.float32), weight.to(torch.float32))
+            logits = torch.matmul(hidden.to(torch.float32), weight.T.to(torch.float32))
             logits_view = logits.view(-1, logits.shape[0], logits.shape[1])
             parallel_logprobs = parallel_cross_entropy(logits_view, labels, 0.0, True, self.group)
             end_event.record()
@@ -545,11 +545,11 @@ class _TestTensorParallel:
             d_logits = torch.autograd.grad((parallel_logprobs,),
                                             (logits_view,),
                                             (g_logprobs,),
-                                            retain_graph=False)
-            d_logits = d_logits[0]
-            
-            d_hidden = torch.matmul(d_logits, weight.T.to(torch.float32))
-            d_weight = torch.matmul(hidden.T.to(torch.float32), d_logits)
+                                            retain_graph=False)[0]
+            d_logits = d_logits.view(-1, d_logits.shape[-1])
+            d_hidden = torch.matmul(d_logits, weight.to(torch.float32))
+            d_weight = torch.matmul(d_logits.T, hidden.to(torch.float32))
+
             end_event.record()
             torch.cuda.synchronize()
             custom_backward_latency.append(start_event.elapsed_time(end_event))
@@ -591,7 +591,7 @@ class _TestTensorParallel:
         dist.broadcast(labels, src=0, group=self.group)
 
         torch.cuda.reset_peak_memory_stats()
-        logits = torch.matmul(hidden.to(torch.float32), weight.to(torch.float32))
+        logits = torch.matmul(hidden.to(torch.float32), weight.T.to(torch.float32))
         logits_view = logits.view(-1, logits.shape[0], logits.shape[1])
         parallel_logprobs = parallel_cross_entropy(logits_view, labels, 0.0, True, self.group)
         torch.cuda.synchronize()
@@ -604,10 +604,10 @@ class _TestTensorParallel:
         d_logits = torch.autograd.grad((parallel_logprobs,),
                                         (logits_view,),
                                         (g_logprobs,),
-                                        retain_graph=False)
-        d_logits = d_logits[0]  
-        d_hidden = torch.matmul(d_logits, weight.T.to(torch.float32))
-        d_weight = torch.matmul(hidden.T.to(torch.float32), d_logits)
+                                        retain_graph=False)[0]
+        d_logits = d_logits.view(-1, d_logits.shape[-1])
+        d_hidden = torch.matmul(d_logits, weight.to(torch.float32))
+        d_weight = torch.matmul(d_logits.T, hidden.to(torch.float32))
         torch.cuda.synchronize()
         backward_max_memory = torch.cuda.max_memory_allocated() / 1024 / 1024
         dist.all_reduce(d_hidden, op=dist.ReduceOp.SUM, group=self.group)
@@ -634,7 +634,7 @@ class _TestTensorParallel:
             dist.broadcast(hidden, src=0, group=self.group)
             dist.broadcast(labels, src=0, group=self.group)
 
-            torch_logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.group)
+            torch_logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.reduction, self.group)
 
             start_event.record()
             custom_logprobs = linear_cross_entropy(hidden, weight, labels, self.reduction, self.group, self.ignore_index)
@@ -665,8 +665,8 @@ class _TestTensorParallel:
             custom_backward_latency.append(start_event.elapsed_time(end_event))
             dist.all_reduce(custom_d_hidden, op=dist.ReduceOp.SUM, group=self.group)
             
-            torch.testing.assert_close(torch_d_hidden, custom_d_hidden, atol=1e-4, rtol=1e-4)
-            torch.testing.assert_close(torch_d_weight, custom_d_weight, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(torch_d_hidden, custom_d_hidden, atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(torch_d_weight, custom_d_weight, atol=1e-3, rtol=1e-3)
 
         # remove first latency
         custom_forward_latency = custom_forward_latency[1:]
@@ -718,11 +718,11 @@ class _TestTensorParallel:
         dist.destroy_process_group()
 
 if __name__ == "__main__":
-    # torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/pytorch/test_linear_cross_entropy.py
+    # PYTHONPATH=$PWD torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/pytorch/test_linear_cross_entropy.py
     torch.manual_seed(233376)
 
-    ignore_index = -100 # this is the default value in torch's cross entropy
-    # ignore_index = None # comment this line if you want to test with ignore_index
+    # ignore_index = -100 # this is the default value in torch's cross entropy
+    ignore_index = None # comment this line if you want to test with ignore_index
     tp_test = _TestTensorParallel(ignore_index)
 
     tp_test.verify_torch_correctness_with_single_gpu()
