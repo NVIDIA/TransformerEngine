@@ -262,9 +262,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         if copy_buffer is None:
             return cpu_backup.to(dev, non_blocking=non_blocking)
 
-        assert (
-            cpu_backup.size() == copy_buffer.size()
-        ), "Can't copy two buffers of different sizes!"
+        assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
 
         copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
 
