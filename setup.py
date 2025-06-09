@@ -79,7 +79,7 @@ def setup_common_extension() -> CMakeExtension:
 def setup_requirements() -> Tuple[List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for runtime and testing.
     """
 
     # Common requirements
