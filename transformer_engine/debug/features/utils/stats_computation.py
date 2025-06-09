@@ -127,7 +127,7 @@ STATS = {
         lambda buffers: min(_get(buffers, "dynamic_range_bottom")),
     ),
     "underflows_num": (
-        lambda x: (x._data == 0).sum(),
+        lambda x: (x.get_data_tensors()[0] == 0).sum(),
         lambda buffers: sum(_get(buffers, "underflows_num")),
     ),
     "std": (

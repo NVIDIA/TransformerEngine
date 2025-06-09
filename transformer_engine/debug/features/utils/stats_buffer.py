@@ -88,7 +88,7 @@ class _Buffer:
         if (
             tensor.numel() == 0
             if hasattr(tensor, "numel")
-            else all(t.numel() == 0 for t in tensor.get_data_tensors())
+            else all((t is None or t.numel() == 0) for t in tensor.get_data_tensors())
         ):
             return
 
