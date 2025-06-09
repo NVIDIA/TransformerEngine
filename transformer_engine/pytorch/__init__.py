@@ -29,6 +29,7 @@ from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
 from transformer_engine.pytorch.module import LayerNorm
 from transformer_engine.pytorch.module import RMSNorm
+from transformer_engine.pytorch.module import L2Norm
 from transformer_engine.pytorch.module import GroupedLinear
 from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
