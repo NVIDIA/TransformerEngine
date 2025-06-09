@@ -4,13 +4,22 @@
 
 """JAX related extensions."""
 import os
-import shutil
 from pathlib import Path
 
 import setuptools
 
 from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
 from typing import List
+
+
+def install_requirements() -> List[str]:
+    """Install dependencies for TE/JAX extensions."""
+    return ["jax[cuda12]", "flax>=0.7.1"]
+
+
+def test_requirements() -> List[str]:
+    """Test dependencies for TE/JAX extensions."""
+    return ["numpy"]
 
 
 def xla_path() -> str:

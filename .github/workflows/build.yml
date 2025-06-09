@@ -89,7 +89,7 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install --no-build-isolation . -v
+        run: pip install --no-build-isolation . -v --no-deps
         env:
           NVTE_FRAMEWORK: all
           MAX_JOBS: 1

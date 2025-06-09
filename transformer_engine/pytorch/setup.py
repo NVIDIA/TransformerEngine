@@ -31,7 +31,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 from build_tools.build_ext import get_build_ext
 from build_tools.utils import copy_common_headers
 from build_tools.te_version import te_version
-from build_tools.pytorch import setup_pytorch_extension
+from build_tools.pytorch import setup_pytorch_extension, install_requirements, test_requirements
 
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
@@ -55,8 +55,8 @@ if __name__ == "__main__":
         description="Transformer acceleration library - Torch Lib",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension},
-        install_requires=["torch>=2.1"],
-        tests_require=["numpy", "torchvision"],
+        install_requires=install_requirements(),
+        tests_require=test_requirements(),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
