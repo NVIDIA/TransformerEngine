@@ -418,6 +418,9 @@ def efficient_entropy_forward(hidden: torch.Tensor,
             REDUCTION,
         )
     else: # tensor-parallel case
+        _max_backup = _max.clone()
+        dist.all_reduce(_max, op=dist.ReduceOp.MAX, group=dist_process_group)
+        
         # launch it to another stream, instead of using current stream
         torch.cuda.current_stream().record_event(_dedicated_events[0])
         with torch.cuda.stream(_dedicated_stream):
@@ -426,10 +429,7 @@ def efficient_entropy_forward(hidden: torch.Tensor,
                             op=dist.ReduceOp.SUM,
                             group=dist_process_group)
             _dedicated_stream.record_event(_dedicated_events[1])
-        # communicate maximums
-        # maybe _max is too large to be communicated, and cause longer communication time
-        _max_backup = _max.clone()
-        dist.all_reduce(_max, op=dist.ReduceOp.MAX, group=dist_process_group)
+
         efficient_entropy_triton_kernel_epilogue_tp[epilogue_grid](
             num_tokens, num_splits,
             _max, _max.stride(0), _max.stride(1),
