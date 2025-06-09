@@ -261,14 +261,14 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
 
         if copy_buffer is None:
             return cpu_backup.to(dev, non_blocking=non_blocking)
-        else:
-            assert (
-                cpu_backup.size() == copy_buffer.size()
-            ), "Can't copy two buffers of different sizes!"
 
-            copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
+        assert (
+            cpu_backup.size() == copy_buffer.size()
+        ), "Can't copy two buffers of different sizes!"
 
-            return copy_buffer
+        copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
+
+        return copy_buffer
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs):
         """Tensor push."""
@@ -310,7 +310,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         num_offload_group,  # must be <= actual number of groups (number of commits)
         num_model_group,
         tensor_need_offloading_checker=(lambda t: True),
-        double_buffering=True,
+        double_buffering=False,
         debug=False,
     ) -> None:
         super().__init__(

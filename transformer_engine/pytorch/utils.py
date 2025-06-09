@@ -14,6 +14,7 @@ import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 from . import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+from .cpu_offload import is_cpu_offload_enabled
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -37,13 +38,17 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
-    for t in tensors:
-        if t is not None:
-            if hasattr(t, "clear"):
-                t.clear()
-            else:
-                t.data = _empty_tensor()
-            del t
+
+    # We do not want to force remove the tensor data if CPU offloading is enabled
+    # because it can break double buffering.
+    if not is_cpu_offload_enabled():
+        for t in tensors:
+            if t is not None:
+                if hasattr(t, "clear"):
+                    t.clear()
+                else:
+                    t.data = _empty_tensor()
+                del t
 
 
 @functools.lru_cache
