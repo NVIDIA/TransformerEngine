@@ -21,13 +21,7 @@ from typing import List, Optional, Tuple, Union
 @functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
-    for arg in sys.argv:
-        if arg == "--debug":
-            sys.argv.remove(arg)
-            return True
-    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
-        return True
-    return False
+    return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
 
 
 @functools.lru_cache(maxsize=None)

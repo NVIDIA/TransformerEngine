@@ -158,11 +158,12 @@ def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
     dim_nums = (lhs_contract, rhs_contract), (lhs_batch, rhs_batch)
 
     out_fp8 = jax.lax.dot_general(
-        lhs.data, rhs.data, dim_nums, precision=precision, preferred_element_type=jnp.float32
+        lhs.data, rhs.data, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
     )
-    scale_inv = (lhs.scale_inv * rhs.scale_inv).astype(jnp.float32)
+    scale_inv = lhs.scale_inv * rhs.scale_inv
+    out = (out_fp8 * scale_inv).astype(lhs.dq_dtype)
 
-    return (out_fp8 * scale_inv).astype(lhs.dq_dtype)
+    return out
 
 
 @partial(jax.jit, static_argnums=(2,))
