@@ -1379,7 +1379,7 @@ def test_inference_mode(
 
     # Construct module
     module = None
-    with torch.inference_mode():
+    with torch.no_grad():
         with fp8_model_init(enabled=with_quantization, recipe=quantization_recipe):
             if module_name == "Linear":
                 module = Linear(hidden_size, hidden_size)
