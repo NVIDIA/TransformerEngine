@@ -362,7 +362,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 self.tensor_tag_to_buf[tensor_tag] = []
 
                 # Added support for de-duplicating FP8 param tensors
-                for key, value in self.fp8_tensor_object_map.items():
+                for _, value in self.fp8_tensor_object_map.items():
                     if tensor is value:
                         self.dereferencing_list.append(tensor_tag)
                         break
