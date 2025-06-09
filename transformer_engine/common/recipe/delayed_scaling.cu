@@ -397,9 +397,9 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update(
   NVTE_API_CALL(nvte_delayed_scaling_recipe_amax_and_scale_update);
   using namespace transformer_engine;
   delayed_scaling_recipe::amax_and_scale_update(
-      *reinterpret_cast<const Tensor*>(amax_history), *reinterpret_cast<const Tensor*>(scale),
-      reinterpret_cast<Tensor*>(updated_amax_history), reinterpret_cast<Tensor*>(updated_scale),
-      amax_compute_algo, static_cast<DType>(fp8_dtype), margin, stream);
+      *convertNVTETensorCheck(amax_history), *convertNVTETensorCheck(scale),
+      convertNVTETensor(updated_amax_history), convertNVTETensor(updated_scale), amax_compute_algo,
+      static_cast<DType>(fp8_dtype), margin, stream);
 }
 
 void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
@@ -411,10 +411,10 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
   size_t num_tensors = amax_histories.size();
   std::vector<Tensor*> t_amax_histories, t_scales;
   for (size_t i = 0; i < num_tensors; i++) {
-    t_amax_histories.push_back(reinterpret_cast<Tensor*>(amax_histories[i]));
-    t_scales.push_back(reinterpret_cast<Tensor*>(scales[i]));
+    t_amax_histories.push_back(convertNVTETensor(amax_histories[i]));
+    t_scales.push_back(convertNVTETensor(scales[i]));
   }
   delayed_scaling_recipe::amax_and_scale_update_after_reduction(
-      *reinterpret_cast<const Tensor*>(amax_reduction_buffer), t_amax_histories, t_scales,
-      amax_compute_algo, static_cast<DType>(fp8_dtype), margin, stream);
+      *convertNVTETensorCheck(amax_reduction_buffer), t_amax_histories, t_scales, amax_compute_algo,
+      static_cast<DType>(fp8_dtype), margin, stream);
 }

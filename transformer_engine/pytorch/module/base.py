@@ -83,7 +83,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(tex._num_cublas_streams):
+        for _ in range(tex.get_num_cublas_streams()):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
@@ -639,6 +639,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Update quantizers with new amax pointers.
             self.quantizers[meta_key] = self.fp8_meta[meta_key].make_quantizers()
+            # Make sure weight tensors has correct quantizers
+            self._update_weight_quantizers()
 
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
@@ -692,6 +694,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
 
+    def _update_weight_quantizers(self) -> None:
+        """Update the quantizers for the weight tensors."""
+        weight_tensors = self._get_weight_tensors()
+        weight_quantizers = self._get_weight_quantizers()
+        assert len(weight_tensors) == len(weight_quantizers), (
+            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+            f"({len(weight_quantizers)}) must match"
+        )
+        for weight, quantizer in zip(weight_tensors, weight_quantizers):
+            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                weight.update_quantizer(quantizer)
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
+        )
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
+        )
+
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
         self.set_meta_tensor(True, recipe)
@@ -731,7 +757,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             reset("scaling_fwd")
             reset("scaling_bwd")
 
-    def get_extra_state(self) -> Optional[torch.Tensor]:
+    def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
 
         # This implementation is working around a few issues:
@@ -766,7 +792,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state = None
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
         if not fp8_checkpoint:
-            return None
+            return torch.empty(0, dtype=torch.uint8)
 
         # Copy tensors to CPU and store
         state = {}
@@ -792,13 +818,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
 
-    def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
+    def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
-        if state is None:
-            return
-
         # Load state
         if isinstance(state, torch.Tensor):
+            # No FP8 is indicated by an empty tensor we don't need to unpickle.
+            if state.numel() == 0:
+                return
             # Default format: byte tensor with pickled data
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):

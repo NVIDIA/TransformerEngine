@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
+from typing import Union
 import operator
 
 from utils import (
@@ -33,6 +34,9 @@ from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     DelayedScaleQuantizer,
     ScaledTensor,
+    ScaledTensor1x,
+    ScaledTensor2x,
+    GroupedScaledTensor1x,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -41,7 +45,6 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -111,6 +114,38 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         assert_dequantized_scaled_tensor(a.get_colwise_tensor(), b)
     else:
         pytest.fail("a must be a ScaledTensor object")
+
+
+def assert_dequantized_grouped_scaled_tensor(
+    a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
+):
+    if isinstance(a, GroupedScaledTensor1x):
+        assert a.group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        dq_a = a.dequantize()
+        for dq_a_i, b_i in zip(dq_a, b):
+            if len(dq_a_i) == 0:
+                continue
+            if a.data_layout == "T":
+                data_ndim = len(a.original_shape)
+                flatten_axis = a.flatten_axis
+                if b_i.shape[0] == 1:
+                    b_i = jnp.transpose(
+                        b_i, (0, *range(flatten_axis, data_ndim), *range(1, flatten_axis))
+                    )
+                else:
+                    b_i = jnp.transpose(
+                        b_i, (*range(flatten_axis, data_ndim), *range(flatten_axis))
+                    )
+            dq_a_i = dq_a_i.reshape(b_i.shape)
+            assert_allclose(dq_a_i, b_i, dtype=a.data.dtype)
+    elif isinstance(a, ScaledTensor2x):
+        assert isinstance(a.get_rowwise_tensor(), GroupedScaledTensor1x)
+        assert isinstance(a.get_colwise_tensor(), GroupedScaledTensor1x)
+        assert_dequantized_grouped_scaled_tensor(a.get_rowwise_tensor(), b)
+        assert_dequantized_grouped_scaled_tensor(a.get_colwise_tensor(), b)
+    else:
+        pytest.fail("a must be a GroupedScaledTensor object")
 
 
 ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
@@ -532,7 +567,7 @@ QUANTIZE_OUTPUT_DTYPES = {
 ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = [
     ((32, 64), -1),
     ((2, 64, 32), -1),
-    ((2, 64, 32), -2),
+    ((64, 2, 32), -2),
     ((32, 256, 128), -1),
     ((32, 256, 128), -2),
     ((64, 32, 32, 256), -1),
@@ -544,7 +579,7 @@ QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = {
     "L0": [
         ((32, 64), -1),
         ((2, 64, 32), -1),
-        ((2, 64, 32), -2),
+        ((64, 2, 32), -2),
     ],
     "L2": ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES,
 }
@@ -577,9 +612,6 @@ class TestQuantize:
             q_dtype=q_dtype,
             q_layout=q_layout,
         )
-        # Adding dimension to test if padding is done correctly when flatten 3D to 2D
-        if flatten_axis == -2:
-            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
@@ -593,8 +625,6 @@ class TestQuantize:
     ):
 
         key = jax.random.PRNGKey(0)
-        if flatten_axis == -2:
-            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
@@ -605,6 +635,57 @@ class TestQuantize:
 
         te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
         assert_bitwise_scaled_tensors(te_output, jax_output)
+
+
+@pytest.mark.skipif(not is_fp8_supported, reason=reason)
+@pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
+@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
+@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
+@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+@pytest_parametrize_wrapper("flatten_axis", [-1])
+@pytest_parametrize_wrapper("with_group_sizes", [True, False])
+@pytest_parametrize_wrapper(
+    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
+)
+class TestGroupedQuantize:
+    def test_grouped_qdq(
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+    ):
+        n_groups, m, n = input_shape
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+
+        # *32 so that the input shapes works for MXFP8
+        input_shape = (m * 32, n)
+
+        if with_group_sizes:
+            group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+            group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+            group_sizes = jnp.diff(group_sizes)
+            assert group_sizes.sum() == m
+            assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
+            group_sizes = group_sizes * 32
+        else:
+            group_sizes = None
+            input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
+
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
+
+        grouped_quantizer = QuantizerFactory.create(
+            scaling_mode=scaling_mode,
+            q_dtype=q_dtype,
+            q_layout=q_layout,
+            n_groups=n_groups,
+        )
+
+        scaled_tensor = tex.grouped_quantize(
+            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+        )
+
+        assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -624,12 +705,6 @@ class TestFusedQuantize:
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
-
-        if (flatten_axis < 0 and flatten_axis + len(input_shape) <= 0) or flatten_axis <= 0:
-            pytest.skip(
-                f"Flatten axis {flatten_axis} is not supported for input shape {input_shape}. There"
-                " must be at least one axis on either side of the flatten_axis split."
-            )
 
         key = jax.random.PRNGKey(0)
         input = jax.random.uniform(key, input_shape, in_dtype)
