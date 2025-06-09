@@ -1273,6 +1273,76 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
+    def test_l2norm(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 1e-6,
+        quantization: Optional[str],
+    ) -> None:
+        """L2 Normalization"""
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        # L2 norm: x / ||x||_2 = x / sqrt(sum(x^2) + eps)
+        l2_norm_squared = x_ref.pow(2).sum(dim=-1, keepdim=True)
+        rsqrt_norm = torch.rsqrt(l2_norm_squared + eps)
+        y_ref = x_ref * rsqrt_norm
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.L2Norm(
+            eps=eps,
+            device=device,
+            dtype=dtype,
+        )
+        quantized_compute = quantization is not None
+        recipe = make_recipe(quantization)
+        forward = te_ops.Sequential(
+            op,
+            te_ops.Quantize(forward=quantized_compute, backward=False),
+        )
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if quantized_compute:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+        else:
+            # L2Norm requires slightly looser tolerances
+            if dtype == torch.float16:
+                tols = dict(rtol=5e-3, atol=5e-4)
+            elif dtype == torch.bfloat16:
+                tols = dict(rtol=2e-2, atol=5e-3)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("fp8", (False, True))
