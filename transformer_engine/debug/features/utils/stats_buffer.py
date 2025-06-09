@@ -85,7 +85,7 @@ class _Buffer:
         if self.modified[0] and not self.reduce_within_microbatch:
             return
 
-        if tensor.numel() == 0:
+        if tensor.numel() == 0 if hasattr(tensor, "numel") else all(t.numel() == 0 for t in tensor.get_data_tensors()):
             return
 
         # save stats for tensor to tmp buffer
