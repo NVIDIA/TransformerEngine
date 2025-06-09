@@ -49,7 +49,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        data_format: Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat.GEMM_READY,
+        data_format: Float8BlockScaleTensorFormat,
         *args,
         **kwargs,
     ):
