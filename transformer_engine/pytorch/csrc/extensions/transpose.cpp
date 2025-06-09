@@ -237,6 +237,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   std::vector<py::object> py_output_objects_list;
   std::vector<TensorWrapper> tensor_wrappers_input;
   std::vector<TensorWrapper> tensor_wrappers_output;
+  TensorWrapper dummy_te_noop = TensorWrapper();
 
   // Choose implementation
   // Note: Currently only have fused kernel for FP8 cast-transpose
@@ -261,10 +262,6 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // create TE tensors from input
   if (use_fused_bulk_alloc) {
-    // for (size_t i = 0; i < input_list.size(); i++) {
-    //   if (m_splits[i] == 0) continue;
-    //   tensor_wrappers_input.emplace_back(makeTransformerEngineTensor(input_list[i]));
-    // }
     NVTE_CHECK(input_list.size() == 0, "Input list must be empty because we want to split in C++");
     _fused_bulk_alloc_outputs(input_view, m_splits, quantizers, quantizer_list,
                               tensor_wrappers_input, tensor_wrappers_output,
@@ -323,12 +320,10 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
                "Input tensor wrappers and output tensor wrappers must have the same size");
 
     for (size_t i = 0; i < py_output_objects_list.size(); i++) {
-      // quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);
-
       if (m_splits[i] == 0) continue;
 
       quantize_cpp(tensor_wrappers_input[non_empty_tensor_idx], quantizer_list[i], quantizers[i],
-                   tensor_wrappers_output[non_empty_tensor_idx], std::nullopt);
+                   tensor_wrappers_output[non_empty_tensor_idx], dummy_te_noop);
       non_empty_tensor_idx++;
     }
   }

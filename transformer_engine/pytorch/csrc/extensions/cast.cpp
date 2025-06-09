@@ -46,64 +46,16 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 
   if (te_output.numel() == 0) return out;
 
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_noop_tensor(te_noop.data());
-
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    // my_quantizer here has to be a Float8CurrentScalingQuantizer
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
-    });
-    // check if we need to do amax reudction (depending on model parallel configs)
-    if (my_quantizer_cs->with_amax_reduction) {
-      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
-      // construct torch tesnor from NVTEBasicTensor without reallocating memory
-      at::Tensor& amax_tensor_torch = my_quantizer_cs->amax;
-      std::vector<at::Tensor> tensors = {amax_tensor_torch};
-      // allreduce amax tensor
-      c10d::AllreduceOptions allreduce_opts;
-      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
-      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
-    }
-    // this config is used for cs scaling factor computation
-    // because compute scale is cannot be fused with quantize kernel
-    // so in nvte_quantize_v2 with current scaling, the quant config is not used again
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(te_output.data(), quant_config,
-                                   at::cuda::getCurrentCUDAStream());
-    });
-    // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-    te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
-    auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
-    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
-    if (my_quantizer_bw->all_gather_usage) {
-      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
-    }
-  }
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
-                     at::cuda::getCurrentCUDAStream());
-  });
+  quantize_cpp(te_input, quantizer, my_quantizer, te_output, te_noop);
 
   return out;
 }
 
-// TODO(zhongbo): we should let this function be the backend of quantize to reduce code redundancy
-void quantize_cpp(TensorWrapper& te_input, py::handle quantizer_py,
+// C++ backend of quantize with tensor converted
+// quantizer_py is still required for runtime type check
+void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
                   std::unique_ptr<Quantizer>& quantizer_cpp, TensorWrapper& te_output,
-                  std::optional<at::Tensor> noop) {
-  TensorWrapper te_noop;
-  if (noop.has_value()) {
-    te_noop = makeTransformerEngineTensor(*noop);
-  } else {
-    te_noop = TensorWrapper();
-  }
-
+                  TensorWrapper& te_noop) {
   if (te_output.numel() == 0) {
     NVTE_CHECK(te_input.numel() == 0, "Input tensor is not 0 when output tensor is 0");
   }
@@ -142,6 +94,9 @@ void quantize_cpp(TensorWrapper& te_input, py::handle quantizer_py,
     auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(quantizer_cpp.get());
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+    if (my_quantizer_bw->all_gather_usage) {
+      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+    }
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,

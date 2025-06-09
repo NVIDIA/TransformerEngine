@@ -186,9 +186,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop);
 
-void quantize_cpp(TensorWrapper &te_input, py::handle quantizer_py,
+void quantize_cpp(const TensorWrapper &te_input, py::handle quantizer_py,
                   std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &te_output,
-                  std::optional<at::Tensor> noop);
+                  TensorWrapper &te_noop);
 
 py::object dequantize(const py::handle &input, DType otype);
 
