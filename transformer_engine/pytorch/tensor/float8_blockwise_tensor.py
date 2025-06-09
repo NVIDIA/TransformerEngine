@@ -10,6 +10,7 @@ import math
 import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -306,7 +307,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
-        data_format: tex.Float8BlockScaleTensorFormat,
+        data_format: tex.Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat.GEMM_READY,
         **kwargs,
     ):
         instance = super().__new__(
