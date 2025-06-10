@@ -18,8 +18,8 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake==3.21.0
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake==3.21.0 pybind11[global] ninja
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -42,8 +42,8 @@ jobs:
       - name: 'Dependencies'
         run: |
           apt-get update
-          apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops
+          apt-get install -y git python3.9 pip cudnn9-cuda-12
+          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -62,6 +62,8 @@ jobs:
       image: ghcr.io/nvidia/jax:jax
       options: --user root
     steps:
+      - name: 'Dependencies'
+        run: pip install pybind11[global]
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
