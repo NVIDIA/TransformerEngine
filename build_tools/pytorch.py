@@ -19,6 +19,7 @@ def install_requirements() -> List[str]:
         "nvdlfw-inspect @"
         " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
     )
+    reqs.extend(["torch>=2.1", "onnx", "onnxscript@git+https://github.com/microsoft/onnxscript.git@51ecf47523ef079c53b0e620c62d56d70cfd3871"])
     return reqs
 
 
