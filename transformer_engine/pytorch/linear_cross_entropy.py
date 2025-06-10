@@ -9,7 +9,9 @@ Fuse cross entropy with linear layer.
 
 import typing
 import torch
-from transformer_engine.pytorch.triton import linear_cross_entropy_with_token_entropy as linear_cross_entropy_with_token_entropy_kernels
+from transformer_engine.pytorch.triton import (
+    linear_cross_entropy_with_token_entropy as linear_cross_entropy_with_token_entropy_kernels,
+)
 from transformer_engine.pytorch.triton import linear_cross_entropy as linear_cross_entropy_kernels
 
 
@@ -28,14 +30,17 @@ class LinearCrossEntropyWithTokenEntropy(torch.autograd.Function):
             return logprobs, entropy
         ```
     """
+
     @staticmethod
-    def forward(ctx,
-                hidden: torch.Tensor,
-                weight: torch.Tensor,
-                labels: torch.Tensor,
-                reduction: typing.Optional[str] = "mean",
-                temperature: typing.Optional[float] = 1.0,
-                dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None) -> typing.List[torch.Tensor]:
+    def forward(
+        ctx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        labels: torch.Tensor,
+        reduction: typing.Optional[str] = "mean",
+        temperature: typing.Optional[float] = 1.0,
+        dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None,
+    ) -> typing.List[torch.Tensor]:
         """
         The forward pass of the Linear Cross Entropy with Token Entropy.
         Args:
@@ -51,11 +56,17 @@ class LinearCrossEntropyWithTokenEntropy(torch.autograd.Function):
             entropy (torch.Tensor): The entropy of shape (num_tokens,).
         """
         with torch.cuda.nvtx.range("EfficientEntropy-forward"):
-            REDUCTION = linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
+            REDUCTION = (
+                linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(
+                    reduction.lower()
+                )
+            )
 
-            logprobs, entropy, _maximum, _accumulate, _entropy_b =\
+            logprobs, entropy, _maximum, _accumulate, _entropy_b = (
                 linear_cross_entropy_with_token_entropy_kernels.efficient_entropy_forward(
-                    hidden, weight, labels, REDUCTION, temperature, dist_process_group)
+                    hidden, weight, labels, REDUCTION, temperature, dist_process_group
+                )
+            )
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _accumulate, _entropy_b)
             ctx.REDUCTION = REDUCTION
@@ -65,9 +76,7 @@ class LinearCrossEntropyWithTokenEntropy(torch.autograd.Function):
         return logprobs, entropy
 
     @staticmethod
-    def backward(ctx,
-                 dlogprobs: torch.Tensor,
-                 dentropy: torch.Tensor) -> typing.List[torch.Tensor]:
+    def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> typing.List[torch.Tensor]:
         """
         The backward pass of the Linear Cross Entropy.
         Args:
@@ -84,10 +93,21 @@ class LinearCrossEntropyWithTokenEntropy(torch.autograd.Function):
             temperature = ctx.temperature
             dist_process_group = ctx.dist_process_group
 
-            d_hidden, d_weight =\
+            d_hidden, d_weight = (
                 linear_cross_entropy_with_token_entropy_kernels.efficient_entropy_backward(
-                    dlogprobs, dentropy, hidden, weight, labels, _maximum, _accumulate, _entropy_b,
-                    REDUCTION, temperature, dist_process_group)
+                    dlogprobs,
+                    dentropy,
+                    hidden,
+                    weight,
+                    labels,
+                    _maximum,
+                    _accumulate,
+                    _entropy_b,
+                    REDUCTION,
+                    temperature,
+                    dist_process_group,
+                )
+            )
 
         return d_hidden, d_weight, None, None, None, None
 
@@ -105,14 +125,17 @@ class LinearCrossEntropy(torch.autograd.Function):
             return logprobs
         ```
     """
+
     @staticmethod
-    def forward(ctx,
-                hidden: torch.Tensor,
-                weight: torch.Tensor,
-                labels: torch.Tensor,
-                reduction: typing.Optional[str] = "mean",
-                dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None,
-                ignore_index: typing.Optional[int] = -100) -> torch.Tensor:
+    def forward(
+        ctx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        labels: torch.Tensor,
+        reduction: typing.Optional[str] = "mean",
+        dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None,
+        ignore_index: typing.Optional[int] = -100,
+    ) -> torch.Tensor:
         """
         The forward pass of the Linear Cross Entropy.
         If dist_process_group is passed for distributed loss calculation,
@@ -129,12 +152,17 @@ class LinearCrossEntropy(torch.autograd.Function):
             logprobs (torch.Tensor): The cross entropy.
         """
         with torch.cuda.nvtx.range("LinearCrossEntropy-forward"):
-            REDUCTION = linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
+            REDUCTION = (
+                linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(
+                    reduction.lower()
+                )
+            )
 
-            logprobs, _maximum, _acc, _num_valid_tokens =\
+            logprobs, _maximum, _acc, _num_valid_tokens = (
                 linear_cross_entropy_kernels.efficient_entropy_forward(
-                    hidden, weight, labels, REDUCTION,
-                    dist_process_group, ignore_index)
+                    hidden, weight, labels, REDUCTION, dist_process_group, ignore_index
+                )
+            )
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _acc, _num_valid_tokens)
             ctx.REDUCTION = REDUCTION
@@ -144,8 +172,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         return logprobs
 
     @staticmethod
-    def backward(ctx,
-                 dlogprobs: torch.Tensor) -> typing.List[torch.Tensor]:
+    def backward(ctx, dlogprobs: torch.Tensor) -> typing.List[torch.Tensor]:
         """
         The backward pass of the Linear Cross Entropy.
         Args:
@@ -161,18 +188,24 @@ class LinearCrossEntropy(torch.autograd.Function):
             ignore_index = ctx.ignore_index
             d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
                 dlogprobs,
-                hidden, weight, labels,
-                _maximum, _acc, _num_valid_tokens,
+                hidden,
+                weight,
+                labels,
+                _maximum,
+                _acc,
+                _num_valid_tokens,
                 REDUCTION,
                 dist_process_group,
-                ignore_index
+                ignore_index,
             )
         return d_hidden, d_weight, None, None, None, None
 
 
 linear_cross_entropy = LinearCrossEntropy.apply
 
-__all__ = ["linear_cross_entropy_with_token_entropy",
-           "LinearCrossEntropyWithTokenEntropy",
-           "linear_cross_entropy",
-           "LinearCrossEntropy"]
+__all__ = [
+    "linear_cross_entropy_with_token_entropy",
+    "LinearCrossEntropyWithTokenEntropy",
+    "linear_cross_entropy",
+    "LinearCrossEntropy",
+]
