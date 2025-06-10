@@ -153,8 +153,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
-  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr)
-                                           + static_cast<uint64_t>(offset_elems * type_size));
+  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
+                                           static_cast<uint64_t>(offset_elems * type_size));
 
   NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
              "Tensor data pointer must be 16B aligned");
@@ -186,8 +186,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       // CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
 
       // Any element that is outside of bounds will be set to zero by the TMA transfer.
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE)
-  );
+      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
 
 bool is_supported_by_CC_100() {
@@ -212,9 +211,11 @@ size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype) {
   return (N * typeToNumBits(buffer_dtype)) / 8;
 }
 
-size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last, const DType buffer_dtype) {
+size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
+                             const DType buffer_dtype) {
   if (buffer_dtype == DType::kFloat4E2M1) {
-    NVTE_CHECK(dim_last % 2 == 0, "Last dimension of a tensor with FP4 type of data must be an even number!");
+    NVTE_CHECK(dim_last % 2 == 0,
+               "Last dimension of a tensor with FP4 type of data must be an even number!");
   }
   const size_t N = dim_first * dim_last;
   return get_buffer_size_bytes(N, buffer_dtype);

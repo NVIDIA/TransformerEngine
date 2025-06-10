@@ -90,7 +90,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                  t.columnwise_scale_inv.shape, ")");
     }
   } else {
-    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING || t.scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING ||
+        t.scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
@@ -103,7 +104,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
             DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) * alignment;
         alignment = block_alignment[1];
         expected_y =
-            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) *
+            alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
@@ -112,7 +114,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
         expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) * alignment;
+            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) *
+            alignment;
         alignment = block_alignment[0];
         expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
@@ -400,7 +403,8 @@ size_t nvte_tensor_element_size_bits(const NVTETensor tensor) {
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) return sizeof(float);
-  NVTE_CHECK(!is_fp4_dtype(t->dtype()), "For FP4 type please use the nvte_tensor_element_size_bits.");
+  NVTE_CHECK(!is_fp4_dtype(t->dtype()),
+             "For FP4 type please use the nvte_tensor_element_size_bits.");
   return nvte_tensor_element_size_bits(tensor) / 8;
 }
 

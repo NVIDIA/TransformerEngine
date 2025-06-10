@@ -70,13 +70,13 @@ struct BitsNumber;
 #if FP4_TYPE_SUPPORTED
 template <>
 struct BitsNumber<fp4e2m1> {
-  static constexpr size_t num_bits = 4; 
+  static constexpr size_t num_bits = 4;
 };
 #endif
 
 template <typename T>
 struct BitsNumber {
-  static constexpr size_t num_bits = 8 * sizeof(T); 
+  static constexpr size_t num_bits = 8 * sizeof(T);
 };
 
 template <typename T>

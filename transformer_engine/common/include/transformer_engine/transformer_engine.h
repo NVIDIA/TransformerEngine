@@ -22,18 +22,18 @@ extern "C" {
  *  \brief TE datatype.
  */
 enum NVTEDType {
-  kNVTEByte = 0,       /*!< Byte */
-  kNVTEInt16 = 1,      /*!< 16-bit integer */
-  kNVTEInt32 = 2,      /*!< 32-bit integer */
-  kNVTEInt64 = 3,      /*!< 64-bit integer */
-  kNVTEFloat32 = 4,    /*!< 32-bit float */
-  kNVTEFloat16 = 5,    /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 6,   /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 7, /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 8, /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 9, /*!< 8-bit float (E8M0) */
-  kNVTEFloat4E2M1 = 10,/*!< 4-bit float (E2M1) */
-  kNVTENumTypes        /*!< Number of supported types */
+  kNVTEByte = 0,        /*!< Byte */
+  kNVTEInt16 = 1,       /*!< 16-bit integer */
+  kNVTEInt32 = 2,       /*!< 32-bit integer */
+  kNVTEInt64 = 3,       /*!< 64-bit integer */
+  kNVTEFloat32 = 4,     /*!< 32-bit float */
+  kNVTEFloat16 = 5,     /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,    /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
+  kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
+  kNVTENumTypes         /*!< Number of supported types */
 };
 
 /*! \struct NVTEShape

@@ -196,7 +196,8 @@ void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /
         std::accumulate(workspace->data.shape.begin(), workspace->data.shape.end(), 1,
                         std::multiplies<size_t>()),
         workspace->data.dtype);
-    const size_t required_size = get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
+    const size_t required_size =
+        get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
     NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
                num_rows_partial_dbias, ",", row_length, "), found ())");
     NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",

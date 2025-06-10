@@ -236,7 +236,8 @@ TensorWrapper CommOverlapCore::get_buffer_chunk_like(const TensorWrapper &source
   auto chunk = get_tensor_chunk(source, chunk_offset, chunk_shape);
 
   // Update chunk with offset data pointers from the communication buffer
-  auto ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr()) + static_cast<size_t>(chunk_offset * _ubuf.element_size());
+  auto ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr()) +
+                  static_cast<size_t>(chunk_offset * _ubuf.element_size());
   if (chunk.dptr() != nullptr) {
     chunk.set_rowwise_data(reinterpret_cast<void *>(ubuf_ptr), chunk.dtype(), chunk.shape());
   }
@@ -762,10 +763,9 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
   if (B_copy.numel() > 0) {
     assert(B_copy.numel() == _ubufs[_self_chunk_id].numel());
     assert(B_copy.element_size() == _ubufs[_self_chunk_id].element_size());
-    NVTE_CHECK_CUDA(
-        cudaMemcpyAsync(B_copy.dptr(), _ubufs[_self_chunk_id].dptr(),
-                        _ubufs[_self_chunk_id].bytes(),
-                        cudaMemcpyDeviceToDevice, _stream_send[0]));
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_self_chunk_id].dptr(),
+                                    _ubufs[_self_chunk_id].bytes(), cudaMemcpyDeviceToDevice,
+                                    _stream_send[0]));
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send[0]));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
   }
@@ -882,8 +882,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         assert(B_copy.numel() == _ubufs[_tp_id].numel());
         assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
         NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(),
-                                        cudaMemcpyDeviceToDevice, _stream_send[0]));
+                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
+                                        _stream_send[0]));
       }
     }
   } else {
@@ -935,8 +935,8 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         assert(B_copy.numel() == _ubufs[_tp_id].numel());
         assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
         NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(),
-                                        cudaMemcpyDeviceToDevice, _stream_send[0]));
+                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
+                                        _stream_send[0]));
       }
     }
   }

@@ -7,7 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
-
 #include <cudaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
@@ -277,8 +276,7 @@ constexpr T DIVUP(const T &x, const T &y) {
 }
 
 template <typename T1, typename T2>
-constexpr __device__ __host__ __forceinline__ uint64_t
-DIVUP_TO_MULTIPLE(const T1 &N, const T2 &M) {
+constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T1 &N, const T2 &M) {
   static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value,
                 "Integral type required.");
   return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
@@ -372,13 +370,13 @@ struct BitsNumber;
 #if FP4_TYPE_SUPPORTED
 template <>
 struct BitsNumber<fp4e2m1> {
-  static constexpr size_t num_bits = 4; 
+  static constexpr size_t num_bits = 4;
 };
 #endif
 
 template <typename T>
 struct BitsNumber {
-  static constexpr size_t num_bits = 8 * sizeof(T); 
+  static constexpr size_t num_bits = 8 * sizeof(T);
 };
 
 template <typename T>
@@ -470,9 +468,9 @@ struct TypeInfo {
       using type = byte;                                     \
       { __VA_ARGS__ }                                        \
     } break;                                                 \
-    SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                \
+      SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)              \
     default:                                                 \
-      NVTE_ERROR("Invalid type MARKED.");                           \
+      NVTE_ERROR("Invalid type MARKED.");                    \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
@@ -526,7 +524,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                           \
     } break;                                                    \
     default:                                                    \
-      NVTE_ERROR("Invalid type MARKED 2.");                              \
+      NVTE_ERROR("Invalid type MARKED 2.");                     \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, type, ...) \
@@ -545,7 +543,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                \
     } break;                                                         \
     default:                                                         \
-      NVTE_ERROR("Invalid type MARKED 3.");                                   \
+      NVTE_ERROR("Invalid type MARKED 3.");                          \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
@@ -560,7 +558,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                            \
     } break;                                                     \
     default:                                                     \
-      NVTE_ERROR("Invalid type MARKED 4.");                               \
+      NVTE_ERROR("Invalid type MARKED 4.");                      \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, type, ...) \
@@ -586,7 +584,7 @@ struct TypeInfo {
       NVTE_ERROR("FP4 type not instantiated for input.");      \
     } break;                                                   \
     default:                                                   \
-      NVTE_ERROR("Invalid type MARKED 5.");                             \
+      NVTE_ERROR("Invalid type MARKED 5.");                    \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...) \
