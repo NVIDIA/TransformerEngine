@@ -9,6 +9,22 @@ from pathlib import Path
 import setuptools
 
 from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+from typing import List
+
+
+def install_requirements() -> List[str]:
+    """Install dependencies for TE/JAX extensions."""
+    reqs = ["torch>=2.1", "einops"]
+    reqs.append(
+        "nvdlfw-inspect @"
+        " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+    )
+    return reqs
+
+
+def test_requirements() -> List[str]:
+    """Test dependencies for TE/JAX extensions."""
+    return ["numpy", "torchvision", "transformers"]
 
 
 def setup_pytorch_extension(
