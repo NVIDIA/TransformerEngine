@@ -377,7 +377,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
-        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
@@ -831,7 +831,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
-        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
@@ -957,9 +957,9 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -1082,9 +1082,9 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrQ = devPtrQKV;
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -1173,9 +1173,9 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -1313,9 +1313,9 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);

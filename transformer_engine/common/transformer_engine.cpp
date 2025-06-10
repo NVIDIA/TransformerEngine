@@ -59,8 +59,8 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_DELAYED_TENSOR_SCALING";
     case NVTE_MXFP8_1D_SCALING:
       return "NVTE_MXFP8_1D_SCALING";
-    case NVTE_NVFP4_SCALING:
-      return "NVTE_NVFP4_SCALING";
+    case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING:
+      return "NVTE_FWD_NVFP4_BWD_MXFP8_SCALING";
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -90,7 +90,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                  t.columnwise_scale_inv.shape, ")");
     }
   } else {
-    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING || t.scaling_mode == NVTE_NVFP4_SCALING) {
+    if (t.scaling_mode == NVTE_MXFP8_1D_SCALING || t.scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
@@ -391,10 +391,23 @@ size_t nvte_tensor_numel(const NVTETensor tensor) {
   return numel;
 }
 
+size_t nvte_tensor_element_size_bits(const NVTETensor tensor) {
+  auto *t = transformer_engine::convertNVTETensor(tensor);
+  if (t == nullptr) return 8 * sizeof(float);
+  return transformer_engine::typeToNumBits(t->dtype());
+}
+
 size_t nvte_tensor_element_size(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) return sizeof(float);
-  return transformer_engine::typeToNumBits(t->dtype());
+  NVTE_CHECK(!is_fp4_dtype(t->dtype()), "For FP4 type please use the nvte_tensor_element_size_bits.");
+  return nvte_tensor_element_size_bits(tensor) / 8;
+}
+
+size_t nvte_tensor_size_bytes(const NVTETensor tensor) {
+  auto *t = transformer_engine::convertNVTETensor(tensor);
+  if (t == nullptr) return 0;
+  return (nvte_tensor_numel(tensor) * nvte_tensor_element_size_bits(tensor)) / 8;
 }
 
 void *nvte_tensor_data(const NVTETensor tensor) {
@@ -521,7 +534,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   const auto &t = *transformer_engine::convertNVTETensorCheck(tensor);
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
-    size_t size_in_bytes = nvte_tensor_element_size(tensor) * nvte_tensor_numel(tensor);
+    const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
     cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
   }
   // Set amax to 0 if allocated

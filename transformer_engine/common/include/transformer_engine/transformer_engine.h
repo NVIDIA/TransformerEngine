@@ -88,8 +88,10 @@ enum NVTEScalingMode {
    */
   NVTE_BLOCK_SCALING_1D = 2,
   NVTE_BLOCK_SCALING_2D = 3,
-  /*! Single scale per block of 16 elements consecutive in rowwise direction */
-  NVTE_NVFP4_SCALING = 4,
+  /*! Single NVFP4 scale per block of 16 contiguous elements in forward pass (FWD),
+    and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
+  */
+  NVTE_FWD_NVFP4_BWD_MXFP8_SCALING = 4,
   NVTE_INVALID_SCALING = 100
 };
 
@@ -180,6 +182,14 @@ size_t nvte_tensor_ndims(const NVTETensor tensor);
  */
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
 
+/*! \brief Get the byte size for the tensor.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Byte size of the tensor.
+ */
+size_t nvte_tensor_size_bytes(const NVTETensor tensor);
+
 /*! \brief Get a tensor's total number of elements.
  *
  *  \param[in] tensor Tensor.
@@ -192,9 +202,17 @@ size_t nvte_tensor_numel(const NVTETensor tensor);
  *
  *  \param[in] tensor Tensor.
  *
- *  \return Bit size of the tensor's data type.
+ *  \return Byte size of the tensor's data type.
  */
 size_t nvte_tensor_element_size(const NVTETensor tensor);
+
+/*! \brief Get the bit size for the tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Bit size of the tensor's data type.
+ */
+size_t nvte_tensor_element_size_bits(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data type.
  *
@@ -402,14 +420,14 @@ enum class DType {
  * Return true if TE datatype is FP8
  *  \param[in] DType      TE Datatype of interest
  */
-inline bool is_fp8_dtype(const DType t);
+bool is_fp8_dtype(const DType t);
 
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
  *  \param[in] DType      TE Datatype of interest
  */
-inline bool is_fp4_dtype(const DType t);
+bool is_fp4_dtype(const DType t);
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -629,13 +647,22 @@ class TensorWrapper {
     return nvte_tensor_numel(tensor_);
   }
 
-  /*! \brief Get the tensor's element size in bits.
+  /*! \brief Get the tensor's element size in bytes.
    *
-   *  \return Element size in bits.
+   *  \return Element size in bytes.
    */
   size_t element_size() const noexcept {
     if (tensor_ == nullptr) return 0;
     return nvte_tensor_element_size(tensor_);
+  }
+
+  /*! \brief Get the tensor's element size in bits.
+   *
+   *  \return Element size in bits.
+   */
+  size_t element_size_bits() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_element_size_bits(tensor_);
   }
 
   /*! \brief Get the tensor's allocated size in bytes. This will return 0 for tensors with nullptr
@@ -645,21 +672,7 @@ class TensorWrapper {
    */
   size_t bytes() const noexcept {
     if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
-
-    const auto &shape = nvte_tensor_shape(tensor_);
-    if (shape.data.back()) {
-
-    }
-    size_t numel = 1;
-    for (size_t i = 0; i < shape.ndim; i++) {
-      numel *= shape.data[i];
-    }
-    return numel;
-
-
-
-
-    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+    return nvte_tensor_size_bytes(tensor_);
   }
 
   /*! \brief Get the data type of this TensorWrapper.

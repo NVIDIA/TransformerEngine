@@ -45,7 +45,7 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2) {
   return true;
 }
 
-double typeToNumBits(DType type) {
+size_t typeToNumBits(DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
   {
       return TypeInfo<T>::size;
@@ -110,11 +110,15 @@ size_t DIVUP(const size_t &x, const size_t &y){
 struct scale_inv_meta {
   std::vector<size_t> shape;
   DType type;
-  double type_size;
+  size_t type_size_bits;
   size_t bytes() const noexcept {
-    return static_cast<size_t>(product(shape) * type_size);
+    return (product(shape) * type_size_bits) / 8;
   }
 };
+
+size_t bytes(const NVTEShape& shape, const DType type) {
+  return (product(shape) * typeToNumBits(type)) / 8;
+}
 
 NVTEShape convertShape(const std::vector<size_t>& s) {
   return nvte_make_shape(s.data(), s.size());
@@ -126,7 +130,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret;
     ret.shape = {1};
     ret.type = DType::kFloat32;
-    ret.type_size = sizeof(float);
+    ret.type_size_bits = typeToNumBits(DType::kFloat32);
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -156,8 +160,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat8E8M0;
     ret_colwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size = sizeof(uint8_t);
-    ret_colwise.type_size = sizeof(uint8_t);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -183,8 +187,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat32;
     ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size = sizeof(float);
-    ret_colwise.type_size = sizeof(float);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -209,8 +213,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat32;
     ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size = sizeof(float);
-    ret_colwise.type_size = sizeof(float);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
     return {ret_rowwise, ret_colwise};
   }
 
@@ -226,8 +230,7 @@ Tensor::Tensor(const std::string& name,
   gen_.seed(seed);
   rowwise_ = rowwise;
   columnwise_ = columnwise;
-  size_t s = typeToSize(type);
-  size_t total_size = product(shape) * s;
+  size_t total_size = bytes(shape, type);
   void *dptr_rowwise = nullptr;
   void *dptr_columnwise = nullptr;
   cpu_data_rowwise_ = nullptr;
@@ -335,7 +338,7 @@ Tensor::Tensor(const std::string& name,
 
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = static_cast<size_t>(product(s) * typeToNumBits(tensor_.dtype()));
+  const size_t size = bytes(s, tensor_.dtype());
   if (rowwise_) {
     cudaMemcpy(cpu_data_rowwise_.get(),
                tensor_.get_rowwise_data().data_ptr,
@@ -382,7 +385,7 @@ void Tensor::to_cpu() const {
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = static_cast<size_t>(product(s) * typeToNumBits(tensor_.dtype()));
+  const size_t size = bytes(s, tensor_.dtype());
   if (rowwise_) {
     cudaMemcpy(tensor_.get_rowwise_data().data_ptr, cpu_data_rowwise_.get(), size,
                cudaMemcpyHostToDevice);

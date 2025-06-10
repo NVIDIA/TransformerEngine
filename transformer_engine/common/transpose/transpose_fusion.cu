@@ -382,17 +382,17 @@ void populate_transpose_dbias_workspace_config(const Tensor &input, /*cast*/
     workspace->data.dtype = DType::kFloat32;
   } else {
     // Check that workspace matches expected size
-    const size_t workspace_size =
+    const size_t workspace_size = get_buffer_size_bytes(
         std::accumulate(workspace->data.shape.begin(), workspace->data.shape.end(), 1,
-                        std::multiplies<size_t>()) *
-        typeToSize(workspace->data.dtype);
-    const size_t required_size = num_rows_partial_dbias * row_length * typeToSize(DType::kFloat32);
+                        std::multiplies<size_t>()),
+        workspace->data.dtype);
+    const size_t required_size = get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
     NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
                num_rows_partial_dbias, ",", row_length, "), found ())");
     NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",
                num_rows_partial_dbias, ",", row_length, "), dtype=", to_string(DType::kFloat32),
                "; found dims=", workspace->data.shape,
-               ", dtype=", typeToSize(workspace->data.dtype), ")");
+               ", dtype=", typeToNumBits(workspace->data.dtype), " bits)");
   }
 }
 

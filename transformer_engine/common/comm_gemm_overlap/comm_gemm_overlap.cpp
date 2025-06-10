@@ -196,7 +196,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       if (param_type == NVTETensorParam::kNVTERowwiseData ||
           param_type == NVTETensorParam::kNVTEColumnwiseData) {
         // Offset data pointer
-        param_dptr += static_cast<size_t>(chunk_offset * typeToNumBits(param_dtype));
+        param_dptr += chunk_offset * typeToNumBits(param_dtype);
         param_shape = chunk_shape;
 
         if (param_type == NVTETensorParam::kNVTEColumnwiseData &&
@@ -269,7 +269,7 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
              "or 2 (multi-atomic).");
 
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
-  size_t buffer_bytes = static_cast<size_t>(buffer_shape[0] * buffer_shape[1] * typeToNumBits(buffer_dtype));
+  size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   void *buffer_ptr;
   _ub_reg = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true);
   if (_ub_comm->myrank == 0) printf("!!! [UB] Register UBuf %d\n", _ub_reg);
@@ -606,7 +606,7 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
-  size_t buffer_bytes = static_cast<size_t>(buffer_shape[0] * buffer_shape[1] * typeToNumBits(buffer_dtype));
+  size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / tp_size;
   _num_ubuf_chunks = tp_size;
   if (_is_reduce_scatter) {

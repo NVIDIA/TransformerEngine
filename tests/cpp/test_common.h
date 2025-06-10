@@ -10,11 +10,13 @@
 #include <vector>
 #include <array>
 #include <random>
+#include <cudaTypedefs.h>
+#define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
-#if CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
 #endif
 #include <cuda_runtime_api.h>
@@ -58,23 +60,32 @@ using bf16 = nv_bfloat16;
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
-#if CUDA_VERSION >= 12080
+#if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
 #endif
 
 template <typename T>
-struct TypeInfo{
-    using types = std::tuple<byte,
-                             int16,
-                             int32,
-                             int64,
-                             fp32,
-                             fp16,
-                             bf16,
-                             fp8e4m3,
-                             fp8e5m2,
-                             fp8e8m0,
-                             fp4e2m1>;
+struct BitsNumber;
+
+#if FP4_TYPE_SUPPORTED
+template <>
+struct BitsNumber<fp4e2m1> {
+  static constexpr size_t num_bits = 4; 
+};
+#endif
+
+template <typename T>
+struct BitsNumber {
+  static constexpr size_t num_bits = 8 * sizeof(T); 
+};
+
+template <typename T>
+struct TypeInfo {
+#if FP4_TYPE_SUPPORTED
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0, fp4e2m1>;
+#else
+    using types = std::tuple<byte, int16, int32, int64, fp32, fp16, bf16, fp8e4m3, fp8e5m2, fp8e8m0>;
+#endif
 
     template <typename U, DType current>
     struct Helper {
@@ -101,7 +112,7 @@ struct TypeInfo{
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static double size = sizeof(T);
+    constexpr static size_t size = BitsNumber<T>::num_bits;;
 };
 
 class Tensor {
@@ -426,6 +437,7 @@ inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 size_t typeToNumBits(DType type);
 size_t product(const NVTEShape &shape);
 size_t product(const std::vector<size_t> &shape);
+size_t bytes(const NVTEShape& shape, const DType type);
 
 size_t first_dimension(const std::vector<size_t> &shape);
 size_t last_dimension(const std::vector<size_t> &shape);
@@ -470,6 +482,16 @@ constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
 }  // namespace test
+
+#if FP4_TYPE_SUPPORTED
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) \
+  case DType::kFloat4E2M1: {              \
+    using type = fp4e2m1;                 \
+    { __VA_ARGS__ }                       \
+  } break;
+#else
+#define SWITCH_FP4_TYPE_HANDLE(type, ...) // do nothing
+#endif
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
     switch (dtype) { \
@@ -522,14 +544,16 @@ constexpr int32_t blackwellComputeCapability = 100;
                 {__VA_ARGS__} \
             } \
         break; \
-        case DType::kFloat4E2M1: \
+        case DType::kFloat8E8M0: \
             { \
-                using type = fp4e2m1; \
+                using type = fp8e8m0; \
                 {__VA_ARGS__} \
             } \
         break; \
+        SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            printf("dtype: %d\n", static_cast<int>(dtype)); \
+            NVTE_ERROR("Invalid type MARKED TEST."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -548,20 +572,15 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 2."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
     switch (dtype) { \
         using namespace transformer_engine; \
-        case DType::kFloat4E2M1: \
-            { \
-                using type = fp4e2m1; \
-                {__VA_ARGS__} \
-            } \
-        break; \
+        SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 3."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -586,5 +605,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type."); \
+            NVTE_ERROR("Invalid type MARKED TEST 4."); \
     }
