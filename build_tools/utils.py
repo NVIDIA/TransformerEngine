@@ -354,10 +354,3 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
-
-
-def install_and_import(package):
-    """Install a package via pip (if not already installed) and import into globals."""
-    main_package = package.split("[")[0]
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    globals()[main_package] = importlib.import_module(main_package)
