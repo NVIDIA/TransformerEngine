@@ -120,9 +120,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["onnx", "onnxscript"])
             setup_reqs.extend(["torch>=2.1"])
-            install_reqs.extend(["torch>=2.1"])
+            install_reqs.extend(["torch>=2.1", "onnx", "onnxscript"])
             install_reqs.append(
                 "nvdlfw-inspect @"
                 " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
