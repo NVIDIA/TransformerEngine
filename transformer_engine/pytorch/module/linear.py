@@ -1418,7 +1418,7 @@ class Linear(TransformerEngineBaseModule):
                     "Please make sure this is intentional."
                 )
                 unfused_weights = [w.dequantize() for w in unfused_weights]
-    
+
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
                 if len(unfused_weights) != 1:

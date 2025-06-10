@@ -1728,7 +1728,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
 
-
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
         if not self.fp8:
