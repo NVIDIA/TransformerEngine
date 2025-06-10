@@ -21,6 +21,7 @@ from .fp8 import (
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
 from .ops.op import BasicOperation
+from .utils import make_weak_ref
 
 __all__ = ["make_graphed_callables"]
 
@@ -65,6 +66,7 @@ def _make_graphed_callables(
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
+    io_memory_reduction: bool = False,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -132,6 +134,78 @@ def _make_graphed_callables(
             + f"args tuple, but got {len(sample_args)}."
         )
         assert len(sample_kwargs) == len(sample_args)
+
+    # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
+    if io_memory_reduction:
+        assert _order is not None, "`_order` must be provided when `io_memory_reduction` is True."
+        assert is_training, "`io_memory_reduction` is only available in training mode."
+        assert isinstance(sample_args, list), "sample_args must be a list for io_memory_reduction."
+        len_args = len(sample_args[0])
+        for i in range(len(sample_args)):
+            assert len_args == len(
+                sample_args[i]
+            ), f"Arguments must have same length and shape for io_memory_reduction."
+        len_kwargs = len(sample_kwargs[0])
+        assert isinstance(
+            sample_kwargs, list
+        ), "sample_kwargs must be a list for io_memory_reduction."
+        for i in range(len(sample_kwargs)):
+            assert len_kwargs == len(
+                sample_kwargs[i]
+            ), f"Keyword arguments must have same length and shape for io_memory_reduction."
+
+        # Reuse no grad input tensors
+        no_grad_indices, no_grad_keys = [], []
+        for i, arg in enumerate(sample_args[0]):
+            if not arg.requires_grad:
+                no_grad_indices.append(i)
+        for sa in sample_args:
+            for i in no_grad_indices:
+                sa[i] = sample_args[0][i].detach()
+        for k, v in sample_kwargs[0].items():
+            if not v.requires_grad:
+                no_grad_keys.append(k)
+        for sa in sample_kwargs:
+            for k in no_grad_keys:
+                sa[k] = sample_kwargs[0][k].detach()
+
+        # Reorganize args and kwargs for input tensor reuse
+        fwd_order_qs = {}
+        fwd_order_accu = 0
+        bwd_order_q = []
+        per_callable_fwd_idx_recorder = []
+        fwd_idx = [0] * num_model_chunks
+        for c_id in _order:
+            if c_id > 0:
+                # Record the fwd order pattern.
+                if c_id in fwd_order_qs:
+                    fwd_order_qs[c_id].append(fwd_order_accu)
+                else:
+                    fwd_order_qs[c_id] = [fwd_order_accu]
+                fwd_order_accu += 1
+                if bwd_order_q:
+                    # It can use the tensor buffer of a previous one.
+                    reuse_fwd_idx = fwd_order_qs[abs(bwd_order_q.pop(0))].pop(0)
+                else:
+                    reuse_fwd_idx = -1
+
+                m_chunk = c_id - 1
+                for l_no in range(num_layers):
+                    per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) + (
+                        fwd_idx[m_chunk] * num_layers + l_no
+                    )
+                    per_callable_fwd_idx_recorder.append(per_callable_fwd_idx)
+                    if reuse_fwd_idx >= 0:
+                        reuse_per_callable_fwd_idx = per_callable_fwd_idx_recorder[
+                            reuse_fwd_idx * num_layers + l_no
+                        ]
+                        sample_args[per_callable_fwd_idx] = sample_args[reuse_per_callable_fwd_idx]
+                        sample_kwargs[per_callable_fwd_idx] = sample_kwargs[
+                            reuse_per_callable_fwd_idx
+                        ]
+                fwd_idx[m_chunk] += 1
+            else:
+                bwd_order_q.append(c_id)
 
     if fp8_weight_caching:
         # Initialize flag that controls FP8 weight updates
@@ -292,6 +366,8 @@ def _make_graphed_callables(
         per_callable_static_grad_inputs = [None] * len(flatten_sample_args)
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
+        static_grad_outputs = None
+        previous_per_callable_bwd_idx = None
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
@@ -322,9 +398,10 @@ def _make_graphed_callables(
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
-                    static_grad_outputs = tuple(
-                        torch.empty_like(o) if o.requires_grad else None for o in static_outputs
-                    )
+                    if not io_memory_reduction or static_grad_outputs is None:
+                        static_grad_outputs = tuple(
+                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                        )
                     if is_training:
                         with torch.cuda.graph(bwd_graph, pool=mempool):
                             grad_inputs = torch.autograd.grad(
@@ -350,6 +427,21 @@ def _make_graphed_callables(
 
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
+
+                    if io_memory_reduction:
+                        # Weak ref the static outputs and static grad inputs.
+                        per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
+                            static_outputs
+                        )
+                        if previous_per_callable_bwd_idx is not None:
+                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
+                                make_weak_ref(
+                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
+                                )
+                            )
+                        previous_per_callable_bwd_idx = per_callable_bwd_idx
+                        del static_outputs, static_grad_inputs, grad_inputs
+
                 bwd_idx[m_chunk] += 1
     else:
         # Capture forward graphs
@@ -636,6 +728,7 @@ def make_graphed_callables(
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
+    io_memory_reduction: bool = False,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -664,6 +757,10 @@ def make_graphed_callables(
           this graph may share memory with the indicated pool.
     retain_graph_in_backward: bool, default = `False`
                               Whether to set retain_graph=True in backward graph capture.
+    io_memory_reduction: bool, default = `False`
+                         Whether or not to reduce memory usage by optimizing input/output
+                         data buffer between graphs. Only available when all callables in
+                         `modules` have the same input/output dtype and shape.
 
     FP8-related parameters
     ----------------------
@@ -749,6 +846,7 @@ def make_graphed_callables(
         _order=_order,
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
+        io_memory_reduction=io_memory_reduction,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
