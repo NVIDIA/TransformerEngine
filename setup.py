@@ -120,19 +120,17 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
+            from build_tools.pytorch import install_requirements, test_requirements
+
             setup_reqs.extend(["torch>=2.1"])
-            install_reqs.extend(["torch>=2.1", "onnx", "onnxscript"])
-            install_reqs.append(
-                "nvdlfw-inspect @"
-                " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
-            )
-            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
-            # install_reqs.append("triton")
-            test_reqs.extend(["numpy", "torchvision", "transformers"])
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
         if "jax" in frameworks:
+            from build_tools.jax import install_requirements, test_requirements
+
             setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
-            install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy"])
+            install_reqs.extend(install_requirements())
+            test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -203,14 +201,8 @@ if __name__ == "__main__":
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8, <3.13",
-        classifiers=[
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: 3.10",
-            "Programming Language :: Python :: 3.11",
-            "Programming Language :: Python :: 3.12",
-        ],
+        python_requires=">=3.8",
+        classifiers=["Programming Language :: Python :: 3"],
         setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),

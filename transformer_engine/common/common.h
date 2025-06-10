@@ -89,9 +89,16 @@ struct SimpleTensor {
     }
     return acc;
   }
+
+  void clear() {
+    dptr = nullptr;
+    shape.resize(0);
+    dtype = DType::kFloat32;
+  }
 };
 
 struct Tensor {
+ public:
   SimpleTensor data;
   SimpleTensor columnwise_data;
   SimpleTensor amax;
@@ -99,8 +106,8 @@ struct Tensor {
   SimpleTensor scale_inv;
   SimpleTensor columnwise_scale_inv;
 
- public:
   NVTEScalingMode scaling_mode;
+  NVTETensor nvte_tensor;
 
   Tensor()
       : data(),
@@ -109,7 +116,20 @@ struct Tensor {
         scale(nullptr, {1}, DType::kFloat32),
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
-        scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
+        scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
+        nvte_tensor(0) {}
+
+  void clear() {
+    data.clear();
+    columnwise_data.clear();
+    amax.clear();
+    scale.clear();
+    scale_inv.clear();
+    columnwise_scale_inv.clear();
+    scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
+  }
+
+  explicit operator NVTETensor() const noexcept { return nvte_tensor; }
 
   size_t numel() const {
     size_t acc = 1;
@@ -232,11 +252,14 @@ struct QuantizationConfig {
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0f;
   NVTETensor noop_tensor = nullptr;
+  Float8BlockScaleTensorFormat float8_block_scale_tensor_format =
+      Float8BlockScaleTensorFormat::GEMM_READY;
 
   static constexpr size_t attr_sizes[] = {
-      sizeof(bool),       // force_pow_2_scales
-      sizeof(float),      // amax_epsilon
-      sizeof(NVTETensor)  // noop_tensor
+      sizeof(bool),                         // force_pow_2_scales
+      sizeof(float),                        // amax_epsilon
+      sizeof(NVTETensor),                   // noop_tensor
+      sizeof(Float8BlockScaleTensorFormat)  // float8_block_scale_tensor_format
   };
 };
 
@@ -620,6 +643,8 @@ bool is_supported_by_CC_100();
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size);
 
+Tensor *convertNVTETensor(const NVTETensor tensor);
+Tensor *convertNVTETensorCheck(const NVTETensor tensor);
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_COMMON_H_

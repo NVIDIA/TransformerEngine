@@ -1222,23 +1222,23 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
   const Tensor *activation_input_tensor;
   if constexpr (IS_DBIAS || IS_DACT) {
     // backward - input is incoming gradient
-    input_tensor = reinterpret_cast<const Tensor *>(grad);
-    activation_input_tensor = reinterpret_cast<const Tensor *>(input);
+    input_tensor = convertNVTETensorCheck(grad);
+    activation_input_tensor = convertNVTETensor(input);
   } else {
     // forward = input is activation input
-    input_tensor = reinterpret_cast<const Tensor *>(input);
+    input_tensor = convertNVTETensorCheck(input);
     activation_input_tensor = nullptr;
   }
-  auto output_tensor = reinterpret_cast<Tensor *>(output);
-  auto dbias_tensor = reinterpret_cast<Tensor *>(dbias);
-  auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
+  auto output_tensor = convertNVTETensorCheck(output);
+  auto dbias_tensor = convertNVTETensor(dbias);
+  auto workspace_tensor = convertNVTETensor(workspace);
 
   const QuantizationConfig *quant_config_cpp =
       reinterpret_cast<const QuantizationConfig *>(quant_config);
 
   // extract noop tensor from quant_config_cpp if it's not null
   const NVTETensor noop = quant_config_cpp ? quant_config_cpp->noop_tensor : nullptr;
-  const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
+  const auto noop_tensor = noop != nullptr ? *(convertNVTETensorCheck(noop)) : Tensor();
 
   switch (output_tensor->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
@@ -1283,12 +1283,25 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
       bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
       float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
-      FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
-                                                     ? FP8BlockwiseRowwiseOption::ROWWISE
-                                                     : FP8BlockwiseRowwiseOption::NONE;
-      FP8BlockwiseColumnwiseOption columnwise_option =
-          output_tensor->has_columnwise_data() ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
-                                               : FP8BlockwiseColumnwiseOption::NONE;
+      FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
+      FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
+      if (output_tensor->has_data()) {
+        bool rowwise_compact = quant_config_cpp
+                                   ? quant_config_cpp->float8_block_scale_tensor_format ==
+                                         Float8BlockScaleTensorFormat::COMPACT
+                                   : false;
+        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
+                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+      }
+      if (output_tensor->has_columnwise_data()) {
+        bool columnwise_compact = quant_config_cpp
+                                      ? quant_config_cpp->float8_block_scale_tensor_format ==
+                                            Float8BlockScaleTensorFormat::COMPACT
+                                      : false;
+        columnwise_option = columnwise_compact
+                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
+                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+      }
       quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
                                           output_tensor->columnwise_scale_inv, output_tensor->data,
                                           output_tensor->columnwise_data, epsilon, rowwise_option,

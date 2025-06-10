@@ -43,7 +43,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11
+          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -54,7 +54,6 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
-        if: false  # Sanity import test requires Flash Attention
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
@@ -73,4 +72,24 @@ jobs:
           NVTE_FRAMEWORK: jax
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: python tests/jax/test_sanity_import.py
+        run: python3 tests/jax/test_sanity_import.py
+  all:
+    name: 'All'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nvidia/jax:jax
+      options: --user root
+    steps:
+      - name: 'Dependencies'
+        run: pip install torch pybind11[global] einops
+      - name: 'Checkout'
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: 'Build'
+        run: pip install --no-build-isolation . -v --no-deps
+        env:
+          NVTE_FRAMEWORK: all
+          MAX_JOBS: 1
+      - name: 'Sanity check'
+        run: python3 tests/pytorch/test_sanity_import.py && python3 tests/jax/test_sanity_import.py
