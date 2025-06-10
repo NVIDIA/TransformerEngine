@@ -57,7 +57,6 @@ class L2Norm(BasicOperation):
 
     def reset_parameters(self) -> None:
         """L2Norm has no parameters to reset"""
-        pass
 
     def op_forward(
         self,
