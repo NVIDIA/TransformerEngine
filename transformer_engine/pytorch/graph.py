@@ -798,27 +798,9 @@ def make_graphed_callables(
     # Store FP8 tensors to reset later.
     saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
 
-    # FP8 wrapper.
-    def wrap_autocast(block):
-        old_forward = block.forward
-
-        def forward_func(*args, **kwargs):
-            with fp8_autocast(
-                enabled=fp8_enabled,
-                calibrating=fp8_calibrating,
-                fp8_recipe=fp8_recipe,
-                fp8_group=fp8_group,
-                _graph=True,
-            ):
-                outputs = old_forward(*args, **kwargs)
-            return outputs
-
-        block.forward = forward_func
-
     forward_funcs = []
     for module in modules:
         assert isinstance(module, torch.nn.Module), f"Graphing for {type(module)} is not supported."
-        wrap_autocast(module)
         forward_funcs.append(module)
 
     if just_one_callable:
@@ -836,18 +818,26 @@ def make_graphed_callables(
     else:
         original_rng_states = torch.cuda.get_rng_state()
 
-    graphed_callables = _make_graphed_callables(
-        forward_funcs,
-        sample_args,
-        num_warmup_iters=num_warmup_iters,
-        allow_unused_input=allow_unused_input,
-        fp8_weight_caching=fp8_weight_caching,
-        sample_kwargs=sample_kwargs,
-        _order=_order,
-        pool=pool,
-        retain_graph_in_backward=retain_graph_in_backward,
-        io_memory_reduction=io_memory_reduction,
-    )
+    # FP8 wrapper.
+    with fp8_autocast(
+        enabled=fp8_enabled,
+        calibrating=fp8_calibrating,
+        fp8_recipe=fp8_recipe,
+        fp8_group=fp8_group,
+        _graph=True,
+    ):
+        graphed_callables = _make_graphed_callables(
+            forward_funcs,
+            sample_args,
+            num_warmup_iters=num_warmup_iters,
+            allow_unused_input=allow_unused_input,
+            fp8_weight_caching=fp8_weight_caching,
+            sample_kwargs=sample_kwargs,
+            _order=_order,
+            pool=pool,
+            retain_graph_in_backward=retain_graph_in_backward,
+            io_memory_reduction=io_memory_reduction,
+        )
 
     # Ensures warmup does not affect numerics for ops such as dropout.
     if graph_safe_rng_available():
