@@ -490,16 +490,6 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     # TransformerLayer FP8 TN Gemm currently requires %8=0
     if is_fp8 and not (qkv_format == "thd" and module == "DotProductAttention"):
         pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
-    if (
-        backend == "FusedAttention"
-        and config.head_dim_qk > 128
-        and not is_paged
-        and not is_cuda_graph
-    ):
-        pytest.skip(
-            "No support for KV caching with head dim > 128, non-paged attention,"
-            " sq = 1, and mask != no_mask"
-        )
 
     # create full model
     logger.info("=== Generating all tokens at once ===")
