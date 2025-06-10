@@ -346,6 +346,10 @@ class OperationFuser:
         if fuse_ops:
             self.fuse_ops()
 
+        # Flatten list of parameters
+        self._basic_op_params = [param for op in self._basic_ops for param in op.parameters()]
+        self._num_basic_op_params = len(self._basic_op_params)
+
     @classmethod
     def _fuse_forward_ops(
         cls,
@@ -385,10 +389,7 @@ class OperationFuser:
 
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
-            basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
-
-        # Flatten list of parameters
-        params = [param for op in self._basic_ops for param in op.parameters()]
+            basic_op_kwargs = [{}] * self._num_basic_ops
 
         # Fuser forward pass
         is_grad_enabled = torch.is_grad_enabled()
@@ -405,9 +406,9 @@ class OperationFuser:
             self._basic_ops,
             basic_op_kwargs,
             is_grad_enabled,
-            len(params),
+            self._num_basic_op_params,
             self._num_extra_inputs,
-            *params,
+            *self._basic_op_params,
             *extra_inputs,
         )
         return forward_func(*args)
