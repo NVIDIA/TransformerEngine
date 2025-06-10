@@ -61,8 +61,8 @@ class L2Norm(_L2NormOp):
 
         # JIT warmup for L2Norm fused operations
         if seq_length and micro_batch_size:
-            device = getattr(self, 'device', torch.device('cuda'))
-            if hasattr(device, 'type') and device.type == 'cuda':
+            device = getattr(self, "device", torch.device("cuda"))
+            if hasattr(device, "type") and device.type == "cuda":
                 set_jit_fusion_options()
                 # For L2Norm, we don't know the hidden size until forward pass,
                 # but we can warm up with common sizes used in attention mechanisms

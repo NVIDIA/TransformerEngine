@@ -835,7 +835,7 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
         # Apply L2 normalization to query and key tensors
         # ===========================
-        
+
         if self.use_qk_norm:
             query_layer = self.qk_norm(query_layer)
             key_layer = self.qk_norm(key_layer)

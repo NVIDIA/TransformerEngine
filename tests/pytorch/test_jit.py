@@ -72,10 +72,10 @@ def test_l2norm_fused():
     # Basic smoke test like other JIT functions
     x = torch.randn(10, 128, device="cuda", dtype=torch.float32)
     eps = 1e-6
-    
+
     # Test inference version
     output_inf = l2norm_fused(x, eps)
-    
+
     # Test training version with backward
     x_train = torch.randn(10, 128, device="cuda", dtype=torch.float32, requires_grad=True)
     output_train, rsqrt_norm = l2norm_fwd_fused(x_train, eps)
@@ -90,28 +90,28 @@ def test_l2norm_fused_correctness():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     x = torch.randn(16, 64, device=device, dtype=torch.float32, requires_grad=True)
     eps = 1e-6
-    
+
     # Test fused forward
     output_fused, rsqrt_norm = l2norm_fwd_fused(x, eps)
-    
+
     # Reference implementation
     x_ref = x.clone().detach().requires_grad_(True)
     x_squared = x_ref.pow(2)
     l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
     rsqrt_norm_ref = torch.rsqrt(l2_norm_squared + eps)
     output_ref = x_ref * rsqrt_norm_ref
-    
+
     # Check forward pass matches
     torch.testing.assert_close(output_fused, output_ref, atol=1e-6, rtol=1e-5)
     torch.testing.assert_close(rsqrt_norm, rsqrt_norm_ref, atol=1e-6, rtol=1e-5)
-    
+
     # Test fused backward
     grad_output = torch.randn_like(output_fused)
     grad_input_fused = l2norm_backward_fused(grad_output, x, rsqrt_norm, eps)
-    
+
     # Reference backward
     output_ref.backward(grad_output)
     grad_input_ref = x_ref.grad
-    
+
     # Check backward pass matches
     torch.testing.assert_close(grad_input_fused, grad_input_ref, atol=1e-5, rtol=1e-4)

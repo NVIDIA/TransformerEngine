@@ -142,10 +142,7 @@ def l2norm_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.
 
 @jit_fuser
 def l2norm_backward_fused_(
-    grad_output: torch.Tensor, 
-    x: torch.Tensor, 
-    rsqrt_norm: torch.Tensor, 
-    eps: float
+    grad_output: torch.Tensor, x: torch.Tensor, rsqrt_norm: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """L2 normalization backward fused"""
     x_dy_sum = (x * grad_output).sum(dim=-1, keepdim=True)
@@ -184,10 +181,7 @@ def l2norm_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.T
 
 
 def l2norm_backward_fused(
-    grad_output: torch.Tensor, 
-    x: torch.Tensor, 
-    rsqrt_norm: torch.Tensor, 
-    eps: float
+    grad_output: torch.Tensor, x: torch.Tensor, rsqrt_norm: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """Disable native AMP for l2norm_backward_fused_"""
     with gpu_autocast_ctx(enabled=False):
@@ -355,9 +349,7 @@ def warmup_jit_l2norm(
     torch.cuda.set_rng_state(rng_state)
 
 
-def warmup_jit_l2norm_all_dtypes(
-    hidden_size: int, seq_length: int, micro_batch_size: int
-) -> None:
+def warmup_jit_l2norm_all_dtypes(hidden_size: int, seq_length: int, micro_batch_size: int) -> None:
     """Call `warmup_jit_l2norm` for all training dtypes"""
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
         warmup_jit_l2norm(hidden_size, dtype, seq_length, micro_batch_size)

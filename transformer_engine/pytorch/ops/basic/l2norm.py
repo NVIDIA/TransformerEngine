@@ -72,12 +72,12 @@ class L2Norm(BasicOperation):
         if device.type != "cuda":
             device = canonicalize_device(None)
         dtype = maybe_autocast_dtype(default_dtype=self.dtype or input_.dtype)
-        
+
         # Reshape input for computation
         input_dims = tuple(input_.size())
         inner_dim = input_dims[-1]
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
-        
+
         if isinstance(x, QuantizedTensor):
             x = x.dequantize()
 
