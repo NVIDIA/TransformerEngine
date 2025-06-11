@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 

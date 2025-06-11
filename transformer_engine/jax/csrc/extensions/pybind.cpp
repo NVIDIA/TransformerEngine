@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -25,6 +25,7 @@ pybind11::dict Registrations() {
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
+  dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
