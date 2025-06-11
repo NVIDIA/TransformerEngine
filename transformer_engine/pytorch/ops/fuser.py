@@ -97,7 +97,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
         # Unflatten list of parameters and extra tensor inputs
-        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs:]
+        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
         basic_op_extra_inputs = []
         for op in fuser._basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
