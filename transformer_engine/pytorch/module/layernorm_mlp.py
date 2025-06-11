@@ -849,6 +849,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
+                    ub_obj_fc2_wgrad = None
+                    if ctx.ub_overlap_ag:
+                        ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
                     # UB does not support overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
@@ -857,18 +860,20 @@ class _LayerNormMLP(torch.autograd.Function):
                     # overlapping the NCCL operation with the dgrad GEMM.
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                     # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
-                    with torch.cuda.stream(dgrad_comm_stream):
-                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                        grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
-                            grad_outputs[0],
-                            ctx.tp_group,
-                            async_op=True,
-                            quantizer=ctx.fc2_grad_output_quantizer,
-                        )
-                    # Synchronize with the main stream
-                    mxfp8_fc2_grad_output_work.wait()
+                    # dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
+                    # with torch.cuda.stream(dgrad_comm_stream):
+                    #     # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
+                    #     # This ensures that we don't start until all communication for the dgrad GEMM is complete
+                    #     grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
+                    #         grad_outputs[0],
+                    #         ctx.tp_group,
+                    #         async_op=True,
+                    #         quantizer=ctx.fc2_grad_output_quantizer,
+                    #     )
+                    # # Synchronize with the main stream
+                    # mxfp8_fc2_grad_output_work.wait()
+
+                    ub_obj_fc2_wgrad.copy_into_buffer(grad_outputs[0])
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
