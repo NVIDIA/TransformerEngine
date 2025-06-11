@@ -12,8 +12,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <stdexcept>
-
 #include "../common.h"
 #include "../extensions.h"
 #include "common.h"
@@ -30,6 +28,22 @@ PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
+
+py::object PythonCopy;
+
+py::object python_copy(const py::handle& src) {
+    return PythonCopy(src);
+}
+
+void init_copy_extension() {
+  if (!PythonCopy.is_none()) return;
+
+  // Import Python's copy module
+  py::module_ copy_module = py::module_::import("copy");
+
+  // Get the copy.copy function
+  PythonCopy = copy_module.attr("copy");
+}
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -88,6 +102,7 @@ void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
   init_float8blockwise_extension();
+  init_copy_extension();
 }
 
 }  // namespace transformer_engine::pytorch

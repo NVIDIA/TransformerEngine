@@ -42,10 +42,13 @@ extern PyTypeObject *Float8BlockwiseQTensorBasePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
 
 void init_extension();
+py::object python_copy(const py::handle &src);
 
-void init_float8_extension();
-
-void init_mxfp8_extension();
+enum class PythonTensorType {
+  INVALID = 0,
+  TENSOR = 1,
+  TENSOR_BASE = 2,
+};
 
 namespace detail {
 
@@ -55,23 +58,28 @@ inline bool IsFloat8CurrentScalingQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8CurrentScalingQuantizerClass;
 }
 
-inline bool IsFloat8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == Float8TensorPythonClass || Py_TYPE(obj) == Float8TensorBasePythonClass;
+inline PythonTensorType IsFloat8Tensor(PyObject *obj) {
+  if (Py_TYPE(obj) == Float8TensorPythonClass) return PythonTensorType::TENSOR;
+  if (Py_TYPE(obj) == Float8TensorBasePythonClass) return PythonTensorType::TENSOR_BASE;
+  return PythonTensorType::INVALID;
 }
 
 inline bool IsMXFP8Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP8QuantizerClass; }
 
-inline bool IsMXFP8Tensor(PyObject *obj) {
-  return Py_TYPE(obj) == MXFP8TensorPythonClass || Py_TYPE(obj) == MXFP8TensorBasePythonClass;
+inline PythonTensorType IsMXFP8Tensor(PyObject *obj) {
+  if (Py_TYPE(obj) == MXFP8TensorPythonClass) return PythonTensorType::TENSOR;
+  if (Py_TYPE(obj) == MXFP8TensorBasePythonClass) return PythonTensorType::TENSOR_BASE;
+  return PythonTensorType::INVALID;
 }
 
 inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
 }
 
-inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
-  return Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass ||
-         Py_TYPE(obj) == Float8BlockwiseQTensorBasePythonClass;
+inline PythonTensorType IsFloat8BlockwiseQTensor(PyObject *obj) {
+  if (Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass) return PythonTensorType::TENSOR;
+  if (Py_TYPE(obj) == Float8BlockwiseQTensorBasePythonClass) return PythonTensorType::TENSOR_BASE;
+  return PythonTensorType::INVALID;
 }
 
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
