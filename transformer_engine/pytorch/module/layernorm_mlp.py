@@ -843,8 +843,11 @@ class _LayerNormMLP(torch.autograd.Function):
                     # for the dgrad GEMM. We work around by explicitly
                     # overlapping the NCCL operation with the dgrad GEMM.
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    s = ub_obj_fc2_dgrad.get_communication_stream()
-                    with torch.cuda.stream(s):
+                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
+                    dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
+                    with torch.cuda.stream(dgrad_comm_stream):
+                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
+                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
                         grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
                             grad_outputs[0],
                             ctx.tp_group,

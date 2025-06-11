@@ -413,14 +413,18 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # for the dgrad GEMM. We work around by explicitly
                 # overlapping the NCCL operation with the dgrad GEMM.
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                s = ub_comm_dgrad.get_communication_stream()
-                with torch.cuda.stream(s):
+                # Get the communication stream from the dgrad GEMM and set it as the current torch stream
+                dgrad_comm_stream = ub_comm_dgrad.get_communication_stream()
+                with torch.cuda.stream(dgrad_comm_stream):
+                    # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
+                    # This ensures that we don't start until all communication for the dgrad GEMM is complete
                     dy, dy_work = gather_along_first_dim(
                         dy_local,
                         tensor_parallel_group,
                         async_op=True,
                         quantizer=grad_output_quantizer,
                     )
+                # Synchronize with the main stream
                 dy_work.wait()
 
             if tensor_parallel_mode == "column":
