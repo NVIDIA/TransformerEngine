@@ -149,7 +149,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
-  uint64_t stride[rank - 1] = (stride_elems * type_num_bits) / 8;
+  uint64_t stride[rank - 1] = {(stride_elems * type_num_bits) / 8};
 
   // The boxSize is the size of the shared memory buffer that is used as the
   // source/destination of a TMA transfer
@@ -213,8 +213,8 @@ std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensor
   return ret;
 }
 
-size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype) {
-  return (N * typeToNumBits(buffer_dtype)) / 8;
+size_t get_buffer_size_bytes(const size_t elements_num, const DType buffer_dtype) {
+  return (elements_num * typeToNumBits(buffer_dtype)) / 8;
 }
 
 size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
@@ -223,8 +223,8 @@ size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
     NVTE_CHECK(dim_last % 2 == 0,
                "Last dimension of a tensor with FP4 type of data must be an even number!");
   }
-  const size_t N = dim_first * dim_last;
-  return get_buffer_size_bytes(N, buffer_dtype);
+  const size_t elements_num = dim_first * dim_last;
+  return get_buffer_size_bytes(elements_num, buffer_dtype);
 }
 
 }  // namespace transformer_engine

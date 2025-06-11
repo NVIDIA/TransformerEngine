@@ -196,7 +196,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       if (param_type == NVTETensorParam::kNVTERowwiseData ||
           param_type == NVTETensorParam::kNVTEColumnwiseData) {
         // Offset data pointer
-        param_dptr += (chunk_offset * typeToNumBits(param_dtype)) / 8;
+        param_dptr += get_buffer_size_bytes(chunk_offset, param_dtype);
         param_shape = chunk_shape;
 
         if (param_type == NVTETensorParam::kNVTEColumnwiseData &&
@@ -217,7 +217,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
         } else {
           chunk_scale_height /= 32;
         }
-        param_dptr += ((chunk_offset / 32) * typeToNumBits(param_dtype)) / 8;
+        param_dptr += get_buffer_size_bytes(chunk_offset / 32, param_dtype);
         param_shape = {chunk_scale_height, chunk_scale_width};
       }
 
@@ -236,8 +236,7 @@ TensorWrapper CommOverlapCore::get_buffer_chunk_like(const TensorWrapper &source
   auto chunk = get_tensor_chunk(source, chunk_offset, chunk_shape);
 
   // Update chunk with offset data pointers from the communication buffer
-  auto ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr()) +
-                  static_cast<size_t>(chunk_offset * _ubuf.element_size());
+  auto ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr()) + chunk_offset * _ubuf.element_size();
   if (chunk.dptr() != nullptr) {
     chunk.set_rowwise_data(reinterpret_cast<void *>(ubuf_ptr), chunk.dtype(), chunk.shape());
   }
@@ -431,7 +430,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
       }
     }
 
-    rs_output_ptr += static_cast<size_t>(m_chunk * rs_output.element_size());
+    rs_output_ptr += m_chunk * rs_output.element_size();
   }
 
   _ub_comm->sms = ori_sms;
@@ -521,7 +520,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                                               m_chunk, n, m, _ub_comm, _stream_comm);
       }
 
-      rs_output_ptr += static_cast<size_t>(m_chunk * rs_output.element_size());
+      rs_output_ptr += m_chunk * rs_output.element_size();
     }
     int last_compute_stream_id =
         (_num_splits + _stream_compute.size() - 1) % _stream_compute.size();
@@ -572,7 +571,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                                               m_chunk, n, m, _ub_comm, _stream_comm);
       }
 
-      rs_output_ptr += static_cast<size_t>(m_chunk * rs_output.element_size());
+      rs_output_ptr += m_chunk * rs_output.element_size();
     }
   }
 
@@ -709,7 +708,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
 
   // Create an GEMM output buffer with N+1 chunks in a contiguous memory
   void *D_buffer_ptr;
-  int D_chunk_bytes = static_cast<int>(n_chunk * m * D.element_size());
+  int D_chunk_bytes = n_chunk * m * D.element_size();
   NVTE_CHECK_CUDA(cudaMallocAsync(&D_buffer_ptr, (_tp_size + 1) * D_chunk_bytes, stream_main));
   auto D_buffer = TensorWrapper(D_buffer_ptr, D.shape(), D.dtype(), D.amax(), D.scale(),
                                 D.scale_inv(), D.scale_inv_shape(), D.scaling_mode());
