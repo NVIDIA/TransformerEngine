@@ -14,7 +14,7 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    return ["jax[cuda12]", "flax>=0.7.1"]
+    return ["jax", "flax>=0.7.1"]
 
 
 def test_requirements() -> List[str]:
@@ -75,20 +75,9 @@ def setup_jax_extension(
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
-    class Pybind11CPPExtension(Pybind11Extension):
-        """Modified Pybind11Extension to allow custom CXX flags."""
-
-        def _add_cflags(self, flags: List[str]) -> None:
-            if isinstance(self.extra_compile_args, dict):
-                cxx_flags = self.extra_compile_args.pop("cxx", [])
-                cxx_flags += flags
-                self.extra_compile_args["cxx"] = cxx_flags
-            else:
-                self.extra_compile_args[:0] = flags
-
-    return Pybind11CPPExtension(
+    return Pybind11Extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
-        extra_compile_args={"cxx": cxx_flags},
+        extra_compile_args=cxx_flags,
     )
