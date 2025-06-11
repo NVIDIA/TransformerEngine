@@ -30,14 +30,6 @@ def _empty_tensor() -> torch.Tensor:
     return torch.Tensor().cuda()
 
 
-clear_internal_tensors = True
-
-
-def disable_clear_internal_tensors():
-    """Disable the clear_tensor_data function"""
-    global clear_internal_tensors
-    clear_internal_tensors = False
-
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
@@ -46,11 +38,16 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
-    if not clear_internal_tensors:
-        return
 
     for t in tensors:
         if t is not None:
+            # Workaround for double buffering in cpu offload
+            if hasattr(t, "do_not_clear"):
+                continue
+            if hasattr(t, "get_data_tensors"):
+                if any([hasattr(tensor, "do_not_clear") for tensor in t.get_data_tensors()]):
+                    continue
+            
             if hasattr(t, "clear"):
                 t.clear()
             else:

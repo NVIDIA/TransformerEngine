@@ -12,7 +12,6 @@ import torch
 from .tensor.quantized_tensor import QuantizedTensorBase
 
 from .tensor.float8_tensor import Float8Tensor
-from .utils import disable_clear_internal_tensors
 
 __all__ = ["get_cpu_offload_context"]
 
@@ -266,7 +265,6 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
 
         copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
-        copy_buffer.cpu_reloaded_do_not_clear = True
 
         return copy_buffer
 
@@ -334,11 +332,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.double_buffering = double_buffering
         self.reload_double_buffer = [[], []]
         self.double_buffer_created = False
-
-        # We do not want to clear the internal tensors when double buffering is enabled,
-        # because it will release the buffer memory to early.
-        if double_buffering:
-            disable_clear_internal_tensors()
 
         # Logic to make offloading load balance across computation
         # for optimal CPU/GPU interconnect usage
@@ -422,8 +415,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             self.fp8_tensor_object_map[tensor_tag].restore_from_saved(tensor)
             tensor = self.fp8_tensor_object_map.pop(tensor_tag)
 
-        self.tensor_tag_to_buf.pop(tensor_tag, None)
+        if self.double_buffering:
+            tensor.do_not_clear = True
 
+        self.tensor_tag_to_buf.pop(tensor_tag, None)
         # the tensor should have been copied back in on_group_commit_backward()
         # which invokes bulk_reload_group.
         assert not isinstance(tensor, tuple)
