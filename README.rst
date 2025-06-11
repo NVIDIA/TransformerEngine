@@ -216,13 +216,25 @@ Alternatively, install directly from the GitHub repository:
 
 .. code-block:: bash
 
-    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 When installing from GitHub, you can explicitly specify frameworks using the environment variable:
 
 .. code-block:: bash
 
-    NVTE_FRAMEWORK=pytorch,jax pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    NVTE_FRAMEWORK=pytorch,jax pip install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@stable
+
+conda Installation
+^^^^^^^^^^^^^^^^^^
+
+To install the latest stable version with conda from conda-forge:
+
+.. code-block:: bash
+
+    # For PyTorch integration
+    conda install -c conda-forge transformer-engine-torch
+    
+    # JAX integration (coming soon)
 
 Source Installation
 ^^^^^^^^^^^^^^^^^^^
