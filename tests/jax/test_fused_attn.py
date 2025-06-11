@@ -106,7 +106,8 @@ def general_dot_product_attention(
         softmax_out = softmax_out * multiplier
 
     context = jnp.einsum("...hgqk,...khd->...qhgd", softmax_out, value)
-    context = jnp.reshape(context, value.shape)
+    context_shape = query.shape[:-1] + (value.shape[-1],)
+    context = jnp.reshape(context, context_shape)
     return context
 
 
