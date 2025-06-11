@@ -30,7 +30,6 @@ def _empty_tensor() -> torch.Tensor:
     return torch.Tensor().cuda()
 
 
-
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
@@ -47,7 +46,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
             if hasattr(t, "get_data_tensors"):
                 if any([hasattr(tensor, "do_not_clear") for tensor in t.get_data_tensors()]):
                     continue
-            
+
             if hasattr(t, "clear"):
                 t.clear()
             else:
