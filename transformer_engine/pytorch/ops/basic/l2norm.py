@@ -18,7 +18,13 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape
-from ...jit import l2norm_fused, l2norm_fwd_fused, l2norm_backward_fused
+from ...jit import (
+    l2norm_fused,
+    l2norm_fwd_fused,
+    l2norm_backward_fused,
+    set_jit_fusion_options,
+    warmup_jit_l2norm_all_dtypes,
+)
 
 
 class L2Norm(BasicOperation):
@@ -36,6 +42,14 @@ class L2Norm(BasicOperation):
     ----------
     eps : float, default = 1e-6
         A value added to the denominator for numerical stability
+    seq_length: int, default = None
+        sequence length of input samples. Needed for JIT Warmup, a technique where jit fused
+        functions are warmed up before training to ensure same kernels are used for forward
+        propagation and activation recompute phase.
+    micro_batch_size: int, default = None
+        batch size per training step. Needed for JIT Warmup, a technique where jit
+        fused functions are warmed up before training to ensure same kernels are
+        used for forward propagation and activation recompute phase.
     device: torch.device, default = default CUDA device
         Tensor device
     dtype: torch.dtype, default = default dtype
@@ -47,6 +61,8 @@ class L2Norm(BasicOperation):
         self,
         *,
         eps: float = 1e-6,
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
         device: Optional[torch.device | str] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
@@ -54,6 +70,17 @@ class L2Norm(BasicOperation):
         self.eps: float = eps
         self.device = canonicalize_device(device)
         self.dtype = canonicalize_dtype(dtype)
+
+        # JIT warmup for L2Norm fused operations
+        if seq_length and micro_batch_size:
+            device = getattr(self, "device", torch.device("cuda"))
+            if hasattr(device, "type") and device.type == "cuda":
+                set_jit_fusion_options()
+                # For L2Norm, we don't know the hidden size until forward pass,
+                # but we can warm up with common sizes used in attention mechanisms
+                common_hidden_sizes = [768, 1024, 2048, 4096, 8192]
+                for hidden_size in common_hidden_sizes:
+                    warmup_jit_l2norm_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
     def reset_parameters(self) -> None:
         """L2Norm has no parameters to reset"""

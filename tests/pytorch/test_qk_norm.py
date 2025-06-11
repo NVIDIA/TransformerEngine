@@ -34,7 +34,7 @@ def test_qk_norm_functionality(use_qk_norm, attention_type, qk_norm_eps) -> None
         assert not hasattr(mha, "q_l2norm"), "Should not have separate q_l2norm module"
         assert not hasattr(mha, "k_l2norm"), "Should not have separate k_l2norm module"
         # Check that the module is L2Norm type
-        from transformer_engine.pytorch.module.l2norm import L2Norm
+        from transformer_engine.pytorch.ops.basic.l2norm import L2Norm
 
         assert isinstance(mha.qk_norm, L2Norm), "qk_norm should be an L2Norm module"
     else:

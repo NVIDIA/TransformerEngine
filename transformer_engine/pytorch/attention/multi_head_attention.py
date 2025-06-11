@@ -12,7 +12,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
-from transformer_engine.pytorch.module.l2norm import L2Norm
+from transformer_engine.pytorch.ops.basic.l2norm import L2Norm
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
     divide,
