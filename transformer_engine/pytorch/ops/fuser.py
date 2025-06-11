@@ -91,7 +91,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
         # Unflatten list of parameters and extra tensor inputs
-        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs:]
+        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
         basic_op_extra_inputs = []
         for op in fuser._basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
@@ -121,7 +121,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
             prev_ops = [fuser._basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
             next_ops = [
-                fuser._basic_ops[idx + 1] if (idx < fuser._num_basic_ops - 1) else None for idx in basic_op_idxs
+                fuser._basic_ops[idx + 1] if (idx < fuser._num_basic_ops - 1) else None
+                for idx in basic_op_idxs
             ]
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
@@ -355,9 +356,8 @@ class OperationFuser:
         # Verify extra input count
         if len(extra_inputs) != self._num_extra_inputs:
             raise ValueError(
-                f"Expected {self._num_extra_inputs} extra inputs "
-                f"but got {len(extra_inputs)}"
-            )            
+                f"Expected {self._num_extra_inputs} extra inputs but got {len(extra_inputs)}"
+            )
 
         # Initialization before forward pass
         for op in self._basic_ops:
