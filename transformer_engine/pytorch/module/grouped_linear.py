@@ -361,7 +361,7 @@ class _GroupedLinear(torch.autograd.Function):
                     if ctx.input_quantizers[0] is not None:
                         for input_quantizer in ctx.input_quantizers:
                             if isinstance(
-                                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                                input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                             ):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
