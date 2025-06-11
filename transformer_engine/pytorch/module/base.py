@@ -820,6 +820,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
+
+        # Maintain backwards compatibility with older checkpoints.
+        if state is None:
+            return
+
         # Load state
         if isinstance(state, torch.Tensor):
             # No FP8 is indicated by an empty tensor we don't need to unpickle.
