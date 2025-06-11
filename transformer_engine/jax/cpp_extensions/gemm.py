@@ -18,7 +18,7 @@ from ..quantize import (
     Quantizer,
     QuantizeConfig,
     noop_quantizer_set,
-    is_gemm_with_all_layouts_supported
+    is_gemm_with_all_layouts_supported,
 )
 
 
@@ -256,7 +256,10 @@ def _jax_gemm(
     if not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor):
         if quantizer_set != noop_quantizer_set:
             assert type(quantizer_set.x) is type(quantizer_set.kernel)
-            if quantizer_set.x.scaling_mode.is_tensor_scaling() and is_gemm_with_all_layouts_supported():
+            if (
+                quantizer_set.x.scaling_mode.is_tensor_scaling()
+                and is_gemm_with_all_layouts_supported()
+            ):
                 lhs_is_rowwise = rhs_is_rowwise = True
             else:
                 (((lhs_contract_dim,), (rhs_contract_dim,)), _) = dim_nums
