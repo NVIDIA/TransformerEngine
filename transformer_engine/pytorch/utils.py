@@ -44,7 +44,7 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
             if hasattr(t, "do_not_clear"):
                 continue
             if hasattr(t, "get_data_tensors"):
-                if any([hasattr(tensor, "do_not_clear") for tensor in t.get_data_tensors()]):
+                if any(hasattr(tensor, "do_not_clear") for tensor in t.get_data_tensors()):
                     continue
 
             if hasattr(t, "clear"):
