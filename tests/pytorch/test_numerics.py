@@ -1274,7 +1274,9 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("recipe", fp8_recipes + [None])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_linear_accuracy_save_original_input(dtype, bs, model, fuse_wgrad_accumulation, recipe, fp8_model_params):
+def test_linear_accuracy_save_original_input(
+    dtype, bs, model, fuse_wgrad_accumulation, recipe, fp8_model_params
+):
     fp8 = recipe is not None
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -2009,7 +2011,15 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("save_original_input", all_boolean)
 def test_padding_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, save_original_input, parallel_mode=None
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    save_original_input,
+    parallel_mode=None,
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)

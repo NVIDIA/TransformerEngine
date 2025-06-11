@@ -97,7 +97,9 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(*inputmats, *weights)
             if save_original_input:
-                assert not isinstance(input_quantizers[0], Float8Quantizer), "DelayedScaling recipe is not supported with save_original_input"
+                assert not isinstance(
+                    input_quantizers[0], Float8Quantizer
+                ), "DelayedScaling recipe is not supported with save_original_input"
 
         # Cast input to expected dtype
         inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
@@ -109,7 +111,9 @@ class _GroupedLinear(torch.autograd.Function):
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=(is_grad_enabled and weight_requires_grad and not save_original_input),
+                    columnwise=(
+                        is_grad_enabled and weight_requires_grad and not save_original_input
+                    ),
                 )
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if not columnwise_usage:
@@ -350,17 +354,24 @@ class _GroupedLinear(torch.autograd.Function):
                     inp = inputmats[0]
                     in_features = inp.shape[-1]
                     inputmats = torch.split(inp.view(-1, in_features), ctx.m_splits)
-                    inputmats_no_fp8 = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats]
+                    inputmats_no_fp8 = [
+                        cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats
+                    ]
                     inputmats = []
                     if ctx.input_quantizers[0] is not None:
                         for input_quantizer in ctx.input_quantizers:
-                            if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                            if isinstance(
+                                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                            ):
                                 input_quantizer.set_usage(rowwise=True, columnwise=True)
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     if ctx.fp8:
                         inputmats = tex.fused_multi_quantize(
-                            inputmats_no_fp8, None, ctx.input_quantizers, TE_DType[ctx.activation_dtype]
+                            inputmats_no_fp8,
+                            None,
+                            ctx.input_quantizers,
+                            TE_DType[ctx.activation_dtype],
                         )
                     else:
                         inputmats = inputmats_no_fp8

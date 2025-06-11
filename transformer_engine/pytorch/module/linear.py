@@ -158,7 +158,9 @@ class _Linear(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             if save_original_input:
-                assert not isinstance(input_quantizer, Float8Quantizer), "DelayedScaling recipe is not supported with save_original_input"
+                assert not isinstance(
+                    input_quantizer, Float8Quantizer
+                ), "DelayedScaling recipe is not supported with save_original_input"
 
         if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
@@ -167,7 +169,9 @@ class _Linear(torch.autograd.Function):
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorBase):
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input and not save_original_input)
+                    input_quantizer.set_usage(
+                        rowwise=True, columnwise=backward_needs_input and not save_original_input
+                    )
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
@@ -204,7 +208,9 @@ class _Linear(torch.autograd.Function):
                 else:
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input and not save_original_input)
+                    input_quantizer.set_usage(
+                        rowwise=True, columnwise=backward_needs_input and not save_original_input
+                    )
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
             else:
