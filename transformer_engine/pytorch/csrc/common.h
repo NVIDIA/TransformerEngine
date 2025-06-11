@@ -30,6 +30,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
@@ -173,6 +174,8 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
+  // Whether quantized tensor will be used in an all-gather
+  bool all_gather_usage = false;
 
  private:
   int block_scaling_dim = 2;

@@ -10,10 +10,10 @@
 #include <string>
 
 #include "../common.h"
+#include "../extensions.h"
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
-#include "extensions.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"

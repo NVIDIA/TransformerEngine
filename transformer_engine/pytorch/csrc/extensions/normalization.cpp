@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "../extensions.h"
 #include "common/util/system.h"
-#include "extensions.h"
 #include "pybind.h"
 
 namespace transformer_engine::pytorch {
@@ -170,6 +170,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
       quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
       quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+      if (my_quantizer_bw->all_gather_usage) {
+        quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+      }
     }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,
@@ -328,6 +331,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(my_quantizer.get());
       quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
       quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+      if (my_quantizer_bw->all_gather_usage) {
+        quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+      }
     }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_quantize_v2(unquantized_out_cu.data(), out_cu.data(), quant_config,

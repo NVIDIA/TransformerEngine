@@ -302,6 +302,13 @@ enum NVTEQuantizationConfigAttribute {
    conditional early even when captured in a static CUDA graph.
   */
   kNVTEQuantizationConfigNoopTensor = 2,
+  /*! Data format for an FP8 block-scaled tensor
+   *
+   *  This is not the right design since the tensor format is a
+   *  property of the tensor, not the quantization. This enum will
+   *  likely be refactored away in the future.
+   */
+  kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -721,6 +728,16 @@ class TensorWrapper {
   NVTETensor tensor_ = nullptr;
 };
 
+/*! \enum Float8BlockScaleTensorFormat
+ *  \brief Data format for an FP8 block-scaled tensor
+ */
+enum class Float8BlockScaleTensorFormat {
+  /*! FP8 data is transposed if needed and scales are swizzled */
+  GEMM_READY = 0,
+  /*! FP8 data is untransposed and scales are not swizzled or padded */
+  COMPACT = 1
+};
+
 /*! \struct QuantizationConfigWrapper
  *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
  */
@@ -772,6 +789,13 @@ class QuantizationConfigWrapper {
   void set_noop_tensor(NVTETensor noop_tensor) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
                                            sizeof(NVTETensor));
+  }
+
+  /*! \brief Set FP8 block-scaled tensor format */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
+                                           &format, sizeof(Float8BlockScaleTensorFormat));
   }
 
  private:

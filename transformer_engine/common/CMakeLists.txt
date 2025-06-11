@@ -92,6 +92,7 @@ list(APPEND transformer_engine_SOURCES
      util/cuda_driver.cpp
      util/cuda_nvml.cpp
      util/cuda_runtime.cpp
+     util/multi_stream.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu

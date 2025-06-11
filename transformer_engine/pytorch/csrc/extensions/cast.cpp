@@ -6,8 +6,8 @@
 
 #include "transformer_engine/cast.h"
 
+#include "../extensions.h"
 #include "common.h"
-#include "extensions.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -81,6 +81,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
+    if (my_quantizer_bw->all_gather_usage) {
+      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+    }
   }
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
