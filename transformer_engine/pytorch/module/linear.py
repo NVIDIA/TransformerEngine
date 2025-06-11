@@ -116,6 +116,7 @@ class _Linear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
+        save_original_input: bool = False,
         debug: Optional[bool] = False,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -156,6 +157,9 @@ class _Linear(torch.autograd.Function):
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
+            if save_original_input:
+                assert not isinstance(input_quantizer, Float8Quantizer), "DelayedScaling recipe is not supported with save_original_input"
+
         if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
             # Cast local input tensor if needed
@@ -163,7 +167,7 @@ class _Linear(torch.autograd.Function):
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorBase):
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input and not save_original_input)
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
@@ -200,7 +204,7 @@ class _Linear(torch.autograd.Function):
                 else:
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input and not save_original_input)
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
             else:
@@ -329,6 +333,9 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
 
         if is_grad_enabled:
+            if save_original_input:
+                inputmat = inp
+
             ctx.weight_quantizer = weight_quantizer
             saved_inputmat = None
 
@@ -337,15 +344,16 @@ class _Linear(torch.autograd.Function):
             )
 
             if backward_needs_input:
-                if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
-                    # For sequence parallel in vanilla FP8, rowwise data is
-                    # to gather the input. For MXFP8, columnwise only data
-                    # can be allgathered.
-                    if (
-                        isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
-                        or not ctx.backward_input_needs_gather
-                    ):
-                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+                if not save_original_input:
+                    if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
+                        # For sequence parallel in vanilla FP8, rowwise data is
+                        # to gather the input. For MXFP8, columnwise only data
+                        # can be allgathered.
+                        if (
+                            isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                            or not ctx.backward_input_needs_gather
+                        ):
+                            inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -425,6 +433,9 @@ class _Linear(torch.autograd.Function):
                 if in_fp8_activation_recompute_phase():
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
+
+            ctx.save_original_input = save_original_input
+            ctx.own_quantized_input = own_quantized_input
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -549,6 +560,17 @@ class _Linear(torch.autograd.Function):
             # --------------------------------------------------
             inputmat_total = None
             inputmat_total_work = None
+            if ctx.save_original_input:
+                if ctx.fp8 or ctx.debug:
+                    if ctx.own_quantized_input:
+                        quantizer = ctx.input_quantizer
+                        if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                            quantizer.set_usage(rowwise=True, columnwise=False)
+                        else:
+                            quantizer.set_usage(rowwise=False, columnwise=True)
+                        inputmat = quantizer(inputmat)
+                else:
+                    inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if ctx.backward_input_needs_gather:
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
@@ -881,6 +903,7 @@ class _Linear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
+            None,  # save_original_input
             None,  # debug
         )
 
@@ -963,6 +986,11 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
+    save_original_input : bool, default = `False`
+                       If set to `True`, always saves the original input tensor rather than the
+                       casted or quantized tensor. In some scenarios, the input tensor is used by
+                       mutiple modules, and saving the original input tensor may reduce the memory
+                       usage. Cannot work with DelayedScaling recipe.
     """
 
     def __init__(
@@ -990,6 +1018,7 @@ class Linear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
+        save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -1004,6 +1033,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
+        self.save_original_input = save_original_input
         self.name = name
 
         if TEDebugState.debug_enabled:
@@ -1357,6 +1387,7 @@ class Linear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.save_original_input,
                 debug,
             )
             out = linear_fn(*args)

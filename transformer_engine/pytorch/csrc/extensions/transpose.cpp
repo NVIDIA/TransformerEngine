@@ -59,7 +59,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
              "Number of input and output tensors must match");
 
   for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-    if (nvte_tensor_columnwise_data(nvte_tensor_output_list[i]) == nullptr) {
+    if (nvte_tensor_data(nvte_tensor_output_list[i]) == nullptr || nvte_tensor_columnwise_data(nvte_tensor_output_list[i]) == nullptr) {
       with_fused_kernel = false;
       break;
     }

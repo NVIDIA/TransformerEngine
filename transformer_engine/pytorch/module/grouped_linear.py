@@ -43,6 +43,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..cpu_offload import is_cpu_offload_enabled
 
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensorBase,
     Quantizer,
@@ -79,6 +80,7 @@ class _GroupedLinear(torch.autograd.Function):
         is_grad_enabled: bool,
         module,
         skip_fp8_weight_update,
+        save_original_input,
         *weights_and_biases,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -94,6 +96,8 @@ class _GroupedLinear(torch.autograd.Function):
         inputmats = torch.split(inp.view(-1, in_features), m_splits)
         if fp8:
             assert_dim_for_fp8_exec(*inputmats, *weights)
+            if save_original_input:
+                assert not isinstance(input_quantizers[0], Float8Quantizer), "DelayedScaling recipe is not supported with save_original_input"
 
         # Cast input to expected dtype
         inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
@@ -105,7 +109,7 @@ class _GroupedLinear(torch.autograd.Function):
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=(is_grad_enabled and weight_requires_grad),
+                    columnwise=(is_grad_enabled and weight_requires_grad and not save_original_input),
                 )
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if not columnwise_usage:
@@ -182,9 +186,15 @@ class _GroupedLinear(torch.autograd.Function):
 
             # TODO: update after #1638 is merged. # pylint: disable=fixme
             if weight_requires_grad:
-                for inputmat in inputmats:
-                    if isinstance(inputmat, QuantizedTensorBase):
-                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+                if save_original_input:
+                    inputmats = [None] * num_gemms
+                    inputmats[0] = inp
+                else:
+                    for inputmat in inputmats:
+                        if isinstance(inputmat, QuantizedTensorBase):
+                            inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+            else:
+                inputmats = [None] * num_gemms
             if inp.requires_grad:
                 for weight in weights_fp8:
                     if isinstance(weight, QuantizedTensorBase):
@@ -225,6 +235,8 @@ class _GroupedLinear(torch.autograd.Function):
                     or FP8GlobalStateManager.is_first_fp8_module()
                 )
             ctx.wgrad_store = wgrad_store
+            ctx.save_original_input = save_original_input
+            ctx.input_quantizers = input_quantizers
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -333,6 +345,26 @@ class _GroupedLinear(torch.autograd.Function):
                         torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
                         for w in weights
                     ]
+
+                if ctx.save_original_input:
+                    inp = inputmats[0]
+                    in_features = inp.shape[-1]
+                    inputmats = torch.split(inp.view(-1, in_features), ctx.m_splits)
+                    inputmats_no_fp8 = [cast_if_needed(mat, ctx.activation_dtype) for mat in inputmats]
+                    inputmats = []
+                    if ctx.input_quantizers[0] is not None:
+                        for input_quantizer in ctx.input_quantizers:
+                            if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                                input_quantizer.set_usage(rowwise=True, columnwise=True)
+                            else:
+                                input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    if ctx.fp8:
+                        inputmats = tex.fused_multi_quantize(
+                            inputmats_no_fp8, None, ctx.input_quantizers, TE_DType[ctx.activation_dtype]
+                        )
+                    else:
+                        inputmats = inputmats_no_fp8
+
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     out_dtype=ctx.activation_dtype,
@@ -424,6 +456,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             None,
+            None,
             *wgrad_list,
             *grad_biases,
         )
@@ -474,6 +507,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                   would not fit in GPU memory.
     delay_wgrad_compute : bool, default = `False`
                          Whether to delay weight gradient computation
+    save_original_input : bool, default = `False`
+                       If set to `True`, always saves the original input tensor rather than the
+                       casted or quantized tensor. In some scenarios, the input tensor is used by
+                       mutiple modules, and saving the original input tensor may reduce the memory
+                       usage. Cannot work with DelayedScaling recipe.
 
     Note: GroupedLinear doesn't really handle the TP communications inside. The `tp_size` and
           `parallel_mode` are used to determine the shapes of weights and biases.
@@ -501,6 +539,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
+        save_original_input: bool = False,
     ) -> None:
         super().__init__()
 
@@ -515,6 +554,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
+        self.save_original_input = save_original_input
         assert (
             not ub_overlap_rs and not ub_overlap_ag
         ), "GroupedLinear doesn't support Userbuffer overlap."
@@ -730,6 +770,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 torch.is_grad_enabled(),
                 self,
                 skip_fp8_weight_update,
+                self.save_original_input,
                 *weight_tensors,
                 *bias_tensors,
             )
