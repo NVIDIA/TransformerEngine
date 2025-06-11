@@ -68,8 +68,8 @@ void nvte_multi_padding(size_t num_tensors, const NVTETensor* input_list, NVTETe
  *  \param[in]     unpadded_num_rows_list    List of unpadded num rows corresponding to input tensors.
  *  \param[in]     stream                    CUDA stream used for the operation.
  */
- void nvte_multi_unpadding(size_t num_tensors, const NVTETensor* input_list, NVTETensor* output_list,
-    const int* unpadded_num_rows_list, cudaStream_t stream);
+void nvte_multi_unpadding(size_t num_tensors, const NVTETensor* input_list, NVTETensor* output_list,
+                          const int* unpadded_num_rows_list, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

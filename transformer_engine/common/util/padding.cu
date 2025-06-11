@@ -279,9 +279,8 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
   }
 }
 
-
 void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*> output_list,
-                   const std::vector<int> unpadded_num_rows_list, cudaStream_t stream) {
+                     const std::vector<int> unpadded_num_rows_list, cudaStream_t stream) {
   // Check that number of tensors is valid
   NVTE_CHECK(output_list.size() == input_list.size(),
              "Number of input and output tensors must match");

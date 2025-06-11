@@ -74,20 +74,20 @@ void performUnpaddingTest() {
     const size_t original_height = tensor_dims[tensor_id].first;
     const size_t width = tensor_dims[tensor_id].second;
     const size_t padded_height = (original_height + align - 1) / align * align;
-    
+
     // Input is padded tensor (padded_height x width)
     padded_input_list.emplace_back(
-        Tensor("padded_input_" + std::to_string(tensor_id), 
+        Tensor("padded_input_" + std::to_string(tensor_id),
                std::vector<size_t>{padded_height, width}, itype));
-    
+
     // Output is unpadded tensor (original_height x width)
     unpadded_output_list.emplace_back(
-        Tensor("unpadded_output_" + std::to_string(tensor_id), 
+        Tensor("unpadded_output_" + std::to_string(tensor_id),
                std::vector<size_t>{original_height, width}, otype));
 
     auto& padded_input = padded_input_list.back();
     auto& unpadded_output = unpadded_output_list.back();
-    
+
     // Fill padded input with random data (including padding area)
     fillUniform(&padded_input);
     setRandomScale(&unpadded_output);
@@ -100,7 +100,7 @@ void performUnpaddingTest() {
     std::copy(padded_input.rowwise_cpu_dptr<InputType>(),
               padded_input.rowwise_cpu_dptr<InputType>() + padded_height * width,
               ref_padded_input_list.back().begin());
-    
+
     ref_height_list[tensor_id] = original_height;
     ref_width_list[tensor_id] = width;
     ref_padded_height_list[tensor_id] = padded_height;
@@ -115,7 +115,7 @@ void performUnpaddingTest() {
     }
     return nvte_tensor_list;
   };
-  
+
   // Convert height_list to int for the API
   std::vector<int> original_height_list_int(num_tensors);
   for (size_t i = 0; i < num_tensors; ++i) {
@@ -128,7 +128,7 @@ void performUnpaddingTest() {
                       make_nvte_vector(unpadded_output_list).data(),
                       original_height_list_int.data(),
                       0);
-  
+
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);

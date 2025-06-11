@@ -57,7 +57,9 @@ class _Fp8Padding(torch.autograd.Function):
 
             # Allocate cast and transpose output tensor
             total_row = sum(ctx.m_splits)
-            grad_input = torch.empty([total_row, in_features], dtype=grad_output.dtype, device=grad_output.device)
+            grad_input = torch.empty(
+                [total_row, in_features], dtype=grad_output.dtype, device=grad_output.device
+            )
 
             tex.fused_multi_row_unpadding(
                 grad_output.view(-1, in_features), grad_input, ctx.padded_m_splits, ctx.m_splits
