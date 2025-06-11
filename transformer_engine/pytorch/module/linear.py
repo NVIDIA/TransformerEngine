@@ -440,7 +440,7 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
-            ctx.save_original_input = save_original_input
+            ctx.save_original_input = save_original_input and backward_needs_input
             ctx.own_quantized_input = own_quantized_input
 
         # ------------------------------------------------------
@@ -571,7 +571,10 @@ class _Linear(torch.autograd.Function):
                     if ctx.own_quantized_input:
                         quantizer = ctx.input_quantizer
                         if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-                            quantizer.set_usage(rowwise=True, columnwise=False)
+                            quantizer.set_usage(
+                                rowwise=True,
+                                columnwise=not ctx.backward_input_needs_gather,
+                            )
                         else:
                             quantizer.set_usage(rowwise=False, columnwise=True)
                         inputmat = quantizer(inputmat)
