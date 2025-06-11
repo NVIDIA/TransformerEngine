@@ -524,6 +524,13 @@ class _Linear(torch.autograd.Function):
                     # usage for only dgrad GEMM.
                     quantizer.set_usage(columnwise=False)
 
+            # Adjust the quantization direction approach depending
+            # on whether dgrad and wgrad calculations will be performed.
+            if not ctx.requires_dgrad and ctx.grad_output_quantizer is not None:
+                ctx.grad_output_quantizer.set_usage(rowwise=False)
+            if not ctx.requires_wgrad and ctx.grad_output_quantizer is not None:
+                ctx.grad_output_quantizer.set_usage(columnwise=False)
+
             # Prepare grad output tensor
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
