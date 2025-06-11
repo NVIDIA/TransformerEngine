@@ -62,6 +62,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         func_ctx: Optional[torch.autograd.function.FunctionCtx],
         input_: torch.Tensor,
         fuser: OperationFuser,
+        basic_op_kwargs: list[dict[str, Any]],
+        is_grad_enabled: bool,
         *params_and_extra_inputs: torch.nn.Parameter,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
@@ -74,6 +76,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Input to first operation in pipeline
         fuser: OperationFuser
             Container for the pipeline of operations to run
+        basic_op_kwargs: list of dict
+            Keyword arguments to BasicOperation
+        is_grad_enabled: bool
+            Should context be saved for backward
         *params_and_extra_inputs: torch.Tensor
             Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
@@ -91,7 +97,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
         # Unflatten list of parameters and extra tensor inputs
-        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
+        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs:]
         basic_op_extra_inputs = []
         for op in fuser._basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
@@ -99,12 +105,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Apply forward ops
         x = input_
-        requires_grad = fuser._is_grad_enabled and x.requires_grad
+        requires_grad = is_grad_enabled and x.requires_grad
         extra_outputs = [None] * fuser._num_basic_ops
         for op, basic_op_idxs in fuser._forward_ops:
 
             # Check if backward op is required
-            if fuser._is_grad_enabled:
+            if is_grad_enabled:
                 if not requires_grad:
                     requires_grad = any(param.requires_grad for param in op.parameters())
                 if not requires_grad:
@@ -130,7 +136,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_extra_inputs=extra_inputs,
                 basic_op_prev_ops=prev_ops,
                 basic_op_next_ops=next_ops,
-                basic_op_kwargs=[fuser._basic_op_kwargs[idx] for idx in basic_op_idxs],
+                basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
             x.requires_grad_(requires_grad=requires_grad)
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
@@ -152,7 +158,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             extra_outputs_flat.extend(ys)
 
         # Save context for backward pass
-        if fuser._is_grad_enabled:
+        if is_grad_enabled:
 
             # Flatten list of saved tensors
             to_save = []
@@ -271,6 +277,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         return (
             dx,  # input_
             None,  # fuser
+            None,  # basic_op_kwargs
+            None,  # is_grad_enabled
             *grad_params_flat,
             *grad_extra_inputs_flat,
         )
@@ -366,11 +374,10 @@ class OperationFuser:
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
             basic_op_kwargs = [{}] * self._num_basic_ops
-        self._basic_op_kwargs = basic_op_kwargs
 
         # Fuser forward pass
-        self._is_grad_enabled = torch.is_grad_enabled()
-        if self._is_grad_enabled:
+        is_grad_enabled = torch.is_grad_enabled()
+        if is_grad_enabled:
             forward_func = _OperationFuserAutogradFunction.apply
             args = []
         else:
@@ -379,6 +386,8 @@ class OperationFuser:
         args += (
             input,
             self,
+            basic_op_kwargs,
+            is_grad_enabled,
             *self._basic_op_params,
             *extra_inputs,
         )
