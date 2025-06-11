@@ -124,8 +124,12 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
-  // TODO: Replace with an empty tensor.
-  at::Tensor scale_inv = at::reciprocal(scale);
+  at::Tensor scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(),
+                                             output, "_scale_inv");
+  // TODO: Remove
+  if (rowwise_data.has_value()) {
+    at::reciprocal_out(scale_inv, scale);
+  }
 
   bool create_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
   TensorWrapper tensor(this->get_scaling_mode());
@@ -257,7 +261,13 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
   // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
-  at::Tensor scale_inv = at::reciprocal(scale);
+  at::Tensor scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(),
+                                             output, "_scale_inv");
+  // TODO: Remove
+  if (rowwise_data.has_value()) {
+    at::reciprocal_out(scale_inv, scale);
+  }
+
 
   TensorWrapper tensor(this->get_scaling_mode());
 
