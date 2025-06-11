@@ -18,6 +18,7 @@ from ..quantize import (
     Quantizer,
     QuantizeConfig,
     noop_quantizer_set,
+    is_gemm_with_all_layouts_supported
 )
 
 
@@ -254,10 +255,12 @@ def _jax_gemm(
     if not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor):
         if quantizer_set != noop_quantizer_set:
             assert type(quantizer_set.x) is type(quantizer_set.kernel)
-            (((lhs_contract_dim,), (rhs_contract_dim,)), _) = dim_nums
-            lhs_is_rowwise = lhs_contract_dim == lhs.ndim - 1
-            rhs_is_rowwise = rhs_contract_dim == rhs.ndim - 1
-            # Call JAX quantization so that XLA can do pattern matching (QDQ --> FP8 gemm)
+            if quantizer_set.x.scaling_mode.is_tensor_scaling() and is_gemm_with_all_layouts_supported():
+                lhs_is_rowwise = rhs_is_rowwise = True
+            else:
+                (((lhs_contract_dim,), (rhs_contract_dim,)), _) = dim_nums
+                lhs_is_rowwise = lhs_contract_dim == lhs.ndim - 1
+                rhs_is_rowwise = rhs_contract_dim == rhs.ndim - 1
             lhs_q = quantizer_set.x.quantize(
                 lhs,
                 is_rowwise=lhs_is_rowwise,

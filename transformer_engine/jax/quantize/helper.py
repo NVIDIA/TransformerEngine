@@ -199,7 +199,7 @@ class QuantizeConfig:
         FP8_2X_ACC_FPROP: Whether to use 2x accumulation for forward pass
         FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
         FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
-        IF_QUANTIZE_2X: Whether 2x quantization is enabled
+        INFERENCE_MODE: Whether to enable optimization for inference
         SCALING_MODE: Scaling mode
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
