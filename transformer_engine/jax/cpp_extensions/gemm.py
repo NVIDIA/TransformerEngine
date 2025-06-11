@@ -103,14 +103,15 @@ class GroupedGemmPrimitive(BasePrimitive):
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
         del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
-        del lhs_scale_inv_aval, rhs_scale_inv_aval
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
-        # JAX buffer pointers are 128-aligned
-        # 255 is added to the workspace size to ensure workspace ptr is 256-aligned
-        workspace_size += 255
+        # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
+        # necessarily 256 bytes aligned, we add some padding to ensure alignment.
+        # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
+        workspace_size += 256
+        workspace_size += (lhs_scale_inv_aval.size + 256)
+        workspace_size += (rhs_scale_inv_aval.size + 256)
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-        # TODO(phuong): We should make separate tmp buffers for swizzled scales to avoid unaligned-by-256 workspace ptr issue
 
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
@@ -495,7 +496,8 @@ def grouped_gemm(
             # and is_gemm_with_all_layouts_supported()
             scaling_mode.is_1d_block_scaling()
         ):
-            lhs_is_rowwise = rhs_is_rowwise = True
+            lhs_is_rowwise = True
+            rhs_is_rowwise = False
         else:
             lhs_is_rowwise = not lhs_is_trans
             rhs_is_rowwise = lhs_is_trans
@@ -556,9 +558,6 @@ def grouped_gemm(
     has_bias = bias is not None
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
-
-    # TODO(Phuong): support MXFP8_1D_SCALING
-    assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
