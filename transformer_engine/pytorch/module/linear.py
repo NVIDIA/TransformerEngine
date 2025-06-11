@@ -1443,8 +1443,6 @@ class Linear(TransformerEngineBaseModule):
 
         return weight_tensor, bias_tensor
 
-
-
     def onnx_forward(
         self,
         inp: torch.Tensor,
