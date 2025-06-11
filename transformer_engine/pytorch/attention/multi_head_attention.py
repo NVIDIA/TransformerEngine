@@ -12,7 +12,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
-from transformer_engine.pytorch.ops.basic.l2norm import L2Norm
+from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
     divide,
@@ -183,6 +183,14 @@ class MultiheadAttention(torch.nn.Module):
     qk_norm_eps: float, default = 1e-6
                     epsilon value for L2 normalization of query and key tensors.
                     Only used when `use_qk_norm` is True.
+    seq_length: Optional[int], default = `None`
+                    sequence length of input samples. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are used for
+                    forward propagation and activation recompute phase.
+    micro_batch_size: Optional[int], default = `None`
+                    batch size per training step. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are
+                    used for forward propagation and activation recompute phase.
     """
 
     def __init__(
@@ -225,6 +233,8 @@ class MultiheadAttention(torch.nn.Module):
         name: str = None,
         use_qk_norm: bool = False,
         qk_norm_eps: float = 1e-6,
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -292,10 +302,10 @@ class MultiheadAttention(torch.nn.Module):
 
         # Initialize L2 normalization modules for query and key if enabled
         if self.use_qk_norm:
-            self.qk_norm = L2Norm(
+            self.qk_norm = L2Normalization(
                 eps=qk_norm_eps,
-                device=device,
-                dtype=self.params_dtype,
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
             )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None

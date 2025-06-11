@@ -9,25 +9,19 @@ from typing import Optional
 
 import torch
 
-from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
-from ...utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    clear_tensor_data,
-)
+from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, reshape
 from ...jit import (
-    l2norm_fused,
-    l2norm_fwd_fused,
-    l2norm_backward_fused,
+    l2normalization_fused,
+    l2normalization_fwd_fused,
+    l2normalization_backward_fused,
     set_jit_fusion_options,
-    warmup_jit_l2norm_all_dtypes,
+    warmup_jit_l2normalization_all_dtypes,
 )
 
 
-class L2Norm(BasicOperation):
+class L2Normalization(BasicOperation):
     r"""L2 Normalization
 
     Applies L2 normalization over the last dimension of input tensors.
@@ -50,10 +44,6 @@ class L2Norm(BasicOperation):
         batch size per training step. Needed for JIT Warmup, a technique where jit
         fused functions are warmed up before training to ensure same kernels are
         used for forward propagation and activation recompute phase.
-    device: torch.device, default = default CUDA device
-        Tensor device
-    dtype: torch.dtype, default = default dtype
-        Tensor datatype
 
     """
 
@@ -63,27 +53,21 @@ class L2Norm(BasicOperation):
         eps: float = 1e-6,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
-        device: Optional[torch.device | str] = None,
-        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.eps: float = eps
-        self.device = canonicalize_device(device)
-        self.dtype = canonicalize_dtype(dtype)
 
-        # JIT warmup for L2Norm fused operations
+        # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
-            device = getattr(self, "device", torch.device("cuda"))
-            if hasattr(device, "type") and device.type == "cuda":
+            if torch.cuda.is_available():
                 set_jit_fusion_options()
-                # For L2Norm, we don't know the hidden size until forward pass,
-                # but we can warm up with common sizes used in attention mechanisms
-                common_hidden_sizes = [768, 1024, 2048, 4096, 8192]
+                # For L2Normalization, we don't know the hidden size until forward pass,
+                # but we can warm up with common sizes. For QK normalization, this will be
+                # the attention head dimension (hidden_size_per_attention_head), not the full
+                # model hidden dimension. Common head dimensions are 32, 64, 80, 96, 128, 256.
+                common_hidden_sizes = [32, 64, 80, 96, 128, 256]
                 for hidden_size in common_hidden_sizes:
-                    warmup_jit_l2norm_all_dtypes(hidden_size, seq_length, micro_batch_size)
-
-    def reset_parameters(self) -> None:
-        """L2Norm has no parameters to reset"""
+                    warmup_jit_l2normalization_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
     def op_forward(
         self,
@@ -92,17 +76,8 @@ class L2Norm(BasicOperation):
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
-
-        # Determine compute device and dtype
-        device = self.device
-        if device.type != "cuda":
-            device = canonicalize_device(None)
-        dtype = maybe_autocast_dtype(default_dtype=self.dtype or input_.dtype)
-
-        # Reshape input for computation
-        input_dims = tuple(input_.size())
-        inner_dim = input_dims[-1]
-        x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
+        # Use input directly - torch.compile can handle multi-dimensional tensors
+        x = input_
 
         if isinstance(x, QuantizedTensor):
             x = x.dequantize()
@@ -110,39 +85,22 @@ class L2Norm(BasicOperation):
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
 
-        # Check if output is quantized
-        output_quantizer = None
-        if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and next_op is not None
-            and next_op.num_quantizers("forward") > 0
-        ):
-            output_quantizer = next_op.get_quantizer("forward", 0)
-
         # Compute L2 normalization using fused implementation
         # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
         if requires_grad:
             # Training: use version that returns both output and intermediate values
-            y, rsqrt_norm = l2norm_fwd_fused(x, self.eps)
+            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
         else:
             # Inference: use lightweight version that only returns output
-            y = l2norm_fused(x, self.eps)
+            y = l2normalization_fused(x, self.eps)
             rsqrt_norm = None  # Not needed for inference
-
-        # Apply quantization if needed
-        if output_quantizer is not None:
-            y = output_quantizer(y)
 
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rsqrt_norm)
-            ctx.device = device
-            ctx.dtype = dtype
             ctx.has_prev_op = prev_op is not None
 
-        # Reshape output tensor
-        out = reshape(y, input_dims)
-        return out
+        return y
 
     def op_backward(
         self,
@@ -153,22 +111,18 @@ class L2Norm(BasicOperation):
         # Saved tensors from forward pass
         x, rsqrt_norm = ctx.saved_tensors
 
-        # Check input tensors
-        device = ctx.device
-        dtype = ctx.dtype
-        dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
+        dy = grad_output
 
         if isinstance(dy, QuantizedTensor):
             dy = dy.dequantize()
 
         # Compute L2 norm backward pass using fused implementation
-        dx = l2norm_backward_fused(dy, x, rsqrt_norm, self.eps)
+        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
 
         # Clear saved tensors if possible
         if ctx.has_prev_op:
             clear_tensor_data(x)
         clear_tensor_data(rsqrt_norm)
 
-        # Reshape results (no parameters, so empty tuple for param grads)
-        grad_input = reshape(dx, grad_output.size())
-        return grad_input, ()
+        # No parameters, so empty tuple for param grads
+        return dx, ()

@@ -65,34 +65,34 @@ def test_lazy_compile():
     dgelu_fused_(torch.randn(10, 10), torch.randn(10, 10))
 
 
-def test_l2norm_fused():
-    """Smoke test for L2Norm fusion functions."""
-    from transformer_engine.pytorch.jit import l2norm_fused, l2norm_fwd_fused, l2norm_backward_fused
+def test_l2normalization_fused():
+    """Smoke test for L2Normalization fusion functions."""
+    from transformer_engine.pytorch.jit import l2normalization_fused, l2normalization_fwd_fused, l2normalization_backward_fused
 
     # Basic smoke test like other JIT functions
     x = torch.randn(10, 128, device="cuda", dtype=torch.float32)
     eps = 1e-6
 
     # Test inference version
-    output_inf = l2norm_fused(x, eps)
+    output_inf = l2normalization_fused(x, eps)
 
     # Test training version with backward
     x_train = torch.randn(10, 128, device="cuda", dtype=torch.float32, requires_grad=True)
-    output_train, rsqrt_norm = l2norm_fwd_fused(x_train, eps)
+    output_train, rsqrt_norm = l2normalization_fwd_fused(x_train, eps)
     grad_output = torch.randn_like(output_train)
-    grad_input = l2norm_backward_fused(grad_output, x_train, rsqrt_norm, eps)
+    grad_input = l2normalization_backward_fused(grad_output, x_train, rsqrt_norm, eps)
 
 
-def test_l2norm_fused_correctness():
-    """Simple verification that L2Norm fusion matches reference implementation."""
-    from transformer_engine.pytorch.jit import l2norm_fused, l2norm_fwd_fused, l2norm_backward_fused
+def test_l2normalization_fused_correctness():
+    """Simple verification that L2Normalization fusion matches reference implementation."""
+    from transformer_engine.pytorch.jit import l2normalization_fwd_fused, l2normalization_backward_fused
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     x = torch.randn(16, 64, device=device, dtype=torch.float32, requires_grad=True)
     eps = 1e-6
 
     # Test fused forward
-    output_fused, rsqrt_norm = l2norm_fwd_fused(x, eps)
+    output_fused, rsqrt_norm = l2normalization_fwd_fused(x, eps)
 
     # Reference implementation
     x_ref = x.clone().detach().requires_grad_(True)
@@ -107,7 +107,7 @@ def test_l2norm_fused_correctness():
 
     # Test fused backward
     grad_output = torch.randn_like(output_fused)
-    grad_input_fused = l2norm_backward_fused(grad_output, x, rsqrt_norm, eps)
+    grad_input_fused = l2normalization_backward_fused(grad_output, x, rsqrt_norm, eps)
 
     # Reference backward
     output_ref.backward(grad_output)

@@ -122,7 +122,7 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
 
 
 @jit_fuser
-def l2norm_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
+def l2normalization_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
     """L2 normalization fused - inference version"""
     x_squared = x.pow(2)
     l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
@@ -131,7 +131,7 @@ def l2norm_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 @jit_fuser
-def l2norm_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+def l2normalization_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
     """L2 normalization fused - training version that returns intermediate values"""
     x_squared = x.pow(2)
     l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
@@ -141,7 +141,7 @@ def l2norm_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.
 
 
 @jit_fuser
-def l2norm_backward_fused_(
+def l2normalization_backward_fused_(
     grad_output: torch.Tensor, x: torch.Tensor, rsqrt_norm: torch.Tensor, eps: float
 ) -> torch.Tensor:
     """L2 normalization backward fused"""
@@ -168,24 +168,24 @@ def bgrad_dgelu_fused(
         return None, dgelu_fused_(grad_output, inp)
 
 
-def l2norm_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
-    """Disable native AMP for l2norm_fused_ - inference version"""
+def l2normalization_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """Disable native AMP for l2normalization_fused_ - inference version"""
     with gpu_autocast_ctx(enabled=False):
-        return l2norm_fused_(x, eps)
+        return l2normalization_fused_(x, eps)
 
 
-def l2norm_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """Disable native AMP for l2norm_fwd_fused_ - training version"""
+def l2normalization_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Disable native AMP for l2normalization_fwd_fused_ - training version"""
     with gpu_autocast_ctx(enabled=False):
-        return l2norm_fwd_fused_(x, eps)
+        return l2normalization_fwd_fused_(x, eps)
 
 
-def l2norm_backward_fused(
+def l2normalization_backward_fused(
     grad_output: torch.Tensor, x: torch.Tensor, rsqrt_norm: torch.Tensor, eps: float
 ) -> torch.Tensor:
-    """Disable native AMP for l2norm_backward_fused_"""
+    """Disable native AMP for l2normalization_backward_fused_"""
     with gpu_autocast_ctx(enabled=False):
-        return l2norm_backward_fused_(grad_output, x, rsqrt_norm, eps)
+        return l2normalization_backward_fused_(grad_output, x, rsqrt_norm, eps)
 
 
 def bias_dropout_add(
@@ -315,10 +315,10 @@ def warmup_jit_bias_gelu_all_dtypes(
         warmup_jit_bias_gelu(ffn_hidden_size, dtype, seq_length, micro_batch_size)
 
 
-def warmup_jit_l2norm(
+def warmup_jit_l2normalization(
     hidden_size: int, dtype: torch.dtype, seq_length: int, micro_batch_size: int
 ) -> None:
-    """Compile L2Norm JIT function before the main training steps"""
+    """Compile L2Normalization JIT function before the main training steps"""
 
     # Save cuda RNG state to ensure warmup does not affect reproducibility.
     rng_state = torch.cuda.get_rng_state()
@@ -336,20 +336,20 @@ def warmup_jit_l2norm(
         for _ in range(5):
             if input_grad:
                 # Test training version that returns intermediate values
-                output, rsqrt_norm = l2norm_fwd_fused_(inp, eps)
+                output, rsqrt_norm = l2normalization_fwd_fused_(inp, eps)
                 # Test backward pass as well
                 grad_out = torch.rand_like(output)
-                _ = l2norm_backward_fused_(grad_out, inp, rsqrt_norm, eps)
+                _ = l2normalization_backward_fused_(grad_out, inp, rsqrt_norm, eps)
             else:
                 # Test inference version
-                output = l2norm_fused_(inp, eps)
+                output = l2normalization_fused_(inp, eps)
     del inp, output
 
     torch.cuda.empty_cache()
     torch.cuda.set_rng_state(rng_state)
 
 
-def warmup_jit_l2norm_all_dtypes(hidden_size: int, seq_length: int, micro_batch_size: int) -> None:
-    """Call `warmup_jit_l2norm` for all training dtypes"""
+def warmup_jit_l2normalization_all_dtypes(hidden_size: int, seq_length: int, micro_batch_size: int) -> None:
+    """Call `warmup_jit_l2normalization` for all training dtypes"""
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
-        warmup_jit_l2norm(hidden_size, dtype, seq_length, micro_batch_size)
+        warmup_jit_l2normalization(hidden_size, dtype, seq_length, micro_batch_size)
