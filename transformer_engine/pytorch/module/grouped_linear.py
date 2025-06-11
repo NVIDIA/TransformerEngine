@@ -520,9 +520,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                          Whether to delay weight gradient computation
     save_original_input : bool, default = `False`
                        If set to `True`, always saves the original input tensor rather than the
-                       casted or quantized tensor. In some scenarios, the input tensor is used by
-                       mutiple modules, and saving the original input tensor may reduce the memory
-                       usage. Cannot work with DelayedScaling recipe.
+                       cast tensor. In some scenarios, the input tensor is used by multiple modules,
+                       and saving the original input tensor may reduce the memory usage.
+                       Cannot work with FP8 DelayedScaling recipe.
 
     Note: GroupedLinear doesn't really handle the TP communications inside. The `tp_size` and
           `parallel_mode` are used to determine the shapes of weights and biases.

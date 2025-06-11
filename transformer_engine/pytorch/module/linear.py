@@ -997,9 +997,9 @@ class Linear(TransformerEngineBaseModule):
                    is used.
     save_original_input : bool, default = `False`
                        If set to `True`, always saves the original input tensor rather than the
-                       casted or quantized tensor. In some scenarios, the input tensor is used by
-                       mutiple modules, and saving the original input tensor may reduce the memory
-                       usage. Cannot work with DelayedScaling recipe.
+                       cast tensor. In some scenarios, the input tensor is used by multiple modules,
+                       and saving the original input tensor may reduce the memory usage.
+                       Cannot work with FP8 DelayedScaling recipe.
     """
 
     def __init__(
