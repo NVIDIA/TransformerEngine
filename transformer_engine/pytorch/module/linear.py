@@ -66,7 +66,6 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
@@ -1403,8 +1402,8 @@ class Linear(TransformerEngineBaseModule):
             for name, q in zip(names, original_quantizers)
         )
 
-    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # Get concatenated weight and bias tensors
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
         unfused_weights = [getattr(self, name) for name in self.weight_names]
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
@@ -1418,7 +1417,11 @@ class Linear(TransformerEngineBaseModule):
                     "Please make sure this is intentional."
                 )
                 unfused_weights = [w.dequantize() for w in unfused_weights]
+        return unfused_weights
 
+    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Get concatenated weight and bias tensors
+        unfused_weights = self._get_weight_tensors()
         if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
             if self.fp8:
                 if len(unfused_weights) != 1:
@@ -1439,6 +1442,8 @@ class Linear(TransformerEngineBaseModule):
             bias_tensor = None
 
         return weight_tensor, bias_tensor
+
+
 
     def onnx_forward(
         self,

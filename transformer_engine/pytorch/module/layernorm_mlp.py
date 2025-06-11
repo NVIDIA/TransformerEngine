@@ -1913,9 +1913,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ) = self._get_quantizers(False)
         inp_dtype = inp.dtype
 
-        fc1_weight = self.fc1_weight
+        fc1_weight, fc2_weight = self._get_weight_tensors()
         fc1_bias = self.fc1_bias if self.use_bias else None
-        fc2_weight = self.fc2_weight
         fc2_bias = self.fc2_bias if self.use_bias else None
 
         # layernorm + fp8 cast
