@@ -36,7 +36,9 @@ def test_qk_norm_functionality(use_qk_norm, attention_type, qk_norm_eps) -> None
         # Check that the module is L2Norm type
         from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 
-        assert isinstance(mha.qk_norm, L2Normalization), "qk_norm should be an L2Normalization module"
+        assert isinstance(
+            mha.qk_norm, L2Normalization
+        ), "qk_norm should be an L2Normalization module"
     else:
         assert not hasattr(mha, "qk_norm"), "Should not have qk_norm module when use_qk_norm=False"
 

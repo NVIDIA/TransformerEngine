@@ -1318,7 +1318,7 @@ class TestBasicOps:
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        
+
         torch.testing.assert_close(y_test, y_ref, **tols)
         # L2Norm backward pass requires slightly looser atol for bfloat16
         if dtype == torch.bfloat16:

@@ -67,7 +67,11 @@ def test_lazy_compile():
 
 def test_l2normalization_fused():
     """Smoke test for L2Normalization fusion functions."""
-    from transformer_engine.pytorch.jit import l2normalization_fused, l2normalization_fwd_fused, l2normalization_backward_fused
+    from transformer_engine.pytorch.jit import (
+        l2normalization_fused,
+        l2normalization_fwd_fused,
+        l2normalization_backward_fused,
+    )
 
     # Basic smoke test like other JIT functions
     x = torch.randn(10, 128, device="cuda", dtype=torch.float32)
@@ -85,7 +89,10 @@ def test_l2normalization_fused():
 
 def test_l2normalization_fused_correctness():
     """Simple verification that L2Normalization fusion matches reference implementation."""
-    from transformer_engine.pytorch.jit import l2normalization_fwd_fused, l2normalization_backward_fused
+    from transformer_engine.pytorch.jit import (
+        l2normalization_fwd_fused,
+        l2normalization_backward_fused,
+    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     x = torch.randn(16, 64, device=device, dtype=torch.float32, requires_grad=True)

@@ -349,7 +349,9 @@ def warmup_jit_l2normalization(
     torch.cuda.set_rng_state(rng_state)
 
 
-def warmup_jit_l2normalization_all_dtypes(hidden_size: int, seq_length: int, micro_batch_size: int) -> None:
+def warmup_jit_l2normalization_all_dtypes(
+    hidden_size: int, seq_length: int, micro_batch_size: int
+) -> None:
     """Call `warmup_jit_l2normalization` for all training dtypes"""
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
         warmup_jit_l2normalization(hidden_size, dtype, seq_length, micro_batch_size)
