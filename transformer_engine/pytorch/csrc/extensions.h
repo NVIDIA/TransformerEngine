@@ -430,7 +430,6 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  void current_stream_wait_on_memcpy();
   at::Stream get_communication_stream();
 
 };  // CommOverlap
@@ -451,8 +450,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
-
-  void current_stream_wait_on_memcpy();
 
   at::Stream get_communication_stream();
 

@@ -386,7 +386,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
-      .def("current_stream_wait_on_memcpy", &CommOverlap::current_stream_wait_on_memcpy)
       .def("get_communication_stream", &CommOverlap::get_communication_stream);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
@@ -405,6 +404,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
-      .def("current_stream_wait_on_memcpy", &CommOverlapP2P::current_stream_wait_on_memcpy)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
 }
