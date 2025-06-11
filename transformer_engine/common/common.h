@@ -470,7 +470,7 @@ struct TypeInfo {
     } break;                                                 \
       SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)              \
     default:                                                 \
-      NVTE_ERROR("Invalid type MARKED.");                    \
+      NVTE_ERROR("Invalid type.");                           \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
@@ -524,7 +524,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                           \
     } break;                                                    \
     default:                                                    \
-      NVTE_ERROR("Invalid type MARKED 2.");                     \
+      NVTE_ERROR("Invalid type.");                              \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, type, ...) \
@@ -543,7 +543,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                \
     } break;                                                         \
     default:                                                         \
-      NVTE_ERROR("Invalid type MARKED 3.");                          \
+      NVTE_ERROR("Invalid type.");                                   \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
@@ -558,7 +558,7 @@ struct TypeInfo {
       { __VA_ARGS__ }                                            \
     } break;                                                     \
     default:                                                     \
-      NVTE_ERROR("Invalid type MARKED 4.");                      \
+      NVTE_ERROR("Invalid type.");                               \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, type, ...) \
@@ -584,7 +584,7 @@ struct TypeInfo {
       NVTE_ERROR("FP4 type not instantiated for input.");      \
     } break;                                                   \
     default:                                                   \
-      NVTE_ERROR("Invalid type MARKED 5.");                    \
+      NVTE_ERROR("Invalid type.");                             \
   }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...) \
@@ -678,6 +678,7 @@ inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
   return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
 }
 
+size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
 size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);

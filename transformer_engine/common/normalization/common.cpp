@@ -212,7 +212,10 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
   }
 
   const auto gamma_dtype = use_zero_centered_gamma_in_weight_dtype() ? wtype : ctype;
-  NVTE_CHECK(gamma_dtype != DType::kFloat4E2M1, "Gamma of type FP4 is not supported");
+  NVTE_CHECK(gamma_dtype == DType::kFloat32
+             || gamma_dtype == DType::kFloat16
+             || gamma_dtype == DType::kBFloat16,
+             "Gamma of type FP4 is not supported");
 
   _scalar_dptr = std::make_unique<char[]>(typeToNumBits(gamma_dtype) / 8);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(

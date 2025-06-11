@@ -23,6 +23,11 @@ size_t typeToNumBits(const DType type) {
                                      return TypeInfo<T>::size;);  // NOLINT(*)
 }
 
+size_t typeToSize(const DType type) {
+  NVTE_CHECK(type != DType::kFloat4E2M1, "typeToSize() Does not support FP4 data type.");
+  return typeToNumBits(type) / 8;
+}
+
 bool is_fp8_dtype(const DType t) { return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2; }
 bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 

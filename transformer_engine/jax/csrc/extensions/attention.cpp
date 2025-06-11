@@ -248,7 +248,7 @@ static void FusedAttnForwardImpl(
 
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * head_dim;
-    cudaMemsetAsync(output, 0, (output_size * typeToNumBits(dtype)) / 8, stream);
+    cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
 
     // Memset to 0xF0 for filling large negative numbers
     auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
@@ -532,7 +532,7 @@ static void FusedAttnBackwardImpl(
     auto dqkv_tensor = TensorWrapper(dq, qkv_shape, dtype);
     if (is_ragged) {
       cudaMemsetAsync(
-          dq, 0, (transformer_engine::jax::product(qkv_shape) * typeToNumBits(dtype)) / 8, stream);
+          dq, 0, transformer_engine::jax::product(qkv_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                   s_tensor.data(),  // not used for F16
@@ -550,10 +550,10 @@ static void FusedAttnBackwardImpl(
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
     auto dkv_tensor = TensorWrapper(dk, kv_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, (transformer_engine::jax::product(q_shape) * typeToNumBits(dtype)) / 8,
+      cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype),
                       stream);
       cudaMemsetAsync(
-          dk, 0, (transformer_engine::jax::product(kv_shape) * typeToNumBits(dtype)) / 8, stream);
+          dk, 0, transformer_engine::jax::product(kv_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
@@ -575,12 +575,9 @@ static void FusedAttnBackwardImpl(
     auto dk_tensor = TensorWrapper(dk, k_shape, dtype);
     auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, (transformer_engine::jax::product(q_shape) * typeToNumBits(dtype)) / 8,
-                      stream);
-      cudaMemsetAsync(dk, 0, (transformer_engine::jax::product(k_shape) * typeToNumBits(dtype)) / 8,
-                      stream);
-      cudaMemsetAsync(dv, 0, (transformer_engine::jax::product(v_shape) * typeToNumBits(dtype)) / 8,
-                      stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dk, 0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dv, 0, transformer_engine::jax::product(v_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
                         doutput_tensor.data(),

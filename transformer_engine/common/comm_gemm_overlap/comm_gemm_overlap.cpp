@@ -196,7 +196,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       if (param_type == NVTETensorParam::kNVTERowwiseData ||
           param_type == NVTETensorParam::kNVTEColumnwiseData) {
         // Offset data pointer
-        param_dptr += chunk_offset * typeToNumBits(param_dtype);
+        param_dptr += (chunk_offset * typeToNumBits(param_dtype)) / 8;
         param_shape = chunk_shape;
 
         if (param_type == NVTETensorParam::kNVTEColumnwiseData &&
