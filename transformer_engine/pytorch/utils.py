@@ -440,6 +440,7 @@ def is_bf16_compatible() -> None:
     return torch.cuda.get_device_capability()[0] >= 8
 
 
+@functools.lru_cache(maxsize=None)
 def is_non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.
