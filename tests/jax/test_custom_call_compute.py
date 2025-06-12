@@ -685,8 +685,8 @@ class TestGroupedQuantize:
         # disable cudaGraph, then use the following jitted function
 
         scaled_tensor = tex.grouped_quantize(
-                x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
-                )
+            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+        )
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
