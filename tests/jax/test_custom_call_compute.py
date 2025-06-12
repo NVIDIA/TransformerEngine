@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1286,7 +1287,6 @@ class TestGroupedDense:
                 )
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
-
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
@@ -1315,7 +1315,15 @@ class TestGroupedDense:
             out_dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
-        prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
+
+        # grouped_gemm_fp8 does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
+        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        #         )
+
+        prim_out = tex.grouped_gemm(
                 lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
                 )
 
