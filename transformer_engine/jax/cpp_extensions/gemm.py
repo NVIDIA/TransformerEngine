@@ -9,7 +9,7 @@ import operator
 import math
 import jax
 import jax.numpy as jnp
-from transformer_engine_jax import get_device_compute_capability
+from transformer_engine_jax import get_device_compute_capability, get_num_compute_streams
 
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
@@ -30,7 +30,7 @@ from ..quantize import (
 __all__ = ["gemm", "grouped_gemm", "is_gemm_with_all_layouts_supported"]
 
 
-num_cublas_streams = 4
+num_cublas_streams = get_num_compute_streams()
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -105,8 +105,11 @@ class GroupedGemmPrimitive(BasePrimitive):
         del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
-        workspace_size += lhs_scale_inv_aval.size + rhs_scale_inv_aval.size
+        # 255 is added to the workspace size to ensure workspace ptr is 256-aligned
+        workspace_size += 255
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
+        # TODO(phuong): We should make separate tmp buffers for swizzled scales to avoid unaligned-by-256 workspace ptr issue
+
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
             out_shape = (group_sizes_aval.size, M, N)

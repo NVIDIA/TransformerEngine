@@ -13,8 +13,6 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <transformer_engine/normalization.h>
-#include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
 #include <cstddef>
@@ -29,7 +27,11 @@
 #include "extensions/ffi.h"
 #include "extensions/misc.h"
 #include "extensions/utils.h"
+#include <transformer_engine/transformer_engine.h>
 #include "transformer_engine/activation.h"
+#include "transformer_engine/multi_stream.h"
+#include <transformer_engine/normalization.h>
+
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);

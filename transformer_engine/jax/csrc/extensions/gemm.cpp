@@ -10,7 +10,6 @@
 #include "../extensions.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
-#include "transformer_engine/multi_stream.h"
 #include "xla/ffi/api/c_api.h"
 
 #define MXFP8_BLOCK_SIZE 32
@@ -58,14 +57,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // Outputs
   auto out_ptr = reinterpret_cast<uint8_t *>(output->untyped_data());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-  auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
-  auto workspace_total_size = product(workspace->dimensions());
-
-  auto lhs_sinv_size = product(lhs_sinv.dimensions());
-  auto rhs_sinv_size = product(rhs_sinv.dimensions());
-  auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size) / num_streams;
-  auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
-  auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
+  // Here we clear the lower 8 bits of the buffer address to ensure the buffer is 256-aligned
+  auto workspace_ptr = reinterpret_cast<uint8_t*>(
+      (reinterpret_cast<uintptr_t>(workspace->untyped_data()) + 255)
+      & ~static_cast<uintptr_t>(255)
+      );
+  auto workspace_total_size = product(workspace->dimensions()) - 255;
+  auto workspace_size = workspace_total_size/ num_streams;
 
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);

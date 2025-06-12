@@ -1281,8 +1281,11 @@ class TestGroupedDense:
             dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
-        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
+                lhs, rhs, group_sizes, contracting_dims,
+                )
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
+
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
@@ -1312,7 +1315,7 @@ class TestGroupedDense:
             out_dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
-        prim_out = tex.grouped_gemm(
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
                 lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
                 )
 

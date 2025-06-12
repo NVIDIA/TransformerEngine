@@ -455,9 +455,9 @@ class ScaledTensorFactory:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
-        flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
         if group_sizes is not None:
+            flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
@@ -495,6 +495,7 @@ class ScaledTensorFactory:
             )
 
         # Handling attrs of transposed tensors
+        flatten_axis = data.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
         if data_layout == "T":
             flatten_axis = data.ndim - flatten_axis
 
