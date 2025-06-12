@@ -389,7 +389,7 @@ def _grouped_dense_bwd_rule(
         # after the extra transpose for FP8 in grouped_gemm
         # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
         g_contracting_dim = (0,)
-        x_contracting_dim = (1,)
+        x_contracting_dim = (0,)
         wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
         wgrad_x_T = ctx_x
         wgrad_grad = casted_grad.get_colwise_tensor()
