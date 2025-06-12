@@ -1273,6 +1273,58 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_shape", ((32,), (6, 16, 64), (32, 64)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    def test_l2normalization(
+        self,
+        *,
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 1e-6,
+    ) -> None:
+        """L2 Normalization"""
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        # L2 norm: x / ||x||_2 = x / sqrt(sum(x^2) + eps)
+        l2_norm_squared = x_ref.pow(2).sum(dim=-1, keepdim=True)
+        rsqrt_norm = torch.rsqrt(l2_norm_squared + eps)
+        y_ref = x_ref * rsqrt_norm
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.L2Normalization(
+            eps=eps,
+        )
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        # L2Norm backward pass requires slightly looser atol for bfloat16
+        if dtype == torch.bfloat16:
+            tols["atol"] = 2e-3
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("fp8", (False, True))
