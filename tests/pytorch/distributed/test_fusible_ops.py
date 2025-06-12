@@ -26,6 +26,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -130,7 +131,7 @@ def make_reference_and_test_tensors(
 
 def _test_all_reduce(
     *,
-    local_size: int = 17,
+    local_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -142,8 +143,8 @@ def _test_all_reduce(
     world_size = torch.distributed.get_world_size(process_group)
 
     # Tensor dimensions
-    in_shape = [world_size, local_size]
-    out_shape = [local_size]
+    in_shape = [world_size, local_size, local_size]
+    out_shape = [local_size, local_size]
 
     # Random data
     reset_rng()
@@ -188,7 +189,7 @@ def _test_all_reduce(
 
 def _test_all_gather(
     *,
-    local_size: int = 13,
+    local_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -200,8 +201,8 @@ def _test_all_gather(
     world_size = torch.distributed.get_world_size(process_group)
 
     # Tensor dimensions
-    in_shape = [world_size, local_size]
-    out_shape = [world_size, world_size * local_size]
+    in_shape = [world_size, local_size, local_size]
+    out_shape = [world_size, world_size * local_size, local_size]
 
     # Random data
     reset_rng()
@@ -222,7 +223,7 @@ def _test_all_gather(
     )
 
     # Plain PyTorch implementation
-    y_ref = x_ref.tile((world_size, 1)).reshape(out_shape)
+    y_ref = x_ref.tile((world_size, 1, 1)).reshape(out_shape)
     y_ref.backward(dy_ref)
 
     # Convert to distributed tensors
@@ -249,7 +250,7 @@ def _test_all_gather(
 
 def _test_reduce_scatter(
     *,
-    local_size: int = 11,
+    local_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -261,8 +262,8 @@ def _test_reduce_scatter(
     world_size = torch.distributed.get_world_size(process_group)
 
     # Tensor dimensions
-    in_shape = [world_size, world_size * local_size]
-    out_shape = [world_size, local_size]
+    in_shape = [world_size, world_size * local_size, local_size]
+    out_shape = [world_size, local_size, local_size]
 
     # Random data
     reset_rng()

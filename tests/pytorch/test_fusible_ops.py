@@ -31,7 +31,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
@@ -375,8 +375,9 @@ class TestFuser:
         """Check dtype cast functions"""
 
         # Skip invalid configurations
+        in_shape = (size, size)
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         dtype = torch.float32
@@ -414,7 +415,7 @@ class TestFuser:
 
         # Check forward and backward pass
         x = torch.zeros(
-            (size, size),
+            in_shape,
             dtype=init_dtype,
             device=device,
             requires_grad=True,
@@ -442,8 +443,9 @@ class TestFuser:
         device = torch.device(device)
 
         # Skip invalid configurations
+        in_shape = (size, size)
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Construct operation
         recipe = make_recipe(quantization)
@@ -452,7 +454,7 @@ class TestFuser:
 
         # Check forward and backward pass
         x = torch.zeros(
-            (size, size),
+            in_shape,
             dtype=model_dtype,
             device=device,
             requires_grad=True,
@@ -494,7 +496,7 @@ class TestBasicOps:
     def test_identity(
         self,
         *,
-        in_shape: Iterable[int] = (1,),
+        in_shape: Iterable[int] = (32, 32),
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -502,7 +504,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -615,7 +617,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
     @pytest.mark.parametrize("size", (1, 7, 32))
-    @pytest.mark.parametrize("in_shape", ((-1,), (1, 3, -1), (2, 3, 4, -1)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (1, 3, -1), (4, 3, 8, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", _devices)
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -634,7 +636,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -697,6 +699,8 @@ class TestBasicOps:
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, device=device)
+        if quantization == "mxfp8":
+            maybe_skip_quantization(quantization, dims=in_shape)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1296,7 +1300,7 @@ class TestBasicOps:
     def test_add_in_place(
         self,
         *,
-        in_shape: Iterable[int] = (1,),
+        in_shape: Iterable[int] = (32, 32),
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1309,7 +1313,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x1_ref, x1_test = make_reference_and_test_tensors(
@@ -1363,7 +1367,7 @@ class TestBasicOps:
     def test_make_extra_output(
         self,
         *,
-        in_shape: Iterable[int] = (1,),
+        in_shape: Iterable[int] = (32, 32),
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1376,7 +1380,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
