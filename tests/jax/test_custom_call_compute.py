@@ -2,10 +2,8 @@
 #
 # See LICENSE for license information.
 
-import os
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
@@ -14,7 +12,6 @@ import operator
 
 from utils import (
     assert_allclose,
-    assert_tree_like_allclose,
     pytest_parametrize_wrapper,
 )
 from transformer_engine.jax.layernorm import layernorm

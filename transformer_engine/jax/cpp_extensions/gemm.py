@@ -103,8 +103,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
         del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
+        del lhs_scale_inv_aval, rhs_scale_inv_aval
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
+        # JAX buffer pointers are 128-aligned
         # 255 is added to the workspace size to ensure workspace ptr is 256-aligned
         workspace_size += 255
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
