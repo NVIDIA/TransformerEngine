@@ -680,9 +680,13 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
-        scaled_tensor = jax.jit(tex.grouped_quantize, static_argnames=("flatten_axis",))(
-            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
-        )
+        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
+        scaled_tensor = tex.grouped_quantize(
+                x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+                )
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
@@ -1279,12 +1283,17 @@ class TestGroupedDense:
             dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
-        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
-        )
+
+        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
+        # jitting grouped_gemm
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+        #     lhs, rhs, group_sizes, contracting_dims,
+        # )
+
+        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -1316,9 +1325,7 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # grouped_gemm_fp8 does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
+        # jitting grouped_gemm
         # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
         #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         #         )
