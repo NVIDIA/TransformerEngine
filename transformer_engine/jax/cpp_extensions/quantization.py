@@ -47,7 +47,7 @@ else:
     from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
-__all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
+__all__ = ["quantize", "quantize_dbias", "grouped_quantize"]
 
 
 class BaseDBiasQuantizePrimitive(BasePrimitive):
@@ -1032,24 +1032,3 @@ def grouped_quantize(
         group_axis=group_axis,
     )
     return out
-
-
-def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
-    """
-    Compute the grouped bias gradient.
-
-    Args:
-        grad: jnp.ndarray of shape (M, N)
-        group_sizes: jnp.ndarray of shape(num_groups,), sum(group_sizes) == M
-
-    Returns:
-        dbias: jnp.ndarray of shape (num_groups, N)
-    """
-    assert grad.ndim == 2, "Input grad must be a 2D tensor."
-    assert group_sizes.ndim == 1, "group_sizes must be a 1D tensor."
-
-    segment_ids = jnp.repeat(jnp.arange(group_sizes.shape[0]), group_sizes)
-    grad_fp32 = grad.astype(jnp.float32)
-    dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
-    dbias = dbias_fp32.astype(grad.dtype)
-    return dbias
