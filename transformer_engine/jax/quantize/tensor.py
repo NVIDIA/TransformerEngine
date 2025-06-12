@@ -131,22 +131,16 @@ class ScaledTensor1x(ScaledTensor):
         Ensures the scale_inv shape matches the expected shape based on the scaling mode
         and quantization direction. Pads the scale_inv if necessary.
         """
-        flatten_axis = (
-            len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
-        )
+        assert self.flatten_axis > 0
         assert (
-            0 < flatten_axis < len(self.data.shape)
-        ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
-
-        if self.data_layout == "T":
-            flatten_axis = self.data.ndim - flatten_axis
-        self.flatten_axis = flatten_axis
+            0 < self.flatten_axis < len(self.data.shape)
+        ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
         expected_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=True, flatten_axis=flatten_axis
+            self.data.shape, self.is_colwise, is_padded=True, flatten_axis=self.flatten_axis
         )
         expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=False, flatten_axis=flatten_axis
+            self.data.shape, self.is_colwise, is_padded=False, flatten_axis=self.flatten_axis
         )
         if self.scale_inv.shape != expected_scale_shape:
             assert self.scale_inv.shape == expected_unpadded_scale_shape, (
@@ -291,6 +285,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         original_shape,
         group_axis=0,
     ):
+        self.flatten_axis = flatten_axis
         self.group_sizes = group_sizes
         self.original_shape = original_shape
         self.group_axis = group_axis
@@ -301,44 +296,25 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
         assert self.data.ndim == 1, "Only support flattened data"
+        assert self.group_axis >= 0
+        assert self.flatten_axis > 0
 
         data_ndim = len(self.original_shape)
-        flatten_axis = data_ndim + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
         assert (
-            0 < flatten_axis < data_ndim
-        ), f"flatten_axis {flatten_axis} is out of bounds for data.ndim = {data_ndim}"
+            0 < self.flatten_axis < data_ndim
+        ), f"flatten_axis {self.flatten_axis} is out of bounds for data.ndim = {data_ndim}"
 
-        group_axis = (
-            len(self.original_shape) + self.group_axis if self.group_axis < 0 else self.group_axis
-        )
         assert (
-            0 <= group_axis < data_ndim
-        ), f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
+            0 <= self.group_axis < data_ndim
+        ), f"group_axis {self.group_axis} is out of bounds for shape {self.original_shape}"
 
-        if self.data_layout == "T":
-            if self.original_shape[0] == self.group_sizes.size:
-                self.original_shape = (
-                    self.original_shape[0],
-                    *self.original_shape[flatten_axis:],
-                    *self.original_shape[1:flatten_axis],
-                )
-                flatten_axis = len(self.original_shape) - flatten_axis + 1
-            else:
-                self.original_shape = (
-                    *self.original_shape[flatten_axis:],
-                    *self.original_shape[:flatten_axis],
-                )
-                self.group_axis = flatten_axis
-                flatten_axis = len(self.original_shape) - flatten_axis
-
-        self.flatten_axis = flatten_axis
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
             self.original_shape,
             self.group_sizes.size,
             self.group_axis,
             self.is_colwise,
             is_padded=True,
-            flatten_axis=flatten_axis,
+            flatten_axis=self.flatten_axis,
         )
 
         assert self.scale_inv.shape == expected_scale_shape, (
@@ -479,10 +455,31 @@ class ScaledTensorFactory:
             A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
+
         if group_sizes is not None:
+            flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
+
+            # Handling attrs of transposed tensors
+            group_axis = len(original_shape) + group_axis if group_axis < 0 else group_axis
+            if data_layout == "T":
+                if original_shape[0] == group_sizes.size:
+                    original_shape = (
+                        original_shape[0],
+                        *original_shape[flatten_axis:],
+                        *original_shape[1:flatten_axis],
+                    )
+                    flatten_axis = len(original_shape) - flatten_axis + 1
+                else:
+                    original_shape = (
+                        *original_shape[flatten_axis:],
+                        *original_shape[:flatten_axis],
+                    )
+                    group_axis = flatten_axis
+                    flatten_axis = len(original_shape) - flatten_axis
+
             return GroupedScaledTensor1x(
                 data=data,
                 scale_inv=scale_inv,
@@ -496,6 +493,11 @@ class ScaledTensorFactory:
                 original_shape=original_shape,
                 group_axis=group_axis,
             )
+
+        # Handling attrs of transposed tensors
+        flatten_axis = data.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+        if data_layout == "T":
+            flatten_axis = data.ndim - flatten_axis
 
         return ScaledTensor1x(
             data,
