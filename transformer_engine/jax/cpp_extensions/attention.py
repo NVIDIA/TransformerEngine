@@ -148,7 +148,6 @@ class FusedAttnHelper:
         return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     @staticmethod
-    # TODO: This method needs some checking of dimensions to be re-done
     def parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout):
         """Parse qkv aval"""
         if qkv_layout.get_qkv_format() == QKVFormat.SBHD:
