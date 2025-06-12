@@ -469,7 +469,7 @@ class ScaledTensorFactory:
                     original_shape = (
                         original_shape[0],
                         *original_shape[flatten_axis:],
-                        *original_shape[1: flatten_axis],
+                        *original_shape[1:flatten_axis],
                     )
                     flatten_axis = len(original_shape) - flatten_axis + 1
                 else:

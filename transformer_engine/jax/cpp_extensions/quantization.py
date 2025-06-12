@@ -973,8 +973,9 @@ def grouped_quantize(
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
-        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes,
-                                 total_repeat_length=x.shape[group_axis])
+        segment_ids = jnp.repeat(
+            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
+        )
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)

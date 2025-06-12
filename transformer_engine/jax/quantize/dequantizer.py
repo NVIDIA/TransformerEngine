@@ -188,7 +188,7 @@ def _grouped_dequantize(grouped_scaled_tensor):
         data_shape_i = (
             *original_shape[:group_axis],
             group_sizes[i],
-            *original_shape[group_axis + 1:],
+            *original_shape[group_axis + 1 :],
         )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
