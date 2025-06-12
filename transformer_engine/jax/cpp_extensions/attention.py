@@ -309,7 +309,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             v_head_dim,
         ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
 
-        output_shape = (*batch_shape, q_max_seqlen, attn_heads, q_head_dim)
+        output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype

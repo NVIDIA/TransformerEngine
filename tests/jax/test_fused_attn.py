@@ -967,6 +967,20 @@ class FusedAttnRunner:
         pytest.param(
             4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
         ),
+        pytest.param(
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+        ),
+        pytest.param(
+            2, 2048, 2048, 12, 6, 64, 32, jnp.float16, id="2-2048-2048-12-6-64-32-FP16-GQA"
+        ),
     ],
 )
 @pytest.mark.parametrize(
