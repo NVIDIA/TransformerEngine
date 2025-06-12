@@ -29,7 +29,7 @@ PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 
-py::object PythonCopy;
+py::object PythonCopy = py::none();
 
 py::object python_copy(const py::handle &src) { return PythonCopy(src); }
 
