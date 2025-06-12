@@ -82,7 +82,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(tex._num_cublas_streams):
+        for _ in range(tex.get_num_cublas_streams()):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
