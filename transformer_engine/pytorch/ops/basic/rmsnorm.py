@@ -179,8 +179,8 @@ class RMSNorm(BasicOperation):
         if device.type != "cuda":
             device = canonicalize_device(None)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
-        x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
+        x = reshape(input_, (-1, inner_dim), dtype=dtype)
+        w = reshape(self.weight, (inner_dim,), dtype=dtype)
         if isinstance(x, QuantizedTensor):
             x = x.dequantize()
         if isinstance(w, QuantizedTensor):
@@ -238,8 +238,8 @@ class RMSNorm(BasicOperation):
         # Check input tensors
         device = ctx.device
         dtype = ctx.dtype
-        dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
+        dy = reshape(grad_output, x.size(), dtype=dtype)
+        w = reshape(self.weight, (inner_dim,), dtype=dtype)
         if isinstance(w, QuantizedTensor):
             w = w.dequantize()
         if isinstance(dy, QuantizedTensor):
