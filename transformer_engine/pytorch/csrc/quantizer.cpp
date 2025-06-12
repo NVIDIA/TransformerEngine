@@ -124,8 +124,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
-  at::Tensor scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(),
-                                             output, "_scale_inv");
+  at::Tensor scale_inv =
+      create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
   // TODO: Remove
   if (rowwise_data.has_value()) {
     at::reciprocal_out(scale_inv, scale);
@@ -261,13 +261,12 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
   // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
-  at::Tensor scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(),
-                                             output, "_scale_inv");
+  at::Tensor scale_inv =
+      create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
   // TODO: Remove
   if (rowwise_data.has_value()) {
     at::reciprocal_out(scale_inv, scale);
   }
-
 
   TensorWrapper tensor(this->get_scaling_mode());
 
@@ -509,8 +508,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
           "shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype), "rowwise_data"_a = data_rowwise,
           "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = scale_inv_rowwise,
           "columnwise_scale_inv"_a = scale_inv_colwise, "fp8_dtype"_a = this->dtype,
-          "quantizer"_a = python_copy(this->quantizer),
-          "is_2D_scaled"_a = (block_scaling_dim == 2),
+          "quantizer"_a = python_copy(this->quantizer), "is_2D_scaled"_a = (block_scaling_dim == 2),
           "data_format"_a = data_format);
     }
   } else {
@@ -571,9 +569,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   auto output_tensor_type = PythonTensorType::INVALID;
   if (!output.is_none()) {
     output_tensor_type = detail::IsMXFP8Tensor(output.ptr());
-    NVTE_CHECK(output_tensor_type != PythonTensorType::INVALID, "Wrong Tensor type provided for reuse. ",
-               "Expected MXFP8Tensor or MXFP8TensorBase, but got ",
-               py::repr(output).cast<std::string>());
+    NVTE_CHECK(
+        output_tensor_type != PythonTensorType::INVALID, "Wrong Tensor type provided for reuse. ",
+        "Expected MXFP8Tensor or MXFP8TensorBase, but got ", py::repr(output).cast<std::string>());
   }
 
   if (rowwise_usage) {
@@ -617,12 +615,11 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
     } else {
       py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass));
-      ret = MXFP8TensorClass("shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype),
-                             "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
-                             "rowwise_scale_inv"_a = rowwise_scale_inv,
-                             "columnwise_scale_inv"_a = columnwise_scale_inv,
-                             "fp8_dtype"_a = this->dtype,
-                             "quantizer"_a = python_copy(this->quantizer));
+      ret = MXFP8TensorClass(
+          "shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype), "rowwise_data"_a = data_rowwise,
+          "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = rowwise_scale_inv,
+          "columnwise_scale_inv"_a = columnwise_scale_inv, "fp8_dtype"_a = this->dtype,
+          "quantizer"_a = python_copy(this->quantizer));
     }
   } else {
     output.attr("_rowwise_data") = data_rowwise;

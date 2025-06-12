@@ -31,9 +31,7 @@ PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
 
 py::object PythonCopy;
 
-py::object python_copy(const py::handle& src) {
-    return PythonCopy(src);
-}
+py::object python_copy(const py::handle &src) { return PythonCopy(src); }
 
 void init_copy_extension() {
   if (!PythonCopy.is_none()) return;
