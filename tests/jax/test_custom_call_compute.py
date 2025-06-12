@@ -682,9 +682,9 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
-        scaled_tensor = tex.grouped_quantize(
-            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
-        )
+        scaled_tensor = jax.jit(tex.grouped_quantize, static_argnames=('flatten_axis',))(
+                x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+                )
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
@@ -1313,8 +1313,8 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
         prim_out = tex.grouped_gemm(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
-        )
+                lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+                )
 
         allclose_dtype = jnp.float8_e4m3fn
         if jnp.float8_e5m2 in fwd_bwd_dtype:

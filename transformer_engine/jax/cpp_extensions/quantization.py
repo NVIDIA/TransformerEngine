@@ -839,9 +839,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scale_inv,
             colwise_scale_inv,
             updated_amax,
-            _dbias,
-            _wkspace,
-        ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
+        ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
         return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
@@ -975,7 +973,8 @@ def grouped_quantize(
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
-        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes)
+        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes,
+                                 total_repeat_length=x.shape[group_axis])
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)
