@@ -1048,8 +1048,9 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     assert grad.ndim == 2, "Input grad must be a 2D tensor."
     assert group_sizes.ndim == 1, "group_sizes must be a 1D tensor."
 
-    segment_ids = jnp.repeat(jnp.arange(group_sizes.size), group_sizes,
-                             total_repeat_length=grad.shape[0])
+    segment_ids = jnp.repeat(
+        jnp.arange(group_sizes.size), group_sizes, total_repeat_length=grad.shape[0]
+    )
     grad_fp32 = grad.astype(jnp.float32)
     dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
     dbias = dbias_fp32.astype(grad.dtype)
