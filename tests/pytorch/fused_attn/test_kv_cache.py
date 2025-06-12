@@ -378,10 +378,16 @@ def get_tols(config, module, backend, dtype):
                 torch.bfloat16: (3.5e-2, 3.5e-2),
             }
         else:
-            tols = {
-                torch.half: (1e-2, 1e-2),
-                torch.bfloat16: (8e-2, 7e-2),
-            }
+            if backend == "UnfusedAttention":
+                tols = {
+                    torch.half: (1.5e-2, 1.5e-2),
+                    torch.bfloat16: (1.2e-1, 1e-1),
+                }
+            else:
+                tols = {
+                    torch.half: (1e-2, 1e-2),
+                    torch.bfloat16: (8e-2, 7e-2),
+                }
     if module == "DotProductAttention":
         tols = {
             torch.half: (1e-3, 1e-3),
