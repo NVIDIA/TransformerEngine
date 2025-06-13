@@ -406,7 +406,6 @@ def _grouped_dense_bwd_rule(
         group_offset=group_offset,
     )
 
-    # import pdb; pdb.set_trace()
     wgrad = tex.grouped_gemm(
         wgrad_x_T,
         wgrad_grad,

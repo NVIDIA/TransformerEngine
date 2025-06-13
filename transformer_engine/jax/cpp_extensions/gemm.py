@@ -502,7 +502,7 @@ def grouped_gemm(
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
             lhs_is_rowwise = not lhs_is_trans
-            rhs_is_rowwise = lhs_is_trans
+            rhs_is_rowwise = rhs_is_trans
         quantizer_set.x.q_layout = (
             QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
         )
@@ -517,6 +517,8 @@ def grouped_gemm(
         rhs_data = rhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
         rhs_scale_inv = rhs_q.scale_inv
+        lhs_shape = lhs_q.original_shape
+        rhs_shape = rhs_q.original_shape
 
     assert not (
         lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
