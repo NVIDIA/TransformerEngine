@@ -420,14 +420,16 @@ enum class DType {
  * Return true if TE datatype is FP8
  *  \param[in] DType      TE Datatype of interest
  */
-bool is_fp8_dtype(const DType t);
+inline bool is_fp8_dtype(const DType t) {
+  return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
+}
 
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
  *  \param[in] DType      TE Datatype of interest
  */
-bool is_fp4_dtype(const DType t);
+inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
