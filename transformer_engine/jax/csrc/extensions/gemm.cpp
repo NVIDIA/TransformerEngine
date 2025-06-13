@@ -19,9 +19,10 @@
 namespace transformer_engine {
 namespace jax {
 
-static uint8_t* move_ptr_to_next_256B_aligned(uint8_t* ptr) {
+static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
   // Move the pointer to the next 256B aligned address
-  return reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(ptr) + 255) & ~static_cast<uintptr_t>(255));
+  return reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(ptr) + 255) &
+                                     ~static_cast<uintptr_t>(255));
 }
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
@@ -71,7 +72,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   auto lhs_sinv_size = product(lhs_sinv.dimensions());
   auto rhs_sinv_size = product(rhs_sinv.dimensions());
-  auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size - 3 * 256) / num_streams;
+  auto workspace_size =
+      (workspace_total_size - lhs_sinv_size - rhs_sinv_size - 3 * 256) / num_streams;
   auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
   swizzled_lhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_lhs_sinv_ptr);
   auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;

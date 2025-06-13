@@ -109,8 +109,8 @@ class GroupedGemmPrimitive(BasePrimitive):
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
         workspace_size += 256
-        workspace_size += (lhs_scale_inv_aval.size + 256)
-        workspace_size += (rhs_scale_inv_aval.size + 256)
+        workspace_size += lhs_scale_inv_aval.size + 256
+        workspace_size += rhs_scale_inv_aval.size + 256
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
