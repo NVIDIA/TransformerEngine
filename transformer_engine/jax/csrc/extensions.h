@@ -101,20 +101,20 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DTy
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t head_dim, int64_t window_size_left,
-                                            int64_t window_size_right);
+                                            size_t qk_head_dim, size_t v_head_dim,
+                                            int64_t window_size_left, int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
+    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
+    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);
