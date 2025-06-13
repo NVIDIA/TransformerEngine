@@ -325,8 +325,8 @@ class _LayerNormMLP(torch.autograd.Function):
             # which handles weight caching etc.
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -1762,9 +1762,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_bias = self.fc2_bias if self.use_bias else None
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
-                    fc1_weight = fc1_weight.from_float8()
+                    fc1_weight = fc1_weight.dequantize()
                 if isinstance(fc2_weight, Float8Tensor):
-                    fc2_weight = fc2_weight.from_float8()
+                    fc2_weight = fc2_weight.dequantize()
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
