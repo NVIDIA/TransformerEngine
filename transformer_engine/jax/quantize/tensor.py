@@ -142,7 +142,7 @@ class ScaledTensor1x(ScaledTensor):
         ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
         if self.scaling_mode == ScalingMode.NO_SCALING:
-            self.scale_inv = jnp.empty((1, ), dtype=jnp.float32)
+            self.scale_inv = jnp.empty((1,), dtype=jnp.float32)
 
         else:
             expected_scale_shape = self.scaling_mode.get_scale_shape(
@@ -158,8 +158,10 @@ class ScaledTensor1x(ScaledTensor):
                     f" {self.scale_inv.shape}"
                 )
                 expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-                    self.data.shape, self.is_colwise, is_padded=False,
-                    flatten_axis=self.flatten_axis
+                    self.data.shape,
+                    self.is_colwise,
+                    is_padded=False,
+                    flatten_axis=self.flatten_axis,
                 )
                 if self.scale_inv.shape != expected_scale_shape:
                     assert self.scale_inv.shape == expected_unpadded_scale_shape, (
@@ -168,8 +170,8 @@ class ScaledTensor1x(ScaledTensor):
                         f" {self.scale_inv.shape}"
                     )
                     pad_width = tuple(
-                        (0, a - b) for a, b in zip(expected_scale_shape,
-                                                   expected_unpadded_scale_shape)
+                        (0, a - b)
+                        for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
                     )
                     # This actually pad scale_inv with nan, should we pad it with 127 directly instead?
                     self.scale_inv = jnp.pad(

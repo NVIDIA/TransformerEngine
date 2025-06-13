@@ -587,19 +587,25 @@ def _quantize_dbias_impl(
         if noop_scaled_tensor:
             # Return a dummy ScaledTensor2x to ensure .get_rowwise_tensor() and .get_colwise_tensor()
             # always works.
-            return ScaledTensorFactory.create_2x(
-                x, None, x, None, ScalingMode.NO_SCALING, dq_dtype=x.dtype, data_layout="NN",
-                flatten_axis=flatten_axis,
-            ), dbias
+            return (
+                ScaledTensorFactory.create_2x(
+                    x,
+                    None,
+                    x,
+                    None,
+                    ScalingMode.NO_SCALING,
+                    dq_dtype=x.dtype,
+                    data_layout="NN",
+                    flatten_axis=flatten_axis,
+                ),
+                dbias,
+            )
         return x, dbias
 
     # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
     # fall back on the native-JAX quantize implementation
     PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
-    if (
-        quantizer.q_layout == QuantizeLayout.COLWISE
-        or not PrimitiveClass.enabled()
-    ):
+    if quantizer.q_layout == QuantizeLayout.COLWISE or not PrimitiveClass.enabled():
         if is_dbias:
             return _jax_quantize_dbias(
                 x,
@@ -748,7 +754,10 @@ def quantize_dbias(
             Shape: (K,) or empty if is_dbias is False.
     """
     return _quantize_dbias_impl(
-        dz, quantizer=quantizer, is_dbias=is_dbias, flatten_axis=flatten_axis,
+        dz,
+        quantizer=quantizer,
+        is_dbias=is_dbias,
+        flatten_axis=flatten_axis,
         noop_scaled_tensor=noop_scaled_tensor,
     )
 

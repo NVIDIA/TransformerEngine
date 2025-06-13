@@ -90,24 +90,25 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     Returns:
         Tuple of (output, context) for backward pass
     """
-    x_cdims, k_cdims = map(
-        tex.sanitize_dims, (x.ndim, kernel.ndim), contracting_dims
-    )
+    x_cdims, k_cdims = map(tex.sanitize_dims, (x.ndim, kernel.ndim), contracting_dims)
     x_is_transposed = x.ndim - 1 not in x_cdims
     k_is_transposed = kernel.ndim - 1 in k_cdims
-    assert not x_is_transposed and not k_is_transposed, (
-        "Forward-mode Dense layer implementation only supports 'NN' layout inputs."
-    )
+    assert (
+        not x_is_transposed and not k_is_transposed
+    ), "Forward-mode Dense layer implementation only supports 'NN' layout inputs."
 
-    casted_x = tex.quantize(x, flatten_axis=min(x_cdims), quantizer=quantizer_set.x,
-                            noop_scaled_tensor=True)
+    casted_x = tex.quantize(
+        x, flatten_axis=min(x_cdims), quantizer=quantizer_set.x, noop_scaled_tensor=True
+    )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
     rowwise_x = casted_x.get_rowwise_tensor()
     colwise_x = casted_x.get_colwise_tensor()
 
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=max(k_cdims) + 1, quantizer=quantizer_set.kernel,
-        noop_scaled_tensor=True
+        kernel,
+        flatten_axis=max(k_cdims) + 1,
+        quantizer=quantizer_set.kernel,
+        noop_scaled_tensor=True,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
     colwise_k = casted_kernel.get_colwise_tensor()
@@ -163,7 +164,10 @@ def _dense_bwd_rule(
     # Axis boundary for the gradient is the number of non-contracting dimensions of the FWD input
     flatten_axis_grad = len(fwd_x_non_cdims)
     casted_grad, dbias = tex.quantize_dbias(
-        grad, is_dbias=use_bias, flatten_axis=flatten_axis_grad, quantizer=quantizer_set.dgrad,
+        grad,
+        is_dbias=use_bias,
+        flatten_axis=flatten_axis_grad,
+        quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
 
@@ -175,10 +179,7 @@ def _dense_bwd_rule(
 
     # DGRAD GEMM: (batch..., hidden_out) x (hidden_in, hidden_out)^T = (batch..., hidden_in)
     dgrad = tex.gemm(
-        rowwise_g,
-        rowwise_k,
-        contracting_dims=(rowwise_g_cdims, fwd_k_non_cdims),
-        grad=True
+        rowwise_g, rowwise_k, contracting_dims=(rowwise_g_cdims, fwd_k_non_cdims), grad=True
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 

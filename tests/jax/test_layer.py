@@ -490,9 +490,9 @@ class BaseTester:
     def use_jax_dot_for_gemm(self, enabled=False):
         """Enable/disable TE custom cuBLAS GEMM primitive."""
         if enabled:
-            os.environ['NVTE_JAX_CUSTOM_CALLS_RE']='^(?!GemmPrimitive$).+$'
-        elif 'NVTE_JAX_CUSTOM_CALLS_RE' in os.environ:
-            os.environ.pop('NVTE_JAX_CUSTOM_CALLS_RE')
+            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+        elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
+            os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
     def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""

@@ -62,10 +62,10 @@ def is_gemm_with_all_layouts_supported() -> bool:
 
 def sanitize_dims(ndim: int, dims: Union[int, Sequence[int]]) -> Sequence[int]:
     """Convert relative (negative) indexes to absolute dimension numbers."""
-    dims_ = dims if isinstance(dims, Iterable) else (dims, )
+    dims_ = dims if isinstance(dims, Iterable) else (dims,)
     if len(dims_) == 0:
         return dims_
-    return tuple( ndim + dim if dim < 0 else dim for dim in dims_ )
+    return tuple(ndim + dim if dim < 0 else dim for dim in dims_)
 
 
 def get_non_contracting_dims(ndim, contracting_dims):
@@ -88,8 +88,8 @@ def _compatible_fp8_gemm_dtypes(lhs_dtype, rhs_dtype) -> bool:
             rhs_dtype,
             jnp.float8_e4m3fn,
             jnp.float8_e5m2,
-            jnp.uint8  # replace with jnp.float8_e8m0 when JAX/XLA merges support
-        )
+            jnp.uint8,  # replace with jnp.float8_e8m0 when JAX/XLA merges support
+        ),
     )
 
     # MXFP8 GEMM needs both operands to be MXFP8 (uint8 for now until JAX merges float8_e8m0)
@@ -105,8 +105,7 @@ def _compatible_fp8_gemm_dtypes(lhs_dtype, rhs_dtype) -> bool:
 
 
 def _get_gemm_layout(
-    operand_ndims: Tuple[int, int],
-    contracting_dims: Tuple[Sequence[int], Sequence[int]]
+    operand_ndims: Tuple[int, int], contracting_dims: Tuple[Sequence[int], Sequence[int]]
 ) -> Tuple[bool, bool]:
     lhs_contracting, rhs_contracting = map(sanitize_dims, operand_ndims, contracting_dims)
     lhs_is_transposed = operand_ndims[0] - 1 not in lhs_contracting
@@ -128,9 +127,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             is_rowwise=True,
             is_colwise=False,
             flatten_axis=(
-                max(lhs_contracting_dims) + 1
-                if lhs_is_transposed
-                else min(lhs_contracting_dims)
+                max(lhs_contracting_dims) + 1 if lhs_is_transposed else min(lhs_contracting_dims)
             ),
         )
         if lhs_is_transposed:
@@ -145,9 +142,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             is_rowwise=True,
             is_colwise=False,
             flatten_axis=(
-                min(rhs_contracting_dims)
-                if rhs_is_transposed
-                else max(rhs_contracting_dims) + 1
+                min(rhs_contracting_dims) if rhs_is_transposed else max(rhs_contracting_dims) + 1
             ),
         )
         if not rhs_is_transposed:
@@ -171,8 +166,20 @@ class GemmPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_dtype,
-                 contracting_dims, scaling_mode, fuse_bias, fuse_gelu, grad):
+    def abstract(
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+    ):
         # Sanity-check operand layouts and types
         operand_ndims = (lhs.ndim, rhs.ndim)
         (
@@ -182,7 +189,7 @@ class GemmPrimitive(BasePrimitive):
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
             (lhs.shape, rhs.shape),
-            (lhs_contracting_dims, rhs_contracting_dims)
+            (lhs_contracting_dims, rhs_contracting_dims),
         )
         assert lhs_contracting_size == rhs_contracting_size, (
             "cuBLAS GEMM operands have incompatible contracting dimensions: "
@@ -195,9 +202,9 @@ class GemmPrimitive(BasePrimitive):
                 "cuBLAS GEMM quantized operands have incompatible data types: "
                 f"{lhs.dtype} x {rhs.dtype}."
             )
-            assert lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0, (
-                "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
-            )
+            assert (
+                lhs_scale_inv.size > 0 and rhs_scale_inv.size > 0
+            ), "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
             if (
                 scaling_mode != ScalingMode.MXFP8_1D_SCALING
                 and not tex.is_non_nt_fp8_gemm_supported()
@@ -209,19 +216,19 @@ class GemmPrimitive(BasePrimitive):
                 )
 
         # Determine output shape and dtype
-        assert dtypes.canonicalize_dtype(out_dtype).itemsize > 1, (
-            "cuBLAS GEMM custom op does not support 8-bit quantized output types."
-        )
+        assert (
+            dtypes.canonicalize_dtype(out_dtype).itemsize > 1
+        ), "cuBLAS GEMM custom op does not support 8-bit quantized output types."
         lhs_non_contracting_shape, rhs_non_contracting_shape = map(
-            lambda shape, dims: [ shape[dim] for dim in range(len(shape)) if dim not in dims ],
+            lambda shape, dims: [shape[dim] for dim in range(len(shape)) if dim not in dims],
             (lhs.shape, rhs.shape),
-            (lhs_contracting_dims, rhs_contracting_dims)
+            (lhs_contracting_dims, rhs_contracting_dims),
         )
         out_shape = (*lhs_non_contracting_shape, *rhs_non_contracting_shape)
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         # Validate bias
-        bias_shape = (0, )
+        bias_shape = (0,)
         bias_dtype = out_dtype
         if fuse_bias:
             expected_bias_size = reduce(operator.mul, rhs_non_contracting_shape)
@@ -240,15 +247,14 @@ class GemmPrimitive(BasePrimitive):
         bias_grad = jax.core.ShapedArray(shape=bias_shape, dtype=bias_dtype)
 
         # Validate pre-GeLU
-        pre_gelu_shape = (0, )
+        pre_gelu_shape = (0,)
         pre_gelu_dtype = out_dtype
         if fuse_gelu:
             pre_gelu_shape = out_shape
             if grad:
                 pre_gelu_ndim = len(pre_gelu_shape)
-                assert (
-                    gelu_input.ndim == pre_gelu_shape
-                    and all(gelu_input.shape[i] == pre_gelu_shape[i] for i in range(pre_gelu_ndim))
+                assert gelu_input.ndim == pre_gelu_shape and all(
+                    gelu_input.shape[i] == pre_gelu_shape[i] for i in range(pre_gelu_ndim)
                 ), (
                     "cuBLAS GEMM pre-GeLU tensor has incorrect shape, "
                     f"expected {pre_gelu_shape} but found {gelu_input.shape}."
@@ -266,12 +272,13 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_swizzle_size = lhs_scale_inv.size
             rhs_swizzle_size = rhs_scale_inv.size
-        lhs_swizzle = jax.core.ShapedArray(shape=(lhs_swizzle_size, ), dtype=swizzle_dtype)
-        rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size, ), dtype=swizzle_dtype)
+        lhs_swizzle = jax.core.ShapedArray(shape=(lhs_swizzle_size,), dtype=swizzle_dtype)
+        rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size,), dtype=swizzle_dtype)
 
         # Declare cuBLAS workspace
-        workspace = jax.core.ShapedArray(shape=(get_cublas_workspace_size_bytes(), ),
-                                         dtype=jnp.uint8)
+        workspace = jax.core.ShapedArray(
+            shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
+        )
 
         return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
 
@@ -281,31 +288,45 @@ class GemmPrimitive(BasePrimitive):
         return outputs[:-3]  # discard workspace arrays
 
     @staticmethod
-    def lowering(ctx, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_dtype,
-                 contracting_dims, scaling_mode, fuse_bias, fuse_gelu, grad):
+    def lowering(
+        ctx,
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+    ):
         del out_dtype
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
-        lhs_transposed, rhs_transposed = _get_gemm_layout((lhs_aval.ndim, rhs_aval.ndim),
-                                                          (lhs_cdims, rhs_cdims))
+        lhs_transposed, rhs_transposed = _get_gemm_layout(
+            (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
+        )
 
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input)
         kwargs = {
-            "scaling_mode" : int(scaling_mode.value),
-            "lhs_axis_boundary" : max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-            "rhs_axis_boundary" : min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
-            "lhs_transposed" : lhs_transposed,
-            "rhs_transposed" : rhs_transposed,
-            "fuse_bias" : fuse_bias,
-            "fuse_gelu" : fuse_gelu,
-            "grad" : grad,
+            "scaling_mode": int(scaling_mode.value),
+            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+            "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+            "lhs_transposed": lhs_transposed,
+            "rhs_transposed": rhs_transposed,
+            "fuse_bias": fuse_bias,
+            "fuse_gelu": fuse_gelu,
+            "grad": grad,
         }
 
         operand_output_aliases = {}
         if fuse_bias and not grad:
-            operand_output_aliases.update({ 4 : 1 })  # bias <-> bias_grad
+            operand_output_aliases.update({4: 1})  # bias <-> bias_grad
         if fuse_gelu and grad:
-            operand_output_aliases.update({ 5 : 2 })  # gelu_input <-> pre_gelu_out
+            operand_output_aliases.update({5: 2})  # gelu_input <-> pre_gelu_out
 
         return jax.ffi.ffi_lowering(
             GemmPrimitive.name,
@@ -313,8 +334,20 @@ class GemmPrimitive(BasePrimitive):
         )(ctx, *args, **kwargs)
 
     @staticmethod
-    def impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_dtype, contracting_dims,
-             scaling_mode, fuse_bias, fuse_gelu, grad):
+    def impl(
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+    ):
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
@@ -332,16 +365,24 @@ class GemmPrimitive(BasePrimitive):
         return outputs[:-3]  # discard workspace arrays
 
     @staticmethod
-    def batcher(batched_args, batch_dims, out_dtype, contracting_dims, scaling_mode, fuse_bias,
-                fuse_gelu, grad):
+    def batcher(
+        batched_args,
+        batch_dims,
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+    ):
         assert GemmPrimitive.outer_primitive is not None
         lhs, _, rhs, *_ = batched_args
         lhs_bdims, *_ = batch_dims
 
         # Output is batched like LHS only if LHS is batched and RHS is not
-        out_bdims = lhs_bdims if lhs.ndim > 2 and rhs.ndim == 2 else (None, )
-        bias_bdims = (None, )  # Bias is never batched
-        pre_gelu_bdims = (None, )  # Pre-GeLU output, if exists, is batched like GEMM output
+        out_bdims = lhs_bdims if lhs.ndim > 2 and rhs.ndim == 2 else (None,)
+        bias_bdims = (None,)  # Bias is never batched
+        pre_gelu_bdims = (None,)  # Pre-GeLU output, if exists, is batched like GEMM output
         if fuse_gelu and not grad:
             pre_gelu_bdims = out_bdims
 
@@ -355,12 +396,21 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
             ),
-            (out_bdims, bias_bdims, pre_gelu_bdims)
+            (out_bdims, bias_bdims, pre_gelu_bdims),
         )
 
     @staticmethod
-    def infer_sharding_from_operands(out_dtype, contracting_dims, scaling_mode, fuse_bias,
-                                     fuse_gelu, grad, mesh, arg_infos, result_infos):
+    def infer_sharding_from_operands(
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
         del out_dtype, scaling_mode, result_infos
 
         # Check contracting dimensions
@@ -370,29 +420,29 @@ class GemmPrimitive(BasePrimitive):
             sanitize_dims, operand_ndims, contracting_dims
         )
         lhs_contracting_specs, rhs_contracting_specs = map(
-            lambda specs, dims: [ specs[dim] for dim in dims if specs[dim] is not None],
+            lambda specs, dims: [specs[dim] for dim in dims if specs[dim] is not None],
             (lhs_spec, rhs_spec),
-            (lhs_contracting_dims, rhs_contracting_dims)
+            (lhs_contracting_dims, rhs_contracting_dims),
         )
-        assert len(lhs_contracting_specs) <= 1 and len(rhs_contracting_specs) <= 1, (
-            "cuBLAS GEMM operands can have only one sharded contracting dimension."
-        )
+        assert (
+            len(lhs_contracting_specs) <= 1 and len(rhs_contracting_specs) <= 1
+        ), "cuBLAS GEMM operands can have only one sharded contracting dimension."
         lhs_contracting_spec, rhs_contracting_spec = map(
             lambda spec: None if len(spec) == 0 else spec[0],
-            (lhs_contracting_specs, rhs_contracting_specs)
+            (lhs_contracting_specs, rhs_contracting_specs),
         )
-        assert lhs_contracting_spec == rhs_contracting_spec, (
-            "cuBLAS GEMM operands must have the same sharding in contracting dimensions."
-        )
+        assert (
+            lhs_contracting_spec == rhs_contracting_spec
+        ), "cuBLAS GEMM operands must have the same sharding in contracting dimensions."
 
         # Sanity check leading dimensions, allow for simultaneous batch and sequence sharding
         lhs_leading_dims, rhs_leading_dims = map(
             get_non_contracting_dims, operand_ndims, (lhs_contracting_dims, rhs_contracting_dims)
         )
         lhs_leading_specs, rhs_leading_specs = map(
-            lambda specs, dims: [ specs[dim] for dim in dims if specs[dim] is not None ],
+            lambda specs, dims: [specs[dim] for dim in dims if specs[dim] is not None],
             (lhs_spec, rhs_spec),
-            (lhs_leading_dims, rhs_leading_dims)
+            (lhs_leading_dims, rhs_leading_dims),
         )
         assert len(lhs_leading_specs) <= 1 and len(rhs_leading_specs) <= 1, (
             "cuBLAS GEMM operands cannot have more than one sharded leading dimensions. This error "
@@ -401,8 +451,7 @@ class GemmPrimitive(BasePrimitive):
 
         # Determine output sharding
         lhs_leading_spec, rhs_leading_spec = map(
-            lambda spec: None if len(spec) == 0 else spec[0],
-            (lhs_leading_specs, rhs_leading_specs)
+            lambda spec: None if len(spec) == 0 else spec[0], (lhs_leading_specs, rhs_leading_specs)
         )
         out_spec = (lhs_leading_spec, rhs_leading_spec)
         if operand_ndims[0] > 2 and operand_ndims[1] == 2:
@@ -411,13 +460,13 @@ class GemmPrimitive(BasePrimitive):
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
         # Bias gradient sharding inherits the RHS contracting spec
-        bias_spec = (None, )
+        bias_spec = (None,)
         if fuse_bias and grad:
-            bias_spec = (rhs_contracting_spec, )
+            bias_spec = (rhs_contracting_spec,)
         bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
 
         # Pre-GeLU sharding matches output sharding
-        pre_gelu_spec = (None, )
+        pre_gelu_spec = (None,)
         if fuse_gelu and not grad:
             pre_gelu_spec = out_spec
         pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_spec))
@@ -425,11 +474,27 @@ class GemmPrimitive(BasePrimitive):
         return (out_sharding, bias_sharding, pre_gelu_sharding)
 
     @staticmethod
-    def partition(out_dtype, contracting_dims, scaling_mode, fuse_bias, fuse_gelu, grad,
-                  mesh, arg_infos, result_infos):
+    def partition(
+        out_dtype,
+        contracting_dims,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
         out_shardings = GemmPrimitive.infer_sharding_from_operands(
-            out_dtype, contracting_dims, scaling_mode, fuse_bias, fuse_gelu, grad,
-            mesh, arg_infos, result_infos
+            out_dtype,
+            contracting_dims,
+            scaling_mode,
+            fuse_bias,
+            fuse_gelu,
+            grad,
+            mesh,
+            arg_infos,
+            result_infos,
         )
         output_spec = out_shardings[0].spec
 
@@ -442,13 +507,13 @@ class GemmPrimitive(BasePrimitive):
         scale_sharding = NamedSharding(mesh, PartitionSpec(None))
 
         # Bias has to be sharded same as the trailing dimension of the GEMM output
-        bias_spec = (None, )
+        bias_spec = (None,)
         if fuse_bias and not grad:
-            bias_spec = (output_spec[-1], )
+            bias_spec = (output_spec[-1],)
         bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
 
         # Pre-GeLU output has to be sharded same as the GEMM output
-        pre_gelu_spec = (None, )
+        pre_gelu_spec = (None,)
         if fuse_gelu and grad:
             pre_gelu_spec = output_spec
         pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_spec))
@@ -481,7 +546,7 @@ def _te_gemm(
     gelu_input: jax.Array = None,
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
-    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1, ), (-2, )),
+    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (-2,)),
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
@@ -848,9 +913,9 @@ def _jax_gemm(
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
 
     if isinstance(lhs_q, ScaledTensor) or isinstance(rhs_q, ScaledTensor):
-        assert isinstance(lhs_q, ScaledTensor) and isinstance(rhs_q, ScaledTensor), (
-            "Both LHS and RHS must be quantized (or have valid quantizers) for FP8 GEMM."
-        )
+        assert isinstance(lhs_q, ScaledTensor) and isinstance(
+            rhs_q, ScaledTensor
+        ), "Both LHS and RHS must be quantized (or have valid quantizers) for FP8 GEMM."
         return _jax_gemm_fp8_impl(lhs_q, rhs_q)
 
     return jax.lax.dot_general(lhs, rhs, dim_nums, preferred_element_type=lhs.dtype)
@@ -939,7 +1004,7 @@ def gemm(
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
-        **kwargs
+        **kwargs,
     )
 
     # Discard empty outputs
@@ -948,11 +1013,11 @@ def gemm(
     grad = kwargs.get("grad", False)
     clean_outputs = outputs[0]  # first output is the final result and is never empty
     if (fuse_bias and grad) or (fuse_gelu and not grad):
-        clean_outputs = (outputs[0], )
+        clean_outputs = (outputs[0],)
         if fuse_bias and grad:  # only return bias gradient if it exists
-            clean_outputs += (outputs[1], )
+            clean_outputs += (outputs[1],)
         if fuse_gelu and not grad:  # only return pre-GeLU output if it exists
-            clean_outputs += (outputs[2], )
+            clean_outputs += (outputs[2],)
     return clean_outputs
 
 
