@@ -268,6 +268,13 @@ constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
 }
 
+template <typename T1, typename T2>
+constexpr __device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(const T1 &N, const T2 &M) {
+  static_assert(std::is_integral<T1>::value && std::is_integral<T2>::value,
+                "Integral type required.");
+  return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
+}
+
 using byte = uint8_t;
 using int16 = int16_t;
 using int32 = int32_t;
@@ -600,7 +607,8 @@ constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
