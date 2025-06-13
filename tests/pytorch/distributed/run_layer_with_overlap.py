@@ -323,6 +323,7 @@ def _train(opts):
         new_group_kwargs = {
             "backend": "nccl",
             "ranks": tp_rank_list,
+            "pg_options": dist.ProcessGroupNCCL.Options(is_high_priority_stream=True),
         }
     else:
         opts.tp = WORLD_SIZE
