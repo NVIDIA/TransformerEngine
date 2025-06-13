@@ -1320,10 +1320,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if update_workspace:
             if tensor is None:
                 raise ValueError("tensor kwarg must be provided to update FP8 workspace")
-            if hasattr(out, "quantize_"):
-                out.quantize_(tensor, noop_flag=skip_update_flag)
-            else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
+            tex.quantize(tensor, quantizer, out, skip_update_flag)
         return out
 
     def _load_from_state_dict(
