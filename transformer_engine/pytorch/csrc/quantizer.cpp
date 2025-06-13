@@ -48,9 +48,9 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
 }
 
 // Create torch tensor reusing existing data if possible
-std::pair<at::Tensor, bool> create_torch_tensor_ex(
-    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-    const py::object& tensor_to_reuse) {
+std::pair<at::Tensor, bool> create_torch_tensor_ex(const std::vector<int64_t>& shape,
+                                                   const at::TensorOptions& opts,
+                                                   const py::object& tensor_to_reuse) {
   if (!tensor_to_reuse.is_none()) {
     // Reuse output
     const at::Tensor temp = tensor_to_reuse.cast<at::Tensor>();
@@ -63,9 +63,10 @@ std::pair<at::Tensor, bool> create_torch_tensor_ex(
 
 // Create torch tensor reusing existing data is possible
 // The reused tensor is tensor_to_reuse.attr_name
-std::pair<at::Tensor, bool> create_torch_tensor_ex(
-    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-    const py::object& tensor_to_reuse, const std::string_view& attr_name) {
+std::pair<at::Tensor, bool> create_torch_tensor_ex(const std::vector<int64_t>& shape,
+                                                   const at::TensorOptions& opts,
+                                                   const py::object& tensor_to_reuse,
+                                                   const std::string_view& attr_name) {
   py::object tensor{py::none()};
   if (!tensor_to_reuse.is_none()) {
     tensor = tensor_to_reuse.attr(attr_name.data());
@@ -73,9 +74,9 @@ std::pair<at::Tensor, bool> create_torch_tensor_ex(
   return create_torch_tensor_ex(shape, opts, tensor);
 }
 
-at::Tensor create_torch_tensor(
-    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-    const py::object& tensor_to_reuse, const std::string_view& attr_name) {
+at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
+                               const py::object& tensor_to_reuse,
+                               const std::string_view& attr_name) {
   return create_torch_tensor_ex(shape, opts, tensor_to_reuse, attr_name).first;
 }
 
@@ -428,8 +429,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
             block_scaling_dim);
       } break;
     }
-    scale_inv_rowwise = create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)},
-                                            scale_opts, output, "_rowwise_scale_inv");
+    scale_inv_rowwise =
+        create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts,
+                            output, "_rowwise_scale_inv");
     tensor.set_rowwise_data(data_rowwise->data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(scale_inv_rowwise->data_ptr(), DType::kFloat32,
                                  std::vector<size_t>{sinv0, sinv1});
@@ -577,8 +579,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     if (rowwise_data.has_value()) {
       data_rowwise = std::move(*rowwise_data);
     } else {
-      std::tie(data_rowwise, data_reused) = create_torch_tensor_ex(torch_shape, opts, output,
-                                                                   "_rowwise_data");
+      std::tie(data_rowwise, data_reused) =
+          create_torch_tensor_ex(torch_shape, opts, output, "_rowwise_data");
     }
     auto sinv0 = roundup(numel / last_dim, 128lu);
     auto sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4lu);
@@ -607,8 +609,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     auto sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4lu);
     auto sinv1 = roundup(last_dim, 128lu);
     bool data_reused = false;
-    std::tie(data_colwise, data_reused) = create_torch_tensor_ex(torch_shape, opts, output,
-                                                                 "_columnwise_data");
+    std::tie(data_colwise, data_reused) =
+        create_torch_tensor_ex(torch_shape, opts, output, "_columnwise_data");
     bool scale_inv_reused = false;
     std::tie(columnwise_scale_inv, scale_inv_reused) =
         create_torch_tensor_ex({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
