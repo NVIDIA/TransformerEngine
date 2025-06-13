@@ -158,7 +158,6 @@ class FusedAttnHelper:
             kv_max_seqlen = q_max_seqlen
             num_gqa_groups = attn_heads
             v_head_dim = q_head_dim
-            assert q_batch_shape == kv_batch_shape
             assert nqkv == 3
         elif qkv_layout.is_kvpacked():
             *q_batch_shape, q_max_seqlen, attn_heads, q_head_dim = q_aval.shape
