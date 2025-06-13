@@ -28,7 +28,6 @@ def is_float8_tensor(tensor: Any) -> bool:
 def convert_tensor(
     tensor: torch.Tensor | Float8Tensor,
     dtype: Optional[torch.dtype] = None,
-    memory_format: torch.memory_format = torch.preserve_format,
 ) -> torch.Tensor | Float8Tensor:
     """Convert tensor attributes, keeping same data if possible"""
 
@@ -36,38 +35,22 @@ def convert_tensor(
     if dtype is None:
         dtype = tensor.dtype
 
-    # Return immediately if tensor already has desired attributes
-    if dtype == tensor.dtype:
-        if memory_format == torch.preserve_format or tensor.is_contiguous(
-            memory_format=memory_format
-        ):
+    if tensor.is_contiguous():
+        if dtype == tensor.dtype:
             return tensor
-
-    # Make sure output is detached from autograd graph
-    tensor = tensor.detach()
-
-    # Convert FP8 tensor
-    if is_float8_tensor(tensor):
-        data = tensor._data
-        if memory_format != torch.preserve_format and not data.is_contiguous(
-            memory_format=memory_format
-        ):
-            # Note: torch.Tensor.to ignores memory_format kwarg (see
-            # https://github.com/pytorch/pytorch/issues/132020).
-            data = data.contiguous(memory_format=memory_format)
-        out = Float8Tensor.make_like(tensor, dtype=dtype)
-        out.data = data
-        return out
-
-    # Convert standard PyTorch tensor
-    tensor = tensor.to(dtype=dtype)
-    if memory_format != torch.preserve_format and not tensor.is_contiguous(
-        memory_format=memory_format
-    ):
-        # Note: torch.Tensor.to ignores memory_format kwarg (see
-        # https://github.com/pytorch/pytorch/issues/132020).
-        tensor = tensor.contiguous(memory_format=memory_format)
-    return tensor
+        if is_float8_tensor(tensor):
+            out = Float8Tensor.make_like(tensor, dtype=dtype)
+            out.data = tensor._data
+            return out
+        else:
+            return tensor.to(dtype=dtype)
+    else:
+        if is_float8_tensor(tensor):
+            out = Float8Tensor.make_like(tensor, dtype=dtype)
+            out.data = tensor._data.contiguous()
+            return out
+        else:
+            return tensor.to(dtype).contiguous()
 
 
 def reshape(
@@ -76,11 +59,7 @@ def reshape(
     dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor | Float8Tensor:
     """Reshape tensor, keeping same data if possible"""
-    tensor = convert_tensor(
-        tensor,
-        dtype=dtype,
-        memory_format=torch.contiguous_format,
-    )
+    tensor = convert_tensor(tensor, dtype=dtype)
     return tensor.reshape(*shape)
 
 
