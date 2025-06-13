@@ -839,9 +839,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scale_inv,
             colwise_scale_inv,
             updated_amax,
-            _dbias,
-            _wkspace,
-        ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
+        ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
         return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
@@ -975,7 +973,9 @@ def grouped_quantize(
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
-        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes)
+        segment_ids = jnp.repeat(
+            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
+        )
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype)
@@ -1048,7 +1048,9 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     assert grad.ndim == 2, "Input grad must be a 2D tensor."
     assert group_sizes.ndim == 1, "group_sizes must be a 1D tensor."
 
-    segment_ids = jnp.repeat(jnp.arange(group_sizes.shape[0]), group_sizes)
+    segment_ids = jnp.repeat(
+        jnp.arange(group_sizes.size), group_sizes, total_repeat_length=grad.shape[0]
+    )
     grad_fp32 = grad.astype(jnp.float32)
     dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
     dbias = dbias_fp32.astype(grad.dtype)

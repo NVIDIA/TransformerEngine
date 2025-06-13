@@ -4,7 +4,6 @@
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
@@ -13,7 +12,6 @@ import operator
 
 from utils import (
     assert_allclose,
-    assert_tree_like_allclose,
     pytest_parametrize_wrapper,
 )
 from transformer_engine.jax.layernorm import layernorm
@@ -682,6 +680,10 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
+        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
         scaled_tensor = tex.grouped_quantize(
             x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
         )
@@ -1281,6 +1283,16 @@ class TestGroupedDense:
             dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
+
+        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
+        # jitting grouped_gemm
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+        #     lhs, rhs, group_sizes, contracting_dims,
+        # )
+
         prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
@@ -1312,6 +1324,12 @@ class TestGroupedDense:
             out_dtype, input_shape, layout
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
+
+        # jitting grouped_gemm
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
+        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        #         )
+
         prim_out = tex.grouped_gemm(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
@@ -1346,6 +1364,9 @@ class TestGroupedDense:
         )
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        # jitting the grouped_dense
+        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
+        #                              static_argnums=(4,))
         value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
@@ -1386,6 +1407,10 @@ class TestGroupedDense:
             n_groups=group_sizes.size,
         )
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+
+        # jitting the grouped_dense
+        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
+        #                              static_argnums=(4,))
         value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
