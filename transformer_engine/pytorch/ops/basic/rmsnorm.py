@@ -261,6 +261,6 @@ class RMSNorm(BasicOperation):
         clear_tensor_data(rstdevs)
 
         # Reshape results
-        grad_input = reshape(dx, grad_output.size())
-        grad_weight = reshape(dw, weight_dims)
+        grad_input = dx.view(grad_output.size())
+        grad_weight = dw.view(weight_dims)
         return grad_input, (grad_weight,)
