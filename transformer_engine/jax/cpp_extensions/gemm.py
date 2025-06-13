@@ -123,34 +123,36 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     lhs_q = lhs
     rhs_q = rhs
     if not isinstance(lhs, ScaledTensor) and lhs_quantizer is not None:
+        scaling_mode = lhs_quantizer.scaling_mode
         lhs_q = lhs_quantizer.quantize(
             lhs,
-            is_rowwise=True,
-            is_colwise=False,
+            is_rowwise=True if scaling_mode.is_tensor_scaling() else not lhs_is_transposed,
+            is_colwise=False if scaling_mode.is_tensor_scaling() else lhs_is_transposed,
             flatten_axis=(
                 max(lhs_contracting_dims) + 1
                 if lhs_is_transposed
                 else min(lhs_contracting_dims)
             ),
         )
-        if lhs_is_transposed:
+        if lhs_is_transposed and scaling_mode.is_tensor_scaling():
             # Manually update data layout and columnwise flag to avoid transposing already
             # transposed data
             lhs_q.data_layout = "T"
             lhs_q.is_colwise = True
 
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
+        scaling_mode = rhs_quantizer.scaling_mode
         rhs_q = rhs_quantizer.quantize(
             rhs,
-            is_rowwise=True,
-            is_colwise=False,
+            is_rowwise=True if scaling_mode.is_tensor_scaling() else rhs_is_transposed,
+            is_colwise=False if scaling_mode.is_tensor_scaling() else not rhs_is_transposed,
             flatten_axis=(
                 min(rhs_contracting_dims)
                 if rhs_is_transposed
                 else max(rhs_contracting_dims) + 1
             ),
         )
-        if not rhs_is_transposed:
+        if not rhs_is_transposed and scaling_mode.is_tensor_scaling():
             # Manually update data layout and columnwise flag to avoid transposing already
             # transposed data
             rhs_q.data_layout = "T"
@@ -515,7 +517,7 @@ def _te_gemm(
         scaling_mode = lhs_q.scaling_mode
         lhs_data = lhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
-        if lhs_q.data_layout == "T":
+        if lhs_is_transposed and lhs_q.data_layout == "T" and scaling_mode.is_tensor_scaling():
             lhs_contracting_dims = transpose_contracting_dims(lhs_q.ndim, lhs_contracting_dims)
 
     if isinstance(rhs_q, ScaledTensor):
@@ -535,7 +537,7 @@ def _te_gemm(
         )
         rhs_data = rhs_q.data
         rhs_scale_inv = rhs_q.scale_inv
-        if rhs_q.data_layout == "T":
+        if rhs_is_transposed and rhs_q.data_layout == "T" and scaling_mode.is_tensor_scaling():
             rhs_contracting_dims = transpose_contracting_dims(rhs_q.ndim, rhs_contracting_dims)
 
     # Dummy empties for bias and gelu
