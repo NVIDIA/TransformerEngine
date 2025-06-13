@@ -45,7 +45,6 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
 from transformer_engine_jax import is_non_nt_fp8_gemm_supported
 
@@ -1133,7 +1132,7 @@ class TestFusedDense:
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
-    @pytest.mark.parametrize("use_bias", [True, False])
+    @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
         self, m, n, k, activation_type, scaling_mode, norm_type, use_bias, with_jax_gemm
@@ -1141,7 +1140,7 @@ class TestFusedDense:
         """
         Test layernorm_mlp VJP Rule
         """
-
+        use_jax_dot_for_gemm(enabled=with_jax_gemm)
 
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False

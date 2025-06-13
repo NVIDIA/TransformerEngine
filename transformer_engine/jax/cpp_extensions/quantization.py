@@ -36,7 +36,6 @@ from ..quantize import (
     Quantizer,
     GroupedQuantizer,
     QuantizeLayout,
-    DelayedScaleQuantizer,
     ScalingMode,
     compute_scale_from_amax,
 )
