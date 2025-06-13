@@ -11,6 +11,7 @@ from .all_reduce import AllReduce
 from .basic_linear import BasicLinear
 from .bias import Bias
 from .identity import Identity
+from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
 from .make_extra_output import MakeExtraOutput
 from .quantize import Quantize
