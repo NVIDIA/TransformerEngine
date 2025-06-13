@@ -91,12 +91,22 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
-        if fp8:
-            assert_dim_for_fp8_exec(*inputmats, *weights)
+        inp_view = inp.view(-1, in_features)
 
-        # Cast input to expected dtype
-        inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+        with_multi_quantize_split = (
+            fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling()
+        )
+
+        if with_multi_quantize_split:
+            inp_view = cast_if_needed(inp_view, activation_dtype)
+            inputmats_no_fp8 = []
+        else:
+            inputmats = torch.split(inp_view, m_splits)
+            if fp8:
+                assert_dim_for_fp8_exec(*inputmats, *weights)
+            # Cast input to expected dtype
+            inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
+
         inputmats = []
 
         weight_requires_grad = weights[0].requires_grad
@@ -125,9 +135,11 @@ class _GroupedLinear(torch.autograd.Function):
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if hasattr(recipe, "fp8_gemm_fprop"):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
             inputmats = tex.fused_multi_quantize(
-                inputmats_no_fp8, None, input_quantizers, TE_DType[activation_dtype]
+                inputmats_no_fp8, inp_view, m_splits, input_quantizers, TE_DType[activation_dtype]
             )
+
             weights_fp8 = []
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             # FP8 cast to workspace buffer
@@ -250,11 +262,14 @@ class _GroupedLinear(torch.autograd.Function):
             # preprocess grad_output
 
             grad_output = grad_output.contiguous()
-            grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
-            )
+            grad_output_view = grad_output.view(-1, grad_output.shape[-1])
+            if ctx.fp8 and ctx.fp8_recipe.float8_block_scaling() and (not ctx.use_bias):
+                grad_output_mats = []
+            else:
+                grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
+
             if ctx.fp8:
                 if ctx.use_bias:
                     # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
@@ -271,7 +286,8 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
-                        None,
+                        grad_output_view,
+                        ctx.m_splits,
                         ctx.grad_output_quantizers,
                         TE_DType[ctx.activation_dtype],
                     )

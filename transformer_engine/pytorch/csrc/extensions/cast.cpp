@@ -46,12 +46,25 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 
   if (te_output.numel() == 0) return out;
 
+  quantize_cpp(te_input, quantizer, my_quantizer, te_output, te_noop);
+
+  return out;
+}
+
+// C++ backend of quantize with tensor converted
+// quantizer_py is still required for runtime type check
+void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
+                  std::unique_ptr<Quantizer>& quantizer_cpp, TensorWrapper& te_output,
+                  TensorWrapper& te_noop) {
+  if (te_output.numel() == 0) {
+    NVTE_CHECK(te_input.numel() == 0, "Input tensor is not 0 when output tensor is 0");
+  }
+
   QuantizationConfigWrapper quant_config;
   quant_config.set_noop_tensor(te_noop.data());
 
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    // my_quantizer here has to be a Float8CurrentScalingQuantizer
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
+    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     NVTE_SCOPED_GIL_RELEASE({
       nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
     });
@@ -77,8 +90,8 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     });
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer.ptr())) {
-    auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(my_quantizer.get());
+  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
+    auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(quantizer_cpp.get());
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
     if (my_quantizer_bw->all_gather_usage) {
@@ -89,8 +102,6 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());
   });
-
-  return out;
 }
 
 py::object dequantize(const py::handle& input, transformer_engine::DType otype) {
