@@ -58,4 +58,12 @@ int get_num_compute_streams() {
 
 int nvte_get_num_compute_streams() { return transformer_engine::detail::get_num_compute_streams(); }
 
+cudaStream_t nvte_get_compute_stream(const int idx) {
+  return transformer_engine::detail::get_compute_stream(idx);
+}
+
+cudaEvent_t nvte_get_compute_stream_event(const int idx) {
+  return transformer_engine::detail::get_compute_stream_event(idx);
+}
+
 #endif  // TRANSFORMER_ENGINE_UTIL_MULTI_STREAM_H_

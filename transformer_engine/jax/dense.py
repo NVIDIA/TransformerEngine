@@ -287,7 +287,13 @@ def _grouped_dense_fwd_rule(
             "and k_contracting_dims=(1,) for now, "
             f"got {x_contracting_dims=} and {k_contracting_dims=}"
         )
-        k_contracting_dims = (0,)
+        scaling_mode = quantizer_set.x.scaling_mode
+        if scaling_mode.is_tensor_scaling():
+            k_contracting_dims = (0,)
+        elif scaling_mode.is_1d_block_scaling():
+            k_contracting_dims = (1,)
+        else:
+            raise ValueError(f"Unsupported scaling mode {scaling_mode.value} for grouped_dense")
 
         casted_x = tex.grouped_quantize(
             x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
@@ -385,7 +391,7 @@ def _grouped_dense_bwd_rule(
         dgrad_grad = casted_grad.get_rowwise_tensor()
         dgrad_kernel_T = ctx_kernel
 
-        # We need to use g_contracting_dim = (0,) and x_contracting_dim = (1,) to make it work
+        # We need to use g_contracting_dim = (0,) and x_contracting_dim = (0,) to make it work
         # after the extra transpose for FP8 in grouped_gemm
         # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
         g_contracting_dim = (0,)
