@@ -313,7 +313,9 @@ class BasicLinear(BasicOperation):
 
         # Configure quantizers
         if FP8GlobalStateManager.is_fp8_enabled():
+            input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
+            grad_output_quantizer = self.get_quantizer("backward", 0)
 
             # Recipe-specific configuration
             recipe = FP8GlobalStateManager.get_fp8_recipe()
