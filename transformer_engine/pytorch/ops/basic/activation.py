@@ -108,7 +108,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Launch kernel
         y = self._activation_forward_impl(
-            reshape(x, (-1, x.size(-1))),
+            x.view((-1, x.size(-1))),
             quantizer,
         )
 
@@ -167,8 +167,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Launch kernel
         dx = self._activation_backward_impl(
-            reshape(dy, (-1, dy.size(-1))),
-            reshape(x, (-1, x.size(-1))),
+            dy.view((-1, dy.size(-1))),
+            x.view((-1, x.size(-1))),
             quantizer,
         )
 
