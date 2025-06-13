@@ -319,9 +319,9 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
                   alignas(64) CUtensorMap tensor_map_output{};
 
                   create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, sizeof(IType));
+                                       SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
                   create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, sizeof(OType));
+                                       SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
 
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,

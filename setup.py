@@ -66,6 +66,11 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
+    # Add custom CMake arguments from environment variable
+    nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
+    if nvte_cmake_extra_args:
+        cmake_flags.extend(nvte_cmake_extra_args.split())
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 

@@ -325,7 +325,7 @@ void thd_read_half_tensor(const Tensor &tensor, const Tensor &cu_seqlens, Tensor
   int batch = cu_seqlens_shape[0] - 1;
   int num_heads = tensor_shape[seq_dim + 1];
   int dim_per_head = tensor_shape[seq_dim + 2];
-  int hidden_size_in_bytes = num_heads * dim_per_head * typeToSize(tensor.dtype());
+  int hidden_size_in_bytes = (num_heads * dim_per_head * typeToNumBits(tensor.dtype())) / 8;
 
   // For 128-bits load/store
   NVTE_CHECK(hidden_size_in_bytes % 16 == 0);
@@ -582,7 +582,7 @@ static void thd_grad_correction_helper(Tensor grad, const Tensor &grad_per_step,
   NVTE_CHECK(grad_per_step_shape[seq_dim + 2] == dim_per_head);
 
   size_t hidden_size = num_heads * dim_per_head;
-  NVTE_CHECK((hidden_size * typeToSize(grad.dtype())) % 16 == 0);
+  NVTE_CHECK(((hidden_size * typeToNumBits(grad.dtype())) / 8) % 16 == 0);
 
   constexpr unsigned int block = 256;
   unsigned int grid_x;

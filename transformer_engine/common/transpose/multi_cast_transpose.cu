@@ -237,8 +237,8 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
 
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_store_size / typeToSize(otype);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_size / typeToSize(itype);
+  const int tile_dim_m = THREADS_PER_WARP * desired_store_size * 8 / typeToNumBits(otype);
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_size * 8 / typeToNumBits(itype);
 
   // Add tensors to kernel argument struct
   MultiCastTransposeArgs kernel_args_aligned, kernel_args_unaligned;

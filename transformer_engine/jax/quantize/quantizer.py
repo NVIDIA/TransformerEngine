@@ -608,9 +608,10 @@ class GroupedQuantizer(Quantizer):
 
     def __post_init__(self):
         if self.quantizers[0] is None:
-            self.quantizers = QuantizerFactory.create(
+            quantizers = QuantizerFactory.create(
                 self.n_groups, self.scaling_mode, self.q_dtype, self.q_layout
             )
+            self.quantizers = (quantizers,) if not isinstance(quantizers, tuple) else quantizers
         self.data_layout = self.quantizers[0].data_layout
 
     def _create_grouped_tensor_from_tensor_list(

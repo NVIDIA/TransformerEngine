@@ -253,12 +253,20 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         return state
 
     @staticmethod
-    def reload(state, non_blocking=None):
+    def reload(state, non_blocking=None, copy_buffer=None):
         """Reload."""
         dev, cpu_backup = state
         if non_blocking is None:
             non_blocking = cpu_backup.is_pinned()
-        return cpu_backup.to(dev, non_blocking=non_blocking)
+
+        if copy_buffer is None:
+            return cpu_backup.to(dev, non_blocking=non_blocking)
+
+        assert cpu_backup.size() == copy_buffer.size(), "Can't copy two buffers of different sizes!"
+
+        copy_buffer.copy_(cpu_backup, non_blocking=non_blocking)
+
+        return copy_buffer
 
     def tensor_push(self, tensor: torch.Tensor, **kwargs):
         """Tensor push."""
@@ -300,6 +308,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         num_offload_group,  # must be <= actual number of groups (number of commits)
         num_model_group,
         tensor_need_offloading_checker=(lambda t: True),
+        double_buffering=False,
         debug=False,
     ) -> None:
         super().__init__(
@@ -319,6 +328,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.offloaded_group_count = 0
         # Core data structure that decides the window for offloading
         self.layer_window_map = {}
+
+        # Data structures fo double buffered reloading
+        self.double_buffering = double_buffering
+        self.reload_double_buffer = [[], []]
+        self.double_buffer_created = False
 
         # Logic to make offloading load balance across computation
         # for optimal CPU/GPU interconnect usage
@@ -413,8 +427,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 self.fp8_tensor_object_map[tensor_tag].restore_from_saved(tensor)
             tensor = self.fp8_tensor_object_map.pop(tensor_tag)
 
-        self.tensor_tag_to_buf.pop(tensor_tag, None)
+        if self.double_buffering:
+            tensor.do_not_clear = True
 
+        self.tensor_tag_to_buf.pop(tensor_tag, None)
         # the tensor should have been copied back in on_group_commit_backward()
         # which invokes bulk_reload_group.
         assert not isinstance(tensor, tuple)
@@ -466,6 +482,20 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         # the first compute completion
         if current_group == 0:
             self.d2h_stream.wait_stream(torch.cuda.current_stream())
+
+            if not self.double_buffer_created:
+                # Creating the first copy of double buffer for tensors that are offloaded
+                for tensor_tag, buf in self.tensor_tag_to_buf.items():
+                    if isinstance(buf, list):
+                        for b in buf:
+                            self.reload_double_buffer[0].append(
+                                torch.empty_like(b) if self.double_buffering else None
+                            )
+                    else:
+                        self.reload_double_buffer[0].append(
+                            torch.empty_like(buf) if self.double_buffering else None
+                        )
+
             self.bulk_offload_group(current_group)
 
         # Window map data structure helps us synchronize based on number
@@ -495,6 +525,15 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             # Increment the offload group count to keep track
             self.offloaded_group_count += 1
 
+        if not self.double_buffer_created:
+            # Creating second copy of double buffer for tensors that are offloaded
+            if current_group == (self.num_layers - 1):
+                for buf in self.reload_double_buffer[0]:
+                    self.reload_double_buffer[1].append(
+                        torch.empty_like(buf) if self.double_buffering else None
+                    )
+                self.double_buffer_created = True
+
     def on_group_commit_forward(self):
         """This function will cause host device synchronization"""
         # handle synchronization events
@@ -506,21 +545,32 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         """Bulk reload group."""
         assert group_to_reload < self.num_offload_group
 
+        buffer_idx = 0
+        double_buffer_idx = group_to_reload % 2
+
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
                     if isinstance(state, tuple):
-                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(state)
+                        recovered_tensor = SynchronizedGroupOffloadHandler.reload(
+                            state, True, self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                        )
+                        buffer_idx = buffer_idx + 1
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
                     elif isinstance(state, list):
                         tensor_list = []
                         for state_tuple in state:
                             if isinstance(state_tuple, tuple):
                                 tensor_list.append(
-                                    SynchronizedGroupOffloadHandler.reload(state_tuple)
+                                    SynchronizedGroupOffloadHandler.reload(
+                                        state_tuple,
+                                        True,
+                                        self.reload_double_buffer[double_buffer_idx][buffer_idx],
+                                    )
                                 )
+                                buffer_idx = buffer_idx + 1
                             else:
                                 tensor_list.append(state_tuple)
 
@@ -574,6 +624,7 @@ def get_cpu_offload_context(
     model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = False,
+    double_buffering: bool = False,
 ):
     """
     This function returns the CPU Offload context and the synchronizer function that needs to be
@@ -602,6 +653,8 @@ def get_cpu_offload_context(
                          When set to `True`, offloads the activations for the TE layer.
     offload_weights: bool, default = `True`
                      When set to `True`, offloads the weights for the TE layer.
+    double_buffering: bool, default = `False`
+                      When set to `True`, uses double buffering for offloading.
 
     """
 
@@ -633,6 +686,7 @@ def get_cpu_offload_context(
         num_offload_group=num_layers,
         num_model_group=model_layers,
         tensor_need_offloading_checker=tensor_need_offloading_checker,
+        double_buffering=double_buffering,
     )
 
     def group_prefetch_offload_commit_async(tensor):

@@ -127,14 +127,16 @@ class BlockScaleDequantizer(Dequantizer):
     def dequantize(scaled_tensor):
         """Dequantize a tensor using block scaling.
 
-        This function dequantizes a tensor that was quantized using block scaling
-        by applying the inverse scaling factor to each block of data.
-
         Args:
-            scaled_tensor: The quantized tensor to dequantize
+            data: The quantized tensor data
+            scale_inv: The inverse scaling factors
+            dq_dtype: The data type for dequantized values
+            scaling_mode: The scaling mode used for quantization
+            is_colwise: Whether the scaling is column-wise
+            flatten_axis: The axis along which the tensor could be flattened to 2D
 
         Returns:
-            The dequantized tensor in the specified data type
+            The dequantized tensor
         """
         return BlockScaleDequantizer._dequantize_func(
             scaled_tensor.data,

@@ -30,6 +30,7 @@
 #include "extensions/misc.h"
 #include "extensions/utils.h"
 #include "transformer_engine/activation.h"
+#include "transformer_engine/multi_stream.h"
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);

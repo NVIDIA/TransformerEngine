@@ -460,7 +460,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
   CUtensorMap tensor_map_output_trans{};
   create_2D_tensor_map(tensor_map_output_trans, tensor, global_dim_y, global_dim_x,
                        /*shmemY=*/BLOCK_TILE_DIM, /*shmemX=*/BLOCK_TILE_DIM,
-                       /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType));
+                       /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
 
