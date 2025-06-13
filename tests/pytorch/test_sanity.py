@@ -10,6 +10,7 @@ import torch
 import pytest
 import os
 
+import transformer_engine.pytorch
 from transformer_engine.pytorch.fp8 import (
     fp8_autocast,
     FP8GlobalStateManager,
@@ -38,9 +39,11 @@ from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Quantizer,
     Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
 )
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
 from test_numerics import reset_rng_states, dtype_tols
@@ -1338,3 +1341,80 @@ def test_sanity_checkpointing_on_callables():
 
     # Assert that gradients are the same
     torch.testing.assert_close(grad_checkpoint, grad_standard)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ("Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear", "ops.Linear"),
+)
+@pytest.mark.parametrize(
+    "quantization",
+    (None, "fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"),
+)
+def test_inference_mode(
+    module_name: str,
+    quantization: Optional[str],
+) -> None:
+    """Test heuristics for initializing quantized weights"""
+
+    # Tensor dimensions
+    sequence_length = 32
+    hidden_size = 32
+
+    # Skip invalid configurations
+    if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    # Construct quantization recipe
+    with_quantization = quantization not in (None, "None")
+    quantization_recipe = None
+    if quantization == "fp8_delayed_scaling":
+        quantization_recipe = recipe.DelayedScaling()
+    elif quantization == "fp8_current_scaling":
+        quantization_recipe = recipe.Float8CurrentScaling()
+    elif quantization == "mxfp8":
+        quantization_recipe = recipe.MXFP8BlockScaling()
+
+    # Construct module
+    module = None
+    with torch.no_grad():
+        with fp8_model_init(enabled=with_quantization, recipe=quantization_recipe):
+            if module_name == "Linear":
+                module = Linear(hidden_size, hidden_size)
+            elif module_name == "LayerNormLinear":
+                module = LayerNormLinear(hidden_size, hidden_size)
+            elif module_name == "LayerNormMLP":
+                module = LayerNormMLP(hidden_size, hidden_size)
+            elif module_name == "GroupedLinear":
+                module = GroupedLinear(1, hidden_size, hidden_size)
+            elif module_name == "ops.Linear":
+                module = transformer_engine.pytorch.ops.Linear(hidden_size, hidden_size)
+
+    def check_weights():
+        """Helper function to check that weight parameters have expected data"""
+        for param in module.parameters():
+            if isinstance(param, Float8Tensor):
+                assert param._data is not None, "Missing FP8 data"
+                assert (
+                    param._transpose is None and param._transpose_invalid
+                ), "FP8 transpose is not expected for inference"
+            if isinstance(param, MXFP8Tensor):
+                assert param._rowwise_data is not None, "Missing row-wise MXFP8 data"
+                assert (
+                    param._columnwise_data is None
+                ), "Column-wise MXFP8 data is not expected for inference"
+
+    # Check that modules have expected weights after initialization
+    check_weights()
+
+    # Check that modules have expected weights after forward pass
+    with torch.inference_mode():
+        x = torch.zeros(sequence_length, hidden_size, device="cuda")
+        kwargs = {}
+        if module_name == "GroupedLinear":
+            kwargs["m_splits"] = [sequence_length]
+        with fp8_autocast(enabled=with_quantization, fp8_recipe=quantization_recipe):
+            y = module(x, **kwargs)
+    check_weights()
