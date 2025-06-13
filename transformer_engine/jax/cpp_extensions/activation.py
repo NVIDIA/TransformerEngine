@@ -1124,9 +1124,8 @@ def quantize_dact_dbias(
     scale = jnp.empty((), jnp.float32)
     act_type_id = ActivationEnum[activation_type]
     PrimitiveClass = DActLuDBiasQuantizePrimitive if is_dbias else DActLuQuantizePrimitive
-    if (
-        not PrimitiveClass.enabled()
-        or (quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE)
+    if not PrimitiveClass.enabled() or (
+        quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE
     ):
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
@@ -1152,9 +1151,17 @@ def quantize_dact_dbias(
             dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
 
         if noop_scaled_tensor:
-            return ScaledTensorFactory.create_2x(
-                output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype,
-            ), dbias
+            return (
+                ScaledTensorFactory.create_2x(
+                    output,
+                    None,
+                    output,
+                    None,
+                    ScalingMode.NO_SCALING,
+                    dq_dtype=output.dtype,
+                ),
+                dbias,
+            )
 
         return output, dbias
 

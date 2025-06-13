@@ -197,8 +197,9 @@ def _layernorm_dense_fwd_rule(
 
     # Kernel (hidden_in, hidden_out)
     flatten_axis = 1 - kernel.ndim
-    casted_kernel = tex.quantize(kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel,
-                                 noop_scaled_tensor=True)
+    casted_kernel = tex.quantize(
+        kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel, noop_scaled_tensor=True
+    )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     rowwise_kernel = casted_kernel.get_rowwise_tensor()
@@ -278,7 +279,10 @@ def _layernorm_dense_bwd_rule(
     # Axis boundary for the gradient is the number of non-contracting dimensions of the FWD input
     flatten_axis_grad = len(fwd_x_non_cdims)
     casted_grad, dbias = tex.quantize_dbias(
-        grad, is_dbias=use_bias, flatten_axis=flatten_axis_grad, quantizer=quantizer_set.dgrad,
+        grad,
+        is_dbias=use_bias,
+        flatten_axis=flatten_axis_grad,
+        quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
 
@@ -291,10 +295,7 @@ def _layernorm_dense_bwd_rule(
 
     # DGRAD GEMM: (batch..., hidden_out) x (hidden_in, hidden_out)^T = (batch..., hidden_in)
     dgrad = tex.gemm(
-        rowwise_g,
-        rowwise_kernel,
-        contracting_dims=(rowwise_g_cdims, fwd_k_non_cdims),
-        grad=True
+        rowwise_g, rowwise_kernel, contracting_dims=(rowwise_g_cdims, fwd_k_non_cdims), grad=True
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, dot_input_axes)
 

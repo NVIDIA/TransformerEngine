@@ -48,8 +48,8 @@ enum class JAXX_Scaling_Mode : int64_t {
 };
 
 inline bool is_tensor_scaling(const JAXX_Scaling_Mode &mode) {
-  return (mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING
-          || mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING);
+  return (mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING ||
+          mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING);
 }
 
 inline bool is_block_scaling(const JAXX_Scaling_Mode &mode) {

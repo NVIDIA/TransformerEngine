@@ -22,11 +22,7 @@ from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
-from .quantize import (
-    with_sharding_constraint_by_logical_axes,
-    QuantizerSet,
-    noop_quantizer_set
-)
+from .quantize import with_sharding_constraint_by_logical_axes, QuantizerSet, noop_quantizer_set
 from .sharding import get_non_contracting_logical_axes
 
 
@@ -271,8 +267,9 @@ def _layernorm_mlp_fwd_rule(
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     # FC1 kernel (hidden_in, act_len, hidden_out)
-    casted_kernel_1 = tex.quantize(kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel,
-                                   noop_scaled_tensor=True)
+    casted_kernel_1 = tex.quantize(
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
+    )
 
     # Prepare FC1 FPROP operands and layouts
     rowwise_ln_out = casted_ln_out.get_rowwise_tensor()
@@ -309,13 +306,15 @@ def _layernorm_mlp_fwd_rule(
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     # Activation (batch..., act_len, hidden_out) -> (batch..., hidden_out)
-    casted_act_out = tex.act_lu(dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x,
-                                noop_scaled_tensor=True)
+    casted_act_out = tex.act_lu(
+        dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
+    )
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
     # FC2 kernel (hidden_out, hidden_in)
-    casted_kernel_2 = tex.quantize(kernel_2, quantizer=ffn2_quantizer_set.kernel,
-                                   noop_scaled_tensor=True)
+    casted_kernel_2 = tex.quantize(
+        kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
+    )
 
     # Prepare FC2 FPROP operands and layouts
     rowwise_act_out = casted_act_out.get_rowwise_tensor()
@@ -333,7 +332,7 @@ def _layernorm_mlp_fwd_rule(
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
         contracting_dims=(x_cdims, k_cdims),
-        grad=False
+        grad=False,
     )
 
     if use_bias_2 and tex.gemm_uses_jax_dot():
@@ -418,8 +417,11 @@ def _layernorm_mlp_bwd_rule(
     flatten_axis_grad = len(fwd_x_non_cdims)
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
     casted_grad, dbias_2 = tex.quantize_dbias(
-        grad, is_dbias=use_bias_2, flatten_axis=flatten_axis_grad,
-        quantizer=ffn2_quantizer_set.dgrad, noop_scaled_tensor=True,
+        grad,
+        is_dbias=use_bias_2,
+        flatten_axis=flatten_axis_grad,
+        quantizer=ffn2_quantizer_set.dgrad,
+        noop_scaled_tensor=True,
     )
 
     # Prepare FC2 DGRAD and WGRAD operands and contracting dims
@@ -433,10 +435,7 @@ def _layernorm_mlp_bwd_rule(
 
     # FC2 DGRAD GEMM: (batch..., hidden_in) x (hidden_out, hidden_in)^T = (batch..., hidden_out)
     dgrad_2 = tex.gemm(
-        rowwise_g,
-        rowwise_kernel_2,
-        contracting_dims=(rowwise_g_cdims, fwd_k2_non_cdims),
-        grad=True
+        rowwise_g, rowwise_kernel_2, contracting_dims=(rowwise_g_cdims, fwd_k2_non_cdims), grad=True
     )
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
@@ -466,7 +465,9 @@ def _layernorm_mlp_bwd_rule(
     rowwise_dact_out = casted_dact_out.get_rowwise_tensor()
     rowwise_dact_out_cdims = tuple(range(flatten_axis_grad, rowwise_dact_out.ndim))
     colwise_dact_out = casted_dact_out.get_colwise_tensor()
-    colwise_dact_out_cdims = tex.get_non_contracting_dims(casted_dact_out.ndim, rowwise_dact_out_cdims)
+    colwise_dact_out_cdims = tex.get_non_contracting_dims(
+        casted_dact_out.ndim, rowwise_dact_out_cdims
+    )
     fwd_k1_non_cdims = tex.get_non_contracting_dims(rowwise_kernel_1.ndim, fwd_k_cdims)
 
     # FC1 DGRAD GEMM:
@@ -475,7 +476,7 @@ def _layernorm_mlp_bwd_rule(
         rowwise_dact_out,
         rowwise_kernel_1,
         contracting_dims=(rowwise_dact_out_cdims, fwd_k1_non_cdims),
-        grad=True
+        grad=True,
     )
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
 

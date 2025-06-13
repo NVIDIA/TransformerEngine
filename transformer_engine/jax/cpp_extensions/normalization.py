@@ -1322,9 +1322,13 @@ def normalization_fwd(
         raise ValueError(f"{norm_type=} is not supported.")
 
     if quantizer is None and noop_scaled_tensor:
-        return ScaledTensorFactory.create_2x(
-            output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype
-        ), mu, rsigma
+        return (
+            ScaledTensorFactory.create_2x(
+                output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype
+            ),
+            mu,
+            rsigma,
+        )
 
     return output, mu, rsigma
 

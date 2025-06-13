@@ -156,9 +156,9 @@ def assert_dequantized_grouped_scaled_tensor(
 
 def use_jax_dot_for_gemm(enabled=False):
     if enabled:
-        os.environ['NVTE_JAX_CUSTOM_CALLS_RE']='^(?!GemmPrimitive$).+$'
-    elif 'NVTE_JAX_CUSTOM_CALLS_RE' in os.environ:
-        os.environ.pop('NVTE_JAX_CUSTOM_CALLS_RE')
+        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
+        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
@@ -731,9 +731,7 @@ class TestFusedQuantize:
         )
 
         te_output, te_dbias = jit(
-            lambda input: tex.quantize_dbias(
-                inp, quantizer=te_quantizer, flatten_axis=flatten_axis
-            )
+            lambda input: tex.quantize_dbias(inp, quantizer=te_quantizer, flatten_axis=flatten_axis)
         )(inp)
 
         jax_output, jax_dbias = jit(
@@ -911,44 +909,42 @@ class TestDense:
         "lhs_q_dtype,rhs_q_dtype",
         [
             (jnp.float8_e4m3fn, jnp.float8_e4m3fn),  # fprop GEMM
-            (jnp.float8_e4m3fn, jnp.float8_e5m2),    # wgrad GEMM
-            (jnp.float8_e5m2, jnp.float8_e4m3fn),    # dgrad GEMM
-        ]
+            (jnp.float8_e4m3fn, jnp.float8_e5m2),  # wgrad GEMM
+            (jnp.float8_e5m2, jnp.float8_e4m3fn),  # dgrad GEMM
+        ],
     )
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", supported_fp8_gemm_layouts)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    def test_gemm_fp8(self, m, n, k, lhs_q_dtype, rhs_q_dtype, scaling_mode, data_layout,
-                      with_jax_gemm):
+    def test_gemm_fp8(
+        self, m, n, k, lhs_q_dtype, rhs_q_dtype, scaling_mode, data_layout, with_jax_gemm
+    ):
         use_jax_dot_for_gemm(enabled=with_jax_gemm)
 
         lhs, rhs, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=jnp.float8_e4m3fn, bwd_dtype=jnp.float8_e5m2,
-            is_2x2x=False
+            scaling_mode=scaling_mode,
+            fwd_dtype=jnp.float8_e4m3fn,
+            bwd_dtype=jnp.float8_e5m2,
+            is_2x2x=False,
         )
-        lhs_quantizer = (
-            quantizer_set.x
-            if lhs_q_dtype == jnp.float8_e4m3fn
-            else quantizer_set.dgrad
-        )
+        lhs_quantizer = quantizer_set.x if lhs_q_dtype == jnp.float8_e4m3fn else quantizer_set.dgrad
         rhs_quantizer = (
-            quantizer_set.kernel
-            if rhs_q_dtype == jnp.float8_e4m3fn
-            else quantizer_set.dgrad
+            quantizer_set.kernel if rhs_q_dtype == jnp.float8_e4m3fn else quantizer_set.dgrad
         )
 
         primitive_out = tex.gemm(
-            lhs, rhs, lhs_quantizer=lhs_quantizer, rhs_quantizer=rhs_quantizer,
-            contracting_dims=contracting_dims
+            lhs,
+            rhs,
+            lhs_quantizer=lhs_quantizer,
+            rhs_quantizer=rhs_quantizer,
+            contracting_dims=contracting_dims,
         )
         ref_out = self._ref_gemm_with_jnp_dot(lhs, rhs, data_layout)
 
         test_q_dtype = (
-            jnp.float8_e5m2
-            if jnp.float8_e5m2 in (lhs_q_dtype, rhs_q_dtype)
-            else jnp.float8_e4m3fn
+            jnp.float8_e5m2 if jnp.float8_e5m2 in (lhs_q_dtype, rhs_q_dtype) else jnp.float8_e4m3fn
         )
         assert_allclose(primitive_out, ref_out, dtype=test_q_dtype)
 
@@ -1008,8 +1004,10 @@ class TestDense:
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
 
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=jnp.float8_e4m3fn, bwd_dtype=jnp.float8_e5m2,
-            is_2x2x=True
+            scaling_mode=scaling_mode,
+            fwd_dtype=jnp.float8_e4m3fn,
+            bwd_dtype=jnp.float8_e5m2,
+            is_2x2x=True,
         )
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
