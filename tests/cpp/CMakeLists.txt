@@ -26,11 +26,13 @@ enable_testing()
 include_directories(${gtest_SOURCE_DIR}/include ${gtest_SOURCE_DIR})
 
 if(NOT DEFINED TE_LIB_PATH)
-    execute_process(COMMAND bash -c "pip3 show transformer-engine | grep Location | cut -d ' ' -f 2 | tr -d '\n'"
-                    OUTPUT_VARIABLE TE_LIB_PATH)
+    execute_process(COMMAND bash -c "python3 -c 'import transformer_engine as te; print(te.__file__)'"
+                    OUTPUT_VARIABLE TE_LIB_FILE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(TE_LIB_PATH ${TE_LIB_FILE} DIRECTORY)
 endif()
 
-find_library(TE_LIB NAMES transformer_engine PATHS ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
+find_library(TE_LIB NAMES transformer_engine PATHS "${TE_LIB_PATH}/.." ${TE_LIB_PATH} ENV TE_LIB_PATH REQUIRED)
 
 message(STATUS "Found transformer_engine library: ${TE_LIB}")
 include_directories(../../transformer_engine/common/include)

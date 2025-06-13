@@ -14,7 +14,7 @@ NUM_PHYSICAL_CORES=$(nproc)
 NUM_PARALLEL_JOBS=4
 
 cd $TE_PATH/tests/cpp
-cmake -GNinja -Bbuild -DTE_LIB_PATH="$TE_LIB_PATH" .
+cmake -GNinja -Bbuild .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
 ctest --test-dir build -j$NUM_PARALLEL_JOBS
