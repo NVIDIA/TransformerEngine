@@ -48,34 +48,35 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
 }
 
 // Create torch tensor reusing existing data if possible
-at::Tensor _create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-                                const py::object& tensor_to_reuse, bool zero_out) {
+std::pair<at::Tensor, bool> create_torch_tensor_ex(
+    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
+    const py::object& tensor_to_reuse) {
   if (!tensor_to_reuse.is_none()) {
     // Reuse output
     const at::Tensor temp = tensor_to_reuse.cast<at::Tensor>();
     if (tensor_is_reusable(temp, shape, opts)) {
-      if (zero_out) {
-        temp.zero_();
-      }
-      return temp;
+      return {temp, true};
     }
   }
-  if (zero_out) {
-    return at::zeros(shape, opts);
-  }
-  return at::empty(shape, opts);
+  return {at::empty(shape, opts), false};
 }
 
 // Create torch tensor reusing existing data is possible
 // The reused tensor is tensor_to_reuse.attr_name
-at::Tensor create_torch_tensor(const std::vector<int64_t>& shape, const at::TensorOptions& opts,
-                               const py::object& tensor_to_reuse, const std::string_view& attr_name,
-                               bool zero_out = false) {
+std::pair<at::Tensor, bool> create_torch_tensor_ex(
+    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
+    const py::object& tensor_to_reuse, const std::string_view& attr_name) {
   py::object tensor{py::none()};
   if (!tensor_to_reuse.is_none()) {
     tensor = tensor_to_reuse.attr(attr_name.data());
   }
-  return _create_torch_tensor(shape, opts, tensor, zero_out);
+  return create_torch_tensor_ex(shape, opts, tensor);
+}
+
+at::Tensor create_torch_tensor(
+    const std::vector<int64_t>& shape, const at::TensorOptions& opts,
+    const py::object& tensor_to_reuse, const std::string_view& attr_name) {
+  return create_torch_tensor_ex(shape, opts, tensor_to_reuse, attr_name).first;
 }
 
 std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
@@ -88,7 +89,7 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
   if (rowwise_data.has_value()) {
     ret = std::move(*rowwise_data);
   } else {
-    ret = _create_torch_tensor(torch_shape, opts, output, false);
+    std::tie(ret, std::ignore) = create_torch_tensor_ex(torch_shape, opts, output);
   }
 
   TensorWrapper tensor;
@@ -124,8 +125,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
-  at::Tensor scale_inv =
-      create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
+  auto scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
   // TODO: Remove
   if (rowwise_data.has_value()) {
     at::reciprocal_out(scale_inv, scale);
@@ -261,8 +261,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   std::optional<at::Tensor> data = std::nullopt;
   std::optional<at::Tensor> columnwise_data = std::nullopt;
   // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
-  at::Tensor scale_inv =
-      create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
+  auto scale_inv = create_torch_tensor(scale.sizes().vec(), scale.options(), output, "_scale_inv");
   // TODO: Remove
   if (rowwise_data.has_value()) {
     at::reciprocal_out(scale_inv, scale);
@@ -429,9 +428,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
             block_scaling_dim);
       } break;
     }
-    scale_inv_rowwise =
-        create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, scale_opts,
-                            output, "_rowwise_scale_inv");
+    scale_inv_rowwise = create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)},
+                                            scale_opts, output, "_rowwise_scale_inv");
     tensor.set_rowwise_data(data_rowwise->data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(scale_inv_rowwise->data_ptr(), DType::kFloat32,
                                  std::vector<size_t>{sinv0, sinv1});
@@ -575,16 +573,30 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   }
 
   if (rowwise_usage) {
+    bool data_reused = false;
     if (rowwise_data.has_value()) {
       data_rowwise = std::move(*rowwise_data);
     } else {
-      data_rowwise = create_torch_tensor(torch_shape, opts, output, "_rowwise_data");
+      std::tie(data_rowwise, data_reused) = create_torch_tensor_ex(torch_shape, opts, output,
+                                                                   "_rowwise_data");
     }
     auto sinv0 = roundup(numel / last_dim, 128lu);
     auto sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4lu);
-    rowwise_scale_inv =
-        create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
-                            output, "_rowwise_scale_inv", true);
+    bool scale_inv_reused = false;
+    std::tie(rowwise_scale_inv, scale_inv_reused) =
+        create_torch_tensor_ex({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
+                               output, "_rowwise_scale_inv");
+    if (!data_reused || !scale_inv_reused) {
+      // cuBLAS requires scale inverse tensor to be zero-padded.
+      // If both the data and the scale inverse are reused though
+      // then the provided output tensor was a valid MXFP8 tensor
+      // so we can assume that the zero padding is already done.
+      // Not doing this zero-padding in such scenario is important
+      // in the CUDA graphs + weight caching case where the reuse
+      // would happen but the quantization would not be performed
+      // again.
+      rowwise_scale_inv->zero_();
+    }
     tensor.set_rowwise_data(data_rowwise->data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(
         rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
@@ -594,10 +606,24 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   if (columnwise_usage) {
     auto sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4lu);
     auto sinv1 = roundup(last_dim, 128lu);
-    data_colwise = create_torch_tensor(torch_shape, opts, output, "_columnwise_data");
-    columnwise_scale_inv =
-        create_torch_tensor({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
-                            output, "_columnwise_scale_inv", true);
+    bool data_reused = false;
+    std::tie(data_colwise, data_reused) = create_torch_tensor_ex(torch_shape, opts, output,
+                                                                 "_columnwise_data");
+    bool scale_inv_reused = false;
+    std::tie(columnwise_scale_inv, scale_inv_reused) =
+        create_torch_tensor_ex({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts,
+                               output, "_columnwise_scale_inv");
+    if (!data_reused || !scale_inv_reused) {
+      // cuBLAS requires scale inverse tensor to be zero-padded.
+      // If both the data and the scale inverse are reused though
+      // then the provided output tensor was a valid MXFP8 tensor
+      // so we can assume that the zero padding is already done.
+      // Not doing this zero-padding in such scenario is important
+      // in the CUDA graphs + weight caching case where the reuse
+      // would happen but the quantization would not be performed
+      // again.
+      columnwise_scale_inv->zero_();
+    }
 
     tensor.set_columnwise_data(data_colwise->data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
