@@ -535,8 +535,12 @@ def grouped_gemm(
             rhs_layout_is_T = rhs_q.data_layout == "T"
         # we can't apply _shape_normalization on the grouped input
         # thus we need to ensure that lhs is in N and rhs is in T
-        assert lhs_is_trans == lhs_layout_is_T, "lhs input must be transposed before calling grouped_gemm"
-        assert not rhs_is_trans == rhs_layout_is_T, "rhs input must be transposed before calling grouped_gemm"
+        assert (
+            lhs_is_trans == lhs_layout_is_T
+        ), "lhs input must be transposed before calling grouped_gemm"
+        assert (
+            not rhs_is_trans == rhs_layout_is_T
+        ), "rhs input must be transposed before calling grouped_gemm"
         lhs_is_trans = False
         rhs_is_trans = True
         lhs_ndim = len(lhs_shape)
@@ -546,7 +550,9 @@ def grouped_gemm(
         if rhs_layout_is_T:
             # For rhs [G, K, N], need to exclude the G dim from contract_dim
             if group_sizes.size == rhs_shape[0]:
-                rhs_contract_dim = tuple((rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim)
+                rhs_contract_dim = tuple(
+                    (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
+                )
             else:
                 rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
 
