@@ -28,7 +28,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm", "is_gemm_with_all_layouts_supported"]
+__all__ = ["gemm", "grouped_gemm"]
 
 
 num_cublas_streams = get_num_compute_streams()
@@ -39,11 +39,6 @@ def get_cublas_workspace_size_bytes() -> None:
     if get_device_compute_capability(0) >= 90:
         return 33_554_432
     return 4_194_304
-
-
-def is_gemm_with_all_layouts_supported() -> False:
-    """Return True if using blackwell, False otherwise."""
-    return get_device_compute_capability(0) >= 100
 
 
 class GroupedGemmPrimitive(BasePrimitive):
