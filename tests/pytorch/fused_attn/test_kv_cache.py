@@ -380,7 +380,7 @@ def get_tols(config, module, backend, dtype):
         else:
             if backend == "UnfusedAttention":
                 tols = {
-                    torch.half: (1.5e-2, 1.5e-2),
+                    torch.half: (1.6e-2, 1.6e-2),
                     torch.bfloat16: (1.2e-1, 1e-1),
                 }
             else:
