@@ -761,6 +761,7 @@ def get_attention_backend(
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
         fused_attention_backend = tex.get_fused_attn_backend(
+            is_training,
             q_type,
             kv_type,
             QKVLayout[qkv_layout],
