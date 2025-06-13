@@ -273,7 +273,9 @@ def _main(opts):
         dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
     assert dist.is_nccl_available()
     dist.init_process_group(**dist_init_kwargs)
-    tp_group = dist.new_group(backend="nccl")
+    tp_group = dist.new_group(
+        backend="nccl", pg_options=dist.ProcessGroupNCCL.Options(is_high_priority_stream=True)
+    )
     tp_rank = dist.get_rank(tp_group)
     tp_size = dist.get_world_size(tp_group)
     dist_print(

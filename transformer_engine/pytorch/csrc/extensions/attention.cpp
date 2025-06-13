@@ -24,12 +24,12 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
   NVTE_CHECK(fcd_size % block_size == 0, "input size not aligned to block size");
 
-  size_t element_size = transformer_engine::pytorch::typeToSize(self.dtype());
+  size_t element_size_bits = transformer_engine::pytorch::typeToNumBits(self.dtype());
   int32_t start_row = start_index.data_ptr<int32_t>()[0];
   void *base_ptr = static_cast<char *>(self.get_rowwise_data().data_ptr) +
-                   static_cast<size_t>(start_row) * fcd_size * element_size;
+                   static_cast<size_t>(start_row) * fcd_size * element_size_bits / 8;
   size_t num_rows_to_zero = max_tokens - start_row;
-  size_t total_bytes = num_rows_to_zero * fcd_size * element_size;
+  size_t total_bytes = num_rows_to_zero * fcd_size * element_size_bits / 8;
 
   NVTE_SCOPED_GIL_RELEASE(
       { nvte_memset(base_ptr, 0, total_bytes, at::cuda::getCurrentCUDAStream()); });
@@ -57,14 +57,14 @@ namespace transformer_engine::pytorch {
 
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right) {
+    bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
-      attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-      head_dim_qk, head_dim_v, window_size_left, window_size_right);
+      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
+      bias_type, attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
+      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
   return fused_attention_backend;
 }
 
