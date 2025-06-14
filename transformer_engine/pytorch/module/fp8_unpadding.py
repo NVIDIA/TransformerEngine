@@ -29,10 +29,13 @@ class _Fp8Unpadding(torch.autograd.Function):
         is_grad_enabled: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        inputmats = torch.split(inp.view(-1, inp.shape[-1]), padded_m_splits)
-        out_ret = torch.cat(
-            [grad_output_mat[: m_splits[i]] for i, grad_output_mat in enumerate(inputmats)], dim=0
-        )
+        in_features = inp.shape[-1]
+
+        # Allocate cast and transpose output tensor
+        total_row = sum(m_splits)
+        out_ret = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
+
+        tex.fused_multi_row_unpadding(inp.view(-1, in_features), out_ret, padded_m_splits, m_splits)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
