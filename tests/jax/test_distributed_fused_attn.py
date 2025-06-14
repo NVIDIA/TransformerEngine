@@ -68,6 +68,7 @@ class TestDistributedSelfAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BS3HD,
@@ -78,6 +79,7 @@ class TestDistributedSelfAttn:
             num_head,
             seqlen,
             seqlen,
+            hidden,
             hidden,
             None,  # no window
         ):
@@ -97,6 +99,7 @@ class TestDistributedSelfAttn:
             seqlen,
             num_head,
             num_head,
+            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -214,6 +217,7 @@ class TestDistributedCrossAttn:
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
+            is_training,
             dtype,
             dtype,
             QKVLayout.BSHD_BS2HD,
@@ -224,6 +228,7 @@ class TestDistributedCrossAttn:
             num_head,
             seqlen,
             seqlen,
+            hidden,
             hidden,
             None,  # no window
         ):
@@ -236,6 +241,7 @@ class TestDistributedCrossAttn:
             seqlen,
             num_head,
             num_head,
+            hidden,
             hidden,
             attn_bias_type,
             attn_mask_type,
@@ -327,6 +333,7 @@ class TestDistributedContextParallelSelfAttn:
             num_head,
             num_kv_heads,
             hidden,
+            hidden,
             attn_bias_type,
             attn_mask_type,
             dropout_prob,
@@ -346,6 +353,7 @@ class TestDistributedContextParallelSelfAttn:
 
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
+                is_training,
                 dtype,
                 dtype,
                 qkv_layout,
@@ -356,6 +364,7 @@ class TestDistributedContextParallelSelfAttn:
                 num_kv_heads,
                 seqlen,
                 seqlen,
+                hidden,
                 hidden,
                 None,
             )  # no SWA for CP
