@@ -114,9 +114,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     if not isinstance(lhs, ScaledTensor) and lhs_quantizer is not None:
         lhs_cdims = sanitize_dims(lhs.ndim, contracting_dims[0])
         lhs_is_rowwise = lhs.ndim - 1 in lhs_cdims
-        flatten_axis = (
-            min(lhs_cdims) if lhs_is_rowwise else max(lhs_cdims) + 1
-        )
+        flatten_axis = min(lhs_cdims) if lhs_is_rowwise else max(lhs_cdims) + 1
         lhs_q = lhs_quantizer.quantize(
             lhs,
             is_rowwise=lhs_is_rowwise,
@@ -129,9 +127,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
         rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
         rhs_is_rowwise = rhs.ndim - 1 in rhs_cdims
-        flatten_axis = (
-            min(rhs_cdims) if rhs_is_rowwise else max(rhs_cdims) + 1
-        )
+        flatten_axis = min(rhs_cdims) if rhs_is_rowwise else max(rhs_cdims) + 1
         rhs_q = rhs_quantizer.quantize(
             rhs,
             is_rowwise=rhs_is_rowwise,
@@ -547,9 +543,7 @@ def _te_gemm(
     rhs_scale_inv = jnp.empty(0, dtype=jnp.float32)
     scaling_mode = ScalingMode.NO_SCALING
     lhs_is_transposed, rhs_is_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim), contracting_dims)
-    lhs_cdims, rhs_cdims = map(
-        sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims
-    )
+    lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
 
     # Quantize operands (if necessary)
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
@@ -892,8 +886,7 @@ def _jax_gemm(
 
         raise NotImplementedError("Unsupported ScalingMode: {lhs.scaling_mode}")
 
-    lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer,
-                                           contracting_dims)
+    lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
 
     if isinstance(lhs_q, ScaledTensor) and isinstance(rhs_q, ScaledTensor):
         return _jax_gemm_fp8_impl(lhs_q, rhs_q)

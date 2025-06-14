@@ -859,6 +859,7 @@ valid_fp8_gemm_operand_types = [
 
 def _use_jax_fp8_gemm(enabled=False):
     import os
+
     if enabled:
         os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
     elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
@@ -916,7 +917,7 @@ class TestDense:
             scaling_mode=scaling_mode,
             fwd_dtype=jnp.float8_e4m3fn,
             bwd_dtype=jnp.float8_e5m2,
-            is_2x2x=False
+            is_2x2x=False,
         )
         primitive_out = tex.gemm(
             x,
@@ -984,9 +985,10 @@ class TestDense:
         value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
 
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=jnp.float8_e4m3fn,
+            scaling_mode=scaling_mode,
+            fwd_dtype=jnp.float8_e4m3fn,
             bwd_dtype=jnp.float8_e5m2 if scaling_mode.is_tensor_scaling() else jnp.float8_e4m3fn,
-            is_2x2x=True
+            is_2x2x=True,
         )
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1

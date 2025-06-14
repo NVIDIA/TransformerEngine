@@ -266,8 +266,9 @@ def _layernorm_mlp_fwd_rule(
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
-    casted_kernel_1 = tex.quantize(kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel,
-                                   noop_scaled_tensor=True)
+    casted_kernel_1 = tex.quantize(
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
+    )
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out)
@@ -276,7 +277,7 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_1.get_colwise_tensor(),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False
+        fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
     )
 
     if dot_1_input_axes is not None and kernel_1_axes is not None:
@@ -294,13 +295,15 @@ def _layernorm_mlp_fwd_rule(
     dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
     # (batch..., hidden_in) -> (batch..., hidden)
-    casted_act_out = tex.act_lu(dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x,
-                                noop_scaled_tensor=True)
+    casted_act_out = tex.act_lu(
+        dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
+    )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
-    casted_kernel_2 = tex.quantize(kernel_2, quantizer=ffn2_quantizer_set.kernel,
-                                   noop_scaled_tensor=True)
+    casted_kernel_2 = tex.quantize(
+        kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
+    )
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
@@ -397,8 +400,7 @@ def _layernorm_mlp_bwd_rule(
     grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
 
     casted_grad, dbias_2 = tex.quantize_dbias(
-        grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad,
-        noop_scaled_tensor=True
+        grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
