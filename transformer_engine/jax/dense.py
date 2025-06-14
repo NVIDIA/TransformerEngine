@@ -48,7 +48,7 @@ def dense(
         Transformed output tensor
     """
     # Remove when tex.quantize() can handle quantizer=None
-    if quantizer_set == noop_quantizer_set:
+    if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
         output = tex.gemm(x, kernel, contracting_dims)
         if bias is not None:
@@ -95,29 +95,36 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
 
-    casted_x = tex.quantize(x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x)
+    casted_x = tex.quantize(
+        x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x, noop_scaled_tensor=True
+    )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel
+        kernel,
+        flatten_axis=flatten_axis_k,
+        quantizer=quantizer_set.kernel,
+        noop_scaled_tensor=True,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     # GEMM NN
+    use_bias = bias is not None
     output = tex.gemm(
         casted_x.get_rowwise_tensor(),
         casted_kernel.get_colwise_tensor(),
-        (x_contracting_dims, k_contracting_dims),
+        contracting_dims=(x_contracting_dims, k_contracting_dims),
+        bias=bias if not tex.gemm_uses_jax_dot() else None,
+        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
     )
 
-    use_bias = bias is not None
-    if use_bias:
+    if use_bias and tex.gemm_uses_jax_dot():
         bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_x.get_colwise_tensor(),
+        casted_kernel.get_rowwise_tensor(),
         x.shape,
         kernel.shape,
         use_bias,
@@ -148,7 +155,11 @@ def _dense_bwd_rule(
     ) = ctx
 
     casted_grad, dbias = tex.quantize_dbias(
-        grad, is_dbias=use_bias, flatten_axis=flatten_axis_k, quantizer=quantizer_set.dgrad
+        grad,
+        is_dbias=use_bias,
+        flatten_axis=flatten_axis_k,
+        quantizer=quantizer_set.dgrad,
+        noop_scaled_tensor=True,
     )
 
     # GEMM NT
@@ -163,7 +174,7 @@ def _dense_bwd_rule(
     dgrad = tex.gemm(
         casted_grad.get_rowwise_tensor(),
         rowwise_casted_kernel,
-        (g_contracting_dim, k_contracting_dim),
+        contracting_dims=(g_contracting_dim, k_contracting_dim),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
@@ -174,7 +185,9 @@ def _dense_bwd_rule(
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_contracting_dim, g_contracting_dim)
+        colwise_casted_x,
+        casted_grad.get_colwise_tensor(),
+        contracting_dims=(x_contracting_dim, g_contracting_dim),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
