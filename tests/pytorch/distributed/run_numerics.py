@@ -47,11 +47,6 @@ if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     )
 
 
-# Disable TF32
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-
-
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "fp8":
@@ -166,7 +161,7 @@ def _gather(tensor, dim=0):
 
 
 def _constant(tensor):
-    return nn.init.constant_(tensor, 0.5)
+    return nn.init.constant_(tensor, 0.05)
 
 
 def dist_print(msg, src=None, end="\n", error=False):
@@ -189,7 +184,8 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1.2e-4, "atol": 1e-4}
+        # TF32 has same mantissa bits as FP16
+        return {"rtol": 1e-3, "atol": 1e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
