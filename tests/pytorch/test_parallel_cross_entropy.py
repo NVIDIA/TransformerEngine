@@ -138,19 +138,3 @@ class TestParallelCrossEntropy:
                 reduce_loss=False,
                 ignore_idx=True,
             )
-
-    # def test_gradient_scaling_with_sum_backward(self):
-    #     """
-    #     Test that catches the gradient scaling bug when using reduce_loss=False
-    #     followed by loss.sum().backward(). This test would fail without the fix
-    #     because the triton kernel incorrectly scaled gradients by 1/n_non_ignore.
-    #     """
-    #     # Set up infrastructure for non-reduced loss (reduction='none')
-    #     self.generate_infra(False, 0)  # reduce_loss=False, label_smoothing=0
-    #     self.one_iteration_test(
-    #         dtype=torch.float32,
-    #         swap_dim=False,
-    #         label_smoothing=0,
-    #         reduce_loss=False,
-    #         ignore_idx=False,
-    #     )
