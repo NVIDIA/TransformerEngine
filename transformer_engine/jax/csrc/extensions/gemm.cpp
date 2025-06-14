@@ -42,7 +42,9 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     NVTE_CHECK(typeToSize(input_dtype) == 1, "Quantized GEMM requires 8-bit operands.");
     NVTE_CHECK(scale_inv.element_count() > 0, "Missing inverse scaling factor for quantized GEMM.");
 
-    std::vector<size_t> scale_shape(scale_inv.dimensions().begin(), scale_inv.dimensions().end());
+    auto scale_dims = scale_inv.dimensions();
+    std::vector<size_t> scale_shape = {product(scale_dims, 0, axis_boundary),
+                                       product(scale_dims, axis_boundary, scale_dims.size())};
     auto scale_dtype = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING)
                            ? DType::kFloat8E8M0
                            : convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
@@ -53,7 +55,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     }
 
     // Swizzle scaling factors for MXFP8
-    if (is_block_scaling(scaling_mode)) {
+    if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
       // Get the swizzle buffer
       NVTE_CHECK(swizzled_scale_inv->element_count() > 0,
                  "Missing swizzled inverse scale buffer in the JAX primitive.");

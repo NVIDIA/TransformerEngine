@@ -142,7 +142,7 @@ class ScaledTensor1x(ScaledTensor):
         ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
         if self.scaling_mode == ScalingMode.NO_SCALING:
-            self.scale_inv = jnp.empty((1,), dtype=jnp.float32)
+            self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
 
         else:
             expected_scale_shape = self.scaling_mode.get_scale_shape(

@@ -18,7 +18,7 @@ import transformer_engine_jax as tex
 from transformer_engine_jax import get_device_compute_capability, get_num_compute_streams
 
 from .base import BasePrimitive, register_primitive
-from .quantization import grouped_quantize
+from .quantization import quantize, grouped_quantize
 from ..quantize import (
     ScaledTensor,
     ScaledTensor2x,
@@ -81,20 +81,15 @@ def transpose_contracting_dims(ndim, contracting_dims):
 
 
 def _compatible_fp8_gemm_dtypes(lhs_dtype, rhs_dtype) -> bool:
-    lhs, rhs, e4m3, e5m2, e8m0 = map(
+    lhs, rhs, e4m3, e5m2 = map(
         dtypes.canonicalize_dtype,
         (
             lhs_dtype,
             rhs_dtype,
             jnp.float8_e4m3fn,
             jnp.float8_e5m2,
-            jnp.uint8,  # replace with jnp.float8_e8m0 when JAX/XLA merges support
         ),
     )
-
-    # MXFP8 GEMM needs both operands to be MXFP8 (uint8 for now until JAX merges float8_e8m0)
-    if lhs is e8m0 and rhs is e8m0:
-        return True
 
     # FP8 GEMM supports (e4m3 x e4m3), (e4m3 x e5m2) and (e5m2 x e4m3)
     if (lhs is e4m3 and rhs in (e4m3, e5m2)) or (lhs in (e4m3, e5m2) and rhs is e4m3):
@@ -114,44 +109,37 @@ def _get_gemm_layout(
 
 
 def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims):
-    lhs_is_transposed, rhs_is_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim), contracting_dims)
-    lhs_contracting_dims, rhs_contracting_dims = map(
-        sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims
-    )
-
     lhs_q = lhs
     rhs_q = rhs
     if not isinstance(lhs, ScaledTensor) and lhs_quantizer is not None:
-        scaling_mode = lhs_quantizer.scaling_mode
+        lhs_cdims = sanitize_dims(lhs.ndim, contracting_dims[0])
+        lhs_is_rowwise = lhs.ndim - 1 in lhs_cdims
+        flatten_axis = (
+            min(lhs_cdims) if lhs_is_rowwise else max(lhs_cdims) + 1
+        )
         lhs_q = lhs_quantizer.quantize(
             lhs,
-            is_rowwise=True if scaling_mode.is_tensor_scaling() else not lhs_is_transposed,
-            is_colwise=False if scaling_mode.is_tensor_scaling() else lhs_is_transposed,
-            flatten_axis=(
-                max(lhs_contracting_dims) + 1 if lhs_is_transposed else min(lhs_contracting_dims)
-            ),
+            is_rowwise=lhs_is_rowwise,
+            is_colwise=not lhs_is_rowwise,
+            flatten_axis=flatten_axis,
         )
-        if lhs_is_transposed and scaling_mode.is_tensor_scaling():
-            # Manually update data layout and columnwise flag to avoid transposing already
-            # transposed data
-            lhs_q.data_layout = "T"
-            lhs_q.is_colwise = True
+        if isinstance(lhs_q, ScaledTensor2x):
+            lhs_q = lhs_q.get_rowwise_tensor() if lhs_is_rowwise else lhs_q.get_colwise_tensor()
 
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
-        scaling_mode = rhs_quantizer.scaling_mode
+        rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
+        rhs_is_rowwise = rhs.ndim - 1 in rhs_cdims
+        flatten_axis = (
+            min(rhs_cdims) if rhs_is_rowwise else max(rhs_cdims) + 1
+        )
         rhs_q = rhs_quantizer.quantize(
             rhs,
-            is_rowwise=True if scaling_mode.is_tensor_scaling() else rhs_is_transposed,
-            is_colwise=False if scaling_mode.is_tensor_scaling() else not rhs_is_transposed,
-            flatten_axis=(
-                min(rhs_contracting_dims) if rhs_is_transposed else max(rhs_contracting_dims) + 1
-            ),
+            is_rowwise=rhs_is_rowwise,
+            is_colwise=not rhs_is_rowwise,
+            flatten_axis=flatten_axis,
         )
-        if not rhs_is_transposed and scaling_mode.is_tensor_scaling():
-            # Manually update data layout and columnwise flag to avoid transposing already
-            # transposed data
-            rhs_q.data_layout = "T"
-            rhs_q.is_colwise = True
+        if isinstance(rhs_q, ScaledTensor2x):
+            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_rowwise else rhs_q.get_colwise_tensor()
 
     return lhs_q, rhs_q
 
@@ -270,7 +258,7 @@ class GemmPrimitive(BasePrimitive):
         # Need extra workspace for swizzled scale factors
         lhs_swizzle_size = 0
         rhs_swizzle_size = 0
-        swizzle_dtype = jnp.uint8  # replace with jnp.float8_e8m0 when JAX merges support
+        swizzle_dtype = jnp.uint8
         if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             lhs_swizzle_size = lhs_scale_inv.size
             rhs_swizzle_size = rhs_scale_inv.size
@@ -535,7 +523,6 @@ class GemmPrimitive(BasePrimitive):
 register_primitive(GemmPrimitive)
 
 
-@lru_cache(maxsize=1)
 def gemm_uses_jax_dot() -> bool:
     """Check if the GEMM call directs to the TE custom cuBLAS call or native JAX dot."""
     return not GemmPrimitive.enabled()
@@ -560,7 +547,7 @@ def _te_gemm(
     rhs_scale_inv = jnp.empty(0, dtype=jnp.float32)
     scaling_mode = ScalingMode.NO_SCALING
     lhs_is_transposed, rhs_is_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim), contracting_dims)
-    lhs_contracting_dims, rhs_contracting_dims = map(
+    lhs_cdims, rhs_cdims = map(
         sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims
     )
 
@@ -574,16 +561,13 @@ def _te_gemm(
             "`Quantizer` object to quantize the RHS operand."
         )
         if isinstance(lhs_q, ScaledTensor2x):
-            # Contracting dimensions for a ScaledTensor2x is interpreted relative to the row-wise
-            # shape. Since we have access to both row-wise and column-wise tensors, we always
-            # choose the one that avoids transposing LHS in the GEMM kernel to comply with the
-            # NT-layout restriction for FP8 GEMM on Hopper.
+            # Choose the quantization of the contracting dimension(s)
             lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
         scaling_mode = lhs_q.scaling_mode
         lhs_data = lhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
-        if lhs_is_transposed and lhs_q.data_layout == "T" and scaling_mode.is_tensor_scaling():
-            lhs_contracting_dims = transpose_contracting_dims(lhs_q.ndim, lhs_contracting_dims)
+        if lhs_q.data_layout == "T":
+            lhs_cdims = transpose_contracting_dims(lhs_q.ndim, lhs_cdims)
 
     if isinstance(rhs_q, ScaledTensor):
         assert isinstance(lhs_q, ScaledTensor) or lhs_quantizer is not None, (
@@ -591,10 +575,7 @@ def _te_gemm(
             "`Quantizer` object to quantize the LHS operand."
         )
         if isinstance(rhs_q, ScaledTensor2x):
-            # Contracting dimensions for a ScaledTensor2x is interpreted relative to the row-wise
-            # shape. Since we have access to both row-wise and column-wise tensors, we always
-            # choose the one that avoids transposing LHS in the GEMM kernel to comply with the
-            # NT-layout restriction for FP8 GEMM on Hopper.
+            # Choose the quantization of the contracting dimension(s)
             rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
         assert rhs_q.scaling_mode == lhs_q.scaling_mode, (
             "cuBLAS GEMM quantized operands have mismatched scaling types, "
@@ -602,8 +583,8 @@ def _te_gemm(
         )
         rhs_data = rhs_q.data
         rhs_scale_inv = rhs_q.scale_inv
-        if rhs_is_transposed and rhs_q.data_layout == "T" and scaling_mode.is_tensor_scaling():
-            rhs_contracting_dims = transpose_contracting_dims(rhs_q.ndim, rhs_contracting_dims)
+        if rhs_q.data_layout == "T":
+            rhs_cdims = transpose_contracting_dims(rhs_q.ndim, rhs_cdims)
 
     # Dummy empties for bias and gelu
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
@@ -620,7 +601,7 @@ def _te_gemm(
         bias,
         gelu_input,
         out_dtype=out_dtype,
-        contracting_dims=(lhs_contracting_dims, rhs_contracting_dims),
+        contracting_dims=(lhs_cdims, rhs_cdims),
         scaling_mode=scaling_mode,
         fuse_bias=fuse_bias,
         fuse_gelu=fuse_gelu,
@@ -911,16 +892,21 @@ def _jax_gemm(
 
         raise NotImplementedError("Unsupported ScalingMode: {lhs.scaling_mode}")
 
-    # Quantize operands (if necessary)
-    lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
+    lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer,
+                                           contracting_dims)
 
-    if isinstance(lhs_q, ScaledTensor) or isinstance(rhs_q, ScaledTensor):
-        assert isinstance(lhs_q, ScaledTensor) and isinstance(
-            rhs_q, ScaledTensor
-        ), "Both LHS and RHS must be quantized (or have valid quantizers) for FP8 GEMM."
+    if isinstance(lhs_q, ScaledTensor) and isinstance(rhs_q, ScaledTensor):
         return _jax_gemm_fp8_impl(lhs_q, rhs_q)
 
-    return jax.lax.dot_general(lhs, rhs, dim_nums, preferred_element_type=lhs.dtype)
+    if (
+        isinstance(lhs, jnp.ndarray)
+        and isinstance(rhs, jnp.ndarray)
+        and lhs_quantizer is None
+        and rhs_quantizer is None
+    ):
+        return jax.lax.dot_general(lhs, rhs, dim_nums, preferred_element_type=lhs.dtype)
+
+    raise NotImplementedError("Not supporting multiplication of ScaledTensor and jnp.array")
 
 
 def gemm(
@@ -987,7 +973,7 @@ def gemm(
             rhs_quantizer = quantizer_set.kernel
 
     # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
-    if gemm_uses_jax_dot():
+    if not GemmPrimitive.enabled():
         assert kwargs.get("bias", None) is None and not kwargs.get("fuse_bias", False), (
             "TE GEMM was invoked with bias fusion options that are not supported by the "
             "`jax.lax.dot_general` and `jnp.scaled_matmul` backends used when the custom cuBLAS "
