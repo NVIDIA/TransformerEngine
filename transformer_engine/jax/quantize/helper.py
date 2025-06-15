@@ -15,17 +15,13 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import (
-    get_cuda_version,
-    get_device_compute_capability,
-)
+from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
 from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
 from .scaling_modes import ScalingMode
 from .. import cpp_extensions as tex
+from .device_utils import get_device_compute_capability
 
 __all__ = [
     "QuantizeConfig",
@@ -203,7 +199,7 @@ class QuantizeConfig:
         FP8_2X_ACC_FPROP: Whether to use 2x accumulation for forward pass
         FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
         FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
-        IF_QUANTIZE_2X: Whether 2x quantization is enabled
+        INFERENCE_MODE: Whether to enable optimization for inference
         SCALING_MODE: Scaling mode
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
@@ -218,7 +214,7 @@ class QuantizeConfig:
     FP8_2X_ACC_FPROP: bool = False
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False
-    IF_QUANTIZE_2X: bool = False
+    INFERENCE_MODE: bool = False
     SCALING_MODE: ScalingMode = ScalingMode.NO_SCALING
 
     # DelayedScaling
@@ -246,7 +242,6 @@ class QuantizeConfig:
         cls.FP8_FORMAT = fp8_recipe.fp8_format
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
         cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
-        cls.IF_QUANTIZE_2X = True
 
     @classmethod
     def finalize(cls) -> None:
@@ -260,7 +255,7 @@ class QuantizeConfig:
         cls.FP8_2X_ACC_DGRAD = False
         cls.FP8_2X_ACC_WGRAD = False
         cls.SCALING_MODE = ScalingMode.NO_SCALING
-        cls.IF_QUANTIZE_2X = False
+        cls.INFERENCE_MODE = False
         # DelayedScaling
         cls.AMAX_HISTORY_LEN = 1024
         cls.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
