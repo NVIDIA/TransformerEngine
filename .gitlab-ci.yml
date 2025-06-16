@@ -593,8 +593,10 @@ upload_logs:
     - vm-builder
 
 send_result_to_slack:
-  stage: finalize
+  stage: build base
   script:
+    - FAIL_SLACK_EMOJI=":red_cross:"
+    - SUCCESS_SLACK_EMOJI=":white_check_mark:"
     - GH_USERNAME=$(jq -r '.comment.user.login' <<< "${githubData}")
     - |
       if [[ -z "${GH_USERNAME}" ]]; then
@@ -606,6 +608,36 @@ send_result_to_slack:
     - |
       function jq_in_place() {
         jq "$@" > "${2}.tmp" && mv "${2}.tmp" "$2";
+      }
+    - |
+      function get_pipeline_status_message() {
+        # Get all jobs from the previous stage
+        RESPONSE=$(curl --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs")
+        
+        PASSING_JOBS=$(echo "$RESPONSE" | jq '[.[] | select(.status == "success")]')
+        FAILED_JOBS=$(echo "$RESPONSE" | jq '[.[] | select(.status != "success")]')
+        FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "success")]  length')
+        if [ "$FAILED_JOB_COUNT" -gt 0 ]; then
+            echo -n "$FAIL_SLACK_EMOJI [FAILED]"
+        else
+            echo -n "$PASS_SLACK_EMOJI [PASSED]"
+        fi
+
+        echo "CI Pipeline <${CI_PIPELINE_URL}|${CI_PIPELINE_ID}> completed."
+
+        echo "Triggered by: $SLACK_USER_ID"
+
+        for job in $(echo "$FAILED_JOBS" | jq -c '.[]'); do
+            JOB_NAME=$(echo "$job" | jq -r '.name')
+            JOB_URL=$(echo "$job" | jq -r '.web_url')
+            echo "$FAIL_SLACK_EMOJI $JOB_NAME (<$JOB_URL|Link>)"
+        done
+
+        for job in $(echo "$PASSING_JOBS" | jq -c '.[]'); do
+            JOB_NAME=$(echo "$job" | jq -r '.name')
+            JOB_URL=$(echo "$job" | jq -r '.web_url')
+            echo "$PASS_SLACK_EMOJI $JOB_NAME (<$JOB_URL|Link>)"
+        done
       }
     - |
       function sendSlackMessage() {
@@ -620,7 +652,7 @@ send_result_to_slack:
           (jq -e '.ok == true' response.json > /dev/null && echo $(jq -e '.ts' response.json)) || (echo "Slack API request failed"; exit 1)
         fi
       }
-    - sendSlackMessage "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed. $SLACK_USER_ID"
+    - sendSlackMessage $(get_pipeline_status_message)
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
