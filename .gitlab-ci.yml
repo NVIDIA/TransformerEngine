@@ -593,9 +593,20 @@ upload_logs:
     - vm-builder
 
 send_result_to_slack:
-  stage: finalize
+  stage: build stage
   script:
-    - echo "${gitHubData}"
+    - GH_USERNAME=$(jq -r '.comment.user.login' <<< "${githubData}")
+    - |
+      if [[ -z "${GH_USERNAME}" ]]; then
+        echo "Error: GH_USERNAME is empty. Please provide a valid GitHub username."
+        exit 1
+      fi
+    - SLACK_USER_ID="(Unknown GitHub user ${GH_USERNAME})"
+    - if [[ "${GH_USERNAME}" == "jberchtold-nvidia" ]]; then SLACK_USER_ID="<@U023NP29RHV>" ; fi
+    - |
+      function jq_in_place() {
+        jq "$@" > "${2}.tmp" && mv "${2}.tmp" "$2";
+      }
     - |
       function sendSlackMessage() {
         if [[ "${SEND_SLACK_MESSAGE}" == "1" ]]; then
@@ -609,7 +620,7 @@ send_result_to_slack:
           (jq -e '.ok == true' response.json > /dev/null && echo $(jq -e '.ts' response.json)) || (echo "Slack API request failed"; exit 1)
         fi
       }
-    - sendSlackMessage "CI Pipeline [${CI_PIPELINE_ID}](https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}) completed"
+    - sendSlackMessage "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed. $SLACK_USER_ID"
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
