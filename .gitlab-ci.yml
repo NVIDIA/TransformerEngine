@@ -593,7 +593,7 @@ upload_logs:
     - vm-builder
 
 send_result_to_slack:
-  stage: build stage
+  stage: finalize
   script:
     - GH_USERNAME=$(jq -r '.comment.user.login' <<< "${githubData}")
     - |
