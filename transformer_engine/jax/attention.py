@@ -188,7 +188,7 @@ class ReorderStrategy(Enum):
 
     - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
     GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
-    mulitple of 2 * cp_size.
+    multiple of 2 * cp_size.
       Examples:
       - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
       - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
@@ -288,7 +288,8 @@ def is_fused_attn_kernel_available(
     kv_num_heads,
     q_max_seqlen,
     kv_max_seqlen,
-    head_dim,
+    head_dim_qk,
+    head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
 ):
     """
@@ -308,7 +309,8 @@ def is_fused_attn_kernel_available(
             kv_num_heads,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            head_dim_qk,
+            head_dim_v,
             (-1, -1) if window_size is None else window_size,
         )
 
@@ -491,7 +493,7 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
 
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
-    """A class to descibe the sequences with flexible initialization.
+    """A class to describe the sequences with flexible initialization.
     - SequenceDescriptor.from_seqlens
       For non-THD (non-packed) cases, where each batch has only 1 sequence.
     - SequenceDescriptor.from_seqlens_and_offsets
