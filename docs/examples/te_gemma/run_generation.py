@@ -19,4 +19,4 @@ hyperparams.is_paged = False
 model = init_te_gemma_model(hyperparams)
 
 print_sample_of_generated_texts(model)
-benchmark_generation(model)
+# benchmark_generation(model)

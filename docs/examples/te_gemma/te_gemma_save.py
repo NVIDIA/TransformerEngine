@@ -19,6 +19,71 @@ from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConf
 
 import torch.nn.functional as F
 
+class CacheParams:
+    def __init__(self, max_seqlen_q, max_seqlen_kv, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded):
+        self.max_seqlen_q = max_seqlen_q
+        self.max_seqlen_kv = max_seqlen_kv
+        self.cu_seqlens_q = cu_seqlens_q
+        self.cu_seqlens_kv = cu_seqlens_kv
+        self.cu_seqlens_q_padded = cu_seqlens_q_padded
+        self.cu_seqlens_kv_padded = cu_seqlens_kv_padded
+
+
+def setup_cache_params_from_infer_params(inference_params, lengths_tensor, max_input_length):
+    """
+    Converts the `input_ids` to variables like `cu_seqlens_q/kv`, etc. which
+    will be used later.
+
+    (Currently a hack, this should be reformatted to a better method)
+    """
+
+    assert lengths_tensor is not None and max_input_length is not None, \
+        "lengths_tensor and max_input_length should not be none for qkv_format = \"thd\""
+
+    inference_params.max_incoming_seq_len = max_input_length
+
+    lengths_tensor = lengths_tensor.to(inference_params.cu_seqlens_q.device)
+
+    # inference_params.step_dict = OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist()))
+    inference_params.pre_step(OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist())))
+
+    # print(inference_params.step_dict)
+
+    # def get_cache_params_in_infer_params():
+    # return CacheParams(max_seqlen_q, max_seqlen_kv, inference_params.cu_seqlens_q, inference_params.cu_seqlens_kv, inference_params.cu_seqlens_q_padded, inference_params.cu_seqlens_kv_padded)
+
+    # For the time being, create an ad-hoc field in `inference_params` to get the variables.
+    # @sudhakars: to create a better way later.
+    # inference_params.get_cache_params_from_infer_params = get_cache_params_in_infer_params
+
+# This class has been modified from
+# https://github.com/huggingface/transformers/blob/98adf24883b007c2a7fb17bab1c01b1614673433/src/transformers/models/gemma/modeling_gemma.py
+class GemmaRotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
+
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float() / self.dim))
+        self.register_buffer("inv_freq", tensor=inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def forward(self, x, position_ids, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        self.inv_freq.to(x.device)
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 since bfloat16 loses precision on long contexts
+        # See https://github.com/huggingface/transformers/pull/29285
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.unsqueeze(2) # should return in [b, s, 1, d] format
+
+
 class StaticBufferAllocator(torch.nn.Module):
     """
         This class is used when we use te.make_graphed_callable().
@@ -71,10 +136,6 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             zero_centered_gamma=True,
         )
 
-        self.te_rope_emb = RotaryPositionEmbedding(self.gemma_config.head_dim)(
-            max_seq_len=self.gemma_config.max_position_embeddings
-        ).cuda()
-
     def alloc(self, size, dtype, device):
         """
             Allocated the buffer and works correctly with CUDA Graphs.
@@ -83,12 +144,59 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
 
     def forward(self, *args, **kwargs):  # We need to additionally pass positional encoding.
 
+        # if "self_attn_mask_type" in kwargs:
+        #     attn_mask_type = kwargs['self_attn_mask_type']
+        # else:
+        #     attn_mask_type = "whatever_default_is"
 
+        # if attn_mask_type == "arbitrary":
+        #     # @sudhakars: following logic doesn't work for `thd`
+        #     attn_mask = kwargs['attention_mask']
+        #     attention_mask_inv = ~attn_mask
+        #     generation_case = torch.tensor(torch.tensor(attn_mask.shape).shape).item() > 2
+
+        #     if generation_case:
+        #         # @sudhakars: for some reason, `attention_mask` for generation is of the
+        #         # form [b, 1, 1, s].
+        #         attention_mask_inv = attention_mask_inv.squeeze(1).squeeze(1)
+        #         assert torch.tensor(torch.tensor(attention_mask_inv.shape).shape).item() == 2
+
+        #     # Create `position_ids` on the fly using `attention_mask` since HF
+        #     # does the same in generation logic.
+        #     position_ids = attention_mask_inv.long().cumsum(-1) - 1
+        #     position_ids.masked_fill_(attention_mask_inv == 0, 1)
+
+        #     if "position_ids" in kwargs and kwargs['position_ids'] is not None:
+        #         assert torch.all(torch.eq(position_ids, kwargs["position_ids"])), "position ids don't match match exactly!"
+
+        #     # convert [b, s] to [b, 1, s, s] since `arbitrary` is only set for
+        #     # context phase and context phase gets [b, s] sized attn mask
+        #     seq_len = 1 if torch.tensor(torch.tensor(attn_mask.shape).shape).item() > 2 else attention_mask_inv.shape[1]
+        #     arbitrary_attn_mask = torch.zeros(attention_mask_inv.shape[0], 1, seq_len, attention_mask_inv.shape[1]).bool()
+        #     for sample_idx in range(attn_mask.shape[0]):
+        #         pad_len = attn_mask[sample_idx].sum().int().item()
+        #         # set the columns to padded
+        #         arbitrary_attn_mask[sample_idx, :, :, :pad_len] = True
+        #         # set the rows to padded
+        #         if not generation_case:
+        #             arbitrary_attn_mask[sample_idx, :, :pad_len, :] = True
+        #             arbitrary_attn_mask[sample_idx] = torch.tril(arbitrary_attn_mask[sample_idx].logical_not()).logical_not()
+
+        #     # Update the attention mask to arbitrary
+        #     kwargs['attention_mask'] = arbitrary_attn_mask.cuda()
+
+        #     # @sudhakars: `max_position_embeddings` is not even used inside GemmaRotaryEmbedding
+        #     # @sudhakars: change the hardcoded `dim` to something like config.head_dim
+        #     te_rope_emb = GemmaRotaryEmbedding(dim=256, max_position_embeddings=self.gemma_config.max_position_embeddings).cuda()
+        #     te_rope_emb = te_rope_emb(args[0], position_ids.cuda())
+        # else:
         # When the `attention_mask` is not `arbitrary`, then for the purpose
         # of this tutorial, we're using `padding_causal` (for context) and
         # `padding` (for generation)
         # @sudhakars: find a better way to provide the `tensor_format`
-
+        te_rope_emb = RotaryPositionEmbedding(self.gemma_config.head_dim)(
+            max_seq_len=self.gemma_config.max_position_embeddings
+        ).cuda()
 
         inference_params = kwargs["inference_params"]
         # @sudhakars: big assumption that the input is "sbhd"
@@ -119,7 +227,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
         return (
             super().forward(
                 *args,
-                rotary_pos_emb=self.te_rope_emb,
+                rotary_pos_emb=te_rope_emb,
                 # cu_seqlens_q=cu_seqlens_q,
                 # cu_seqlens_kv=cu_seqlens_kv,
                 # max_seqlen_q=max_seqlen_q,
@@ -206,6 +314,27 @@ class GemmaGenerator(torch.nn.Module):
         hidden_states.copy_(self.model.embed_tokens(next_tokens).unsqueeze(1))
 
         return next_tokens
+
+
+class PartialForwardWrapper(torch.nn.Module):
+    """
+    This class wraps a `torch.nn.Module` while partially modifying its `forward`
+
+    CUDAGraphs' `make_graphed_callables` method takes in a module but if only
+    `functools.partial` is used to wrap the module, it changes the modules'
+    type and that interferes with the `make_graphed_callables` intrinsics.
+    """
+    def __init__(self, module, **kwargs):
+        super().__init__()
+        self.module = module
+        self.partial_forward = partial(self.module.forward, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        return self.partial_forward(*args, **kwargs)
+
+    # @sudhakars: should we use better abstraction?
+    def set_inference_params(self, *args, **kwargs):
+        return self.module.set_inference_params(*args, **kwargs)
 
 
 @contextmanager
@@ -346,7 +475,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     def _generate_context_phase(self, input_ids: torch.Tensor, inference_params: InferenceParams):
         # import pdb; pdb.set_trace()
         hidden_states = self._create_hidden_states_buffer(input_ids)
-        hidden_states.copy_(self.model.embed_tokens(input_ids))
+        hidden_states.data[:] = self.model.embed_tokens(input_ids)
 
         # We need to update offsets before every forward pass to make cache work properly.
         lengths = input_ids.ne(0).sum(dim=1)
@@ -371,17 +500,15 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         # We choose logits coresponding with last token in each sequence,
         # which have various lengths - they are stored in (inference_params.incoming_seq_len - 1)
         # Tensor when qkv_format == "thd" and
-            # they are the last token in the sequence when qkv_format != "thd".
-            # import pdb; pdb.set_trace()
-        import pdb; pdb.set_trace()
+        # they are the last token in the sequence when qkv_format != "thd".
+        # import pdb; pdb.set_trace()
+        if self.config.qkv_format == "thd":
+            logits = logits[
 
-        # if self.config.qkv_format == "thd":
-        #     logits = logits[
-
-        #         torch.arange(logits.size(0)), lengths - 1, :
-        #     ]
-        # else:
-        logits = logits[:, -1, :]
+                torch.arange(logits.size(0)), lengths - 1, :
+            ]
+        else:
+            logits = logits[:, -1, :]
 
         next_tokens = torch.argmax(logits, dim=1)
 
@@ -443,7 +570,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             inference_params = self._create_inference_params(
                 max_batch_size=batch_size,
                 # num_layers=self.config.num_hidden_layers,
-                max_sequence_length=128,
+                max_sequence_length=self._next_64_multiply(max_input_sequence_len + max_new_tokens),
                 num_heads_kv=self.config.num_key_value_heads,
                 # num_heads_q=self.config.num_attention_heads,
                 head_dim_v=self.config.head_dim,
