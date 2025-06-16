@@ -42,7 +42,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   tail -n +7 "${TEST_CASE}_gpu_0.log"
   # Check and print the log content accordingly
-  elif grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
+  if grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE SKIPPED"
   elif grep -q "PASSED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE PASSED"
