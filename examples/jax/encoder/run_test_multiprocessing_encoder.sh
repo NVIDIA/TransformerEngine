@@ -51,7 +51,9 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   fi
 
   # Remove the log file after processing it
+  wait
   rm ${TEST_CASE}_gpu_*.log
 done
 
+wait
 exit $HAS_FAILURE
