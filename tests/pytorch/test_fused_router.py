@@ -1,6 +1,6 @@
 import torch
 import math
-from typing import Optional
+from typing import Optional, Dict
 from transformer_engine.pytorch.router_func import (
     fused_topk_softmax_sigmoid,
     fused_compute_scores_for_aux_loss,
@@ -10,12 +10,17 @@ import pytest
 from copy import deepcopy
 
 seed = 42
-atol = 1e-6
-rtol = 1e-4
+def dtype_tols(dtype: torch.dtype):
+    if dtype == torch.float32:
+        return 1.0e-6, 1.0e-4
+    if dtype == torch.float16:
+        return 3.0e-3, 1.0e-5
+    if dtype == torch.bfloat16:
+        return 2.0e-2, 1.0e-5
+    raise ValueError(f"Unsuppored dtype ({dtype})")
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
-
 
 # Pytorch-based group topk
 def group_limited_topk(
@@ -134,6 +139,7 @@ def aux_loss_pytorch(
 
 
 def run_comparison(
+    dtype,
     num_tokens,
     num_experts,
     topk,
@@ -142,17 +148,18 @@ def run_comparison(
     group_topk,
     scaling_factor,
     score_function,
-    enable_bais,
+    enable_bias,
 ):
+    atol, rtol = dtype_tols(dtype)
     # Set some parameters
     if score_function == "sigmoid":
-        logits = torch.arange(num_experts, device="cuda", dtype=torch.float32) * 0.1
+        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 0.1
         logits = logits.unsqueeze(0).repeat(num_tokens, 1)
     else:
-        logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=torch.float32) * 1e-4
+        logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=dtype) * 1e-4
     logits = logits.view(num_tokens, num_experts)
     logits.requires_grad = True
-    if enable_bais and score_function == "sigmoid":
+    if enable_bias and score_function == "sigmoid":
         expert_bias = torch.arange(num_experts, device="cuda") * 0.1
         expert_bias.requires_grad = True
     else:
@@ -206,23 +213,25 @@ def run_comparison(
     # Check the gradient
     assert torch.allclose(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
-
+@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
-@pytest.mark.parametrize("enable_bais", [True, False])
+@pytest.mark.parametrize("enable_bias", [True, False])
 def test_topk_sigmoid(
+    dtype,
     num_tokens,
     num_experts,
     topk,
     group_topk,
     scaling_factor,
-    enable_bais,
+    enable_bias,
 ):
     num_groups = 8 if group_topk else None
     run_comparison(
+        dtype=dtype,
         num_tokens=num_tokens,
         num_experts=num_experts,
         topk=topk,
@@ -231,10 +240,10 @@ def test_topk_sigmoid(
         group_topk=group_topk,
         scaling_factor=scaling_factor,
         score_function="sigmoid",
-        enable_bais=enable_bais,
+        enable_bias=enable_bias,
     )
 
-
+@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
@@ -242,6 +251,7 @@ def test_topk_sigmoid(
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 def test_topk_softmax(
+    dtype,
     num_tokens,
     num_experts,
     topk,
@@ -251,6 +261,7 @@ def test_topk_softmax(
 ):
     num_groups = 8 if group_topk else None
     run_comparison(
+        dtype=dtype,
         num_tokens=num_tokens,
         num_experts=num_experts,
         topk=topk,
@@ -259,7 +270,7 @@ def test_topk_softmax(
         group_topk=group_topk,
         scaling_factor=scaling_factor,
         score_function="softmax",
-        enable_bais=False,
+        enable_bias=False,
     )
 
 
@@ -270,19 +281,21 @@ def profile_topk_softmax():
     group_topk = 2
     scaling_factor = 1.2
 
-    enable_bais = False
-    test_topk_sigmoid(num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bais)
+    enable_bias = False
+    test_topk_sigmoid(num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias)
 
     use_pre_softmax = True
     test_topk_softmax(num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)
 
 
+@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
-def test_fused_scores_for_aux_loss(num_tokens, num_experts, topk, score_function):
-    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=torch.float32)
+def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
+    atol, rtol = dtype_tols(dtype)
+    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
     logits.requires_grad = True
 
     logits_clone = deepcopy(logits)
@@ -317,11 +330,13 @@ def test_fused_scores_for_aux_loss(num_tokens, num_experts, topk, score_function
     ), f"logits.grad are not close: {logits.grad} != {logits_clone.grad}"
 
 
+@pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
 @pytest.mark.parametrize("topk", [4])
-def test_fused_aux_loss(num_tokens, num_experts, topk):
-    probs = torch.randn(num_tokens, num_experts, device="cuda", dtype=torch.float32)
+def test_fused_aux_loss(dtype, num_tokens, num_experts, topk):
+    atol, rtol = dtype_tols(dtype)
+    probs = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
     probs.requires_grad = True
 
     tokens_per_expert = torch.randint(1, 1000, (num_experts,), device="cuda", dtype=torch.int32)

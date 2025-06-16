@@ -26,7 +26,7 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ DataType shmem[];
+  extern __shared__ float shmem[];
   DataType *scores_buf = reinterpret_cast<DataType *>(shmem);
   DataType *topk_scores_buf =
       reinterpret_cast<DataType *>(scores_buf + num_experts * num_token_per_block);
@@ -193,7 +193,7 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
     // Revert Expert bias from the topk scores
     if (expert_bias && score_function == 0) {
       for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-        topk_scores[i] -= expert_bias[topk_indices[i]];
+        topk_scores[i] = double(topk_scores[i]) - double(expert_bias[topk_indices[i]]);
       }
     }
     __syncwarp();
@@ -212,9 +212,9 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
     // score_function == 0 means sigmoid
     if (score_function == 0) {
       if (topk > 1) {
-        auto sum_scores = warp_reduce_on_shmem(topk_scores, topk, sum, lane_id);
+        float sum_scores = warp_reduce_on_shmem(topk_scores, topk, sum, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-          topk_scores[i] = topk_scores[i] / (sum_scores + epsilon);
+          topk_scores[i] = float(topk_scores[i]) / (sum_scores + epsilon);
         }
       }
       __syncwarp();
@@ -223,7 +223,7 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
     // Write the probs/routing_map to the output tensor
     for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
       routing_map[pos_offset + topk_indices[i]] = true;
-      probs[pos_offset + topk_indices[i]] = scaling_factor * topk_scores[i];
+      probs[pos_offset + topk_indices[i]] = scaling_factor * double(topk_scores[i]);
     }
     __threadfence_block();
     __syncwarp();
@@ -288,7 +288,7 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ DataType shmem[];
+  extern __shared__ float shmem[];
   DataType *grad_probs_buf = reinterpret_cast<DataType *>(shmem);
   // To store the output of softmax/sigmoid from the fwd
   DataType *act_from_fwd_buf =
@@ -343,23 +343,23 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
     // In-place update
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       if (local_routing_map[i]) {
-        local_grad[i] = local_grad[i] * scaling_factor;
+        local_grad[i] = float(local_grad[i]) * scaling_factor;
       }
     }
     __syncwarp();
     // Sigmoid Post-processing bwd when topk > 1
     if (topk > 1 && score_function == 0) {
-      auto sum_fwd_input = masked_warp_reduce_on_shmem(
+      float sum_fwd_input = masked_warp_reduce_on_shmem(
           /*data ptr = */ local_act_from_fwd,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
           /*reduce func = */ sum, lane_id);
       // Put the result of output * grad to the comp_buf
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = (local_routing_map[i] ? local_grad[i] * local_act_from_fwd[i] : 0.0f);
+        local_comp_buf[i] = (local_routing_map[i] ? float(local_grad[i]) * float(local_act_from_fwd[i]) : 0.0f);
       }
       __syncwarp();
-      auto sum_Output_x_Grad = masked_warp_reduce_on_shmem(
+      float sum_Output_x_Grad = masked_warp_reduce_on_shmem(
           /*data ptr = */ local_comp_buf,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
@@ -368,7 +368,7 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {
           local_grad[i] =
-              local_grad[i] / (sum_fwd_input + epsilon) -
+              float(local_grad[i]) / (sum_fwd_input + epsilon) -
               sum_Output_x_Grad / ((sum_fwd_input + epsilon) * (sum_fwd_input + epsilon));
         } else {
           local_grad[i] = 0.0f;

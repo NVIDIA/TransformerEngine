@@ -26,8 +26,8 @@ __global__ void fused_scores_for_aux_loss_forward_kernel(const DataType *logits,
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ DataType shmem[];
-  DataType *logits_buf = reinterpret_cast<DataType *>(shmem);
+  extern __shared__ float shmem_scores_for_aux_loss[];
+  DataType *logits_buf = reinterpret_cast<DataType *>(shmem_scores_for_aux_loss);
   DataType *topk_logits_buf =
       reinterpret_cast<DataType *>(logits_buf + num_experts * num_token_per_block);
   int *topk_indices_buf = reinterpret_cast<int *>(topk_logits_buf + topk * num_token_per_block);
@@ -103,7 +103,7 @@ __global__ void fused_scores_for_aux_loss_forward_kernel(const DataType *logits,
       if (topk > 1) {
         auto sum_logits = warp_reduce_on_shmem(local_logits, num_experts, sum, lane_id);
         for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-          local_logits[i] = local_logits[i] / (sum_logits + epsilon);
+          local_logits[i] = double(local_logits[i]) / (double(sum_logits) + epsilon);
         }
       }
       __syncwarp();
@@ -174,7 +174,7 @@ __global__ void fused_scores_for_aux_loss_backward_kernel(const DataType *interm
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ DataType shmem[];
+  extern __shared__ float shmem[];
   DataType *grad_scores_buf = reinterpret_cast<DataType *>(shmem);
   // To store the output of softmax/sigmoid from the fwd
   DataType *act_from_fwd_buf =
@@ -233,8 +233,8 @@ __global__ void fused_scores_for_aux_loss_backward_kernel(const DataType *interm
       auto sum_Output_x_Grad = warp_reduce_on_shmem(local_comp_buf, num_experts, sum, lane_id);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_grad[i] = local_grad[i] / (sum_fwd_input + epsilon) -
-                        sum_Output_x_Grad / ((sum_fwd_input + epsilon) * (sum_fwd_input + epsilon));
+        local_grad[i] = double(local_grad[i]) / (double(sum_fwd_input) + epsilon) -
+                        double(sum_Output_x_Grad) / ((double(sum_fwd_input) + epsilon) * (double(sum_fwd_input) + epsilon));
       }
     }
     __syncwarp();

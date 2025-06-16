@@ -17,7 +17,9 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
   int warp_num = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ DataType aggregated_probs_per_expert[];
+  extern __shared__ float shmem_aux_loss[];
+  DataType* aggregated_probs_per_expert = reinterpret_cast<DataType*>(shmem_aux_loss);
+  
   // Clear the shmem
   for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
     aggregated_probs_per_expert[i] = 0;
@@ -60,7 +62,7 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
              * Section: Compute the aux_loss
              */
       float C_coeff = (num_experts * coeff) / topk / num_tokens / num_tokens;
-      aux_loss[0] = intermediate_result * C_coeff;
+      aux_loss[0] = DataType(double(intermediate_result) * C_coeff);
       Const_buf[0] = C_coeff;
     }
   }
@@ -107,9 +109,9 @@ __global__ void fused_aux_loss_backward_kernel(const float* Const_buf,
 
   // Loop: for all positions in each row
   for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-    DataType C_coeff = Const_buf[0];
+    float C_coeff = Const_buf[0];
     IndexType tokens_per_expert_i = tokens_per_expert[i];
-    DataType grad_aux_loss_value = grad_aux_loss[0];
+    double grad_aux_loss_value = double(grad_aux_loss[0]);
     // Loop: for all rows
     for (int j = global_warp_id; j < num_tokens; j += global_warp_num) {
       grad_probs[j * num_experts + i] = C_coeff * tokens_per_expert_i * grad_aux_loss_value;

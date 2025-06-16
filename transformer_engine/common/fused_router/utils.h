@@ -32,7 +32,7 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, T (*reduce_
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile T val = lane_id < data_size ? data_ptr[lane_id] : 0;
+  volatile float val = lane_id < data_size ? float(data_ptr[lane_id]) : float(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     val = reduce_func(val, data_ptr[i]);
   }
@@ -44,13 +44,13 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, T (*reduce_
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
   __syncwarp();
-  return val;
+  return T(val);
 }
 
 template <typename DataType>
 __device__ inline void apply_sigmoid_on_float(DataType *scores, int data_size, int lane_id) {
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    scores[i] = float(1.0 / (1.0 + exp(-float(scores[i]))));
+    scores[i] = float(1.0f / (1.0f + exp(-float(scores[i]))));
   }
 }
 
@@ -60,7 +60,7 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile T val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : 0;
+  volatile float val = lane_id < data_size && mask[lane_id] ? float(data_ptr[lane_id]) : float(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);
@@ -74,14 +74,14 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
   __syncwarp();
-  return val;
+  return T(val);
 }
 
 template <typename DataType>
 __device__ inline void apply_sigmoid_bwd_on_float(DataType *grad, DataType *fwd_output,
                                                   int data_size, int lane_id) {
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    grad[i] = grad[i] * fwd_output[i] * (1 - fwd_output[i]);
+    grad[i] = float(grad[i]) * float(fwd_output[i]) * (1 - float(fwd_output[i]));
   }
 }
 
@@ -144,13 +144,13 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   // After looping topk times, the topk_indices will be the topk indices
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
-    volatile T val = (lane_id < data_size) ? scores[lane_id] : 0.0f;
+    volatile float val = (lane_id < data_size) ? float(scores[lane_id]) : float(0);
     volatile int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      volatile T cur_val = scores[i];
+      volatile float cur_val = scores[i];
       if (cur_val > val) {
         val = cur_val;
         index = i;
@@ -168,23 +168,31 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     if (lane_id == 0) {
       topk_indices[k] = index;
       topk_scores[k] = val;
-      scores[index] = -1.0f - val;  // make the selected experts using val = - 1 - val
+      scores[index] = float(-1.0) - val;  // make the selected experts using val = - 1 - val
     }
     __syncwarp();
   }
 
   // Reset the scores to the original value
   for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-    scores[topk_indices[i]] = -1.0f - scores[topk_indices[i]];
+    scores[topk_indices[i]] = float(-1.0) - float(scores[topk_indices[i]]);
   }
 }
 
-// Current TE only support float32, float64 probs should be considered in the future
+// Current TE only support float32/bf16/fp16, float64 probs should be considered in the future
 #define TE_ROUTER_PROBS_TYPE_SWITCH_ALL(dtype, type, ...) \
   switch (dtype) {                                        \
     using namespace transformer_engine;                   \
     case DType::kFloat32: {                               \
       using type = float;                                 \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
+    case DType::kFloat16: {                               \
+      using type = fp16;                                  \
+      { __VA_ARGS__ }                                     \
+    } break;                                              \
+    case DType::kBFloat16: {                              \
+      using type = bf16;                                  \
       { __VA_ARGS__ }                                     \
     } break;                                              \
     default:                                              \
