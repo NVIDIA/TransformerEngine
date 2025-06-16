@@ -40,7 +40,6 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   wait
   tail -n +7 "${TEST_CASE}_gpu_0.log"
 
-  tail -n +7 "${TEST_CASE}_gpu_0.log"
   # Check and print the log content accordingly
   if grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE SKIPPED"
