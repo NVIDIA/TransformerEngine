@@ -273,21 +273,6 @@ def test_topk_softmax(
         enable_bias=False,
     )
 
-
-def profile_topk_softmax():
-    num_tokens = 1
-    num_experts = 16
-    topk = 2
-    group_topk = 2
-    scaling_factor = 1.2
-
-    enable_bias = False
-    test_topk_sigmoid(num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias)
-
-    use_pre_softmax = True
-    test_topk_softmax(num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)
-
-
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
@@ -376,7 +361,23 @@ def test_fused_aux_loss(dtype, num_tokens, num_experts, topk):
     ), f"probs.grad are not close: {probs.grad} != {probs_clone.grad}"
 
 
+def profile_topk_softmax(
+    dtype,
+    num_tokens,
+    num_experts,
+    topk,
+    enable_bias,
+    use_pre_softmax,
+):
+    group_topk = 4 
+    scaling_factor = 1.2
+    test_topk_sigmoid(torch.float32, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias)
+    test_topk_softmax(torch.float32, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)
+
+
 if __name__ == "__main__":
-    test_fused_scores_for_aux_loss(num_tokens=2, num_experts=128, topk=4, score_function="sigmoid")
-    test_fused_aux_loss(num_tokens=23171, num_experts=64, topk=4)
-    profile_topk_softmax()
+    test_fused_scores_for_aux_loss(dtype=torch.float32, num_tokens=2, num_experts=256, topk=8, score_function="sigmoid")
+    test_fused_aux_loss(dtype=torch.float32, num_tokens=2, num_experts=256, topk=8)
+    profile_topk_softmax(dtype=torch.float32, num_tokens=1, num_experts=256, topk=8, enable_bias=False, use_pre_softmax=True)
+    profile_topk_softmax(dtype=torch.float32, num_tokens=1, num_experts=256, topk=8, enable_bias=True, use_pre_softmax=False)
+

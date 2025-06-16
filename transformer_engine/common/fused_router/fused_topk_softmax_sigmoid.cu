@@ -212,9 +212,9 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
     // score_function == 0 means sigmoid
     if (score_function == 0) {
       if (topk > 1) {
-        float sum_scores = warp_reduce_on_shmem(topk_scores, topk, sum, lane_id);
+        double sum_scores = warp_reduce_on_shmem(topk_scores, topk, sum, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-          topk_scores[i] = float(topk_scores[i]) / (sum_scores + epsilon);
+          topk_scores[i] = double(topk_scores[i]) / (sum_scores + epsilon);
         }
       }
       __syncwarp();
@@ -343,23 +343,23 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
     // In-place update
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       if (local_routing_map[i]) {
-        local_grad[i] = float(local_grad[i]) * scaling_factor;
+        local_grad[i] = double(local_grad[i]) * scaling_factor;
       }
     }
     __syncwarp();
     // Sigmoid Post-processing bwd when topk > 1
     if (topk > 1 && score_function == 0) {
-      float sum_fwd_input = masked_warp_reduce_on_shmem(
+      double sum_fwd_input = masked_warp_reduce_on_shmem(
           /*data ptr = */ local_act_from_fwd,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
           /*reduce func = */ sum, lane_id);
       // Put the result of output * grad to the comp_buf
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = (local_routing_map[i] ? float(local_grad[i]) * float(local_act_from_fwd[i]) : 0.0f);
+        local_comp_buf[i] = (local_routing_map[i] ? double(local_grad[i]) * double(local_act_from_fwd[i]) : 0.0f);
       }
       __syncwarp();
-      float sum_Output_x_Grad = masked_warp_reduce_on_shmem(
+      double sum_Output_x_Grad = masked_warp_reduce_on_shmem(
           /*data ptr = */ local_comp_buf,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
@@ -368,7 +368,7 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {
           local_grad[i] =
-              float(local_grad[i]) / (sum_fwd_input + epsilon) -
+              double(local_grad[i]) / (sum_fwd_input + epsilon) -
               sum_Output_x_Grad / ((sum_fwd_input + epsilon) * (sum_fwd_input + epsilon));
         } else {
           local_grad[i] = 0.0f;

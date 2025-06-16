@@ -32,7 +32,7 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, T (*reduce_
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile float val = lane_id < data_size ? float(data_ptr[lane_id]) : float(0);
+  volatile double val = lane_id < data_size ? double(data_ptr[lane_id]) : double(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     val = reduce_func(val, data_ptr[i]);
   }
@@ -60,7 +60,7 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile float val = lane_id < data_size && mask[lane_id] ? float(data_ptr[lane_id]) : float(0);
+  volatile double val = lane_id < data_size && mask[lane_id] ? double(data_ptr[lane_id]) : double(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);
@@ -81,7 +81,7 @@ template <typename DataType>
 __device__ inline void apply_sigmoid_bwd_on_float(DataType *grad, DataType *fwd_output,
                                                   int data_size, int lane_id) {
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
-    grad[i] = float(grad[i]) * float(fwd_output[i]) * (1 - float(fwd_output[i]));
+    grad[i] = double(grad[i]) * double(fwd_output[i]) * (1 - double(fwd_output[i]));
   }
 }
 
@@ -144,13 +144,13 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   // After looping topk times, the topk_indices will be the topk indices
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
-    volatile float val = (lane_id < data_size) ? float(scores[lane_id]) : float(0);
+    volatile double val = (lane_id < data_size) ? double(scores[lane_id]) : double(0);
     volatile int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      volatile float cur_val = scores[i];
+      volatile double cur_val = scores[i];
       if (cur_val > val) {
         val = cur_val;
         index = i;
@@ -168,14 +168,14 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     if (lane_id == 0) {
       topk_indices[k] = index;
       topk_scores[k] = val;
-      scores[index] = float(-1.0) - val;  // make the selected experts using val = - 1 - val
+      scores[index] = double(-1.0) - val;  // make the selected experts using val = - 1 - val
     }
     __syncwarp();
   }
 
   // Reset the scores to the original value
   for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-    scores[topk_indices[i]] = float(-1.0) - float(scores[topk_indices[i]]);
+    scores[topk_indices[i]] = double(-1.0) - double(scores[topk_indices[i]]);
   }
 }
 
