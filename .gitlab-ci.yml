@@ -51,9 +51,6 @@ variables:
       value: 0
     TAG_ROOT:
       description: Base for container tags (<TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>)
-    SEND_SLACK_MESSAGE:
-      description: Send Slack message when the CI pipeline completes
-      value: 1
 
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -586,41 +583,6 @@ upload_logs:
           test $CURL_RESULT && exit 0
       done
     - exit 1
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
-      when: always
-  tags:
-    - vm-builder
-
-send_result_to_slack:
-  stage: build stage
-  script:
-    - GH_USERNAME=$(jq -r '.comment.user.login' <<< "${githubData}")
-    - |
-      if [[ -z "${GH_USERNAME}" ]]; then
-        echo "Error: GH_USERNAME is empty. Please provide a valid GitHub username."
-        exit 1
-      fi
-    - SLACK_USER_ID="(Unknown GitHub user ${GH_USERNAME})"
-    - if [[ "${GH_USERNAME}" == "jberchtold-nvidia" ]]; then SLACK_USER_ID="<@U023NP29RHV>" ; fi
-    - |
-      function jq_in_place() {
-        jq "$@" > "${2}.tmp" && mv "${2}.tmp" "$2";
-      }
-    - |
-      function sendSlackMessage() {
-        if [[ "${SEND_SLACK_MESSAGE}" == "1" ]]; then
-          SLACK_MESSAGE_MRKDWN=${1}
-          PARENT_MESSAGE_TS=${2}
-          jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-model-perf-ci" > payload.json 
-          [ -n "${SLACK_MESSAGE_MRKDWN}" ] && jq_in_place '.blocks += [{type: "section", text: {type: "mrkdwn", text: $mrkdwn}}]' payload.json --arg mrkdwn "${SLACK_MESSAGE_MRKDWN}"
-          [ -n "$PARENT_MESSAGE_TS" ] && jq_in_place '. += {"thread_ts" : $ts}' payload.json --arg ts ${PARENT_MESSAGE_TS//\"/}
-          curl -X POST https://slack.com/api/chat.postMessage -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H "Content-Type: application/json" -d @payload.json -o response.json || (echo "Curl command failed with status $?"; exit 1)
-          cat response.json | jq '.' > /dev/null
-          (jq -e '.ok == true' response.json > /dev/null && echo $(jq -e '.ts' response.json)) || (echo "Slack API request failed"; exit 1)
-        fi
-      }
-    - sendSlackMessage "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed. $SLACK_USER_ID"
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
