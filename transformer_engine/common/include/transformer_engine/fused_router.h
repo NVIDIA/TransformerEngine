@@ -19,7 +19,7 @@ extern "C" {
  *  \param[in]     num_tokens      Number of tokens.
  *  \param[in]     num_experts     Number of experts.
  *  \param[in]     topk            Topk value.
- *  \param[in]     use_pre_softmax Whether to use softmax before topk.  
+ *  \param[in]     use_pre_softmax Whether to use softmax before topk.
  *  \param[in]     num_groups      Number of groups in grouped topk.
  *  \param[in]     group_topk      Grouped topk value.
  *  \param[in]     scaling_factor  Scaling factor.
@@ -30,7 +30,12 @@ extern "C" {
  *  \param[out]    intermediate_output  Output tensor for intermediate output. (Softmax/sigmoid output)
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_topk_softmax_sigmoid_forward(const NVTETensor logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax, int num_groups, int group_topk, float scaling_factor, int score_function, const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map, NVTETensor intermediate_output, cudaStream_t stream);
+void nvte_fused_topk_softmax_sigmoid_forward(const NVTETensor logits, int num_tokens,
+                                             int num_experts, int topk, bool use_pre_softmax,
+                                             int num_groups, int group_topk, float scaling_factor,
+                                             int score_function, const NVTETensor expert_bias,
+                                             NVTETensor probs, NVTETensor routing_map,
+                                             NVTETensor intermediate_output, cudaStream_t stream);
 
 /*! \brief Backward pass for fused topk + softmax/sigmoid.
  *
@@ -44,9 +49,14 @@ void nvte_fused_topk_softmax_sigmoid_forward(const NVTETensor logits, int num_to
  *  \param[in]     scaling_factor  Scaling factor.
  *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.
  *  \param[out]    grad_logits     Gradient of logits.
- *  \param[in]     stream          CUDA stream used for the operation.  
+ *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_topk_softmax_sigmoid_backward(const NVTETensor routing_map, const NVTETensor intermediate_output, const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
+void nvte_fused_topk_softmax_sigmoid_backward(const NVTETensor routing_map,
+                                              const NVTETensor intermediate_output,
+                                              const NVTETensor grad_probs, int num_tokens,
+                                              int num_experts, int topk, bool use_pre_softmax,
+                                              float scaling_factor, int score_function,
+                                              NVTETensor grad_logits, cudaStream_t stream);
 
 /*! \brief Forward pass for computing scores/routing map for auxiliary loss.
  *
@@ -54,13 +64,17 @@ void nvte_fused_topk_softmax_sigmoid_backward(const NVTETensor routing_map, cons
  *  \param[in]     num_tokens      Number of tokens.
  *  \param[in]     num_experts     Number of experts.
  *  \param[in]     topk            Topk value.
- *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.  
+ *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax.
  *  \param[out]    scores          Output tensor for scores.
  *  \param[in]     routing_map     Routing map.
  *  \param[in]     intermediate_output  Intermediate output from the forward pass. (Softmax/sigmoid output)
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_scores_for_aux_loss_forward(const NVTETensor logits, int num_tokens, int num_experts, int topk, int score_function, NVTETensor scores, const NVTETensor routing_map, const NVTETensor intermediate_output, cudaStream_t stream);
+void nvte_fused_scores_for_aux_loss_forward(const NVTETensor logits, int num_tokens,
+                                            int num_experts, int topk, int score_function,
+                                            NVTETensor scores, const NVTETensor routing_map,
+                                            const NVTETensor intermediate_output,
+                                            cudaStream_t stream);
 
 /*! \brief Backward pass for computing scores/routing map for auxiliary loss.
  *
@@ -73,7 +87,10 @@ void nvte_fused_scores_for_aux_loss_forward(const NVTETensor logits, int num_tok
  *  \param[out]    grad_logits      Gradient of logits.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_output, const NVTETensor grad_scores, int num_tokens, int num_experts, int topk, int score_function, NVTETensor grad_logits, cudaStream_t stream);
+void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_output,
+                                             const NVTETensor grad_scores, int num_tokens,
+                                             int num_experts, int topk, int score_function,
+                                             NVTETensor grad_logits, cudaStream_t stream);
 
 /*! \brief Forward pass for auxiliary loss.
  *
@@ -87,7 +104,9 @@ void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_outpu
  *  \param[out]    Const_buf       Output GPU scalar for temporary constant buffer for backward pass.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert, int num_tokens, int num_experts, int topk, float coeff, NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream);
+void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
+                                 int num_tokens, int num_experts, int topk, float coeff,
+                                 NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *
@@ -99,7 +118,9 @@ void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens
  *  \param[out]    grad_probs      Gradient of probs.
  *  \param[in]     stream          CUDA stream used for the operation.
  */
-void nvte_fused_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert, int num_tokens, int num_experts, NVTETensor grad_aux_loss, NVTETensor grad_probs, cudaStream_t stream);   
+void nvte_fused_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert,
+                                  int num_tokens, int num_experts, NVTETensor grad_aux_loss,
+                                  NVTETensor grad_probs, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

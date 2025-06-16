@@ -16,6 +16,7 @@ torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
 
+
 # Pytorch-based group topk
 def group_limited_topk(
     scores: torch.Tensor,
@@ -26,9 +27,7 @@ def group_limited_topk(
     group_topk: int,
 ):
     group_scores = (
-        scores.view(num_tokens, num_groups, -1)
-        .topk(topk // group_topk, dim=-1)[0]
-        .sum(dim=-1)
+        scores.view(num_tokens, num_groups, -1).topk(topk // group_topk, dim=-1)[0].sum(dim=-1)
     )
     group_idx = torch.topk(group_scores, k=group_topk, dim=-1, sorted=False)[1]
     group_mask = torch.zeros_like(group_scores)
@@ -46,6 +45,7 @@ def group_limited_topk(
 
     return probs, top_indices
 
+
 # Pytorch-based topk softmax/sigmoid
 def topk_softmax_sigmoid_pytorch(
     logits: torch.Tensor,
@@ -58,6 +58,7 @@ def topk_softmax_sigmoid_pytorch(
     expert_bias: Optional[torch.Tensor] = None,
 ):
     num_tokens, num_experts = logits.shape
+
     def compute_topk(scores, topk, num_groups=None, group_topk=None):
         if group_topk:
             return group_limited_topk(
@@ -82,15 +83,11 @@ def topk_softmax_sigmoid_pytorch(
         scores = torch.sigmoid(logits.float()).type_as(logits)
         if expert_bias is not None:
             scores_for_routing = scores + expert_bias
-            _, top_indices = compute_topk(
-                scores_for_routing, topk, num_groups, group_topk
-            )
+            _, top_indices = compute_topk(scores_for_routing, topk, num_groups, group_topk)
             scores = torch.gather(scores, dim=1, index=top_indices).type_as(logits)
         else:
             scores, top_indices = compute_topk(scores, topk, num_groups, group_topk)
-        probs = (
-            scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
-        )
+        probs = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
     else:
         raise ValueError(f"Invalid score_function: {score_function}")
 
@@ -102,21 +99,23 @@ def topk_softmax_sigmoid_pytorch(
 
     return topk_masked_gates, topk_map
 
+
 # Pytorch-based compute routing scores for aux loss
-def compute_scores_for_aux_loss_pytorch(logits: torch.Tensor, topk: int, score_function: str) -> torch.Tensor:
+def compute_scores_for_aux_loss_pytorch(
+    logits: torch.Tensor, topk: int, score_function: str
+) -> torch.Tensor:
     if score_function == "softmax":
         scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
     elif score_function == "sigmoid":
         scores = torch.sigmoid(logits)
-        scores = (
-            scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
-        )
+        scores = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
     else:
         raise ValueError(f"Invalid score_function: {score_function}")
 
     _, top_indices = torch.topk(scores, k=topk, dim=1)
     routing_map = torch.zeros_like(logits).int().scatter(1, top_indices, 1).bool()
     return routing_map, scores
+
 
 # Pytorch-based aux loss
 def aux_loss_pytorch(
@@ -158,7 +157,7 @@ def run_comparison(
         expert_bias.requires_grad = True
     else:
         expert_bias = None
-        
+
     # Clone the input tensor
     logits_clone = deepcopy(logits)
     logits_clone.requires_grad = True
@@ -235,6 +234,7 @@ def test_topk_sigmoid(
         enable_bais=enable_bais,
     )
 
+
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
@@ -261,7 +261,7 @@ def test_topk_softmax(
         score_function="softmax",
         enable_bais=False,
     )
-    
+
 
 def profile_topk_softmax():
     num_tokens = 1
@@ -274,7 +274,7 @@ def profile_topk_softmax():
     test_topk_sigmoid(num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bais)
 
     use_pre_softmax = True
-    test_topk_softmax(num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)    
+    test_topk_softmax(num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)
 
 
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
@@ -287,7 +287,7 @@ def test_fused_scores_for_aux_loss(num_tokens, num_experts, topk, score_function
 
     logits_clone = deepcopy(logits)
     logits_clone.requires_grad = True
-    
+
     routing_map, scores = compute_scores_for_aux_loss_pytorch(
         logits=logits,
         topk=topk,
@@ -300,15 +300,22 @@ def test_fused_scores_for_aux_loss(num_tokens, num_experts, topk, score_function
         score_function=score_function,
     )
 
-    assert torch.allclose(scores, scores_fused, atol=atol, rtol=rtol), f"scores are not close: {scores} != {scores_fused}"
-    assert torch.allclose(routing_map, routing_map_fused, atol=atol, rtol=rtol), f"routing_map are not close: {routing_map} != {routing_map_fused}"
+    assert torch.allclose(
+        scores, scores_fused, atol=atol, rtol=rtol
+    ), f"scores are not close: {scores} != {scores_fused}"
+    assert torch.allclose(
+        routing_map, routing_map_fused, atol=atol, rtol=rtol
+    ), f"routing_map are not close: {routing_map} != {routing_map_fused}"
 
     loss = torch.sum(scores)
     loss.backward()
     loss_fused = torch.sum(scores_fused)
     loss_fused.backward()
-    
-    assert torch.allclose(logits.grad, logits_clone.grad, atol=atol, rtol=rtol), f"logits.grad are not close: {logits.grad} != {logits_clone.grad}"
+
+    assert torch.allclose(
+        logits.grad, logits_clone.grad, atol=atol, rtol=rtol
+    ), f"logits.grad are not close: {logits.grad} != {logits_clone.grad}"
+
 
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
@@ -341,13 +348,17 @@ def test_fused_aux_loss(num_tokens, num_experts, topk):
         coeff=coeff,
     )
 
-    assert torch.allclose(aux_loss, aux_loss_fused), f"aux_loss are not close: {aux_loss} != {aux_loss_fused}"
-    
+    assert torch.allclose(
+        aux_loss, aux_loss_fused
+    ), f"aux_loss are not close: {aux_loss} != {aux_loss_fused}"
+
     # Backward
     aux_loss.backward()
     aux_loss_fused.backward()
 
-    assert torch.allclose(probs.grad, probs_clone.grad, atol=atol, rtol=rtol), f"probs.grad are not close: {probs.grad} != {probs_clone.grad}"
+    assert torch.allclose(
+        probs.grad, probs_clone.grad, atol=atol, rtol=rtol
+    ), f"probs.grad are not close: {probs.grad} != {probs_clone.grad}"
 
 
 if __name__ == "__main__":

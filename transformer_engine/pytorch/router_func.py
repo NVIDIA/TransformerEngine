@@ -1,9 +1,11 @@
 import torch
 import transformer_engine_torch as tex
 
+
 class FusedTopkSoftmaxSigmoid(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, 
+    def forward(
+        ctx,
         logits: torch.Tensor,
         topk: int,
         use_pre_softmax: bool,
@@ -11,18 +13,18 @@ class FusedTopkSoftmaxSigmoid(torch.autograd.Function):
         group_topk: int,
         scaling_factor: float,
         score_function: str,
-        expert_bias: torch.Tensor
+        expert_bias: torch.Tensor,
     ):
         probs, routing_map, intermediate_output = tex.fused_topk_softmax_sigmod_fwd(
-                logits, 
-                topk, 
-                use_pre_softmax, 
-                num_groups, 
-                group_topk, 
-                scaling_factor, 
-                score_function, 
-                expert_bias
-            )
+            logits,
+            topk,
+            use_pre_softmax,
+            num_groups,
+            group_topk,
+            scaling_factor,
+            score_function,
+            expert_bias,
+        )
         ctx.save_for_backward(routing_map, intermediate_output)
         ctx.num_tokens = logits.size(0)
         ctx.num_experts = logits.size(1)
@@ -44,7 +46,7 @@ class FusedTopkSoftmaxSigmoid(torch.autograd.Function):
             ctx.topk,
             ctx.use_pre_softmax,
             ctx.scaling_factor,
-            ctx.score_function
+            ctx.score_function,
         )
         return grad_logits, None, None, None, None, None, None, None
 
@@ -60,14 +62,25 @@ def fused_topk_softmax_sigmoid(
     expert_bias: torch.Tensor,
 ):
     if logits.dtype != torch.float32:
-        raise ValueError("Current TE only support float32 router type, but got {}".format(logits.dtype))
-    return FusedTopkSoftmaxSigmoid.apply(logits, topk, use_pre_softmax, num_groups, group_topk, scaling_factor, score_function, expert_bias)
-
+        raise ValueError(
+            "Current TE only support float32 router type, but got {}".format(logits.dtype)
+        )
+    return FusedTopkSoftmaxSigmoid.apply(
+        logits,
+        topk,
+        use_pre_softmax,
+        num_groups,
+        group_topk,
+        scaling_factor,
+        score_function,
+        expert_bias,
+    )
 
 
 class FusedComputeScoresForAuxLoss(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, 
+    def forward(
+        ctx,
         logits: torch.Tensor,
         topk: int,
         score_function: str,
@@ -83,7 +96,7 @@ class FusedComputeScoresForAuxLoss(torch.autograd.Function):
         ctx.num_tokens = logits.size(0)
         ctx.num_experts = logits.size(1)
         return routing_map, scores
-    
+
     @staticmethod
     def backward(ctx, grad_routing_map, grad_scores):
         intermediate_output = ctx.saved_tensors[0]
@@ -96,7 +109,8 @@ class FusedComputeScoresForAuxLoss(torch.autograd.Function):
             score_function=ctx.score_function,
         )
         return grad_logits, None, None
-    
+
+
 def fused_compute_scores_for_aux_loss(
     logits: torch.Tensor,
     topk: int,
@@ -104,9 +118,11 @@ def fused_compute_scores_for_aux_loss(
 ):
     return FusedComputeScoresForAuxLoss.apply(logits, topk, score_function)
 
+
 class FusedAuxLoss(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, 
+    def forward(
+        ctx,
         probs: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         num_tokens: int,
@@ -119,14 +135,14 @@ class FusedAuxLoss(torch.autograd.Function):
             tokens_per_expert=tokens_per_expert,
             num_tokens=num_tokens,
             num_experts=num_experts,
-            topk=topk,      
+            topk=topk,
             coeff=coeff,
         )
         ctx.save_for_backward(Const_buf, tokens_per_expert)
         ctx.num_tokens = num_tokens
-        ctx.num_experts = num_experts       
+        ctx.num_experts = num_experts
         return aux_loss
-    
+
     @staticmethod
     def backward(ctx, grad_aux_loss):
         Const_buf, tokens_per_expert = ctx.saved_tensors
@@ -138,7 +154,7 @@ class FusedAuxLoss(torch.autograd.Function):
             grad_aux_loss=grad_aux_loss,
         )
         return grad_probs, None, None, None, None, None
-    
+
 
 def fused_aux_loss(
     probs: torch.Tensor,
