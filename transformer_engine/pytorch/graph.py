@@ -64,6 +64,7 @@ def _make_graphed_callables(
     fp8_weight_caching: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
+    _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     io_memory_reduction: bool = False,
@@ -112,34 +113,63 @@ def _make_graphed_callables(
         # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/pipeline_parallel/schedules.py.
         # Note: The model is assumed to consist of layers
         # (corresponding to callables) that are grouped into
-        # equally-sized model chunks. _order is a list of chunk
-        # indices (1-indexed) that indicates the order in which the
-        # layers are evaluated. Positive values indicate forward
-        # passes and negative values indicate backward passes. Each
+        # model chunks. _num_layers_per_chunk is a list of integers
+        # that indicates the number of layers in each model chunk.
+        # _order is a list of chunk indices (1-indexed) that
+        # indicates the order in which the layers are evaluated.
+        # Positive values indicate forward passes and negative
+        # values indicate backward passes. Each
         # entry in sample_args corresponds to one of the forward
         # passes.
         num_model_chunks = max(_order)
         num_microbatches = len(_order) // num_model_chunks // 2
         assert num_model_chunks * num_microbatches * 2 == len(_order)
-        assert len(sample_args) * 2 >= len(_order) and (
-            len(sample_args) * 2 % len(_order) == 0
-        ), f"{len(sample_args)} >= {len(_order)} and {len(sample_args)} % {len(_order)} == 0"
-        num_layers = len(sample_args) // num_model_chunks // num_microbatches
-        assert len(callables) == num_model_chunks * num_layers, (
-            f"Callables should have ({num_model_chunks * num_layers}) "
+        if _num_layers_per_chunk is None:
+            assert len(sample_args) * 2 >= len(_order) and (
+                len(sample_args) * 2 % len(_order) == 0
+            ), f"{len(sample_args)} * 2 >= {len(_order)} and {len(sample_args)} * 2 % {len(_order)} == 0"
+            num_layers = len(sample_args) // num_model_chunks // num_microbatches
+            _num_layers_per_chunk = [num_layers] * num_model_chunks
+        else:
+            assert (
+                isinstance(_num_layers_per_chunk, int)
+                or len(_num_layers_per_chunk) == num_model_chunks
+            ), (
+                f"If _num_layers_per_chunk is provided, it must be an integer or a list of {num_model_chunks} integers, "
+                f"but got {_num_layers_per_chunk}."
+            )
+            if isinstance(_num_layers_per_chunk, int):
+                _num_layers_per_chunk = [_num_layers_per_chunk] * num_model_chunks
+        total_num_layers = sum(_num_layers_per_chunk)
+        assert len(callables) == total_num_layers, (
+            f"Callables should have ({total_num_layers}) "
             + f"entries when order input is provided but got {len(callables)}."
         )
-        assert len(sample_args) == num_model_chunks * num_microbatches * num_layers, (
-            f"Expected {num_model_chunks * num_microbatches}"
+        assert len(sample_args) == total_num_layers * num_microbatches, (
+            f"Expected {total_num_layers * num_microbatches}"
             + f"args tuple, but got {len(sample_args)}."
         )
+
+        # The starting index of each chunk in callables.
+        _prefix_num_layers = [0]
+        for m_chunk in range(num_model_chunks):
+            num_layers = _num_layers_per_chunk[m_chunk]
+            _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
+        assert (
+            len(sample_args) == _prefix_num_layers[-1] * num_microbatches
+        ), f"Expected {_prefix_num_layers[-1] * num_microbatches} args tuple, but got {len(sample_args)}."
+
         assert len(sample_kwargs) == len(sample_args)
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     if io_memory_reduction:
-        assert _order is not None, "`_order` must be provided when `io_memory_reduction` is True."
+        assert (
+            _order is not None
+        ), "`_order` must be provided when `io_memory_reduction` is True."
         assert is_training, "`io_memory_reduction` is only available in training mode."
-        assert isinstance(sample_args, list), "sample_args must be a list for io_memory_reduction."
+        assert isinstance(
+            sample_args, list
+        ), "sample_args must be a list for io_memory_reduction."
         len_args = len(sample_args[0])
         for i in range(len(sample_args)):
             assert len_args == len(
@@ -170,42 +200,34 @@ def _make_graphed_callables(
                 sa[k] = sample_kwargs[0][k].detach()
 
         # Reorganize args and kwargs for input tensor reuse
-        fwd_order_qs = {}
-        fwd_order_accu = 0
-        bwd_order_q = []
-        per_callable_fwd_idx_recorder = []
+        fwd_sample_qs = {}
+        consumed_sample_q = []
         fwd_idx = [0] * num_model_chunks
         for c_id in _order:
-            if c_id > 0:
-                # Record the fwd order pattern.
-                if c_id in fwd_order_qs:
-                    fwd_order_qs[c_id].append(fwd_order_accu)
-                else:
-                    fwd_order_qs[c_id] = [fwd_order_accu]
-                fwd_order_accu += 1
-                if bwd_order_q:
-                    # It can use the tensor buffer of a previous one.
-                    reuse_fwd_idx = fwd_order_qs[abs(bwd_order_q.pop(0))].pop(0)
-                else:
-                    reuse_fwd_idx = -1
+            m_chunk = abs(c_id) - 1
 
-                m_chunk = c_id - 1
-                for l_no in range(num_layers):
-                    per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) + (
-                        fwd_idx[m_chunk] * num_layers + l_no
-                    )
-                    per_callable_fwd_idx_recorder.append(per_callable_fwd_idx)
-                    if reuse_fwd_idx >= 0:
-                        reuse_per_callable_fwd_idx = per_callable_fwd_idx_recorder[
-                            reuse_fwd_idx * num_layers + l_no
-                        ]
-                        sample_args[per_callable_fwd_idx] = sample_args[reuse_per_callable_fwd_idx]
+            if c_id > 0:
+                sample_start_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                    fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk]
+                )
+                fwd_sample_idx = [
+                    sample_start_idx + i for i in range(_num_layers_per_chunk[m_chunk])
+                ]
+                fwd_sample_qs[m_chunk] = fwd_sample_qs.get(m_chunk, []) + fwd_sample_idx
+                for per_callable_fwd_idx in fwd_sample_idx:
+                    if consumed_sample_q:
+                        reuse_fwd_idx = consumed_sample_q.pop(0)
+                        sample_args[per_callable_fwd_idx] = sample_args[reuse_fwd_idx]
                         sample_kwargs[per_callable_fwd_idx] = sample_kwargs[
-                            reuse_per_callable_fwd_idx
+                            reuse_fwd_idx
                         ]
                 fwd_idx[m_chunk] += 1
             else:
-                bwd_order_q.append(c_id)
+                num_consumed_samples = min(
+                    len(fwd_sample_qs[m_chunk]), _num_layers_per_chunk[m_chunk]
+                )
+                consumed_sample_q += fwd_sample_qs[m_chunk][:num_consumed_samples]
+                fwd_sample_qs[m_chunk] = fwd_sample_qs[m_chunk][num_consumed_samples:]
 
     if fp8_weight_caching:
         # Initialize flag that controls FP8 weight updates
@@ -259,10 +281,15 @@ def _make_graphed_callables(
         per_callable_module_params = []
         for m_chunk in range(num_model_chunks):
             for _ in range(num_microbatches):
-                for l_no in range(num_layers):
+                for l_no in range(_num_layers_per_chunk[m_chunk]):
                     per_callable_module_params.append(
-                        tuple(callables[m_chunk * num_layers + l_no].parameters())
-                        if isinstance(callables[m_chunk * num_layers + l_no], torch.nn.Module)
+                        tuple(
+                            callables[_prefix_num_layers[m_chunk] + l_no].parameters()
+                        )
+                        if isinstance(
+                            callables[_prefix_num_layers[m_chunk] + l_no],
+                            torch.nn.Module,
+                        )
                         else ()
                     )
         assert len(per_callable_module_params) == len(flatten_sample_args)
@@ -301,10 +328,10 @@ def _make_graphed_callables(
         for c_id in _order:
             if c_id > 0:
                 m_chunk = c_id - 1
-                for l_no in range(num_layers):
-                    func = callables[m_chunk * num_layers + l_no]
-                    func_idx = (m_chunk * num_microbatches * num_layers) + (
-                        fwd_idx[m_chunk] * num_layers + l_no
+                for l_no in range(_num_layers_per_chunk[m_chunk]):
+                    func = callables[_prefix_num_layers[m_chunk] + l_no]
+                    func_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                        fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
                     warmup_func_idx.append(func_idx)
                     warmup_func.append(func)
@@ -372,11 +399,11 @@ def _make_graphed_callables(
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
-                for l_no in range(num_layers):
-                    func = callables[m_chunk * num_layers + l_no]
-                    per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) + (
-                        fwd_idx[m_chunk] * num_layers + l_no
-                    )
+                for l_no in range(_num_layers_per_chunk[m_chunk]):
+                    func = callables[_prefix_num_layers[m_chunk] + l_no]
+                    per_callable_fwd_idx = (
+                        _prefix_num_layers[m_chunk] * num_microbatches
+                    ) + (fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
@@ -390,17 +417,18 @@ def _make_graphed_callables(
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
-                for l_no in list(reversed(range(num_layers))):
-                    per_callable_bwd_idx = (m_chunk * num_microbatches * num_layers) + (
-                        bwd_idx[m_chunk] * num_layers + l_no
-                    )
+                for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
+                    per_callable_bwd_idx = (
+                        _prefix_num_layers[m_chunk] * num_microbatches
+                    ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
                     if not io_memory_reduction or static_grad_outputs is None:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                            torch.empty_like(o) if o.requires_grad else None
+                            for o in static_outputs
                         )
                     if is_training:
                         with torch.cuda.graph(bwd_graph, pool=mempool):
@@ -430,14 +458,16 @@ def _make_graphed_callables(
 
                     if io_memory_reduction:
                         # Weak ref the static outputs and static grad inputs.
-                        per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
-                            static_outputs
+                        per_callable_static_outputs[per_callable_bwd_idx] = (
+                            make_weak_ref(static_outputs)
                         )
                         if previous_per_callable_bwd_idx is not None:
-                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
-                                make_weak_ref(
-                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
-                                )
+                            per_callable_static_grad_inputs[
+                                previous_per_callable_bwd_idx
+                            ] = make_weak_ref(
+                                per_callable_static_grad_inputs[
+                                    previous_per_callable_bwd_idx
+                                ]
                             )
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
                         del static_outputs, static_grad_inputs, grad_inputs
@@ -726,6 +756,7 @@ def make_graphed_callables(
     fp8_group: Optional[dist_group_type] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
+    _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     io_memory_reduction: bool = False,
@@ -834,6 +865,7 @@ def make_graphed_callables(
             fp8_weight_caching=fp8_weight_caching,
             sample_kwargs=sample_kwargs,
             _order=_order,
+            _num_layers_per_chunk=_num_layers_per_chunk,
             pool=pool,
             retain_graph_in_backward=retain_graph_in_backward,
             io_memory_reduction=io_memory_reduction,
