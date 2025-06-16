@@ -23,6 +23,7 @@ from .helper import (
     QuantizeConfig,
     AmaxComputeAlgo,
 )
+from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
 __all__ = [
     "QuantizeLayout",
@@ -607,9 +608,10 @@ class GroupedQuantizer(Quantizer):
 
     def __post_init__(self):
         if self.quantizers[0] is None:
-            self.quantizers = QuantizerFactory.create(
+            quantizers = QuantizerFactory.create(
                 self.n_groups, self.scaling_mode, self.q_dtype, self.q_layout
             )
+            self.quantizers = (quantizers,) if not isinstance(quantizers, tuple) else quantizers
         self.data_layout = self.quantizers[0].data_layout
 
     def _create_grouped_tensor_from_tensor_list(
@@ -841,9 +843,11 @@ class QuantizerFactory:
         if is_2x2x:
             q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE_COLWISE
         else:
-            q_layout_x = QuantizeLayout.ROWWISE
-            q_layout_kernel = QuantizeLayout.COLWISE
-            q_layout_dgrad = None
+            q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE
+            if scaling_mode.is_1d_block_scaling():
+                q_layout_kernel = QuantizeLayout.COLWISE
+            if QuantizeConfig.INFERENCE_MODE:
+                q_layout_dgrad = None
 
         if "quantize_meta_set" in kwargs:
             quantize_meta_set = kwargs.get("quantize_meta_set")
@@ -898,7 +902,12 @@ class QuantizerFactory:
         scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
         fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
         bwd_dtype = bwd_dtype or QuantizeConfig.BWD_DTYPE
-        is_2x2x = is_2x2x or QuantizeConfig.IF_QUANTIZE_2X
+        is_2x_recipe = scaling_mode.is_1d_block_scaling() or (
+            not is_fp8_gemm_with_all_layouts_supported() and scaling_mode.is_tensor_scaling()
+        )
+        is_2x2x = is_2x2x or is_2x_recipe
+        is_inference_mode = QuantizeConfig.INFERENCE_MODE
+        assert not is_inference_mode, "Inference mode is not supported yet!"
 
         q_set = []
         for _ in range(n_quantizer_sets):
