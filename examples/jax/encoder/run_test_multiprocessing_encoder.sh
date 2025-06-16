@@ -57,4 +57,4 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   rm ${TEST_CASE}_gpu_*.log
 done
 
-exit $HAS_FAILURE
+return $HAS_FAILURE
