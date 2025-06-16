@@ -51,9 +51,6 @@ variables:
       value: 0
     TAG_ROOT:
       description: Base for container tags (<TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>)
-    SEND_SLACK_MESSAGE:
-      description: Send Slack message when the CI pipeline completes
-      value: 1
 
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
