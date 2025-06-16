@@ -29,7 +29,7 @@ RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" == "core" ]] \
   && apt-get update \
   && apt-get install -y git python3 python3-pip \
-  && pip3 install cmake==3.21.0 nvidia-cudnn-cu12 \
+  && pip3 install cmake==3.21.0 nvidia-cudnn-cu12==9.9.0.52 \
   || [[ ! "${FRAMEWORK}" == "core" ]]
 EOF
 RUN pip3 install ninja pybind11
