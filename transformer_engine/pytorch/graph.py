@@ -127,7 +127,10 @@ def _make_graphed_callables(
         if _num_layers_per_chunk is None:
             assert len(sample_args) * 2 >= len(_order) and (
                 len(sample_args) * 2 % len(_order) == 0
-            ), f"{len(sample_args)} * 2 >= {len(_order)} and {len(sample_args)} * 2 % {len(_order)} == 0"
+            ), (
+                f"{len(sample_args)} * 2 >= {len(_order)} and {len(sample_args)} * 2 %"
+                f" {len(_order)} == 0"
+            )
             num_layers = len(sample_args) // num_model_chunks // num_microbatches
             _num_layers_per_chunk = [num_layers] * num_model_chunks
         else:
@@ -135,8 +138,8 @@ def _make_graphed_callables(
                 isinstance(_num_layers_per_chunk, int)
                 or len(_num_layers_per_chunk) == num_model_chunks
             ), (
-                f"If _num_layers_per_chunk is provided, it must be an integer or a list of {num_model_chunks} integers, "
-                f"but got {_num_layers_per_chunk}."
+                "If _num_layers_per_chunk is provided, it must be an integer or a list of"
+                f" {num_model_chunks} integers, but got {_num_layers_per_chunk}."
             )
             if isinstance(_num_layers_per_chunk, int):
                 _num_layers_per_chunk = [_num_layers_per_chunk] * num_model_chunks
@@ -155,21 +158,18 @@ def _make_graphed_callables(
         for m_chunk in range(num_model_chunks):
             num_layers = _num_layers_per_chunk[m_chunk]
             _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
-        assert (
-            len(sample_args) == _prefix_num_layers[-1] * num_microbatches
-        ), f"Expected {_prefix_num_layers[-1] * num_microbatches} args tuple, but got {len(sample_args)}."
+        assert len(sample_args) == _prefix_num_layers[-1] * num_microbatches, (
+            f"Expected {_prefix_num_layers[-1] * num_microbatches} args tuple, but got"
+            f" {len(sample_args)}."
+        )
 
         assert len(sample_kwargs) == len(sample_args)
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     if io_memory_reduction:
-        assert (
-            _order is not None
-        ), "`_order` must be provided when `io_memory_reduction` is True."
+        assert _order is not None, "`_order` must be provided when `io_memory_reduction` is True."
         assert is_training, "`io_memory_reduction` is only available in training mode."
-        assert isinstance(
-            sample_args, list
-        ), "sample_args must be a list for io_memory_reduction."
+        assert isinstance(sample_args, list), "sample_args must be a list for io_memory_reduction."
         len_args = len(sample_args[0])
         for i in range(len(sample_args)):
             assert len_args == len(
@@ -218,9 +218,7 @@ def _make_graphed_callables(
                     if consumed_sample_q:
                         reuse_fwd_idx = consumed_sample_q.pop(0)
                         sample_args[per_callable_fwd_idx] = sample_args[reuse_fwd_idx]
-                        sample_kwargs[per_callable_fwd_idx] = sample_kwargs[
-                            reuse_fwd_idx
-                        ]
+                        sample_kwargs[per_callable_fwd_idx] = sample_kwargs[reuse_fwd_idx]
                 fwd_idx[m_chunk] += 1
             else:
                 num_consumed_samples = min(
@@ -283,9 +281,7 @@ def _make_graphed_callables(
             for _ in range(num_microbatches):
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
                     per_callable_module_params.append(
-                        tuple(
-                            callables[_prefix_num_layers[m_chunk] + l_no].parameters()
-                        )
+                        tuple(callables[_prefix_num_layers[m_chunk] + l_no].parameters())
                         if isinstance(
                             callables[_prefix_num_layers[m_chunk] + l_no],
                             torch.nn.Module,
@@ -401,9 +397,9 @@ def _make_graphed_callables(
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
                     func = callables[_prefix_num_layers[m_chunk] + l_no]
-                    per_callable_fwd_idx = (
-                        _prefix_num_layers[m_chunk] * num_microbatches
-                    ) + (fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
+                    per_callable_fwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                        fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
+                    )
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
@@ -418,17 +414,16 @@ def _make_graphed_callables(
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
                 for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
-                    per_callable_bwd_idx = (
-                        _prefix_num_layers[m_chunk] * num_microbatches
-                    ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
+                    per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
+                        bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
+                    )
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
                     if not io_memory_reduction or static_grad_outputs is None:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o.requires_grad else None
-                            for o in static_outputs
+                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
                         with torch.cuda.graph(bwd_graph, pool=mempool):
@@ -458,16 +453,14 @@ def _make_graphed_callables(
 
                     if io_memory_reduction:
                         # Weak ref the static outputs and static grad inputs.
-                        per_callable_static_outputs[per_callable_bwd_idx] = (
-                            make_weak_ref(static_outputs)
+                        per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
+                            static_outputs
                         )
                         if previous_per_callable_bwd_idx is not None:
-                            per_callable_static_grad_inputs[
-                                previous_per_callable_bwd_idx
-                            ] = make_weak_ref(
-                                per_callable_static_grad_inputs[
-                                    previous_per_callable_bwd_idx
-                                ]
+                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
+                                make_weak_ref(
+                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
+                                )
                             )
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
                         del static_outputs, static_grad_inputs, grad_inputs
