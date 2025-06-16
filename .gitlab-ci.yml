@@ -117,7 +117,6 @@ before_script:
       CURL_ATTEMPTS: 3
       CURL_SLEEP: 5
     script:
-    - echo ${githubData}
     - export CI_TIMESTAMP=$(date +%Y%m%d)                                                          && echo "${CI_TIMESTAMP}"
     - export REPO="${ORIGIN1/${CI_PROJECT_NAME}/${CI_JOB_NAME}}"
     - git config --global user.name "gitlab-runner"
