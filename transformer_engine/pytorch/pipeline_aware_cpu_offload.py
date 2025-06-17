@@ -6,7 +6,9 @@ import torch
 
 from .tensor.quantized_tensor import QuantizedTensorBase
 from .tensor.float8_tensor import Float8Tensor
+
 # cpu offload for pipeline
+
 
 class PipelineOffloadManager:
     OFFLOAD_MGR = None
@@ -20,6 +22,7 @@ class PipelineOffloadManager:
     def get_instance(cls):
         if cls.OFFLOAD_MGR is None:
             from megatron.core import parallel_state
+
             cls.init_instance(parallel_state)
 
         return cls.OFFLOAD_MGR
@@ -138,9 +141,9 @@ OFFLOAD_TAG = "offloading_mlp_input"
 def offloading_checker(tensor):
     global OFFLOAD_TAG
     return (
-            hasattr(tensor, OFFLOAD_TAG)
-            and getattr(tensor, OFFLOAD_TAG)
-            and not isinstance(tensor, torch.nn.Parameter)
+        hasattr(tensor, OFFLOAD_TAG)
+        and getattr(tensor, OFFLOAD_TAG)
+        and not isinstance(tensor, torch.nn.Parameter)
     )
 
 
@@ -223,8 +226,8 @@ class ChunkOffloadHandler:
         if not torch_stray_tensor:
             tensor_need_offload = False
             if (
-                    self.tensor_need_offloading_checker is not None
-                    and self.tensor_need_offloading_checker(tensor)
+                self.tensor_need_offloading_checker is not None
+                and self.tensor_need_offloading_checker(tensor)
             ):
                 # set_offload_tag(tensor)
                 tensor_need_offload = True
@@ -258,7 +261,7 @@ class ChunkOffloadHandler:
 
     def tensor_pop(self, tensor_tag):
         assert (
-                tensor_tag in self._tensor_tag_to_state
+            tensor_tag in self._tensor_tag_to_state
         ), f"{tensor_tag}, {self._tensor_tag_to_state.keys()}"
 
         tensor = self._tensor_tag_to_state.pop(tensor_tag)
@@ -330,12 +333,16 @@ class ChunkOffloadHandler:
                         for state_tuple in state_list:
                             recovered_tensor = self.reload(state_tuple)
                             self._tensor_tag_to_state[tensor_label].append(recovered_tensor)
-                        _ = self._fp8_tensor_object_map[tensor_label].restore_from_saved(self._tensor_tag_to_state[state])
+                        _ = self._fp8_tensor_object_map[tensor_label].restore_from_saved(
+                            self._tensor_tag_to_state[state]
+                        )
                         if isinstance(self._fp8_tensor_object_map[tensor_label], Float8Tensor):
                             self._fp8_tensor_object_map[tensor_label]._transpose_invalid = (
                                 self._float8_transpose_cache_valid.pop(tensor_label)
                             )
-                        self._tensor_tag_to_state[tensor_label] = self._fp8_tensor_object_map.pop(tensor_label)
+                        self._tensor_tag_to_state[tensor_label] = self._fp8_tensor_object_map.pop(
+                            tensor_label
+                        )
 
         self._offloaded_group_count = group_to_reload
         self._b_event.record(self.h2d_stream)
