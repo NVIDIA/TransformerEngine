@@ -725,7 +725,7 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
                "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kInt16,
+    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kInt16,
                "Param remainder tensor ", j, " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kInt16));
   }
@@ -770,7 +770,8 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
                "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == fp8_dtype,
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == fp8_dtype
+               || tensor_lists[1][j]->dtype() == DType::kByte,
                "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(fp8_dtype));
     NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
