@@ -902,10 +902,13 @@ class QuantizerFactory:
         scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
         fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
         bwd_dtype = bwd_dtype or QuantizeConfig.BWD_DTYPE
-        is_2x_recipe = scaling_mode.is_1d_block_scaling() or (
-            not is_fp8_gemm_with_all_layouts_supported() and scaling_mode.is_tensor_scaling()
-        )
-        is_2x2x = is_2x_recipe if is_2x2x is None else is_2x2x
+        if is_2x2x is None:
+            if scaling_mode.is_1d_block_scaling():
+                is_2x2x = True
+            elif scaling_mode.is_tensor_scaling():
+                is_2x2x = not is_fp8_gemm_with_all_layouts_supported()
+            else:   # NO_SCALING ignores is_2x2x for now
+                is_2x2x = False
         is_inference_mode = QuantizeConfig.INFERENCE_MODE
         assert not is_inference_mode, "Inference mode is not supported yet!"
 
@@ -920,4 +923,4 @@ class QuantizerFactory:
         return q_set[0] if len(q_set) == 1 else tuple(q_set)
 
 
-noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING)
+noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False)
