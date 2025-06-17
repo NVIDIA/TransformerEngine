@@ -6,13 +6,13 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
 # Define the test cases to run
 TEST_CASES=(
-# "test_te_bf16"
+"test_te_bf16"
 "test_te_delayed_scaling_fp8"
-# "test_te_current_scaling_fp8"
-# "test_te_mxfp8"
-# "test_te_bf16_shardy"
+"test_te_current_scaling_fp8"
+"test_te_mxfp8"
+"test_te_bf16_shardy"
 "test_te_delayed_scaling_fp8_shardy"
-# "test_te_current_scaling_fp8_shardy"
+"test_te_current_scaling_fp8_shardy"
 )
 
 echo
@@ -40,21 +40,20 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   wait
   tail -n +7 "${TEST_CASE}_gpu_0.log"
 
-  tail -n +7 "${TEST_CASE}_gpu_0.log"
   # Check and print the log content accordingly
-  if grep -q "FAILED" "${TEST_CASE}_gpu_0.log"; then
-    HAS_FAILURE=1
-    echo "... $TEST_CASE FAILED"
-  elif grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
+  if grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE SKIPPED"
   elif grep -q "PASSED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE PASSED"
   else
-    echo "Invalid ${TEST_CASE}_gpu_0.log"
+    HAS_FAILURE=1
+    echo "... $TEST_CASE FAILED"
   fi
 
   # Remove the log file after processing it
+  wait
   rm ${TEST_CASE}_gpu_*.log
 done
 
+wait
 exit $HAS_FAILURE
