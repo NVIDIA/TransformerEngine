@@ -7,7 +7,7 @@ import math
 import operator
 from collections.abc import Iterable
 from typing import Tuple, Sequence, Union
-from functools import partial, reduce, lru_cache
+from functools import partial, reduce
 
 import jax
 import jax.numpy as jnp
@@ -18,13 +18,14 @@ import transformer_engine_jax as tex
 from transformer_engine_jax import get_device_compute_capability, get_num_compute_streams
 
 from .base import BasePrimitive, register_primitive
-from .quantization import quantize, grouped_quantize
+from .quantization import grouped_quantize
 from ..quantize import (
     ScaledTensor,
     ScaledTensor2x,
     GroupedScaledTensor1x,
     ScalingMode,
     Quantizer,
+    BlockScaleQuantizer,
     GroupedQuantizer,
     QuantizeConfig,
     QuantizerSet,
@@ -123,6 +124,10 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
         )
         if isinstance(lhs_q, ScaledTensor2x):
             lhs_q = lhs_q.get_rowwise_tensor() if lhs_is_rowwise else lhs_q.get_colwise_tensor()
+        if jnp.any(jnp.isnan(lhs_q.data)):
+            print("Found NaNs in quantized LHS data.")
+        if jnp.any(jnp.isnan(lhs_q.scale_inv)):
+            print("Found NaNs in quantized LHS scale_inv.")
 
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
         rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
@@ -136,6 +141,10 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
         )
         if isinstance(rhs_q, ScaledTensor2x):
             rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_rowwise else rhs_q.get_colwise_tensor()
+        if jnp.any(jnp.isnan(rhs_q.data)):
+            print("Found NaNs in quantized RHS data.")
+        if jnp.any(jnp.isnan(rhs_q.scale_inv)):
+            print("Found NaNs in quantized RHS scale_inv.")
 
     return lhs_q, rhs_q
 
@@ -165,7 +174,10 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
     ):
+        del use_split_accumulator
+
         # Sanity-check operand layouts and types
         operand_ndims = (lhs.ndim, rhs.ndim)
         (
@@ -288,6 +300,7 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
     ):
         del out_dtype
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
@@ -306,6 +319,7 @@ class GemmPrimitive(BasePrimitive):
             "fuse_bias": fuse_bias,
             "fuse_gelu": fuse_gelu,
             "grad": grad,
+            "use_split_accumulator": use_split_accumulator,
         }
 
         operand_output_aliases = {}
@@ -333,6 +347,7 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
     ):
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -347,6 +362,7 @@ class GemmPrimitive(BasePrimitive):
             fuse_bias=fuse_bias,
             fuse_gelu=fuse_gelu,
             grad=grad,
+            use_split_accumulator=use_split_accumulator,
         )
         return outputs[:-3]  # discard workspace arrays
 
@@ -360,6 +376,7 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
     ):
         assert GemmPrimitive.outer_primitive is not None
         lhs, _, rhs, *_ = batched_args
@@ -381,6 +398,7 @@ class GemmPrimitive(BasePrimitive):
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
                 grad=grad,
+                use_split_accumulator=use_split_accumulator,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -393,11 +411,12 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del out_dtype, scaling_mode, result_infos
+        del out_dtype, scaling_mode, use_split_accumulator, result_infos
 
         # Check contracting dimensions
         lhs_spec, _, rhs_spec, *_ = map(get_padded_spec, arg_infos)
@@ -467,6 +486,7 @@ class GemmPrimitive(BasePrimitive):
         fuse_bias,
         fuse_gelu,
         grad,
+        use_split_accumulator,
         mesh,
         arg_infos,
         result_infos,
@@ -478,6 +498,7 @@ class GemmPrimitive(BasePrimitive):
             fuse_bias,
             fuse_gelu,
             grad,
+            use_split_accumulator,
             mesh,
             arg_infos,
             result_infos,
@@ -535,6 +556,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
+    use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
 ) -> Tuple[jax.Array, ...]:
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
@@ -600,6 +622,7 @@ def _te_gemm(
         fuse_bias=fuse_bias,
         fuse_gelu=fuse_gelu,
         grad=grad,
+        use_split_accumulator=use_split_accumulator,
     )
 
 
@@ -889,6 +912,12 @@ def _jax_gemm(
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
 
     if isinstance(lhs_q, ScaledTensor) and isinstance(rhs_q, ScaledTensor):
+        if isinstance(lhs_q, ScaledTensor2x):
+            lhs_is_transposed = lhs.ndim - 1 not in sanitize_dims(lhs.ndim, contracting_dims[0])
+            lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
+        if isinstance(rhs_q, ScaledTensor2x):
+            rhs_is_transposed = rhs.ndim - 1 in sanitize_dims(rhs.ndim, contracting_dims[1])
+            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
         return _jax_gemm_fp8_impl(lhs_q, rhs_q)
 
     if (
@@ -941,6 +970,9 @@ def gemm(
     grad: bool, default = False
         Flag for switching bias and GeLU fusions from forward to backward mode. Only supported with
         TE's custom call to cuBLAS GEMM.
+    use_split_accumulator: bool, default = True
+        Enable promoting some intermediate sums to higher precision when accumulating the result in
+        the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
 
     Returns
     -------
@@ -966,13 +998,15 @@ def gemm(
             rhs_quantizer = quantizer_set.kernel
 
     # Fall back on a native JAX implementation when the custom call to cuBLAS GEMM is disabled
+    fuse_bias = kwargs.get("fuse_bias", False)
+    fuse_gelu = kwargs.get("fuse_gelu", False)
     if not GemmPrimitive.enabled():
-        assert kwargs.get("bias", None) is None and not kwargs.get("fuse_bias", False), (
+        assert kwargs.get("bias", None) is None and not fuse_gelu, (
             "TE GEMM was invoked with bias fusion options that are not supported by the "
             "`jax.lax.dot_general` and `jnp.scaled_matmul` backends used when the custom cuBLAS "
             "GEMM primitive is disabled."
         )
-        assert kwargs.get("gelu_input", None) is None and not kwargs.get("fuse_gelu", False), (
+        assert kwargs.get("gelu_input", None) is None and not fuse_bias, (
             "TE GEMM was invoked with GeLU fusion options that are not supported by the "
             "`jax.lax.dot_general` and `jnp.scaled_matmul` backends used when the custom cuBLAS "
             "GEMM primitive is disabled."
@@ -989,8 +1023,6 @@ def gemm(
     )
 
     # Discard empty outputs
-    fuse_bias = kwargs.get("fuse_bias", False)
-    fuse_gelu = kwargs.get("fuse_gelu", False)
     grad = kwargs.get("grad", False)
     clean_outputs = outputs[0]  # first output is the final result and is never empty
     if (fuse_bias and grad) or (fuse_gelu and not grad):

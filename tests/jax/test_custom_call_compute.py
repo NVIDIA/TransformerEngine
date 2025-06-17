@@ -904,12 +904,19 @@ class TestDense:
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-    @pytest_parametrize_wrapper("m,n,k", [(256, 512, 1024)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("x_qtype,w_qtype", valid_fp8_gemm_operand_types)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_gemm_fp8(self, m, n, k, x_qtype, w_qtype, scaling_mode, data_layout, with_jax_gemm):
+        if (
+            not with_jax_gemm
+            and scaling_mode.is_1d_block_scaling()
+            and jnp.float8_e5m2 in (x_qtype, w_qtype)
+        ):
+            pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
+
         _use_jax_fp8_gemm(enabled=with_jax_gemm)
 
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)

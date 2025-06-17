@@ -157,26 +157,15 @@ class ScaledTensor1x(ScaledTensor):
                     f" scale_inv or {expected_unpadded_scale_shape} for unpadded scale_inv, got"
                     f" {self.scale_inv.shape}"
                 )
-                expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-                    self.data.shape,
-                    self.is_colwise,
-                    is_padded=False,
-                    flatten_axis=self.flatten_axis,
+                pad_width = tuple(
+                    (0, a - b)
+                    for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
                 )
-                if self.scale_inv.shape != expected_scale_shape:
-                    assert self.scale_inv.shape == expected_unpadded_scale_shape, (
-                        f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-                        f" scale_inv or {expected_unpadded_scale_shape} for unpadded scale_inv, got"
-                        f" {self.scale_inv.shape}"
-                    )
-                    pad_width = tuple(
-                        (0, a - b)
-                        for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
-                    )
-                    # This actually pad scale_inv with nan, should we pad it with 127 directly instead?
-                    self.scale_inv = jnp.pad(
-                        self.scale_inv, pad_width=pad_width, mode="constant", constant_values=0
-                    )
+
+                # This actually pad scale_inv with nan, should we pad it with 127 directly instead?
+                self.scale_inv = jnp.pad(
+                    self.scale_inv, pad_width=pad_width, mode="constant", constant_values=0
+                )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.

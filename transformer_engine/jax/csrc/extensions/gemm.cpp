@@ -100,7 +100,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Result_Type lhs_swizzle, Result_Type rhs_swizzle, Result_Type workspace,
                    JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
-                   bool fuse_bias, bool fuse_gelu, bool grad) {
+                   bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator) {
   // Operands (this includes swizzling MXFP8 scaling factors)
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
@@ -162,8 +162,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_.data(),
-                   rhs_transposed, lhs_transposed, grad, workspace_.data(), false, false,
-                   num_math_sm, stream);
+                   rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
+                   use_split_accumulator, num_math_sm, stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -190,7 +190,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("rhs_transposed")
                                   .Attr<bool>("fuse_bias")
                                   .Attr<bool>("fuse_gelu")
-                                  .Attr<bool>("grad"),
+                                  .Attr<bool>("grad")
+                                  .Attr<bool>("use_split_accumulator"),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
