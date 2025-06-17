@@ -214,7 +214,7 @@ class InferenceParams:
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
-        self.cu_pre_step_seqlens = torch.zeros(
+        self.pre_step_seqlens = torch.zeros(
             self.max_batch_size,
             dtype=torch.int32,
             device=torch.cuda.current_device(),
@@ -272,6 +272,11 @@ class InferenceParams:
         for k, v in self.sequences.items():
             self.sequences_pre_step[k] = v - step_dict[k]
 
+        pre_step_seqlens = torch.Tensor(list(self.sequences_pre_step.values())).to(
+            dtype=torch.int32, device="cpu"
+        )
+        self.pre_step_seqlens[:len(pre_step_seqlens)].copy_(pre_step_seqlens, non_blocking=True)
+
         seqlens_q = list(step_dict.values())
         cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, self.batch_size + 1)]
         cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (self.max_batch_size - self.batch_size)
@@ -286,12 +291,13 @@ class InferenceParams:
 
     def get_seqlens_pre_step(self):
         """Get cached sequence lengths before the stepping"""
-        seqlens = torch.Tensor(list(self.sequences_pre_step.values())).to(
-            dtype=torch.int32, device="cpu"
-        )
-        # return seqlens.cuda()
-        self.cu_pre_step_seqlens[:len(seqlens)].copy_(seqlens, non_blocking=True)
-        return self.cu_pre_step_seqlens
+        # seqlens = torch.Tensor(list(self.sequences_pre_step.values())).to(
+        #     dtype=torch.int32, device="cpu"
+        # )
+        # # return seqlens.cuda()
+        # self.cu_pre_step_seqlens[:len(seqlens)].copy_(seqlens, non_blocking=True)
+        # return self.cu_pre_step_seqlens
+        return self.pre_step_seqlens
 
     def convert_paged_to_nonpaged(self, layer_number: int):
         """
