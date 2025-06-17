@@ -1196,7 +1196,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
                     print(DEBUG_BLOCK)
                     if DEBUG_BLOCK is not None:
-                        print(f"Inside attention: {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}")
+                        print(
+                            f"Inside attention: {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}"
+                        )
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -1226,7 +1228,10 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
                     if DEBUG_BLOCK is not None:
-                        print(f"After Inside attention: {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}")
+                        print(
+                            "After Inside attention:"
+                            f" {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}"
+                        )
 
                     # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
                     # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2

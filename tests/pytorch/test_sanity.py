@@ -1248,8 +1248,9 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
     print(block.self_attention.proj.weight._scale_inv)
     print("transpose")
     print(block.self_attention.proj.weight._transpose)
-    
+
     import transformer_engine.pytorch.attention.dot_product_attention.backends as bbb
+
     bbb.DEBUG_BLOCK = block
     print("set!")
 

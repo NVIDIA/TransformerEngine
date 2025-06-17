@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <cstdint>
+
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
@@ -260,15 +261,15 @@ std::vector<py::object> fused_attn_fwd(
   return output_tensors;
 }
 
-float debug_print(const std::string& name, const at::Tensor& t) {
+float debug_print(const std::string &name, const at::Tensor &t) {
   float ret;
   cudaMemcpy(&ret, t.data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
-  std::cout << name << " " << ret << " " << *reinterpret_cast<uint32_t*>(&ret) << std::endl;
+  std::cout << name << " " << ret << " " << *reinterpret_cast<uint32_t *>(&ret) << std::endl;
   return ret;
 }
 
-void debug_print(const std::string& name, const NVTETensor t, bool with_values = false) {
-  int sizes[] = {1,2,4,8,4,2,2,1,1,1,1};
+void debug_print(const std::string &name, const NVTETensor t, bool with_values = false) {
+  int sizes[] = {1, 2, 4, 8, 4, 2, 2, 1, 1, 1, 1};
   for (int i = 0; i < 6; ++i) {
     auto param = nvte_get_tensor_param(t, (NVTETensorParam)i);
     uintptr_t start = reinterpret_cast<uintptr_t>(param.data_ptr);
@@ -276,10 +277,11 @@ void debug_print(const std::string& name, const NVTETensor t, bool with_values =
       auto num = product(param.shape, 0, param.shape.ndim);
       auto end = start + num * sizes[(int)(param.dtype)];
       std::cout << name << " " << start << " " << end << std::endl;
-      std::cout << name << " shape: " << std::to_string(param.shape) << " dtype: " << std::to_string((int)(param.dtype)) << std::endl;
+      std::cout << name << " shape: " << std::to_string(param.shape)
+                << " dtype: " << std::to_string((int)(param.dtype)) << std::endl;
       if (with_values) {
         if ((int)(param.dtype) == 2) {
-          int32_t * values = new int32_t[num];
+          int32_t *values = new int32_t[num];
           cudaMemcpy(values, param.data_ptr, num * sizeof(uint32_t), cudaMemcpyDeviceToHost);
           std::cout << name << " Values" << std::endl;
           for (int i = 0; i < num; ++i) {
