@@ -13,6 +13,7 @@ from transformer_engine_torch import FP8TensorMeta
 from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
+from ..tensor import QuantizedTensor
 from ..utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -25,42 +26,13 @@ def is_float8_tensor(tensor: Any) -> bool:
     return isinstance(tensor, Float8Tensor)
 
 
-def convert_tensor(
-    tensor: torch.Tensor | Float8Tensor,
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor | Float8Tensor:
-    """Convert tensor attributes, keeping same data if possible"""
-
-    # Default kwargs
-    if dtype is None:
-        dtype = tensor.dtype
-
-    if tensor.is_contiguous():
-        if dtype == tensor.dtype:
-            return tensor
-        if is_float8_tensor(tensor):
-            out = Float8Tensor.make_like(tensor, dtype=dtype)
-            out.data = tensor._data
-            return out
-        else:
-            return tensor.to(dtype=dtype)
+def maybe_dequantize(tensor: torch.Tensor | QuantizedTensor, dtype: torch.dtype) -> torch.Tensor:
+    if isinstance(tensor, QuantizedTensor):
+        return tensor.dequantize(dtype=dtype)
+    elif tensor.dtype != dtype:
+        return tensor.to(dtype)
     else:
-        if is_float8_tensor(tensor):
-            out = Float8Tensor.make_like(tensor, dtype=dtype)
-            out.data = tensor._data.contiguous()
-            return out
-        else:
-            return tensor.to(dtype).contiguous()
-
-
-def reshape(
-    tensor: torch.Tensor | Float8Tensor,
-    shape: Iterable[int],
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor | Float8Tensor:
-    """Reshape tensor, keeping same data if possible"""
-    tensor = convert_tensor(tensor, dtype=dtype)
-    return tensor.reshape(*shape)
+        return tensor
 
 
 def maybe_autocast_dtype(

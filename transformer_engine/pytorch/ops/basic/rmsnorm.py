@@ -23,7 +23,7 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, reshape
+from .._common import maybe_autocast_dtype, maybe_dequantize
 
 
 class RMSNorm(BasicOperation):
@@ -179,12 +179,8 @@ class RMSNorm(BasicOperation):
         if device.type != "cuda":
             device = canonicalize_device(None)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
-        x = reshape(input_, (-1, inner_dim), dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), dtype=dtype)
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        if isinstance(w, QuantizedTensor):
-            w = w.dequantize()
+        x = maybe_dequantize(input_, dtype).view((-1, inner_dim))
+        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
@@ -219,7 +215,7 @@ class RMSNorm(BasicOperation):
             ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
-        out = reshape(y, input_dims)
+        out = y.view(input_dims)
         return out
 
     def op_backward(
@@ -238,12 +234,8 @@ class RMSNorm(BasicOperation):
         # Check input tensors
         device = ctx.device
         dtype = ctx.dtype
-        dy = reshape(grad_output, x.size(), dtype=dtype)
-        w = reshape(self.weight, (inner_dim,), dtype=dtype)
-        if isinstance(w, QuantizedTensor):
-            w = w.dequantize()
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize()
+        dy = maybe_dequantize(grad_output, dtype).view(x.size())
+        w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm backward pass
         dx, dw = rmsnorm_bwd(

@@ -16,7 +16,6 @@ from ...tensor import QuantizedTensor
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ...utils import clear_tensor_data, devices_match
 from ..op import BasicOperation, OperationContext
-from .._common import reshape
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -114,7 +113,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Check output tensor
         if y.dim() != x.dim():
-            y = y.reshape(list(x.shape[:-1]) + [-1])
+            y = y.view(list(x.shape[:-1]) + [-1])
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -174,7 +173,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Check grad input tensor
         if dx.size() != x.size():
-            dx = dx.reshape(x.size())
+            dx = dx.view(x.size())
 
         # Clear input tensor if possible
         if ctx.prev_op is not None:
