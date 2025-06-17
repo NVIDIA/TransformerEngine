@@ -905,7 +905,7 @@ class QuantizerFactory:
         is_2x_recipe = scaling_mode.is_1d_block_scaling() or (
             not is_fp8_gemm_with_all_layouts_supported() and scaling_mode.is_tensor_scaling()
         )
-        is_2x2x = is_2x2x or is_2x_recipe
+        is_2x2x = is_2x_recipe if is_2x2x is None else is_2x2x
         is_inference_mode = QuantizeConfig.INFERENCE_MODE
         assert not is_inference_mode, "Inference mode is not supported yet!"
 
