@@ -111,7 +111,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto [lhs_, lhs_shape] = xla_buffer_to_nvte_gemm_operand(
       stream, lhs, lhs_scale_inv, lhs_swizzle, scaling_mode, lhs_axis_boundary, make_lhs_rowwise);
   auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(
-      stream, rhs, rhs_scale_inv, lhs_swizzle, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
+      stream, rhs, rhs_scale_inv, rhs_swizzle, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
 
   // Output tensor
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
