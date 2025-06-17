@@ -445,6 +445,8 @@ def fused_attn_bwd(
             len(aux_ctx_tensors) == 3
         ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
+    import transformer_engine.pytorch.attention.dot_product_attention.backends as bbb
+    debug = bbb.DEBUG_BLOCK.self_attention.proj.weight._scale_inv
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -471,6 +473,7 @@ def fused_attn_bwd(
         s_quantizer,
         dp_quantizer,
         dqkv_quantizer,
+        debug,
     )
 
     return output_tensors

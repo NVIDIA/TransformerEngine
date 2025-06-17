@@ -104,7 +104,7 @@ class ModelConfig:
 
 model_configs = {
     "126m": ModelConfig(12, 2048, 2, 768, 12),
-    "small": ModelConfig(2, 32, 2, 64, 2),
+    "small": ModelConfig(2, 16, 2, 128, 1),
     "weird": ModelConfig(2, 37, 3, 69, 3),
     "large": ModelConfig(1, 128, 2, 512, 4, 128),
 }
@@ -1152,27 +1152,31 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
-@pytest.mark.parametrize("model", ["large"])
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_sanity_attention_extra_state(model, dtype):
     config = model_configs[model]
+    print("regular")
     outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
+    print("checkpointed")
     outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
-    outputs_checkpoint_v1_6 = _run_attention_extra_state(
-        dtype, config, mimic_v1_6=True, checkpoint=True
-    )
+    # outputs_checkpoint_v1_6 = _run_attention_extra_state(
+    #     dtype, config, mimic_v1_6=True, checkpoint=True
+    # )
 
     # Check that results match
     tols = dtype_tols(dtype)
     if dtype in (torch.float16, torch.bfloat16):
         tols.update(dict(rtol=2e-2, atol=2e-3))
     for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        print(i)
         torch.testing.assert_close(
             test,
             ref,
             **tols,
         )
     for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint_v1_6)):
+        print(f"Second loop {i}")
         torch.testing.assert_close(
             test,
             ref,
@@ -1201,6 +1205,8 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
         requires_grad=True,
     )
 
+    torch.set_printoptions(threshold=100_000_000)
+
     def get_model(dtype, config):
         sigma = 0.023
         init_method = init_method_normal(sigma)
@@ -1219,15 +1225,58 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
                 params_dtype=dtype,
                 device="cuda",
             )
+            # block = torch.nn.Sequential(
+            #         Linear(config.hidden_size,
+            #                config.hidden_size),
+            #         Linear(config.hidden_size,
+            #                config.hidden_size),
+            #         Linear(config.hidden_size,
+            #                config.hidden_size),
+            #         Linear(config.hidden_size,
+            #                config.hidden_size))
+            # block.to(dtype=dtype)
         return block
 
     block = get_model(dtype, config)
+    print("Before the first loop")
+    # for n,p in block.named_parameters():
+    #     print(n)
+    #     print(p)
+    print("data")
+    print(block.self_attention.proj.weight._data)
+    print("scale_inv")
+    print(block.self_attention.proj.weight._scale_inv)
+    print("transpose")
+    print(block.self_attention.proj.weight._transpose)
+    
+    import transformer_engine.pytorch.attention.dot_product_attention.backends as bbb
+    bbb.DEBUG_BLOCK = block
+    print("set!")
+
+    print("End before the first loop")
+    print(f"scale inv: {block.self_attention.proj.weight._scale_inv}")
     for i in range(steps // 2):
         with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
-            output = block(hidden_states, None)
+            print(f"scale inv 0: {block.self_attention.proj.weight._scale_inv}")
+            output = block(hidden_states)
+            print(f"scale inv 1: {block.self_attention.proj.weight._scale_inv}")
+            print(f"output {i}")
+            print(output)
             loss = output.sum()
-            loss.backward()
+        loss.backward()
+        print(f"scale inv 2: {block.self_attention.proj.weight._scale_inv}")
 
+    print("Before the checkpoint")
+    # for n,p in block.named_parameters():
+    #     print(n)
+    #     print(p)
+    print("data")
+    print(block.self_attention.proj.weight._data)
+    print("scale_inv")
+    print(block.self_attention.proj.weight._scale_inv)
+    print("transpose")
+    print(block.self_attention.proj.weight._transpose)
+    print("End before the checkpoint")
     if checkpoint:
         sd = block.state_dict()
         if mimic_v1_6:
@@ -1259,10 +1308,23 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
     for i in range((steps + 1) // 2):
         with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
-            output = block(hidden_states, None)
+            output = block(hidden_states)
+            print(f"after output {i}")
+            print(output)
             loss = output.sum()
             loss.backward()
 
+    print("After the checkpoint")
+    # for n,p in block.named_parameters():
+    #     print(n)
+    #     print(p)
+    print("data")
+    print(block.self_attention.proj.weight._data)
+    print("scale_inv")
+    print(block.self_attention.proj.weight._scale_inv)
+    print("transpose")
+    print(block.self_attention.proj.weight._transpose)
+    print("End after the checkpoint")
     torch.cuda.synchronize()
 
     if os.path.exists(path):

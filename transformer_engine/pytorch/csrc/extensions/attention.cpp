@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cstdint>
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
@@ -101,6 +102,7 @@ std::vector<py::object> fused_attn_fwd(
   // create output tensor O
 
   auto o_shape = std::vector<size_t>{q_shape.begin(), q_shape.end()};
+  std::cout << "O shape size: " << o_shape.size() << " V: " << v_shape.size() << std::endl;
   o_shape[o_shape.size() - 1] = v_shape[v_shape.size() - 1];
   py::object o_python, s_python;
   std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
@@ -258,6 +260,41 @@ std::vector<py::object> fused_attn_fwd(
   return output_tensors;
 }
 
+float debug_print(const std::string& name, const at::Tensor& t) {
+  float ret;
+  cudaMemcpy(&ret, t.data_ptr(), sizeof(float), cudaMemcpyDeviceToHost);
+  std::cout << name << " " << ret << " " << *reinterpret_cast<uint32_t*>(&ret) << std::endl;
+  return ret;
+}
+
+void debug_print(const std::string& name, const NVTETensor t, bool with_values = false) {
+  int sizes[] = {1,2,4,8,4,2,2,1,1,1,1};
+  for (int i = 0; i < 6; ++i) {
+    auto param = nvte_get_tensor_param(t, (NVTETensorParam)i);
+    uintptr_t start = reinterpret_cast<uintptr_t>(param.data_ptr);
+    if (start != 0) {
+      auto num = product(param.shape, 0, param.shape.ndim);
+      auto end = start + num * sizes[(int)(param.dtype)];
+      std::cout << name << " " << start << " " << end << std::endl;
+      std::cout << name << " shape: " << std::to_string(param.shape) << " dtype: " << std::to_string((int)(param.dtype)) << std::endl;
+      if (with_values) {
+        if ((int)(param.dtype) == 2) {
+          int32_t * values = new int32_t[num];
+          cudaMemcpy(values, param.data_ptr, num * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+          std::cout << name << " Values" << std::endl;
+          for (int i = 0; i < num; ++i) {
+            std::cout << i << " " << values[i] << std::endl;
+          }
+          std::cout << name << " End Values" << std::endl;
+          delete[] values;
+        }
+      }
+    } else {
+      std::cout << name << " 0" << std::endl;
+    }
+  }
+}
+
 // fused attention BWD with separate Q, K and V
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -268,7 +305,7 @@ std::vector<py::object> fused_attn_bwd(
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer) {
+    py::handle dp_quantizer, py::handle dqkv_quantizer, at::Tensor debug) {
   auto none = py::none();
   TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
   te_Q = makeTransformerEngineTensor(Q, none);
@@ -276,6 +313,7 @@ std::vector<py::object> fused_attn_bwd(
   te_V = makeTransformerEngineTensor(V, none);
   te_O = makeTransformerEngineTensor(O, none);
   te_dO = makeTransformerEngineTensor(dO, none);
+  debug_print("Beginning", debug);
   // qkv type from the te_Q
   std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
   const DType qkv_type = te_Q.dtype();
@@ -374,9 +412,13 @@ std::vector<py::object> fused_attn_bwd(
     default:
       NVTE_ERROR("QKV layout not supported!");
   }
+  std::cout << "Creating dQKV" << std::endl;
   std::tie(te_dQ, py_dQ) = dQKV_quantizer->create_tensor(q_shape, fake_dtype_te, py::none(), dQ);
   std::tie(te_dK, py_dK) = dQKV_quantizer->create_tensor(k_shape, fake_dtype_te, py::none(), dK);
   std::tie(te_dV, py_dV) = dQKV_quantizer->create_tensor(v_shape, fake_dtype_te, py::none(), dV);
+  std::cout << "dq " << reinterpret_cast<uintptr_t>(dQ.data_ptr()) << std::endl;
+  std::cout << "dk " << reinterpret_cast<uintptr_t>(dK.data_ptr()) << std::endl;
+  std::cout << "dv " << reinterpret_cast<uintptr_t>(dV.data_ptr()) << std::endl;
 
   // construct NVTE tensors
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
@@ -464,6 +506,7 @@ std::vector<py::object> fused_attn_bwd(
 
   // create workspace
   TensorWrapper workspace;
+  debug_print("Before nvte call1", debug);
 
   // populate tensors with appropriate shapes and dtypes
   NVTE_SCOPED_GIL_RELEASE({
@@ -481,6 +524,38 @@ std::vector<py::object> fused_attn_bwd(
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
+  debug_print("Before nvte call2", debug);
+  std::cout << "debug data ptr: " << reinterpret_cast<uintptr_t>(debug.data_ptr()) << std::endl;
+  debug_print("Q", te_Q.data());
+  debug_print("K", te_K.data());
+  debug_print("V", te_V.data());
+  debug_print("O", te_O.data());
+  debug_print("dO", te_dO.data());
+  debug_print("S", te_S.data());
+  debug_print("dP", te_dP.data());
+  debug_print("dQ", te_dQ.data());
+  debug_print("dK", te_dK.data());
+  debug_print("dV", te_dV.data());
+  debug_print("dBias", te_dBias.data());
+  debug_print("cuseq_q", te_cu_seqlens_q.data(), true);
+  debug_print("cuseq_q_padded", te_cu_seqlens_q_padded.data(), true);
+  debug_print("cuseq_kv", te_cu_seqlens_kv.data(), true);
+  debug_print("cuseq_kv_padded", te_cu_seqlens_kv_padded.data(), true);
+  debug_print("workspace", workspace.data());
+  std::cout << "max_seqlen_q " << max_seqlen_q << std::endl;
+  std::cout << "max_seqlen_kv " << max_seqlen_kv << std::endl;
+  std::cout << "attn_scale " << attn_scale << std::endl;
+  std::cout << "p_dropout " << p_dropout << std::endl;
+  std::cout << "qkv_layout " << qkv_layout << std::endl;
+  std::cout << "bias_type " << bias_type << std::endl;
+  std::cout << "attn_mask_type " << attn_mask_type << std::endl;
+  std::cout << "window_size[0] " << window_size[0] << std::endl;
+  std::cout << "window_size[1] " << window_size[1] << std::endl;
+  std::cout << "deterministic " << deterministic << std::endl;
+
+  for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
+    debug_print("Aux" + std::to_string(i), nvte_aux_tensor_pack.tensors[i]);
+  }
   // execute kernel
   NVTE_SCOPED_GIL_RELEASE({
     nvte_fused_attn_bwd(
@@ -492,8 +567,10 @@ std::vector<py::object> fused_attn_bwd(
         workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
+  float result = debug_print("Before destroy", debug);
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
+  debug_print("Ending", debug);
 
   return {py_dQ, py_dK, py_dV, py::cast(dBias)};
 }

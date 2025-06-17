@@ -57,6 +57,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
 )
 
+DEBUG_BLOCK = None
+
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
 flash_attn_func = None
@@ -964,6 +966,8 @@ class FusedAttnFunc(torch.autograd.Function):
                     case _:
                         raise "Invalid qkv_layout " + qkv_layout
             # q_fp8, k_fp8, v_fp8, out_fp8: torch.float8_e4m3fn
+            print(f"Q quantizer scale: {q_fp8._quantizer.scale.shape}")
+            print(f"mixed quantizer scale: {qkv_fp8._quantizer.scale.shape}")
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -1190,6 +1194,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
                     # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
+                    print(DEBUG_BLOCK)
+                    if DEBUG_BLOCK is not None:
+                        print(f"Inside attention: {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}")
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -1218,6 +1225,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
+                    if DEBUG_BLOCK is not None:
+                        print(f"After Inside attention: {DEBUG_BLOCK.self_attention.proj.weight._scale_inv}")
 
                     # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
                     # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2
