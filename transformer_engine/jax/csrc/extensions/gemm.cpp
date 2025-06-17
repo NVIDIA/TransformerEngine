@@ -45,9 +45,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     auto scale_dims = scale_inv.dimensions();
     std::vector<size_t> scale_shape = {product(scale_dims, 0, axis_boundary),
                                        product(scale_dims, axis_boundary, scale_dims.size())};
-    auto scale_dtype = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING)
-                           ? DType::kFloat8E8M0
-                           : convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
+    auto scale_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
     if (rowwise) {
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
     } else {
@@ -66,14 +64,14 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
                  "Inverse scale factors need to have an 8-bit data type.");
 
       // Create tensor to hold swizzled scale factor
-      TensorWrapper output(NVTE_MXFP8_1D_SCALING);
+      TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
       if (rowwise) {
         output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
-        output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), DType::kFloat8E8M0,
+        output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
                                      scale_shape);
       } else {
         output.set_columnwise_data(buffer.untyped_data(), input_dtype, input_shape);
-        output.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), DType::kFloat8E8M0,
+        output.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
                                         scale_shape);
       }
 
@@ -82,10 +80,10 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 
       // Set swizzled scales into the input tensor
       if (rowwise) {
-        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), DType::kFloat8E8M0,
+        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
                                     scale_shape);
       } else {
-        input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), DType::kFloat8E8M0,
+        input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
                                        scale_shape);
       }
     }
