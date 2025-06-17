@@ -592,30 +592,29 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
              "Expected 4 or 5 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
   for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list,
-               "Tensor list ", i, " has size=", tensor_lists[i].size(),
-               ", but expected size=", num_tensors_per_list);
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
   const auto p_in_type_te = tensor_lists[1][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
-    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
-               "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == p_in_type_te,
-               "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == p_in_type_te, "Param tensor ", j,
+               " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(p_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
-               "First moment tensor ", j, " has dtype=", to_string(tensor_lists[2][j]->dtype()),
+    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
-               "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
+    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
     if (num_tensor_lists == 5) {
-      NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32,
-                 "Master param tensor ", j, " has dtype=", to_string(tensor_lists[4][j]->dtype()),
+      NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32, "Master param tensor ", j,
+                 " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                  ", but expected dtype=", to_string(DType::kFloat32));
     }
   }
@@ -705,28 +704,27 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK(num_tensor_lists == 5, "Expected 5 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
   for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list,
-               "Tensor list ", i, " has size=", tensor_lists[i].size(),
-               ", but expected size=", num_tensors_per_list);
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
-    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
-               "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == DType::kBFloat16,
-               "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == DType::kBFloat16, "Param tensor ", j,
+               " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(DType::kBFloat16));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
-               "First moment tensor ", j, " has dtype=", to_string(tensor_lists[2][j]->dtype()),
+    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
-               "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
+    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kInt16,
-               "Param remainder tensor ", j, " has dtype=", to_string(tensor_lists[4][j]->dtype()),
+    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kInt16, "Param remainder tensor ", j,
+               " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kInt16));
   }
 
@@ -759,38 +757,37 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK(num_tensor_lists == 8, "Expected 8 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
   for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list,
-               "Tensor list ", i, " has size=", tensor_lists[i].size(),
-               ", but expected size=", num_tensors_per_list);
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
-    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
-               "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == fp8_dtype
-               || tensor_lists[1][j]->dtype() == DType::kByte,
-               "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
-               ", but expected dtype=", to_string(fp8_dtype));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
-               "First moment tensor ", j, " has dtype=", to_string(tensor_lists[2][j]->dtype()),
+    NVTE_CHECK(
+        tensor_lists[1][j]->dtype() == fp8_dtype || tensor_lists[1][j]->dtype() == DType::kByte,
+        "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+        ", but expected dtype=", to_string(fp8_dtype));
+    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
-               "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
+    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32,
-               "Master param tensor ", j, " has dtype=", to_string(tensor_lists[4][j]->dtype()),
+    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32, "Master param tensor ", j,
+               " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[5][j]->dtype() == DType::kFloat32,
-               "Scale tensor ", j, " has dtype=", to_string(tensor_lists[5][j]->dtype()),
+    NVTE_CHECK(tensor_lists[5][j]->dtype() == DType::kFloat32, "Scale tensor ", j,
+               " has dtype=", to_string(tensor_lists[5][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[6][j]->dtype() == DType::kFloat32,
-               "Absmax tensor ", j, " has dtype=", to_string(tensor_lists[6][j]->dtype()),
+    NVTE_CHECK(tensor_lists[6][j]->dtype() == DType::kFloat32, "Absmax tensor ", j,
+               " has dtype=", to_string(tensor_lists[6][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[7][j]->dtype() == DType::kFloat32,
-               "Scale-inverse tensor ", j, " has dtype=", to_string(tensor_lists[7][j]->dtype()),
+    NVTE_CHECK(tensor_lists[7][j]->dtype() == DType::kFloat32, "Scale-inverse tensor ", j,
+               " has dtype=", to_string(tensor_lists[7][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
   }
 
@@ -845,25 +842,24 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK(num_tensor_lists == 4, "Expected 4 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
   for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list,
-               "Tensor list ", i, " has size=", tensor_lists[i].size(),
-               ", but expected size=", num_tensors_per_list);
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
-    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
-               "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te,
-               "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te, "Param tensor ", j,
+               " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
-               "First moment tensor ", j, " has dtype=", to_string(tensor_lists[2][j]->dtype()),
+    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
-               "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
+    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
   }
 
@@ -892,28 +888,27 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
   NVTE_CHECK(num_tensor_lists == 5, "Expected 4 tensor lists, but found ", num_tensor_lists);
   const size_t num_tensors_per_list = tensor_lists[0].size();
   for (size_t i = 1; i < num_tensor_lists; i++) {
-    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list,
-               "Tensor list ", i, " has size=", tensor_lists[i].size(),
-               ", but expected size=", num_tensors_per_list);
+    NVTE_CHECK(tensor_lists[i].size() == num_tensors_per_list, "Tensor list ", i,
+               " has size=", tensor_lists[i].size(), ", but expected size=", num_tensors_per_list);
   }
 
   // Check tensor dtypes
   const auto g_in_type_te = tensor_lists[0][0]->dtype();
   for (size_t j = 0; j < num_tensors_per_list; j++) {
-    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te,
-               "Grad tensor ", j, " has dtype=", to_string(tensor_lists[0][j]->dtype()),
+    NVTE_CHECK(tensor_lists[0][j]->dtype() == g_in_type_te, "Grad tensor ", j,
+               " has dtype=", to_string(tensor_lists[0][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te,
-               "Param tensor ", j, " has dtype=", to_string(tensor_lists[1][j]->dtype()),
+    NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te, "Param tensor ", j,
+               " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32,
-               "First moment tensor ", j, " has dtype=", to_string(tensor_lists[2][j]->dtype()),
+    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32,
-               "Second moment tensor ", j, " has dtype=", to_string(tensor_lists[3][j]->dtype()),
+    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
+               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32,
-               "Master param tensor ", j, " has dtype=", to_string(tensor_lists[4][j]->dtype()),
+    NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32, "Master param tensor ", j,
+               " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
   }
 
