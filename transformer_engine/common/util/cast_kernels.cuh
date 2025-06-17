@@ -1064,38 +1064,42 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->dtype(), OType, alignas(64) CUtensorMap tensor_map_input{};
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
+      
+          alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
           alignas(64) CUtensorMap tensor_map_output_colwise{};
 
-                  create_2D_tensor_map(tensor_map_input, input.data, rows, cols, MXFP8_SHMEM_DIM_Y,
-                                       MXFP8_SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
+          const int input_type_bit_size = typeToNumBits(input.dtype());
+          const int output_type_bit_size = typeToNumBits(output->dtype());
+          
+          const int input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+          const int output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
 
-                  if constexpr (IS_DACT) {
-                    create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
-                                         typeToNumBits(input.dtype()));
-                  }
+          create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
+                               cols, 0, input_type_bit_size);
 
-                  if (use_rowwise_scaling) {
-                    create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
-                                         typeToNumBits(output->dtype()));
-                  }
+          if constexpr (IS_DACT) {
+            create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, BUFF_DIM_Y,
+                                 BUFF_DIM_X, cols, 0, input_type_bit_size);
+          }
+
+          if (use_rowwise_scaling) {
+            create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols, BUFF_DIM_Y,
+                                 BUFF_DIM_X, cols, 0, output_type_bit_size);
+          }
 
           if (use_colwise_scaling) {
             create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
-                                 MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
           }
-          
+
           constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
           constexpr size_t buff_elems_total = mxfp8_kernel::BUFFS_NUM * buff_elems;
-          constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE((buff_elems_total * typeToNumBits(input->dtype())) / 8, TMA_SHMEM_ALIGNMENT);
-          constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE((buff_elems_total * typeToNumBits(output->dtype())) / 8, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
           constexpr size_t elt_input_mem = buff_size_aligned_in;
           constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
@@ -1118,14 +1122,45 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                    false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
                       tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+              break;
+            case ScalingType::COLWISE:
+              cudaFuncSetAttribute(
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+
+              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
+                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
+                  <<<grid, block_size, dshmem_size, stream>>>(
+                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+              break;
+            case ScalingType::BIDIMENSIONAL:
+              cudaFuncSetAttribute(
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+
+              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true, true,
+                                   CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
+                  <<<grid, block_size, dshmem_size, stream>>>(
+                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                      scale_stride_colwise);
+              break;
+          }
 
           if constexpr (IS_DBIAS) {
             reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-          });  // NOLINT(*)
-  );           // NOLINT(*)
+          }
+      );  // NOLINT(*)
+  );  // NOLINT(*)
 }
 
 namespace detail {

@@ -999,10 +999,8 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   e8m0_t *const scales_colwise_ptr =
       USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      gated_input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->dtype(), OType,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(gated_input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
 
           alignas(64) CUtensorMap tensor_map_grad{};
           alignas(64) CUtensorMap tensor_map_input_act{};
@@ -1012,36 +1010,40 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           alignas(64) CUtensorMap tensor_map_output_act_colwise{};
           alignas(64) CUtensorMap tensor_map_output_gate_colwise{};
 
+          const int input_type_bit_size = typeToNumBits(gated_input.dtype());
+          const int output_type_bit_size = typeToNumBits(output->dtype());
+          
+          const int input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+          const int output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
+
           if constexpr (IS_DGATED) {
             create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols,
-                                BUFF_DIM_Y, BUFF_DIM_X, cols, 0, typeToNumBits(gated_input.dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, input_type_bit_size);
           }
 
           const uint32_t tensor_stride_elems = output_cols;
           create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols,
-                              BUFF_DIM_Y, BUFF_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
+                               BUFF_DIM_Y, BUFF_DIM_X, cols * 2, 0, input_type_bit_size);
           create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols,
-                              BUFF_DIM_Y, BUFF_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
+                               BUFF_DIM_Y, BUFF_DIM_X, cols * 2, cols, input_type_bit_size);
 
           if (USE_ROWWISE_SCALING) {
             create_2D_tensor_map(tensor_map_output_act_rowwise, output->data, rows, cols,
-                                BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0, output_type_bit_size);
             create_2D_tensor_map(tensor_map_output_gate_rowwise, output->data, rows, cols,
-                                BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols, typeToNumBits(output->dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols, output_type_bit_size);
           }
 
           if (USE_COLWISE_SCALING) {
             create_2D_tensor_map(tensor_map_output_act_colwise, output->columnwise_data, rows, cols,
-                                BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, 0, output_type_bit_size);
             create_2D_tensor_map(tensor_map_output_gate_colwise, output->columnwise_data, rows, cols,
-                                BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols, typeToNumBits(output->dtype()));
+                                 BUFF_DIM_Y, BUFF_DIM_X, tensor_stride_elems, cols, output_type_bit_size);
           }
 
           const size_t buff_elems_total = BUFFS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
           const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
           const size_t in_act_mem = buff_size_aligned_in;
@@ -1104,8 +1106,9 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
                       scale_stride_colwise);
               break;
-          });  // NOLINT(*)
-  );           // NOLINT(*)
+          }
+      );  // NOLINT(*)
+  );  // NOLINT(*)
 }
 
 template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
