@@ -149,16 +149,13 @@ class ScaledTensor1x(ScaledTensor):
                     f" {self.scale_inv.shape}"
                 )
                 pad_width = tuple(
-                    (0, a - b)
-                    for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
+                    (0, a - b) for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
                 )
 
                 # padding with the smallest number it can present
                 self.scale_inv = jnp.pad(
                     self.scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127
                 )
-
-
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.

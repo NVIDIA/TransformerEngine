@@ -501,7 +501,6 @@ class BaseTester:
         QuantizeConfig.finalize()  # Ensure FP8 disabled.
         self.runner(attrs).test_forward(data_shape, dtype)
 
-
     def test_backward(self, data_shape, dtype, with_jax_gemm, attrs):
         """Test normal datatype backward"""
         self.use_jax_dot_for_gemm(enabled=with_jax_gemm)

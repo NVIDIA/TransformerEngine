@@ -36,13 +36,13 @@ from .misc import get_padded_spec
 
 
 __all__ = [
-        "gemm",
-        "grouped_gemm",
-        "gemm_uses_jax_dot",
-        "sanitize_dims",
-        "get_non_contracting_dims",
-        "transpose_contracting_dims",
-        ]
+    "gemm",
+    "grouped_gemm",
+    "gemm_uses_jax_dot",
+    "sanitize_dims",
+    "get_non_contracting_dims",
+    "transpose_contracting_dims",
+]
 
 
 num_cublas_streams = get_num_compute_streams()
@@ -109,12 +109,9 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     if not isinstance(lhs, ScaledTensor) and lhs_quantizer is not None:
         lhs_cdims = sanitize_dims(lhs.ndim, contracting_dims[0])
         lhs_is_transposed = lhs.ndim - 1 not in lhs_cdims
-        need_lhs_colwise = (
-            lhs_is_transposed
-            and (
-                lhs_quantizer.scaling_mode.is_1d_block_scaling()
-                or not is_fp8_gemm_with_all_layouts_supported()
-            )
+        need_lhs_colwise = lhs_is_transposed and (
+            lhs_quantizer.scaling_mode.is_1d_block_scaling()
+            or not is_fp8_gemm_with_all_layouts_supported()
         )
         flatten_axis = max(lhs_cdims) + 1 if lhs_is_transposed else min(lhs_cdims)
         lhs_q = lhs_quantizer.quantize(
@@ -130,12 +127,9 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
         rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
         rhs_is_transposed = rhs.ndim - 1 in rhs_cdims
-        need_rhs_colwise = (
-            not rhs_is_transposed
-            and (
-                rhs_quantizer.scaling_mode.is_1d_block_scaling()
-                or not is_fp8_gemm_with_all_layouts_supported()
-            )
+        need_rhs_colwise = not rhs_is_transposed and (
+            rhs_quantizer.scaling_mode.is_1d_block_scaling()
+            or not is_fp8_gemm_with_all_layouts_supported()
         )
         flatten_axis = min(rhs_cdims) if rhs_is_transposed else max(rhs_cdims) + 1
         rhs_q = rhs_quantizer.quantize(

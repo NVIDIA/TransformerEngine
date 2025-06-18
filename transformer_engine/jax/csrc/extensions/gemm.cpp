@@ -21,7 +21,6 @@
 namespace transformer_engine {
 namespace jax {
 
-
 static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
   // Move the pointer to the next 256B aligned address
   return reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(ptr) + 255) &
@@ -78,8 +77,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
       if (rowwise) {
         output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
-        output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-                                     scale_shape);
+        output.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
       } else {
         output.set_columnwise_data(buffer.untyped_data(), input_dtype, input_shape);
         output.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
@@ -91,8 +89,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 
       // Set swizzled scales into the input tensor
       if (rowwise) {
-        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
-                                    scale_shape);
+        input.set_rowwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype, scale_shape);
       } else {
         input.set_columnwise_scale_inv(swizzled_scale_inv->untyped_data(), scale_dtype,
                                        scale_shape);
@@ -204,7 +201,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator"),
                               FFI_CudaGraph_Traits);
-
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
