@@ -324,6 +324,9 @@ class BasicLinear(BasicOperation):
             input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.internal = True
+            weight_quantizer.internal = True
+            grad_output_quantizer.internal = True
 
             # Recipe-specific configuration
             recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -660,7 +663,7 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            if weight is not None:
+            if weight is not None and not is_quantized_tensor(weight):
                 dtype = weight.dtype
             else:
                 dtype = grad_output.dtype
@@ -888,7 +891,7 @@ class BasicLinear(BasicOperation):
     ) -> torch.Tensor:
 
         # Check which grads are required
-        input_requires_grad = ctx.requires_grad and input_.requires_grad
+        input_requires_grad = ctx.requires_grad
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
 
         # FP8 metadata

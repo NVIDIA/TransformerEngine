@@ -101,7 +101,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         )
 
         # Check output tensor
-        if y.dim() != x.dim():
+        if len(y.size()) != x.dim():
             y = y.view(list(x.shape[:-1]) + [-1])
 
         # Quantize input to FP8 before caching if needed

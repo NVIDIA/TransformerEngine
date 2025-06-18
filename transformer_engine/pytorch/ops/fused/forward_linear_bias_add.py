@@ -78,7 +78,7 @@ class ForwardLinearBiasAdd(FusedOperation):
                 raise ValueError("Bias operation forward does not expect keyword arguments")
 
         # Check which grads are required
-        input_requires_grad = linear_op_ctx.requires_grad and input_.requires_grad
+        input_requires_grad = linear_op_ctx.requires_grad
         weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
 
         # FP8 metadata

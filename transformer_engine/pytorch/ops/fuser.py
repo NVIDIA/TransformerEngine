@@ -121,11 +121,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx].requires_grad = requires_grad
-            if requires_grad != x.requires_grad:
-                if requires_grad:
-                    x.requires_grad_()
-                else:
-                    x = x.detach()
 
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
@@ -150,10 +145,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 is_first_op=is_first_op,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
-            x.requires_grad_(requires_grad=requires_grad)
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    y.requires_grad_(requires_grad=requires_grad)
+                    y.requires_grad_(requires_grad)
                 extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
@@ -203,6 +197,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
+
+        x.requires_grad_(requires_grad)
+
         return x
 
     @staticmethod
