@@ -13,295 +13,32 @@
 
 namespace transformer_engine::pytorch {
 
-void _fused_bulk_alloc_outputs(at::Tensor input_view, std::vector<int>& m_splits,
-                               std::vector<std::unique_ptr<Quantizer>>& quantizers,
-                               std::vector<py::handle> quantizer_list,
-                               std::vector<TensorWrapper>& input_list,
-                               std::vector<TensorWrapper>& output_list,
-                               std::vector<py::object>& output_list_py) {
-  using namespace py::literals;
+namespace {
 
-  int num_splits = m_splits.size();
-
-  bool rowwise_usage = quantizers[0]->rowwise_usage;
-  bool columnwise_usage = quantizers[0]->columnwise_usage;
-  size_t hidden_dim = input_view.size(1);
-
-  std::vector<Float8BlockQuantizer*> blockwise_quantizers;
-  for (size_t i = 0; i < quantizers.size(); i++) {
-    Quantizer* raw_ptr = quantizers[i].get();
-    Float8BlockQuantizer* blockwise_quantizer = static_cast<Float8BlockQuantizer*>(raw_ptr);
-    blockwise_quantizers.push_back(blockwise_quantizer);
-  }
-
-  NVTEScalingMode scaling_mode = blockwise_quantizers[0]->get_scaling_mode();
-  bool is_2D_scaled = scaling_mode == NVTE_BLOCK_SCALING_2D;
-  transformer_engine::DType fp8_dtype = blockwise_quantizers[0]->dtype;
-
-  transformer_engine::DType inp_dtype = GetTransformerEngineDType(input_view.scalar_type());
-
-  size_t fp8_elem_size = 1;
-  size_t scale_elem_size = 4;
-  // get element size of input_view
-  size_t input_elem_size = input_view.element_size();
-
-  // this list might also contain zeros when an expert does receive tokens
-  std::vector<std::vector<size_t>> input_shapes;
-  std::vector<size_t> input_sizes;
-
-  std::vector<std::vector<size_t>> rowwise_data_shapes;
-  std::vector<std::vector<size_t>> rowwise_scale_shapes;
-  std::vector<size_t> rowwise_data_sizes;
-  std::vector<size_t> rowwise_scale_sizes;
-  std::vector<std::vector<size_t>> columnwise_data_shapes;
-  std::vector<std::vector<size_t>> columnwise_scale_shapes;
-  std::vector<size_t> columnwise_data_sizes;
-  std::vector<size_t> columnwise_scale_sizes;
-  for (int i = 0; i < num_splits; i++) {
-    std::vector<size_t> input_view_i_shape =
-        std::vector<size_t>{static_cast<size_t>(m_splits[i]), static_cast<size_t>(hidden_dim)};
-    input_shapes.emplace_back(input_view_i_shape);
-    input_sizes.emplace_back(input_view_i_shape[0] * input_view_i_shape[1] * input_elem_size);
-
-    if (rowwise_usage) {
-      rowwise_data_shapes.emplace_back(input_view_i_shape);
-      rowwise_scale_shapes.emplace_back(
-          blockwise_quantizers[i]->get_scale_shape(input_view_i_shape, false));
-      rowwise_data_sizes.emplace_back(input_view_i_shape[0] * input_view_i_shape[1] *
-                                      fp8_elem_size);
-      rowwise_scale_sizes.emplace_back(rowwise_scale_shapes.back()[0] *
-                                       rowwise_scale_shapes.back()[1] * scale_elem_size);
-    }
-    if (columnwise_usage) {
-      columnwise_data_shapes.emplace_back(
-          std::vector<size_t>{input_view_i_shape[1], input_view_i_shape[0]});
-      columnwise_scale_shapes.emplace_back(
-          blockwise_quantizers[i]->get_scale_shape(input_view_i_shape, true));
-      columnwise_data_sizes.emplace_back(input_view_i_shape[0] * input_view_i_shape[1] *
-                                         fp8_elem_size);
-      columnwise_scale_sizes.emplace_back(columnwise_scale_shapes.back()[0] *
-                                          columnwise_scale_shapes.back()[1] * scale_elem_size);
-    }
-  }
-
-  size_t total_size_rowwise_data =
-      std::accumulate(rowwise_data_sizes.begin(), rowwise_data_sizes.end(), 0);
-  size_t total_size_rowwise_scale =
-      std::accumulate(rowwise_scale_sizes.begin(), rowwise_scale_sizes.end(), 0);
-  size_t total_size_columnwise_data =
-      std::accumulate(columnwise_data_sizes.begin(), columnwise_data_sizes.end(), 0);
-  size_t total_size_columnwise_scale =
-      std::accumulate(columnwise_scale_sizes.begin(), columnwise_scale_sizes.end(), 0);
-
-  size_t total_size_rowwise = total_size_rowwise_data + total_size_rowwise_scale;
-  size_t total_size_columnwise = total_size_columnwise_data + total_size_columnwise_scale;
-
-  std::vector<at::Tensor> rowwise_data_list;
-  std::vector<at::Tensor> rowwise_scale_list;
-  std::vector<at::Tensor> columnwise_data_list;
-  std::vector<at::Tensor> columnwise_scale_list;
-
-  at::Tensor rowwise_full_tensor;
-  at::Tensor columnwise_full_tensor;
-
-  // each from_blob will hold a reference to the full tensor, since we need to keep the full tensor alive
-  // when all the views are gone, the full tensor will be garbage collected
-  std::shared_ptr<at::Tensor> rowwise_full_tensor_holder;
-  std::shared_ptr<at::Tensor> columnwise_full_tensor_holder;
-
-  if (rowwise_usage) {
-    rowwise_full_tensor =
-        at::empty({(int64_t)total_size_rowwise}, at::device(at::kCUDA).dtype(torch::kUInt8));
-    rowwise_full_tensor_holder = std::make_shared<at::Tensor>(rowwise_full_tensor);
-    // use raw pointer math + from blob, avoid torch slice to reduce cpu overhead
-    uint8_t* rowwise_data_ptr = rowwise_full_tensor.data_ptr<uint8_t>();
-    uint8_t* rowwise_scale_ptr = rowwise_full_tensor.data_ptr<uint8_t>() + total_size_rowwise_data;
-    // use from_blob to construct rowwise_data_list and rowwise_scale_list
-    for (int i = 0; i < num_splits; i++) {
-      if (rowwise_data_sizes[i] == 0) {
-        NVTE_CHECK(rowwise_scale_sizes[i] == 0,
-                   "Rowwise scale size is not 0 when rowwise data size is 0");
-        rowwise_data_list.emplace_back(at::empty({static_cast<int64_t>(rowwise_data_shapes[i][0]),
-                                                  static_cast<int64_t>(rowwise_data_shapes[i][1])},
-                                                 at::device(at::kCUDA).dtype(torch::kUInt8)));
-        rowwise_scale_list.emplace_back(
-            at::empty({static_cast<int64_t>(rowwise_scale_shapes[i][0]),
-                       static_cast<int64_t>(rowwise_scale_shapes[i][1])},
-                      at::device(at::kCUDA).dtype(torch::kFloat32)));
-      } else {
-        rowwise_data_list.emplace_back(at::from_blob(
-            rowwise_data_ptr,
-            {static_cast<int64_t>(rowwise_data_shapes[i][0]),
-             static_cast<int64_t>(rowwise_data_shapes[i][1])},
-            [rowwise_full_tensor_holder](void*) {}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-        rowwise_scale_list.emplace_back(at::from_blob(
-            rowwise_scale_ptr,
-            {static_cast<int64_t>(rowwise_scale_shapes[i][0]),
-             static_cast<int64_t>(rowwise_scale_shapes[i][1])},
-            [rowwise_full_tensor_holder](void*) {}, at::device(at::kCUDA).dtype(torch::kFloat32)));
-        rowwise_data_ptr += rowwise_data_sizes[i];
-        rowwise_scale_ptr += rowwise_scale_sizes[i];
-      }
-    }
-  }
-
-  if (columnwise_usage) {
-    columnwise_full_tensor =
-        at::empty({(int64_t)total_size_columnwise}, at::device(at::kCUDA).dtype(torch::kUInt8));
-    columnwise_full_tensor_holder = std::make_shared<at::Tensor>(columnwise_full_tensor);
-    uint8_t* columnwise_data_ptr = columnwise_full_tensor.data_ptr<uint8_t>();
-    uint8_t* columnwise_scale_ptr =
-        columnwise_full_tensor.data_ptr<uint8_t>() + total_size_columnwise_data;
-    for (int i = 0; i < num_splits; i++) {
-      if (columnwise_data_sizes[i] == 0) {
-        NVTE_CHECK(columnwise_scale_sizes[i] == 0,
-                   "Columnwise scale size is not 0 when columnwise data size is 0");
-        columnwise_data_list.emplace_back(
-            at::empty({static_cast<int64_t>(columnwise_data_shapes[i][0]),
-                       static_cast<int64_t>(columnwise_data_shapes[i][1])},
-                      at::device(at::kCUDA).dtype(torch::kUInt8)));
-        columnwise_scale_list.emplace_back(
-            at::empty({static_cast<int64_t>(columnwise_scale_shapes[i][0]),
-                       static_cast<int64_t>(columnwise_scale_shapes[i][1])},
-                      at::device(at::kCUDA).dtype(torch::kFloat32)));
-      } else {
-        columnwise_data_list.emplace_back(at::from_blob(
-            columnwise_data_ptr,
-            {static_cast<int64_t>(columnwise_data_shapes[i][0]),
-             static_cast<int64_t>(columnwise_data_shapes[i][1])},
-            [columnwise_full_tensor_holder](void*) {}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-        columnwise_scale_list.emplace_back(at::from_blob(
-            columnwise_scale_ptr,
-            {static_cast<int64_t>(columnwise_scale_shapes[i][0]),
-             static_cast<int64_t>(columnwise_scale_shapes[i][1])},
-            [columnwise_full_tensor_holder](void*) {},
-            at::device(at::kCUDA).dtype(torch::kFloat32)));
-        columnwise_data_ptr += columnwise_data_sizes[i];
-        columnwise_scale_ptr += columnwise_scale_sizes[i];
-      }
-    }
-  }
-
-  {
-    // split input_view into input_list
-    uint8_t* input_data_ptr = static_cast<uint8_t*>(input_view.data_ptr());
-    for (int i = 0; i < num_splits; i++) {
-      // Note: input_list wrappers might wanna skip empty tensors here
-      if (input_sizes[i] == 0) continue;
-      input_list.emplace_back(
-          makeTransformerEngineTensor(input_data_ptr, input_shapes[i], inp_dtype));
-      input_data_ptr += input_sizes[i];
-    }
-  }
-
-  for (int i = 0; i < num_splits; i++) {
-    py::handle Float8BlockwiseQTensorClass(
-        reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
-
-    // Create the tensor object with proper reference counting
-    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
-    py::object columnwise_data = columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none();
-    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
-    py::object columnwise_scale =
-        columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none();
-
-    py::object ret = Float8BlockwiseQTensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, fp8_dtype,
-        quantizer_list[i], is_2D_scaled, Float8BlockScaleTensorFormat::GEMM_READY);
-
-    output_list_py.emplace_back(std::move(ret));
-
-    // as for tensor wrappers, these tensor wrappers are going to be quantized, so no need to insert empty tensors here
-    if (m_splits[i] > 0) {
-      TensorWrapper te_tensor = makeTransformerEngineTensor(
-          rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
-          columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
-          nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
-          columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
-          rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
-          columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode);
-
-      output_list.emplace_back(std::move(te_tensor));
-    }
-  }
-}
-
-std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
-                                             at::Tensor input_view, std::vector<int> m_splits,
-                                             std::vector<py::handle> quantizer_list, DType otype) {
+void multi_quantize_impl(const std::vector<TensorWrapper> &input_list,
+                         std::vector<py::handle> &quantizer_py_list,
+                         std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
+                         std::vector<TensorWrapper> &output_list) {
   init_extension();
-  std::vector<NVTETensor> nvte_tensor_input_list;
-  std::vector<NVTETensor> nvte_tensor_output_list;
-  std::vector<py::object> py_output_objects_list;
-  std::vector<TensorWrapper> tensor_wrappers_input;
-  std::vector<TensorWrapper> tensor_wrappers_output;
-  TensorWrapper dummy_te_noop = TensorWrapper();
+
+  // Check number of tensors
+  const size_t num_tensors = input_list.size();
+  NVTE_CHECK(quantizer_py_list.size() == num_tensors,
+             "Expected ", num_tensors, " Python quantizers, but got ", quantizer_py_list.size());
+  NVTE_CHECK(quantizer_cpp_list.size() == num_tensors,
+             "Expected ", num_tensors, " C++ quantizers, but got ", quantizer_cpp_list.size());
+  NVTE_CHECK(output_list.size() == num_tensors,
+             "Expected ", num_tensors, " output tensors, but got ", output_list.size());
 
   // Choose implementation
-  // Note: Currently only have fused kernel for FP8 cast-transpose
+  // Note: Currently only have fused kernel for FP8 delayed scaling
   bool with_fused_kernel = true;
-  // currently only fp8 subchannel recipe supports bulk alloc, fall back to for loop if not
-  bool use_fused_bulk_alloc = true;
-
-  for (size_t i = 0; i < quantizer_list.size(); i++) {
-    if (!detail::IsFloat8Quantizers(quantizer_list[i].ptr())) {
+  for (size_t i = 0; i < num_tensors; i++) {
+    if (!detail::IsFloat8Quantizers(quantizer_py_list[i].ptr())) {
       with_fused_kernel = false;
+      break;
     }
-    if (!detail::IsFloat8BlockwiseQuantizers(quantizer_list[i].ptr())) {
-      use_fused_bulk_alloc = false;
-    }
-  }
-
-  // convert the quantizers to C++ objects
-  std::vector<std::unique_ptr<Quantizer>> quantizers;
-  for (size_t i = 0; i < quantizer_list.size(); i++) {
-    quantizers.push_back(convert_quantizer(quantizer_list[i]));
-  }
-
-  // create TE tensors from input
-  if (use_fused_bulk_alloc) {
-    NVTE_CHECK(input_list.size() == 0, "Input list must be empty because we want to split in C++");
-    _fused_bulk_alloc_outputs(input_view, m_splits, quantizers, quantizer_list,
-                              tensor_wrappers_input, tensor_wrappers_output,
-                              py_output_objects_list);
-  } else {
-    NVTE_CHECK(input_list.size() == quantizer_list.size(),
-               "Input list and quantizer list must have the same size");
-    NVTE_CHECK(input_list.size() == m_splits.size(),
-               "Input list and m_splits must have the same size");
-
-    for (size_t i = 0; i < input_list.size(); i++) {
-      // raise error is each input[i] is not contiguous
-      NVTE_CHECK(input_list[i].is_contiguous(), "Input tensor is not contiguous");
-
-      auto input_tensor = makeTransformerEngineTensor(input_list[i]);
-      const NVTEShape input_shape = input_tensor.shape();
-
-      TensorWrapper output_tensor;
-
-      auto& quantizer = quantizers[i];
-      std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
-      py::object o;
-      std::tie(output_tensor, o) = quantizer->create_tensor(output_shape, otype);
-      py_output_objects_list.push_back(o);
-
-      if (input_tensor.numel() == 0) continue;
-
-      nvte_tensor_output_list.emplace_back(output_tensor.data());
-      nvte_tensor_input_list.emplace_back(input_tensor.data());
-      tensor_wrappers_input.emplace_back(std::move(input_tensor));
-      tensor_wrappers_output.emplace_back(std::move(output_tensor));
-    }
-  }
-
-  // Check tensor lists
-  NVTE_CHECK(nvte_tensor_output_list.size() == nvte_tensor_input_list.size(),
-             "Number of input and output tensors must match");
-
-  for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-    if (nvte_tensor_columnwise_data(nvte_tensor_output_list[i]) == nullptr) {
+    if (nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
       with_fused_kernel = false;
       break;
     }
@@ -309,25 +46,310 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
 
   // Launch TE kernel
   if (with_fused_kernel) {
+    // Fused kernel for multi-tensor quantize
+    std::vector<NVTETensor> nvte_tensor_input_list;
+    std::vector<NVTETensor> nvte_tensor_output_list;
+    for (size_t i=0; i<num_tensors; ++i) {
+      nvte_tensor_input_list.push_back(input_list[i].data());
+      nvte_tensor_output_list.push_back(output_list[i].data());
+    }
     NVTE_SCOPED_GIL_RELEASE({
       nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
                                 nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
     });
   } else {
-    size_t non_empty_tensor_idx = 0;
-
-    NVTE_CHECK(tensor_wrappers_input.size() == tensor_wrappers_output.size(),
-               "Input tensor wrappers and output tensor wrappers must have the same size");
-
-    for (size_t i = 0; i < py_output_objects_list.size(); i++) {
-      if (m_splits[i] == 0) continue;
-
-      quantize_cpp(tensor_wrappers_input[non_empty_tensor_idx], quantizer_list[i], quantizers[i],
-                   tensor_wrappers_output[non_empty_tensor_idx], dummy_te_noop);
-      non_empty_tensor_idx++;
+    // Quantize kernels individually
+    TensorWrapper dummy_noop_flag;
+    for (size_t i=0; i<num_tensors; ++i) {
+      quantize_cpp(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
+                   dummy_noop_flag);
     }
   }
-  return py_output_objects_list;
+}
+
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>>
+bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list,
+                                    std::vector<py::handle> &quantizer_py_list,
+                                    std::vector<Float8BlockQuantizer*> &quantizer_cpp_list) {
+  init_extension();
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  auto &tensor_py_list = std::get<0>(retval);
+  auto &tensor_cpp_list = std::get<1>(retval);
+
+  // Number of tensors
+  const size_t num_tensors = shape_list.size();
+  if (num_tensors == 0) {
+    return retval;
+  }
+
+  // Quantization parameters
+  const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
+  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
+  const auto is_2D_scaled = scaling_mode == NVTE_BLOCK_SCALING_2D;
+  const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
+  constexpr size_t fp8_elem_size = 1;
+  constexpr size_t scale_elem_size = 4;
+
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer,
+                            const std::vector<size_t> &shape,
+                            size_t offset,
+                            at::ScalarType dtype) -> at::Tensor {
+    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    return at::from_blob(buffer->data_ptr<uint8_t>() + offset,
+                         shape_int64,
+                         [buffer](void*) {},  // deleter holds shared_ptr
+                         at::device(at::kCUDA).dtype(dtype));
+  };
+
+  // Allocate row-wise data
+  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
+  std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
+  if (rowwise_usage) {
+    // Tensor sizes
+    for (size_t i=0; i<num_tensors; ++i) {
+      rowwise_data_shapes.emplace_back(shape_list[i]);
+      rowwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets;
+    for (size_t i=0; i<num_tensors; ++i) {
+      data_offsets.push_back(buffer_size);
+      buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
+    }
+    for (size_t i=0; i<num_tensors; ++i) {
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
+    }
+
+    // Allocate full buffer
+    auto buffer = std::make_shared<at::Tensor>(at::empty({(int64_t)buffer_size},
+                                                         at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i=0; i<num_tensors; ++i) {
+      rowwise_data_list.emplace_back(make_torch_view(buffer,
+                                                     rowwise_data_shapes[i],
+                                                     data_offsets[i],
+                                                     torch::kUInt8));
+      rowwise_scale_list.emplace_back(make_torch_view(buffer,
+                                                      rowwise_scale_shapes[i],
+                                                      scale_offsets[i],
+                                                      torch::kFloat32));
+    }
+  }
+
+  // Allocate column-wise data
+  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list;
+  std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
+  if (columnwise_usage) {
+    // Tensor sizes
+    for (size_t i=0; i<num_tensors; ++i) {
+      columnwise_data_shapes.emplace_back();
+      auto &shape = columnwise_data_shapes.back();
+      shape.push_back(shape_list[i].back());
+      for (size_t j=0; j<shape_list[i].size()-1; ++j) {
+        shape.push_back(shape_list[i][j]);
+      }
+      columnwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets;
+    for (size_t i=0; i<num_tensors; ++i) {
+      data_offsets.push_back(buffer_size);
+      buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
+    }
+    for (size_t i=0; i<num_tensors; ++i) {
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
+    }
+
+    // Allocate full buffer
+    auto buffer = std::make_shared<at::Tensor>(at::empty({(int64_t)buffer_size},
+                                                         at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i=0; i<num_tensors; ++i) {
+      columnwise_data_list.emplace_back(make_torch_view(buffer,
+                                                        columnwise_data_shapes[i],
+                                                        data_offsets[i],
+                                                        torch::kUInt8));
+      columnwise_scale_list.emplace_back(make_torch_view(buffer,
+                                                         columnwise_scale_shapes[i],
+                                                         scale_offsets[i],
+                                                         torch::kFloat32));
+    }
+  }
+
+  // Construct FP8 block-wise tensors
+  py::handle Float8BlockwiseQTensorClass(
+    reinterpret_cast<PyObject*>(Float8BlockwiseQTensorBasePythonClass));
+  for (size_t i=0; i<num_tensors; ++i) {
+
+    // Create tensor objects with proper reference counting
+    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
+    py::object columnwise_data = (columnwise_usage
+                                  ? py::cast(columnwise_data_list[i]) : py::none());
+    py::object columnwise_scale = (columnwise_usage
+                                   ? py::cast(columnwise_scale_list[i]) : py::none());
+
+    // Construct Python tensor
+    tensor_py_list.emplace_back(Float8BlockwiseQTensorClass(
+        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, fp8_dtype,
+        quantizer_py_list[i], is_2D_scaled, Float8BlockScaleTensorFormat::GEMM_READY));
+
+    // Construct C++ tensor
+    tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
+        rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
+        columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{},
+        fp8_dtype, nullptr, nullptr,
+        rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{},
+        scaling_mode));
+  }
+
+  return retval;
+}
+
+}  // namespace
+
+std::vector<py::object> multi_quantize(std::vector<at::Tensor> input_list,
+                                       std::vector<py::handle> quantizer_list) {
+  // Check number of tensors
+  const size_t num_tensors = input_list.size();
+  NVTE_CHECK(quantizer_list.size() == num_tensors,
+             "Expected ", num_tensors, " quantizers, but got ", quantizer_list.size());
+
+  // Convert quantizers to C++ objects
+  std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
+  for (size_t i = 0; i < num_tensors; i++) {
+    quantizer_cpp_list.push_back(convert_quantizer(quantizer_list[i]));
+  }
+
+  // Initialize input and output tensors
+  std::vector<TensorWrapper> input_cpp_list;
+  std::vector<TensorWrapper> output_cpp_list;
+  std::vector<py::object> output_py_list;
+  for (size_t i=0; i<num_tensors; ++i) {
+    // Convert input tensor to C++ object
+    const auto &input_py = input_list[i];
+    NVTE_CHECK(input_py.is_contiguous(), "Input tensor ", i, " is not contiguous");
+    input_cpp_list.emplace_back(makeTransformerEngineTensor(input_py));
+    const auto &input_cpp = input_cpp_list.back();
+    const auto input_shape = input_cpp.shape();
+    const auto input_dtype = GetTransformerEngineDType(input_py.scalar_type());
+
+    // Construct output tensor
+    std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
+    auto [output_cpp, output_py] = quantizer_cpp_list[i]->create_tensor(output_shape, input_dtype);
+    output_cpp_list.emplace_back(std::move(output_cpp));
+    output_py_list.emplace_back(std::move(output_py));
+  }
+
+  // Perform multi-tensor quantization
+  multi_quantize_impl(input_cpp_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+
+  return output_py_list;
+}
+
+std::vector<py::object> split_quantize(at::Tensor input,
+                                       std::vector<int> split_sections,
+                                       std::vector<py::handle> quantizer_list) {
+  init_extension();
+
+  // Check number of tensors
+  const size_t num_tensors = split_sections.size();
+  NVTE_CHECK(quantizer_list.size() == num_tensors,
+             "Expected ", num_tensors, " quantizers, but got ", quantizer_list.size());
+  if (num_tensors == 0) {
+    return {};
+  }
+
+  // Input tensor properties
+  NVTE_CHECK(input.is_contiguous(), "Input tensor is not contiguous");
+  uint8_t *input_dptr = reinterpret_cast<uint8_t*>(input.data_ptr());
+  auto input_dtype = GetTransformerEngineDType(input.scalar_type());
+  std::vector<size_t> input_shape;
+  size_t input_size = 1;
+  for (const auto &d : input.sizes()) {
+    input_shape.push_back(d);
+    input_size *= d;
+  }
+  NVTE_CHECK(input_shape.size() > 0, "Input tensor has 0 dims");
+
+  // Split input tensor along dim 0
+  std::vector<TensorWrapper> input_list;
+  std::vector<std::vector<size_t>> split_shapes;
+  size_t dim0_offset = 0;
+  const size_t dim0_stride = input.element_size() * input_size / input_shape[0];
+  for (size_t i=0; i<num_tensors; ++i) {
+    NVTE_CHECK(split_sections[i] >= 0,
+               "Attempted to split tensor with shape=", input_shape,
+               " along dim 0 with split_sections=", split_sections);
+    NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape[0],
+               "Attempted to split tensor with shape=", input_shape,
+               " along dim 0 with split_sections=", split_sections);
+    split_shapes.push_back(input_shape);
+    auto &split_shape = split_shapes.back();
+    split_shape[0] = split_sections[i];
+    void *split_dptr = static_cast<void*>(input_dptr + dim0_offset * dim0_stride);
+    input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
+    dim0_offset += split_sections[i];
+  }
+
+  // Convert quantizers to C++ objects
+  std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
+  for (size_t i = 0; i < num_tensors; i++) {
+    quantizer_cpp_list.push_back(convert_quantizer(quantizer_list[i]));
+  }
+
+  // For FP8 block-scaling, we construct output tensors with bulk allocations
+  bool use_fused_bulk_alloc = true;
+  for (size_t i = 0; i < quantizer_list.size(); i++) {
+    if (!detail::IsFloat8BlockwiseQuantizers(quantizer_list[i].ptr())) {
+      use_fused_bulk_alloc = false;
+      break;
+    }
+  }
+
+  // Allocate output tensors
+  std::vector<TensorWrapper> output_cpp_list;
+  std::vector<py::object> output_py_list;
+  if (!use_fused_bulk_alloc) {
+    // Allocate output tensors individually
+    for (size_t i=0; i<num_tensors; ++i) {
+      auto [output_cpp, output_py] = quantizer_cpp_list[i]->create_tensor(split_shapes[i], input_dtype);
+      output_cpp_list.emplace_back(std::move(output_cpp));
+      output_py_list.emplace_back(std::move(output_py));
+    }
+  } else {
+    // FP8 block-scaling: construct output tensors with bulk allocations
+    std::vector<Float8BlockQuantizer*> blockwise_quantizers;
+    for (auto &quantizer: quantizer_cpp_list) {
+      blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer*>(quantizer.get()));
+    }
+    std::tie(output_py_list, output_cpp_list)
+      = bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
+  }
+
+  // Perform multi-tensor quantization
+  multi_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+
+  return output_py_list;
 }
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor> output) {

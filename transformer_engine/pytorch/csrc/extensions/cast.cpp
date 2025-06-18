@@ -56,6 +56,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
                   std::unique_ptr<Quantizer>& quantizer_cpp, TensorWrapper& te_output,
                   TensorWrapper& te_noop) {
+  if (te_input.numel() == 0) {
+    return;
+  }
   if (te_output.numel() == 0) {
     NVTE_CHECK(te_input.numel() == 0, "Input tensor is not 0 when output tensor is 0");
   }
