@@ -25,7 +25,6 @@ from ..quantize import (
     GroupedScaledTensor1x,
     ScalingMode,
     Quantizer,
-    BlockScaleQuantizer,
     GroupedQuantizer,
     QuantizeConfig,
     QuantizerSet,
@@ -114,37 +113,43 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     rhs_q = rhs
     if not isinstance(lhs, ScaledTensor) and lhs_quantizer is not None:
         lhs_cdims = sanitize_dims(lhs.ndim, contracting_dims[0])
-        lhs_is_rowwise = lhs.ndim - 1 in lhs_cdims
-        flatten_axis = min(lhs_cdims) if lhs_is_rowwise else max(lhs_cdims) + 1
+        lhs_is_transposed = lhs.ndim - 1 not in lhs_cdims
+        need_lhs_colwise = (
+            lhs_is_transposed
+            and (
+                lhs_quantizer.scaling_mode.is_1d_block_scaling()
+                or not tex.is_non_nt_fp8_gemm_supported()
+            )
+        )
+        flatten_axis = max(lhs_cdims) + 1 if lhs_is_transposed else min(lhs_cdims)
         lhs_q = lhs_quantizer.quantize(
             lhs,
-            is_rowwise=lhs_is_rowwise,
-            is_colwise=not lhs_is_rowwise,
+            is_rowwise=not need_lhs_colwise,
+            is_colwise=need_lhs_colwise,
             flatten_axis=flatten_axis,
         )
         if isinstance(lhs_q, ScaledTensor2x):
-            lhs_q = lhs_q.get_rowwise_tensor() if lhs_is_rowwise else lhs_q.get_colwise_tensor()
-        if jnp.any(jnp.isnan(lhs_q.data)):
-            print("Found NaNs in quantized LHS data.")
-        if jnp.any(jnp.isnan(lhs_q.scale_inv)):
-            print("Found NaNs in quantized LHS scale_inv.")
+            lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
 
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
         rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
-        rhs_is_rowwise = rhs.ndim - 1 in rhs_cdims
-        flatten_axis = min(rhs_cdims) if rhs_is_rowwise else max(rhs_cdims) + 1
+        rhs_is_transposed = rhs.ndim - 1 in rhs_cdims
+        need_rhs_colwise = (
+            not rhs_is_transposed
+            and (
+                rhs_quantizer.scaling_mode.is_1d_block_scaling()
+                or not tex.is_non_nt_fp8_gemm_supported()
+            )
+        )
+        flatten_axis = min(rhs_cdims) if rhs_is_transposed else max(rhs_cdims) + 1
         rhs_q = rhs_quantizer.quantize(
             rhs,
-            is_rowwise=rhs_is_rowwise,
-            is_colwise=not rhs_is_rowwise,
+            is_rowwise=not need_rhs_colwise,
+            is_colwise=need_rhs_colwise,
             flatten_axis=flatten_axis,
         )
         if isinstance(rhs_q, ScaledTensor2x):
-            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_rowwise else rhs_q.get_colwise_tensor()
-        if jnp.any(jnp.isnan(rhs_q.data)):
-            print("Found NaNs in quantized RHS data.")
-        if jnp.any(jnp.isnan(rhs_q.scale_inv)):
-            print("Found NaNs in quantized RHS scale_inv.")
+            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
 
     return lhs_q, rhs_q
 

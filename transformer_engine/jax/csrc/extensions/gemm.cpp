@@ -42,9 +42,13 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     NVTE_CHECK(typeToSize(input_dtype) == 1, "Quantized GEMM requires 8-bit operands.");
     NVTE_CHECK(scale_inv.element_count() > 0, "Missing inverse scaling factor for quantized GEMM.");
 
-    auto scale_dims = scale_inv.dimensions();
-    std::vector<size_t> scale_shape = {product(scale_dims, 0, axis_boundary),
-                                       product(scale_dims, axis_boundary, scale_dims.size())};
+    std::vector<size_t> scale_shape = {1};
+    if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
+      // Block scaling also needs to be collapsed to match 2D data
+      scale_shape = {product(scale_inv.dimensions(), 0, axis_boundary),
+                     product(scale_inv.dimensions(), axis_boundary, scale_inv.dimensions().size())};
+    }
+
     auto scale_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
     if (rowwise) {
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
