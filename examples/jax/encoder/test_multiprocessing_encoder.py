@@ -28,8 +28,8 @@ from common import (
     get_fp8_recipe_from_name_string,
 )
 import transformer_engine.jax as te
+import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -412,7 +412,9 @@ def train_and_evaluate(args):
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            jit_encoder_init = jax.jit(encoder.init,
+                                       in_shardings=in_shardings,
+                                       out_shardings=out_shardings)
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
@@ -432,11 +434,15 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
+            jit_train_step = jax.jit(train_step,
+                                     in_shardings=in_shardings,
+                                     out_shardings=out_shardings)
 
             in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(eval_step,
+                                    in_shardings=in_shardings,
+                                    out_shardings=out_shardings)
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -578,8 +584,8 @@ class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
     def exec(self, use_fp8, fp8_recipe, *, enable_shardy=False):
-        """Run 3 epochs for testing"""
-        args = encoder_parser([])
+        """Run 5 epochs for testing"""
+        args = encoder_parser(["--epochs", "5"])
 
         num_gpu = self.num_process
         tp_size = 2 if num_gpu > 1 and num_gpu % 2 == 0 else 1
@@ -628,6 +634,8 @@ class TestEncoder(unittest.TestCase):
         assert result[0] < 0.505 and result[1] > 0.754
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
+                     "TE cuBLAS GEMM custom op does not support shardy")
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         result = self.exec(False, None, enable_shardy=True)
@@ -636,6 +644,8 @@ class TestEncoder(unittest.TestCase):
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
     )
+    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
+                     "TE cuBLAS GEMM custom op does not support shardy")
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
@@ -646,6 +656,8 @@ class TestEncoder(unittest.TestCase):
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"
     )
+    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
+                     "TE cuBLAS GEMM custom op does not support shardy")
     def test_te_current_scaling_fp8_shardy(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         result = self.exec(True, "Float8CurrentScaling", enable_shardy=True)

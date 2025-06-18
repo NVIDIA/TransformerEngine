@@ -479,7 +479,6 @@ class DecoderRunner(BaseRunner):
 
 @pytest.mark.parametrize("data_shape", DATA_SHAPE)
 @pytest.mark.parametrize("dtype", DTYPE)
-@pytest.mark.parametrize("with_jax_gemm", (False, True))
 @pytest.mark.parametrize("attrs", ATTRS)
 class BaseTester:
     """
@@ -488,39 +487,28 @@ class BaseTester:
 
     runner = BaseRunner
 
-    def use_jax_dot_for_gemm(self, enabled=False):
-        """Enable/disable TE custom cuBLAS GEMM primitive."""
-        if enabled:
-            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
-        elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
-            os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
-
-    def test_forward(self, data_shape, dtype, with_jax_gemm, attrs):
+    def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""
-        self.use_jax_dot_for_gemm(enabled=with_jax_gemm)
         QuantizeConfig.finalize()  # Ensure FP8 disabled.
         self.runner(attrs).test_forward(data_shape, dtype)
 
-    def test_backward(self, data_shape, dtype, with_jax_gemm, attrs):
+    def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
-        self.use_jax_dot_for_gemm(enabled=with_jax_gemm)
         QuantizeConfig.finalize()  # Ensure FP8 disabled.
         self.runner(attrs).test_backward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
-    def test_forward_with_fp8(self, data_shape, dtype, with_jax_gemm, attrs, fp8_recipe):
+    def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
-        self.use_jax_dot_for_gemm(enabled=with_jax_gemm)
         QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
         self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         QuantizeConfig.finalize()
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
-    def test_backward_with_fp8(self, data_shape, dtype, with_jax_gemm, attrs, fp8_recipe):
+    def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
-        self.use_jax_dot_for_gemm(enabled=with_jax_gemm)
         QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
         self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
         QuantizeConfig.finalize()

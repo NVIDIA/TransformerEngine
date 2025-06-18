@@ -898,7 +898,7 @@ class TestDense:
     def test_gemm_bf16(self, m, n, k, data_layout):
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
-        primitive_out = tex.gemm(x, w, contracting_dims)
+        primitive_out = tex.gemm(x, w, dimension_numbers=(contracting_dims, ((), ())))
         ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
@@ -929,7 +929,7 @@ class TestDense:
         primitive_out = tex.gemm(
             x,
             w,
-            contracting_dims=contracting_dims,
+            dimension_numbers=(contracting_dims, ((), ())),
             lhs_quantizer=quantizer_set.x if x_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad,
             rhs_quantizer=(
                 quantizer_set.kernel if w_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad

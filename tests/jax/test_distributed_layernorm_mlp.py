@@ -44,6 +44,7 @@ if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+SUPPORTED_RECIPES_WITH_SHARDY = SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES
 
 DTYPES = [jnp.bfloat16, jnp.float16]
 INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
@@ -72,6 +73,15 @@ def generate_fsdp_and_tp_configs():
             [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
     return configs
+
+
+def use_jax_fp8_gemm(enabled=False):
+    import os
+
+    if enabled:
+        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
+        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 class TestDistributedLayernormMLP:
@@ -146,8 +156,17 @@ class TestDistributedLayernormMLP:
         )
 
     def _test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        use_shardy,
+        with_jax_gemm,
     ):
+        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -208,20 +227,25 @@ class TestDistributedLayernormMLP:
 
             multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
 
-        assert_allclose(multi_fwd, single_fwd, dtype=dtype)
+        fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
+        bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
+        assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
         for i in range(len(inputs)):
             if multi_grads[i] is not None:
                 if isinstance(multi_grads[i], list):
                     assert isinstance(single_grads[i], list)
                     for m_grad, s_grad in zip(multi_grads[i], single_grads[i]):
                         assert_allclose(
-                            m_grad, s_grad, dtype=dtype, err_msg=f"multi_grads[{i}] is not close"
+                            m_grad,
+                            s_grad,
+                            dtype=bwd_test_type,
+                            err_msg=f"multi_grads[{i}] is not close"
                         )
                 else:
                     assert_allclose(
                         multi_grads[i],
                         single_grads[i],
-                        dtype=dtype,
+                        dtype=bwd_test_type,
                         err_msg=f"multi_grads[{i}] is not close",
                     )
 
@@ -232,8 +256,16 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        with_jax_gemm,
     ):
         self._test_layernorm_mlp_grad(
             mesh_config,
@@ -243,6 +275,7 @@ class TestDistributedLayernormMLP:
             dtype,
             fp8_recipe,
             use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -251,19 +284,22 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES_WITH_SHARDY)
     def test_layernorm_mlp_grad_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
     ):
-        # We don't test block scaling with Shardy because at the time of writing,
-        # it is not supported in JAX's scaled_matmul_stablehlo.
+        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
+        # native JAX FP8 dot_general. We don't test block scaling with Shardy because at the
+        # time of writing, it is not supported in JAX's scaled_matmul_stablehlo.
         self._test_layernorm_mlp_grad(
             mesh_config,
             activation_type,
             use_bias,
             input_shape,
             dtype,
-            fp8_recipe=recipe.DelayedScaling(),
+            fp8_recipe=fp8_recipe,
             use_shardy=True,
+            with_jax_gemm=True,
         )
 
     def _test_layernorm_mlp(
@@ -276,7 +312,9 @@ class TestDistributedLayernormMLP:
         use_fp8,
         fp8_recipe,
         use_shardy,
+        with_jax_gemm,
     ):
+        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
@@ -340,9 +378,9 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
     ):
         self._test_layernorm_mlp(
             mesh_config,
@@ -352,7 +390,8 @@ class TestDistributedLayernormMLP:
             dtype,
             use_fp8=False,
             fp8_recipe=None,
-            use_shardy=use_shardy,
+            use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -361,9 +400,10 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
     ):
         self._test_layernorm_mlp(
             mesh_config,
@@ -374,4 +414,52 @@ class TestDistributedLayernormMLP:
             use_fp8=True,
             fp8_recipe=fp8_recipe,
             use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
+        )
+
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    def test_layernorm_mlp_layer_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype
+    ):
+        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
+        # native JAX dot_general.
+        self._test_layernorm_mlp(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=False,
+            fp8_recipe=None,
+            use_shardy=True,
+            with_jax_gemm=True,
+        )
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES_WITH_SHARDY)
+    def test_layernorm_mlp_layer_fp8_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+    ):
+        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
+        # native JAX FP8 dot_general. We don't test block scaling with Shardy because at the
+        # time of writing, it is not supported in JAX's scaled_matmul_stablehlo.
+        self._test_layernorm_mlp(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=True,
+            fp8_recipe=fp8_recipe,
+            use_shardy=True,
+            with_jax_gemm=True,
         )
