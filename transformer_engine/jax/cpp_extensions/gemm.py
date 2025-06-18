@@ -629,8 +629,6 @@ def _te_gemm(
     )
 
 
-=======
->>>>>>> main
 class GroupedGemmPrimitive(BasePrimitive):
     """
     Primitive for grouped GEMM

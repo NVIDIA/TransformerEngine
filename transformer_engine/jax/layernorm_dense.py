@@ -293,7 +293,6 @@ def _layernorm_dense_bwd_rule(
     dgrad = tex.gemm(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel,
-        (g_constracting_dim, k_constracting_dim),
         contracting_dims=(g_constracting_dim, k_constracting_dim),
     )
 
@@ -307,7 +306,6 @@ def _layernorm_dense_bwd_rule(
     wgrad = tex.gemm(
         casted_ln_out,
         casted_grad.get_tensor(TensorUsage.RHS),
-        (x_constracting_dim, g_constracting_dim),
         contracting_dims=(x_constracting_dim, g_constracting_dim),
     )
 
