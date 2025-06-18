@@ -1028,19 +1028,14 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
-  const size_t scale_stride_rowwise = use_rowwise_scaling
-                                      ? output->scale_inv.shape[1]
-                                      : 1;
-  const size_t scale_stride_colwise = use_colwise_scaling
-                                      ? output->columnwise_scale_inv.shape[1]
-                                      : 1;
+  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
 
-  e8m0_t *const scales_rowwise_ptr = use_rowwise_scaling
-                                     ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr)
-                                     : nullptr;
-  e8m0_t *const scales_colwise_ptr = use_colwise_scaling
-                                     ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
-                                     : nullptr;
+  e8m0_t *const scales_rowwise_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
@@ -1069,9 +1064,11 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
-      
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
@@ -1079,7 +1076,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
           constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
           constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
-          
+
           create_2D_tensor_map(tensor_map_input, input.data, rows, cols, BUFF_DIM_Y, BUFF_DIM_X,
                                cols, 0, input_type_bit_size);
 
@@ -1102,8 +1099,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           constexpr size_t buff_elems_total = mxfp8_kernel::BUFFS_NUM * buff_elems;
           constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
           constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
-          constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
-          constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+          constexpr size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
           constexpr size_t elt_input_mem = buff_size_aligned_in;
           constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
@@ -1162,9 +1161,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
           if constexpr (IS_DBIAS) {
             reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
-          }
-      );  // NOLINT(*)
-  );  // NOLINT(*)
+          });  // NOLINT(*)
+  );           // NOLINT(*)
 }
 
 namespace detail {
