@@ -30,19 +30,19 @@ from ..quantize import (
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
+    is_fp8_gemm_with_all_layouts_supported,
 )
 from ..sharding import get_padded_spec
 
 
 __all__ = [
-    "gemm",
-    "grouped_gemm",
-    "gemm_uses_jax_dot",
-    "sanitize_dims",
-    "get_non_contracting_dims",
-    "transpose_contracting_dims",
-    "is_gemm_with_all_layouts_supported",
-]
+        "gemm",
+        "grouped_gemm",
+        "gemm_uses_jax_dot",
+        "sanitize_dims",
+        "get_non_contracting_dims",
+        "transpose_contracting_dims",
+        ]
 
 
 num_cublas_streams = get_num_compute_streams()
@@ -53,11 +53,6 @@ def get_cublas_workspace_size_bytes() -> None:
     if tex.get_device_compute_capability(0) >= 90:
         return 33_554_432
     return 4_194_304
-
-
-def is_gemm_with_all_layouts_supported() -> bool:
-    """Return True if using blackwell, False otherwise."""
-    return get_device_compute_capability(0) >= 100
 
 
 def sanitize_dims(ndim: int, dims: Union[int, Sequence[int]]) -> Sequence[int]:
@@ -118,7 +113,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             lhs_is_transposed
             and (
                 lhs_quantizer.scaling_mode.is_1d_block_scaling()
-                or not tex.is_non_nt_fp8_gemm_supported()
+                or not is_fp8_gemm_with_all_layouts_supported()
             )
         )
         flatten_axis = max(lhs_cdims) + 1 if lhs_is_transposed else min(lhs_cdims)
@@ -128,8 +123,9 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             is_colwise=need_lhs_colwise,
             flatten_axis=flatten_axis,
         )
-        if isinstance(lhs_q, ScaledTensor2x):
-            lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
+        # TODO: remove
+        # if isinstance(lhs_q, ScaledTensor2x):
+        #     lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
 
     if not isinstance(rhs, ScaledTensor) and rhs_quantizer is not None:
         rhs_cdims = sanitize_dims(rhs.ndim, contracting_dims[1])
@@ -138,7 +134,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             not rhs_is_transposed
             and (
                 rhs_quantizer.scaling_mode.is_1d_block_scaling()
-                or not tex.is_non_nt_fp8_gemm_supported()
+                or not is_fp8_gemm_with_all_layouts_supported()
             )
         )
         flatten_axis = min(rhs_cdims) if rhs_is_transposed else max(rhs_cdims) + 1
@@ -148,8 +144,10 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
             is_colwise=need_rhs_colwise,
             flatten_axis=flatten_axis,
         )
-        if isinstance(rhs_q, ScaledTensor2x):
-            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
+        # if isinstance(rhs_q, ScaledTensor2x):
+        #     rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
+    assert not isinstance(lhs_q, ScaledTensor2x)
+    assert not isinstance(rhs_q, ScaledTensor2x)
 
     return lhs_q, rhs_q
 
@@ -631,6 +629,8 @@ def _te_gemm(
     )
 
 
+=======
+>>>>>>> main
 class GroupedGemmPrimitive(BasePrimitive):
     """
     Primitive for grouped GEMM
@@ -689,14 +689,15 @@ class GroupedGemmPrimitive(BasePrimitive):
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
         del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
-        del lhs_scale_inv_aval, rhs_scale_inv_aval
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
-        # JAX buffer pointers are 128-aligned
-        # 255 is added to the workspace size to ensure workspace ptr is 256-aligned
-        workspace_size += 255
+        # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
+        # necessarily 256 bytes aligned, we add some padding to ensure alignment.
+        # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
+        workspace_size += 256
+        workspace_size += lhs_scale_inv_aval.size + 256
+        workspace_size += rhs_scale_inv_aval.size + 256
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-        # TODO(phuong): We should make separate tmp buffers for swizzled scales to avoid unaligned-by-256 workspace ptr issue
 
         out_shape = (M, N)
         if is_grouped_dense_wgrad:
@@ -917,12 +918,12 @@ def _jax_gemm(
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
 
     if isinstance(lhs_q, ScaledTensor) and isinstance(rhs_q, ScaledTensor):
-        if isinstance(lhs_q, ScaledTensor2x):
-            lhs_is_transposed = lhs.ndim - 1 not in sanitize_dims(lhs.ndim, contracting_dims[0])
-            lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
-        if isinstance(rhs_q, ScaledTensor2x):
-            rhs_is_transposed = rhs.ndim - 1 in sanitize_dims(rhs.ndim, contracting_dims[1])
-            rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
+        # if isinstance(lhs_q, ScaledTensor2x):
+        #     lhs_is_transposed = lhs.ndim - 1 not in sanitize_dims(lhs.ndim, contracting_dims[0])
+        #     lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
+        # if isinstance(rhs_q, ScaledTensor2x):
+        #     rhs_is_transposed = rhs.ndim - 1 in sanitize_dims(rhs.ndim, contracting_dims[1])
+        #     rhs_q = rhs_q.get_rowwise_tensor() if rhs_is_transposed else rhs_q.get_colwise_tensor()
         return _jax_gemm_fp8_impl(lhs_q, rhs_q)
 
     if (
@@ -1137,15 +1138,13 @@ def grouped_gemm(
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
         scaling_mode = quantizer_set.x.scaling_mode
         if (
-            # TODO(Phuong): we force Blackwell to also use NT layout for now, need to fix later
-            # scaling_mode.is_tensor_scaling()
-            # and is_gemm_with_all_layouts_supported()
-            scaling_mode.is_1d_block_scaling()
+            quantizer_set.x.scaling_mode.is_tensor_scaling()
+            and is_fp8_gemm_with_all_layouts_supported()
         ):
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
             lhs_is_rowwise = not lhs_is_trans
-            rhs_is_rowwise = lhs_is_trans
+            rhs_is_rowwise = rhs_is_trans
         quantizer_set.x.q_layout = (
             QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
         )
@@ -1160,6 +1159,8 @@ def grouped_gemm(
         rhs_data = rhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
         rhs_scale_inv = rhs_q.scale_inv
+        lhs_shape = lhs_q.original_shape
+        rhs_shape = rhs_q.original_shape
 
     assert not (
         lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
@@ -1167,24 +1168,35 @@ def grouped_gemm(
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
-    # TODO(Phuong): we force Blackwell to also use NT layout for now, need to fix later
-    if scaling_mode.is_tensor_scaling():  # and not is_gemm_with_all_layouts_supported():
-        lhs_is_trans = False
-        rhs_is_trans = True
+    if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():
         if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
             lhs_layout_is_T = lhs.data_layout == "T"
             rhs_layout_is_T = rhs.data_layout == "T"
         else:
             lhs_layout_is_T = lhs_q.data_layout == "T"
             rhs_layout_is_T = rhs_q.data_layout == "T"
+        # we can't apply _shape_normalization on the grouped input
+        # thus we need to ensure that lhs is in N and rhs is in T
+        assert (
+            lhs_is_trans == lhs_layout_is_T
+        ), "lhs input must be transposed before calling grouped_gemm"
+        assert (
+            not rhs_is_trans == rhs_layout_is_T
+        ), "rhs input must be transposed before calling grouped_gemm"
+        lhs_is_trans = False
+        rhs_is_trans = True
         lhs_ndim = len(lhs_shape)
         rhs_ndim = len(rhs_shape)
         if lhs_layout_is_T:
             lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
         if rhs_layout_is_T:
-            rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
-        lhs_data = _shape_normalization(lhs_data, (lhs_contract_dim, ()), not lhs_layout_is_T)
-        rhs_data = _shape_normalization(rhs_data, (rhs_contract_dim, ()), rhs_layout_is_T)
+            # For rhs [G, K, N], need to exclude the G dim from contract_dim
+            if group_sizes.size == rhs_shape[0]:
+                rhs_contract_dim = tuple(
+                    (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
+                )
+            else:
+                rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
 
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
@@ -1203,9 +1215,6 @@ def grouped_gemm(
     has_bias = bias is not None
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
-
-    # TODO(Phuong): support MXFP8_1D_SCALING
-    assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,

@@ -108,8 +108,8 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):
-        assert_dequantized_scaled_tensor(a.get_rowwise_tensor(), b)
-        assert_dequantized_scaled_tensor(a.get_colwise_tensor(), b)
+        assert_dequantized_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_scaled_tensor(a.colwise_tensor, b)
     else:
         pytest.fail("a must be a ScaledTensor object")
 
@@ -138,10 +138,10 @@ def assert_dequantized_grouped_scaled_tensor(
             dq_a_i = dq_a_i.reshape(b_i.shape)
             assert_allclose(dq_a_i, b_i, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):
-        assert isinstance(a.get_rowwise_tensor(), GroupedScaledTensor1x)
-        assert isinstance(a.get_colwise_tensor(), GroupedScaledTensor1x)
-        assert_dequantized_grouped_scaled_tensor(a.get_rowwise_tensor(), b)
-        assert_dequantized_grouped_scaled_tensor(a.get_colwise_tensor(), b)
+        assert isinstance(a.rowwise_tensor, GroupedScaledTensor1x)
+        assert isinstance(a.colwise_tensor, GroupedScaledTensor1x)
+        assert_dequantized_grouped_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_grouped_scaled_tensor(a.colwise_tensor, b)
     else:
         pytest.fail("a must be a GroupedScaledTensor object")
 
@@ -1278,6 +1278,9 @@ class TestGroupedDense:
         group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
         group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
         group_sizes = jnp.diff(group_sizes)
+        # Make one empty input lhs to test empty GEMM handling
+        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
+        group_sizes = group_sizes.at[1].set(0)
         assert group_sizes.sum() == m
 
         # *32 to make sure that input shape works for MXFP8
@@ -1329,9 +1332,6 @@ class TestGroupedDense:
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            pytest.skip("MXFP8 is not supported in grouped_gemm yet")
-
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode,
@@ -1416,9 +1416,6 @@ class TestGroupedDense:
     )
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
-        if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-            pytest.skip("MXFP8 is not supported in grouped_dense yet")
-
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
