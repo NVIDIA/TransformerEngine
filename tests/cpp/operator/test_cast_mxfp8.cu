@@ -301,17 +301,29 @@ void performTest_x1(const ProcessingMethod processing_method,
                                        scales_stride,
                                        scales_stride);
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-
     const uint8_t * const gpu_scales_ptr = rowwise
                                            ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                            : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
 
-    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
 
-    if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+    size_t mismatches_scales = 0;
+    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                                 mismatches_scales,
+                                 scale_diff_abs_tolerance,
+                                 abs_tolerable_mismatches_limit,
+                                 rel_tolerable_mismatches_limit);
+
+    const size_t mismatches_elts = 32 * mismatches_scales;
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol, true, mismatches_elts);
+
+    if (processing_method == ProcessingMethod::CAST_DBIAS
+        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
+    {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
@@ -464,17 +476,38 @@ void performTest_x2(const ProcessingMethod processing_method,
                                        scales_stride_rowwise,
                                        scales_stride_colwise);
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 0.0;
+    const double rel_tolerable_mismatches_limit = 0.0;
+
+    size_t mismatches_scales_rowwise = 0;
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
+                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                                 mismatches_scales_rowwise,
+                                 scale_diff_abs_tolerance,
+                                 abs_tolerable_mismatches_limit,
+                                 rel_tolerable_mismatches_limit);
+
+    size_t mismatches_scales_colwise = 0;
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise);
+                                 unpadded_blocks_X_colwise, scales_stride_colwise,
+                                 mismatches_scales_colwise,
+                                 scale_diff_abs_tolerance,
+                                 abs_tolerable_mismatches_limit,
+                                 rel_tolerable_mismatches_limit);
 
-    if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
+    const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
+    const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
+
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol, true, mismatches_scales_rowwise);
+    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol, true, mismatches_scales_colwise);
+
+    if (processing_method == ProcessingMethod::CAST_DBIAS
+        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
+    {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;

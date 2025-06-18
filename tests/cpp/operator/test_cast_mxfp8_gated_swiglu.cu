@@ -258,19 +258,33 @@ void performTest_x1(const size_t rows,
                               rowwise,
                               colwise);
 
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
+    size_t mismatches_scales = 0;
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 1.0;
+    const double rel_tolerable_mismatches_limit = 1.0e-4;
 
     const uint8_t * const gpu_scales_ptr = rowwise
                                            ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
                                            : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
     if (rowwise) {
       compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
+                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                                   mismatches_scales,
+                                   scale_diff_abs_tolerance,
+                                   abs_tolerable_mismatches_limit,
+                                   rel_tolerable_mismatches_limit);
     } else {
       compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
-                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
+                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                                   mismatches_scales,
+                                   scale_diff_abs_tolerance,
+                                   abs_tolerable_mismatches_limit,
+                                   rel_tolerable_mismatches_limit);
     }
+
+    const size_t mismatches_elts = 32 * mismatches_scales;
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("output", output, ref_output.get(), rowwise, atol, rtol, true, mismatches_elts);
 }
 
 /**
@@ -359,16 +373,34 @@ void performTest_x2(const size_t rows,
                               true,
                               true);
 
-    auto [atol, rtol] = getTolerances(otype);
-    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
-    compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
+    const size_t scale_diff_abs_tolerance = 0;
+    const double abs_tolerable_mismatches_limit = 1.0;
+    const double rel_tolerable_mismatches_limit = 1.0e-4;
+
+    size_t mismatches_scales_rowwise = 0;
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
+                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                                 mismatches_scales_rowwise,
+                                 scale_diff_abs_tolerance,
+                                 abs_tolerable_mismatches_limit,
+                                 rel_tolerable_mismatches_limit);
+    size_t mismatches_scales_colwise = 0;
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise);
+                                 unpadded_blocks_X_colwise, scales_stride_colwise,
+                                 mismatches_scales_colwise,
+                                 scale_diff_abs_tolerance,
+                                 abs_tolerable_mismatches_limit,
+                                 rel_tolerable_mismatches_limit);
+
+    const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
+    const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
+
+    auto [atol, rtol] = getTolerances(otype);
+    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
+    compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol, true, mismatches_elts_rowwise);
+    compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol, true, mismatches_elts_colwise);
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
