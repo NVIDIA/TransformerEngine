@@ -19,6 +19,7 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    TensorUsage,
 )
 
 
@@ -105,8 +106,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
 
     # GEMM NN
     output = tex.gemm(
-        casted_x.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
+        casted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -116,8 +117,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
         x.shape,
         kernel.shape,
         use_bias,
@@ -138,8 +139,8 @@ def _dense_bwd_rule(
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
     (
-        colwise_casted_x,
-        rowwise_casted_kernel,
+        casted_x_lhs,
+        casted_kernel_rhs,
         x_shape,
         kernel_shape,
         use_bias,
@@ -161,8 +162,8 @@ def _dense_bwd_rule(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
+        casted_grad.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel_rhs,
         (g_contracting_dim, k_contracting_dim),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
@@ -174,7 +175,9 @@ def _dense_bwd_rule(
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_contracting_dim, g_contracting_dim)
+        casted_x_lhs,
+        casted_grad.get_tensor(usage=TensorUsage.RHS),
+        (x_contracting_dim, g_contracting_dim),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
@@ -287,13 +290,6 @@ def _grouped_dense_fwd_rule(
             "and k_contracting_dims=(1,) for now, "
             f"got {x_contracting_dims=} and {k_contracting_dims=}"
         )
-        scaling_mode = quantizer_set.x.scaling_mode
-        if scaling_mode.is_tensor_scaling():
-            k_contracting_dims = (0,)
-        elif scaling_mode.is_1d_block_scaling():
-            k_contracting_dims = (1,)
-        else:
-            raise ValueError(f"Unsupported scaling mode {scaling_mode.value} for grouped_dense")
 
         casted_x = tex.grouped_quantize(
             x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
@@ -306,11 +302,10 @@ def _grouped_dense_fwd_rule(
         # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we should have
         # rowwise_casted_x.original_shape == (M, K)
         # colwise_casted_kernel.original_shape == (G, N, K)
-        grouped_gemm_x = casted_x.get_rowwise_tensor()
-        grouped_gemm_kernel = casted_kernel.get_colwise_tensor()
-        # TODO(Hua): Shall we give warning/error if not quantizer_set.x.is_2x2x()?
-        ctx_x = casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None
-        ctx_kernel = casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None
+        grouped_gemm_x = casted_x.get_tensor(usage=TensorUsage.LHS)
+        grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
+        ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
+        ctx_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     output = tex.grouped_gemm(
         grouped_gemm_x,
@@ -388,7 +383,7 @@ def _grouped_dense_bwd_rule(
         g_contracting_dim = (1,)
         k_contracting_dim = (2,)
         dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
-        dgrad_grad = casted_grad.get_rowwise_tensor()
+        dgrad_grad = casted_grad.get_tensor(usage=TensorUsage.LHS)
         dgrad_kernel_T = ctx_kernel
 
         # We need to use g_contracting_dim = (0,) and x_contracting_dim = (0,) to make it work
@@ -398,7 +393,7 @@ def _grouped_dense_bwd_rule(
         x_contracting_dim = (0,)
         wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
         wgrad_x_T = ctx_x
-        wgrad_grad = casted_grad.get_colwise_tensor()
+        wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
 
     dgrad = tex.grouped_gemm(
         dgrad_grad,
