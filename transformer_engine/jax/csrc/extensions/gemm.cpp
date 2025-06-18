@@ -21,6 +21,13 @@
 namespace transformer_engine {
 namespace jax {
 
+
+static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
+  // Move the pointer to the next 256B aligned address
+  return reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(ptr) + 255) &
+                                     ~static_cast<uintptr_t>(255));
+}
+
 std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
     cudaStream_t stream, Buffer_Type buffer, Buffer_Type scale_inv, Result_Type swizzled_scale_inv,
     JAXX_Scaling_Mode scaling_mode, size_t axis_boundary, bool rowwise) {
@@ -157,9 +164,11 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   }
   auto pre_gelu_ = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, pre_gelu_dtype);
 
-  // cuBLAS workspace
-  std::vector<size_t> workspace_shape = {static_cast<size_t>(workspace->element_count())};
-  auto workspace_ = TensorWrapper(workspace->untyped_data(), workspace_shape, DType::kByte);
+  // cuBLAS workspace + 256 alignment enforcement
+  auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
+  workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
+  std::vector<size_t> workspace_shape = {static_cast<size_t>(workspace->element_count()) - 256};
+  auto workspace_ = TensorWrapper(workspace_ptr, workspace_shape, DType::kByte);
 
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
@@ -196,12 +205,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("use_split_accumulator"),
                               FFI_CudaGraph_Traits);
 
-
-static uint8_t *move_ptr_to_next_256B_aligned(uint8_t *ptr) {
-  // Move the pointer to the next 256B aligned address
-  return reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(ptr) + 255) &
-                                     ~static_cast<uintptr_t>(255));
-}
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,

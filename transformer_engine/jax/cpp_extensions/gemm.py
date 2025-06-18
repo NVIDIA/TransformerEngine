@@ -32,7 +32,7 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
 )
-from ..sharding import get_padded_spec
+from .misc import get_padded_spec
 
 
 __all__ = [
@@ -277,9 +277,10 @@ class GemmPrimitive(BasePrimitive):
         rhs_swizzle = jax.core.ShapedArray(shape=(rhs_swizzle_size,), dtype=swizzle_dtype)
 
         # Declare cuBLAS workspace
-        workspace = jax.core.ShapedArray(
-            shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
-        )
+        # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
+        # necessarily 256 bytes aligned, we add some padding to ensure alignment.
+        workspace_size = get_cublas_workspace_size_bytes() + 256
+        workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
 
