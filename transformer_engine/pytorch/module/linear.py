@@ -463,14 +463,13 @@ class _Linear(torch.autograd.Function):
                     else None
                 )
             else:
-                main_grad = weight.main_grad
+                main_grad = weight.get_main_grad()
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
                     weight = ctx.weight_object
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    if not hasattr(param, '__fsdp_param__'):
-                        weight.main_grad = main_grad
+                    weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already

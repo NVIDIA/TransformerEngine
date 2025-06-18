@@ -538,7 +538,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     else None
                 )
             else:
-                main_grad = origin_weight.main_grad
+                main_grad = origin_weight.get_main_grad()
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -560,8 +560,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ctx.grad_added_to_main_grad:
                     origin_weight = ctx.weight_object
                 if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    if not hasattr(param, '__fsdp_param__'):
-                        origin_weight.main_grad = main_grad
+                    origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
