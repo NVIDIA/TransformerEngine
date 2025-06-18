@@ -200,10 +200,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("multi_quantize", &transformer_engine::pytorch::multi_quantize,
+  m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
         "Multi-tensor quantize", py::arg("input_list"), py::arg("quantizer_list"));
-  m.def("split_quantize", &transformer_engine::pytorch::split_quantize, "Split and quantize",
-        py::arg("input"), py::arg("split_sections"), py::arg("quantizer_list"));
+  m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
+        "Split and multi-tensor quantize", py::arg("input"), py::arg("split_sections"),
+        py::arg("quantizer_list"));
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",

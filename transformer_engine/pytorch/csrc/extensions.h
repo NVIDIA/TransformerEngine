@@ -113,13 +113,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
-std::vector<py::object> multi_quantize(std::vector<at::Tensor> input_list,
-                                       std::vector<py::handle> quantizer_list);
-
-std::vector<py::object> split_quantize(at::Tensor input,
-                                       std::vector<int> split_sections,
-                                       std::vector<py::handle> quantizer_list);
-
 /***************************************************************************************************
  * Activations
  **************************************************************************************************/
@@ -194,6 +187,13 @@ void quantize_cpp(const TensorWrapper &te_input, py::handle quantizer_py,
                   TensorWrapper &te_noop);
 
 py::object dequantize(const py::handle &input, DType otype);
+
+std::vector<py::object> multi_tensor_quantize(std::vector<at::Tensor> input_list,
+                                              std::vector<py::handle> quantizer_list);
+
+std::vector<py::object> split_quantize(at::Tensor input,
+                                       std::vector<int> split_sections,
+                                       std::vector<py::handle> quantizer_list);
 
 /***************************************************************************************************
  * Bias gradient fusions
