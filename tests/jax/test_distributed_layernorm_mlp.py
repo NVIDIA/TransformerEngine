@@ -119,7 +119,6 @@ class TestDistributedLayernormMLP:
         bias_2: Optional[jnp.ndarray],
         layernorm_type: str = "rmsnorm",
         activation_type: Sequence[Union[str, Callable]] = ("gelu",),
-        with_jax_gemm: bool = False,
         multi_gpus: bool = False,
     ) -> jnp.ndarray:
 
@@ -137,7 +136,6 @@ class TestDistributedLayernormMLP:
         quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
 
         # out = ((x * kernel_1) + bias_1) * kernel_2 + bias_2
-        use_jax_fp8_gemm(enabled=with_jax_gemm)
         return jnp.mean(
             layernorm_mlp(
                 x,
@@ -160,6 +158,7 @@ class TestDistributedLayernormMLP:
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy,
         with_jax_gemm
     ):
+        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -167,7 +166,7 @@ class TestDistributedLayernormMLP:
         inputs = [x, gamma, k1, k2, b1, b2] = self.generate_inputs(
             input_shape, activation_type, use_bias, dtype
         )
-        static_inputs = [layernorm_type, activation_type, with_jax_gemm]
+        static_inputs = [layernorm_type, activation_type]
         value_and_grad_func = jax.value_and_grad(
             self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
         )

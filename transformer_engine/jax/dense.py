@@ -53,7 +53,7 @@ def dense(
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
-        output = tex.gemm(x, kernel, contracting_dims)
+        output = tex.gemm(x, kernel, dimension_numbers=(contracting_dims, ((),())))
         if bias is not None:
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
             output += jnp.reshape(bias, bias_new_shape)
