@@ -99,6 +99,9 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     fused_router/fused_aux_loss.cu
+     fused_router/fused_compute_score_for_aux_loss.cu
+     fused_router/fused_topk_softmax_sigmoid.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
