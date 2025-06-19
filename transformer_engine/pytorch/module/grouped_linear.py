@@ -24,7 +24,6 @@ from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     divide,
     cast_if_needed,
-    assert_dim_for_fp8_exec,
     clear_tensor_data,
     init_method_constant,
     requires_grad,
@@ -38,7 +37,7 @@ from ..distributed import (
 from ..cpp_extensions import (
     general_grouped_gemm,
 )
-from ..constants import GemmParallelModes, dist_group_type, TE_DType
+from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..cpu_offload import is_cpu_offload_enabled
