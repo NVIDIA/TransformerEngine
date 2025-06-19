@@ -155,8 +155,15 @@ class TestDistributedLayernormMLP:
         )
 
     def _test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy,
-        with_jax_gemm
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        use_shardy,
+        with_jax_gemm,
     ):
         use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
@@ -245,7 +252,14 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm,
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        with_jax_gemm,
     ):
         self._test_layernorm_mlp_grad(
             mesh_config,

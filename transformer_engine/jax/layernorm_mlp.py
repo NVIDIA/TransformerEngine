@@ -291,7 +291,7 @@ def _layernorm_mlp_fwd_rule(
     dot_1_output = tex.gemm(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, k_contracting_dims), ((x_bdim, ), ())),
+        dimension_numbers=((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
     )
@@ -326,7 +326,7 @@ def _layernorm_mlp_fwd_rule(
     dot_2_output = tex.gemm(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, k_contracting_dims), ((x_bdim, ), ())),
+        dimension_numbers=((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
     )
@@ -436,7 +436,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_2 = tex.gemm(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel_2,
-        dimension_numbers=((g_contracting_dims_2, k_contracting_dims_2), ((x_bdim, ), ())),
+        dimension_numbers=((g_contracting_dims_2, k_contracting_dims_2), ((x_bdim,), ())),
     )
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
@@ -450,7 +450,7 @@ def _layernorm_mlp_bwd_rule(
     wgrad_2 = tex.gemm(
         casted_act_out,
         casted_grad.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim, ), ())),
+        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), ())),
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -477,7 +477,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_1 = tex.gemm(
         casted_dact_out.get_tensor(TensorUsage.LHS),
         casted_kernel_1,
-        dimension_numbers=((g_contracting_dims_1, k_contracting_dims_1), ((x_bdim, ), ())),
+        dimension_numbers=((g_contracting_dims_1, k_contracting_dims_1), ((x_bdim,), ())),
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
@@ -487,7 +487,7 @@ def _layernorm_mlp_bwd_rule(
     wgrad_1 = tex.gemm(
         casted_ln_out,
         casted_dact_out.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim, ), ())),
+        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), ())),
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
