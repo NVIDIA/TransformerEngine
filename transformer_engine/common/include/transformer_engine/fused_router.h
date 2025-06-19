@@ -106,8 +106,9 @@ void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_outpu
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
-                                 int total_num_tokens, int num_tokens, int num_experts, int topk, float coeff,
-                                 NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream);
+                                 int total_num_tokens, int num_tokens, int num_experts, int topk,
+                                 float coeff, NVTETensor aux_loss, NVTETensor Const_buf,
+                                 cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.
  *

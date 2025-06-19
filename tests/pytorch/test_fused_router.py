@@ -10,6 +10,8 @@ import pytest
 from copy import deepcopy
 
 seed = 42
+
+
 def dtype_tols(dtype: torch.dtype):
     if dtype == torch.float32:
         return 1.0e-6, 1.0e-4
@@ -18,9 +20,12 @@ def dtype_tols(dtype: torch.dtype):
     if dtype == torch.bfloat16:
         return 2.0e-2, 1.0e-5
     raise ValueError(f"Unsuppored dtype ({dtype})")
+
+
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
+
 
 # Pytorch-based group topk
 def group_limited_topk(
@@ -199,7 +204,9 @@ def run_comparison(
         expert_bias=expert_bias_clone,
     )
 
-    assert torch.allclose(probs, probs_fused, atol=atol, rtol=rtol), f"probs are not close: {probs} != {probs_fused}"
+    assert torch.allclose(
+        probs, probs_fused, atol=atol, rtol=rtol
+    ), f"probs are not close: {probs} != {probs_fused}"
     assert torch.allclose(routing_map, routing_map_fused, atol=atol, rtol=rtol)
 
     # Fake the loss
@@ -212,6 +219,7 @@ def run_comparison(
 
     # Check the gradient
     assert torch.allclose(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
+
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
@@ -243,6 +251,7 @@ def test_topk_sigmoid(
         enable_bias=enable_bias,
     )
 
+
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
 @pytest.mark.parametrize("num_experts", [128, 32])
@@ -272,6 +281,7 @@ def test_topk_softmax(
         score_function="softmax",
         enable_bias=False,
     )
+
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
@@ -369,15 +379,34 @@ def profile_topk_softmax(
     enable_bias,
     use_pre_softmax,
 ):
-    group_topk = 4 
+    group_topk = 4
     scaling_factor = 1.2
-    test_topk_sigmoid(torch.float32, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias)
-    test_topk_softmax(torch.float32, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor)
+    test_topk_sigmoid(
+        torch.float32, num_tokens, num_experts, topk, group_topk, scaling_factor, enable_bias
+    )
+    test_topk_softmax(
+        torch.float32, num_tokens, num_experts, topk, use_pre_softmax, group_topk, scaling_factor
+    )
 
 
 if __name__ == "__main__":
-    test_fused_scores_for_aux_loss(dtype=torch.float32, num_tokens=2, num_experts=256, topk=8, score_function="sigmoid")
+    test_fused_scores_for_aux_loss(
+        dtype=torch.float32, num_tokens=2, num_experts=256, topk=8, score_function="sigmoid"
+    )
     test_fused_aux_loss(dtype=torch.float32, num_tokens=2, num_experts=256, topk=8)
-    profile_topk_softmax(dtype=torch.float32, num_tokens=1, num_experts=256, topk=8, enable_bias=False, use_pre_softmax=True)
-    profile_topk_softmax(dtype=torch.float32, num_tokens=1, num_experts=256, topk=8, enable_bias=True, use_pre_softmax=False)
-
+    profile_topk_softmax(
+        dtype=torch.float32,
+        num_tokens=1,
+        num_experts=256,
+        topk=8,
+        enable_bias=False,
+        use_pre_softmax=True,
+    )
+    profile_topk_softmax(
+        dtype=torch.float32,
+        num_tokens=1,
+        num_experts=256,
+        topk=8,
+        enable_bias=True,
+        use_pre_softmax=False,
+    )

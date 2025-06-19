@@ -60,7 +60,8 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile double val = lane_id < data_size && mask[lane_id] ? double(data_ptr[lane_id]) : double(0);
+  volatile double val =
+      lane_id < data_size && mask[lane_id] ? double(data_ptr[lane_id]) : double(0);
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);

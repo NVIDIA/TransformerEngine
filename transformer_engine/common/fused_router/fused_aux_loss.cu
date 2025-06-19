@@ -11,15 +11,16 @@ namespace transformer_engine {
 
 template <typename DataType, typename IndexType>
 __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
-                                              const IndexType* tokens_per_expert, int total_num_tokens, int num_tokens,
-                                              int num_experts, int topk, float coeff,
-                                              DataType* aux_loss, float* Const_buf) {
+                                              const IndexType* tokens_per_expert,
+                                              int total_num_tokens, int num_tokens, int num_experts,
+                                              int topk, float coeff, DataType* aux_loss,
+                                              float* Const_buf) {
   int warp_num = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
   extern __shared__ float shmem_aux_loss[];
   DataType* aggregated_probs_per_expert = reinterpret_cast<DataType*>(shmem_aux_loss);
-  
+
   // Clear the shmem
   for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
     aggregated_probs_per_expert[i] = 0;
@@ -70,10 +71,10 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
 
 template <typename DataType, typename IndexType>
 void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
-                                            const IndexType* tokens_per_expert, int total_num_tokens, int num_tokens,
-                                            int num_experts, int topk, float coeff,
-                                            DataType* aux_loss, float* Const_buf,
-                                            cudaStream_t stream) {
+                                            const IndexType* tokens_per_expert,
+                                            int total_num_tokens, int num_tokens, int num_experts,
+                                            int topk, float coeff, DataType* aux_loss,
+                                            float* Const_buf, cudaStream_t stream) {
   // Meta data for the kernel
   size_t shared_memory_size = sizeof(DataType) * num_experts * 2;
   // Use Only 1 block/1024 threads to avoid the grid sync
@@ -81,20 +82,21 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
   int block_size = 1024;
   fused_aux_loss_forward_kernel<DataType, IndexType>
       <<<grid_size, block_size, shared_memory_size, stream>>>(
-          probs, tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff, aux_loss, Const_buf);
+          probs, tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
+          aux_loss, Const_buf);
 }
 
-void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert, int total_num_tokens, int num_tokens,
-                            int num_experts, int topk, float coeff, Tensor& aux_loss,
-                            Tensor& Const_buf, cudaStream_t stream) {
+void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
+                            int total_num_tokens, int num_tokens, int num_experts, int topk,
+                            float coeff, Tensor& aux_loss, Tensor& Const_buf, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
           tokens_per_expert.data.dtype, IndexType,
           fused_aux_loss_forward_kernel_launcher<DataType, IndexType>(
               reinterpret_cast<DataType*>(probs.data.dptr),
-              reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens, num_tokens, num_experts,
-              topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
+              reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens,
+              num_tokens, num_experts, topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
               reinterpret_cast<float*>(Const_buf.data.dptr), stream);););
 }
 
@@ -148,14 +150,15 @@ void fused_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_e
 }  // namespace transformer_engine
 
 void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
-                                 int total_num_tokens,
-                                 int num_tokens, int num_experts, int topk, float coeff,
-                                 NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream) {
+                                 int total_num_tokens, int num_tokens, int num_experts, int topk,
+                                 float coeff, NVTETensor aux_loss, NVTETensor Const_buf,
+                                 cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_aux_loss_forward);
   using namespace transformer_engine;
   fused_aux_loss_forward(*convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
-                         total_num_tokens, num_tokens, num_experts, topk, coeff, *convertNVTETensorCheck(aux_loss),
-                         *convertNVTETensorCheck(Const_buf), stream);
+                         total_num_tokens, num_tokens, num_experts, topk, coeff,
+                         *convertNVTETensorCheck(aux_loss), *convertNVTETensorCheck(Const_buf),
+                         stream);
 }
 
 void nvte_fused_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert,

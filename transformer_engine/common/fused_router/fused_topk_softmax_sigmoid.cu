@@ -356,7 +356,8 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
           /*reduce func = */ sum, lane_id);
       // Put the result of output * grad to the comp_buf
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_comp_buf[i] = (local_routing_map[i] ? double(local_grad[i]) * double(local_act_from_fwd[i]) : 0.0f);
+        local_comp_buf[i] =
+            (local_routing_map[i] ? double(local_grad[i]) * double(local_act_from_fwd[i]) : 0.0f);
       }
       __syncwarp();
       double sum_Output_x_Grad = masked_warp_reduce_on_shmem(

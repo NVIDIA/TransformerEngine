@@ -272,8 +272,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
         py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
   m.def("fused_aux_loss_fwd", &transformer_engine::pytorch::fused_aux_loss_fwd, py::arg("probs"),
-        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_tokens"), py::arg("num_experts"),
-        py::arg("topk"), py::arg("coeff"), "Fused aux loss fwd");
+        py::arg("tokens_per_expert"), py::arg("total_num_tokens"), py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("topk"), py::arg("coeff"), "Fused aux loss fwd");
   m.def("fused_aux_loss_bwd", &transformer_engine::pytorch::fused_aux_loss_bwd,
         py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_tokens"),
         py::arg("num_experts"), py::arg("grad_aux_loss"), "Fused aux loss bwd");

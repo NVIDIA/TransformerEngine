@@ -234,7 +234,8 @@ __global__ void fused_scores_for_aux_loss_backward_kernel(const DataType *interm
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_grad[i] = double(local_grad[i]) / (double(sum_fwd_input) + epsilon) -
-                        double(sum_Output_x_Grad) / ((double(sum_fwd_input) + epsilon) * (double(sum_fwd_input) + epsilon));
+                        double(sum_Output_x_Grad) /
+                            ((double(sum_fwd_input) + epsilon) * (double(sum_fwd_input) + epsilon));
       }
     }
     __syncwarp();

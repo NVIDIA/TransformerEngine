@@ -62,9 +62,7 @@ def fused_topk_softmax_sigmoid(
     expert_bias: torch.Tensor,
 ):
     if logits.dtype == torch.float64:
-        raise ValueError(
-            "Current TE does not support float64 router type"
-        )
+        raise ValueError("Current TE does not support float64 router type")
     return FusedTopkSoftmaxSigmoid.apply(
         logits,
         topk,
