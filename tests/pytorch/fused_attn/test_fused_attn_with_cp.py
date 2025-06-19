@@ -24,6 +24,9 @@ model_configs_flash_attn = {
     "cp_1_3": ModelConfig(
         2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)
     ),  # MHA
+    "cp_1_4": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", chunk_size=1024
+    ),  # MHA with chunks
     "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
     "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     "cp_2_2": ModelConfig(
@@ -100,6 +103,9 @@ model_configs_fused_attn = {
     "cp_1_4": ModelConfig(
         2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
     ),  # MHA
+    "cp_1_5": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", chunk_size=1024
+    ),  # MHA
     "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
     "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     "cp_2_2": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
@@ -144,6 +150,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     config = model_configs_fused_attn[model]
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
+    if qkv_format != "thd" and config.chunk_size is not None:
+        pytest.skip("Only THD format supports chunking!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
         pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if qkv_format == "thd" and "a2a" in cp_comm_type:

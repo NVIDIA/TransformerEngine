@@ -95,6 +95,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        chunk_size=config.chunk_size,
     )
     core_attn = core_attn.cuda()
 
@@ -284,6 +285,7 @@ def run_dpa_with_cp(
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
+
         if fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
@@ -401,8 +403,12 @@ def run_dpa_with_cp(
             _error(a[0], b[0])
             _error(a[1], b[1])
     elif qkv_format == "thd":
+        i = 0
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
             _error(a, b)
+            str_names = ["out_", "dq_", "dk_", "dv_"]
+            print(f"{str_names[i]} passed on rank {rank}")
+            i += 1
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 

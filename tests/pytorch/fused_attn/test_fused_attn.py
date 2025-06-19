@@ -90,6 +90,7 @@ class ModelConfig:
         window_size: Tuple[int, int] = (-1, -1),
         total_requests: int = None,
         max_ctx_len: int = None,
+        chunk_size: int = None,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -110,6 +111,7 @@ class ModelConfig:
         self.window_size = window_size
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
+        self.chunk_size = chunk_size
 
 
 @contextmanager
