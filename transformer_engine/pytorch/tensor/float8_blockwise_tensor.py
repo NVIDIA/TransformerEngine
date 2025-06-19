@@ -10,6 +10,7 @@ import math
 import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -293,6 +294,37 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
     quantizer: Quantizer - the Float8BlockQuantizer that quantized this tensor and
                holds configuration about quantization and dequantization modes.
     """
+
+    # NOTE: We reorder the *args so that we can instantiate a Float8BlockwiseQTensorBase with positional args,
+    # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
+    def __new__(
+        cls,
+        *args,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
+        columnwise_data: Optional[torch.Tensor],
+        columnwise_scale_inv: Optional[torch.Tensor],
+        fp8_dtype: TE_DType,
+        quantizer: Quantizer,
+        is_2D_scaled: bool,
+        data_format: tex.Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat.GEMM_READY,
+        **kwargs,
+    ):
+        instance = super().__new__(
+            cls,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            quantizer,
+            is_2D_scaled,
+            data_format,
+            *args,
+            **kwargs,
+        )
+
+        return instance
 
     def __repr__(self, *, tensor_contents=None):
         return (
