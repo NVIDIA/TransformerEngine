@@ -184,21 +184,6 @@ def _make_graphed_callables(
                 sample_kwargs[i]
             ), f"Keyword arguments must have same length and shape for io_memory_reduction."
 
-        # Reuse no grad input tensors
-        no_grad_indices, no_grad_keys = [], []
-        for i, arg in enumerate(sample_args[0]):
-            if not arg.requires_grad:
-                no_grad_indices.append(i)
-        for sa in sample_args:
-            for i in no_grad_indices:
-                sa[i] = sample_args[0][i].detach()
-        for k, v in sample_kwargs[0].items():
-            if not v.requires_grad:
-                no_grad_keys.append(k)
-        for sa in sample_kwargs:
-            for k in no_grad_keys:
-                sa[k] = sample_kwargs[0][k].detach()
-
         # Reorganize args and kwargs for input tensor reuse
         fwd_sample_qs = {}
         consumed_sample_q = []
