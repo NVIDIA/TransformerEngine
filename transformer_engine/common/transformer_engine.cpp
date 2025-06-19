@@ -46,6 +46,8 @@ std::string to_string(const DType type) {
       return "Float8E8M0";
     case DType::kFloat4E2M1:
       return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
     case DType::kInt32:
       return "Int32";
     case DType::kInt64:
