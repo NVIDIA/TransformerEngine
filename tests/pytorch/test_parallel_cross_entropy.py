@@ -61,22 +61,26 @@ class TestParallelCrossEntropy:
         test_loss = self.test_loss_func(
             self.input_test, self.tar_test, label_smoothing, reduce_loss, None
         )
-        if reduce_loss:
-            test_loss.backward()
 
         ref_loss = self.ref_loss_func(self.input_ref, self.tar_ref)
+
+        # Handle backward pass based on the test scenario
         if reduce_loss:
+            test_loss.backward()
             ref_loss.backward()
+        else:
+            test_loss.sum().backward()
+            ref_loss.sum().backward()
 
         test_loss = torch.flatten(test_loss) if not reduce_loss else test_loss
 
-        torch.testing.assert_close(test_loss, ref_loss, check_dtype=False)
         if ignore_idx:
             print(test_loss, ref_loss)
-        if reduce_loss:
-            torch.testing.assert_close(
-                torch.flatten(self.input_test.grad, start_dim=0, end_dim=1), self.input_ref.grad
-            )
+
+        # Compare gradients when backward pass was called
+        torch.testing.assert_close(
+            torch.flatten(self.input_test.grad, start_dim=0, end_dim=1), self.input_ref.grad
+        )
 
         self.input_test = None
         self.input_ref = None

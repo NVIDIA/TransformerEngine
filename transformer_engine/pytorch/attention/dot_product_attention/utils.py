@@ -608,11 +608,6 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif head_dim_qk != head_dim_v:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with MLA"
-            )
-            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -766,6 +761,7 @@ def get_attention_backend(
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
         fused_attention_backend = tex.get_fused_attn_backend(
+            is_training,
             q_type,
             kv_type,
             QKVLayout[qkv_layout],
