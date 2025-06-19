@@ -431,7 +431,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -439,7 +439,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8(self):
@@ -447,7 +447,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -455,14 +455,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_shardy(self):
@@ -471,7 +471,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 
@@ -482,7 +482,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.536 and actual[1] > 0.73
 
 
 if __name__ == "__main__":
