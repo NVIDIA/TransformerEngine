@@ -22,63 +22,33 @@
 namespace transformer_engine {
 namespace pytorch {
 
-py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::object& output,
-                    std::optional<at::Tensor> noop) {
-  init_extension();
-  auto my_quantizer = convert_quantizer(quantizer);
-  auto input_tensor = tensor.contiguous();
+namespace {
 
-  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
-  const auto& te_input_shape = te_input.shape();
-  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
-  auto fake_tensor_type = tensor.scalar_type();
-  if (!detail::IsFloatingPointType(fake_tensor_type)) {
-    fake_tensor_type = at::kFloat;
-  }
-
-  TensorWrapper te_output;
-  py::object out;
-  if (output.is_none()) {
-    DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
-    std::tie(te_output, out) = my_quantizer->create_tensor(input_shape, fake_te_type);
-  } else {
-    out = output;
-    te_output = makeTransformerEngineTensor(output, quantizer);
-  }
-
-  TensorWrapper te_noop;
-  if (noop.has_value()) {
-    te_noop = makeTransformerEngineTensor(*noop);
-  } else {
-    te_noop = TensorWrapper();
-  }
-
-  if (te_output.numel() == 0) return out;
-
-  quantize_cpp(te_input, quantizer, my_quantizer, te_output, te_noop);
-
-  return out;
+std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
+  const auto& shape = tensor.shape();
+  return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-// C++ backend of quantize with tensor converted
-// quantizer_py is still required for runtime type check
-void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
-                  std::unique_ptr<Quantizer>& quantizer_cpp, TensorWrapper& te_output,
-                  TensorWrapper& te_noop) {
-  if (te_input.numel() == 0) {
+void quantize_impl(const TensorWrapper &input,
+                   py::handle &quantizer_py,
+                   std::unique_ptr<Quantizer> &quantizer_cpp,
+                   TensorWrapper &output,
+                   TensorWrapper &noop_flag) {
+  // Check tensor dims
+  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output),
+             "Input tensor (shape=", get_tensor_shape(input), ") and output tensor (shape=",
+             get_tensor_shape(output), ") do not match");
+  if (input.numel() == 0) {
     return;
   }
-  if (te_output.numel() == 0) {
-    NVTE_CHECK(te_input.numel() == 0, "Input tensor is not 0 when output tensor is 0");
-  }
 
+  // Recipe-specific configuration
   QuantizationConfigWrapper quant_config;
-  quant_config.set_noop_tensor(te_noop.data());
-
+  quant_config.set_noop_tensor(noop_flag.data());
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+      nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream());
     });
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
@@ -97,11 +67,11 @@ void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(te_output.data(), quant_config,
+      nvte_compute_scale_from_amax(output.data(), quant_config,
                                    at::cuda::getCurrentCUDAStream());
     });
-    // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-    te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
+    // set amax ptr to null in output TensorWrapper to avoid atomic amax updates in kernel
+    output.set_amax(nullptr, DType::kFloat32, output.defaultShape);
   } else if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
     auto my_quantizer_bw = static_cast<Float8BlockQuantizer*>(quantizer_cpp.get());
     quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
@@ -110,10 +80,49 @@ void quantize_cpp(const TensorWrapper& te_input, py::handle quantizer_py,
       quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
     }
   }
+
+  // Perform quantization
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_quantize_v2(te_input.data(), te_output.data(), quant_config,
+    nvte_quantize_v2(input.data(), output.data(), quant_config,
                      at::cuda::getCurrentCUDAStream());
   });
+}
+
+}  // namespace
+
+py::object quantize(const at::Tensor &tensor,
+                    py::handle quantizer,
+                    const py::object &output,
+                    std::optional<at::Tensor> noop_flag) {
+  // Convert quantizer to C++ object
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Convert input tensor to C++ object
+  auto input_contiguous = tensor.contiguous();
+  const auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  // Initialize output tensor
+  TensorWrapper output_cpp;
+  py::object output_py;
+  if (output.is_none()) {
+    const auto shape = get_tensor_shape(input_cpp);
+    const auto fake_dtype = input_cpp.dtype();
+    std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
+  } else {
+    output_py = output;
+    output_cpp = makeTransformerEngineTensor(output_py, quantizer);
+  }
+
+  // Initialize no-op flag
+  TensorWrapper noop_flag_cpp;
+  if (noop_flag.has_value()) {
+    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
+  }
+
+  // Perform quantization
+  quantize_impl(input_cpp, quantizer, quantizer_cpp, output_cpp, noop_flag_cpp);
+
+  return output_py;
 }
 
 py::object dequantize(const py::handle& input, transformer_engine::DType otype) {
@@ -142,8 +151,6 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
                                 std::vector<TensorWrapper> &output_list) {
-  init_extension();
-
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors,
@@ -184,18 +191,18 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     // Quantize kernels individually
     TensorWrapper dummy_noop_flag;
     for (size_t i=0; i<num_tensors; ++i) {
-      quantize_cpp(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
-                   dummy_noop_flag);
+      quantize_impl(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
+                    dummy_noop_flag);
     }
   }
 }
 
 }  // namespace
 
-std::vector<py::object> multi_tensor_quantize(std::vector<at::Tensor> input_list,
+std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list) {
   // Check number of tensors
-  const size_t num_tensors = input_list.size();
+  const size_t num_tensors = tensor_list.size();
   NVTE_CHECK(quantizer_list.size() == num_tensors,
              "Expected ", num_tensors, " quantizers, but got ", quantizer_list.size());
 
@@ -211,7 +218,7 @@ std::vector<py::object> multi_tensor_quantize(std::vector<at::Tensor> input_list
   std::vector<py::object> output_py_list;
   for (size_t i=0; i<num_tensors; ++i) {
     // Convert input tensor to C++ object
-    const auto &input_py = input_list[i];
+    const auto &input_py = tensor_list[i];
     NVTE_CHECK(input_py.is_contiguous(), "Input tensor ", i, " is not contiguous");
     input_cpp_list.emplace_back(makeTransformerEngineTensor(input_py));
     const auto &input_cpp = input_cpp_list.back();
@@ -397,26 +404,26 @@ bulk_allocate_fp8_blockwise_tensors(std::vector<std::vector<size_t>> &shape_list
 
 }  // namespace
 
-std::vector<py::object> split_quantize(at::Tensor input,
-                                       std::vector<int> split_sections,
+std::vector<py::object> split_quantize(const at::Tensor &tensor,
+                                       const std::vector<int> &split_sections,
                                        std::vector<py::handle> quantizer_list) {
   init_extension();
 
   // Check number of tensors
-  const size_t num_tensors = split_sections.size();
-  NVTE_CHECK(quantizer_list.size() == num_tensors,
-             "Expected ", num_tensors, " quantizers, but got ", quantizer_list.size());
-  if (num_tensors == 0) {
+  const size_t num_splits = split_sections.size();
+  NVTE_CHECK(quantizer_list.size() == num_splits,
+             "Expected ", num_splits, " quantizers, but got ", quantizer_list.size());
+  if (num_splits == 0) {
     return {};
   }
 
   // Input tensor properties
-  NVTE_CHECK(input.is_contiguous(), "Input tensor is not contiguous");
-  uint8_t *input_dptr = reinterpret_cast<uint8_t*>(input.data_ptr());
-  auto input_dtype = GetTransformerEngineDType(input.scalar_type());
+  auto input_py = tensor.contiguous();
+  uint8_t *input_dptr = reinterpret_cast<uint8_t*>(input_py.data_ptr());
+  auto input_dtype = GetTransformerEngineDType(input_py.scalar_type());
   std::vector<size_t> input_shape;
   size_t input_size = 1;
-  for (const auto &d : input.sizes()) {
+  for (const auto &d : input_py.sizes()) {
     input_shape.push_back(d);
     input_size *= d;
   }
@@ -426,8 +433,8 @@ std::vector<py::object> split_quantize(at::Tensor input,
   std::vector<TensorWrapper> input_list;
   std::vector<std::vector<size_t>> split_shapes;
   size_t dim0_offset = 0;
-  const size_t dim0_stride = input.element_size() * input_size / input_shape[0];
-  for (size_t i=0; i<num_tensors; ++i) {
+  const size_t dim0_stride = input_py.element_size() * input_size / input_shape[0];
+  for (size_t i=0; i<num_splits; ++i) {
     NVTE_CHECK(split_sections[i] >= 0,
                "Attempted to split tensor with shape=", input_shape,
                " along dim 0 with split_sections=", split_sections);
@@ -444,7 +451,7 @@ std::vector<py::object> split_quantize(at::Tensor input,
 
   // Convert quantizers to C++ objects
   std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
-  for (size_t i = 0; i < num_tensors; i++) {
+  for (size_t i = 0; i < num_splits; i++) {
     quantizer_cpp_list.push_back(convert_quantizer(quantizer_list[i]));
   }
 
@@ -462,7 +469,7 @@ std::vector<py::object> split_quantize(at::Tensor input,
   std::vector<py::object> output_py_list;
   if (!use_fused_bulk_alloc) {
     // Allocate output tensors individually
-    for (size_t i=0; i<num_tensors; ++i) {
+    for (size_t i=0; i<num_splits; ++i) {
       auto [output_cpp, output_py] = quantizer_cpp_list[i]->create_tensor(split_shapes[i], input_dtype);
       output_cpp_list.emplace_back(std::move(output_cpp));
       output_py_list.emplace_back(std::move(output_py));

@@ -180,19 +180,15 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  **************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop);
-
-void quantize_cpp(const TensorWrapper &te_input, py::handle quantizer_py,
-                  std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &te_output,
-                  TensorWrapper &te_noop);
+                    std::optional<at::Tensor> noop_flag);
 
 py::object dequantize(const py::handle &input, DType otype);
 
-std::vector<py::object> multi_tensor_quantize(std::vector<at::Tensor> input_list,
+std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
-std::vector<py::object> split_quantize(at::Tensor input,
-                                       std::vector<int> split_sections,
+std::vector<py::object> split_quantize(const at::Tensor &tensor,
+                                       const std::vector<int> &split_sections,
                                        std::vector<py::handle> quantizer_list);
 
 /***************************************************************************************************

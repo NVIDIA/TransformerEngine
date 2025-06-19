@@ -116,7 +116,7 @@ class _GroupedLinear(torch.autograd.Function):
                 f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
-        inp_view = inp.contiguous().view(-1, in_features)
+        inp_view = inp.reshape(-1, in_features)
         inputmats: list
         if fp8:
             inputmats = tex.split_quantize(inp_view, m_splits, input_quantizers)
