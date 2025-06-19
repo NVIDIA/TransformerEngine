@@ -96,7 +96,8 @@ void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_outpu
  *
  *  \param[in]     probs           Probabilities from the forward pass.
  *  \param[in]     tokens_per_expert  Number of tokens per expert.
- *  \param[in]     num_tokens      Number of total tokens.
+ *  \param[in]     total_num_tokens   Number of total tokens. Will be used in seq/global aux loss.
+ *  \param[in]     num_tokens      Number of tokens.
  *  \param[in]     num_experts     Number of experts.
  *  \param[in]     topk            Topk value.
  *  \param[in]     coeff           Coefficient.
@@ -105,7 +106,7 @@ void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_outpu
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
-                                 int num_tokens, int num_experts, int topk, float coeff,
+                                 int total_num_tokens, int num_tokens, int num_experts, int topk, float coeff,
                                  NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream);
 
 /*! \brief Backward pass for auxiliary loss.

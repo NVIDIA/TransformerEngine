@@ -125,14 +125,16 @@ class FusedAuxLoss(torch.autograd.Function):
         ctx,
         probs: torch.Tensor,
         tokens_per_expert: torch.Tensor,
-        num_tokens: int,
+        total_num_tokens: int,
         num_experts: int,
         topk: int,
         coeff: float,
     ):
+        num_tokens = probs.size(0)
         aux_loss, Const_buf = tex.fused_aux_loss_fwd(
             probs=probs,
             tokens_per_expert=tokens_per_expert,
+            total_num_tokens=total_num_tokens,
             num_tokens=num_tokens,
             num_experts=num_experts,
             topk=topk,
@@ -159,9 +161,9 @@ class FusedAuxLoss(torch.autograd.Function):
 def fused_aux_loss(
     probs: torch.Tensor,
     tokens_per_expert: torch.Tensor,
-    num_tokens: int,
+    total_num_tokens: int,
     num_experts: int,
     topk: int,
     coeff: float,
 ):
-    return FusedAuxLoss.apply(probs, tokens_per_expert, num_tokens, num_experts, topk, coeff)
+    return FusedAuxLoss.apply(probs, tokens_per_expert, total_num_tokens, num_experts, topk, coeff)

@@ -36,8 +36,8 @@ at::Tensor fused_scores_for_aux_loss_bwd(int num_tokens, int num_experts,
                                          int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_aux_loss_fwd(at::Tensor probs,
-                                                      at::Tensor tokens_per_expert, int num_tokens,
-                                                      int num_experts, int topk, float coeff);
+                                                      at::Tensor tokens_per_expert, int total_num_tokens,
+                                                      int num_tokens, int num_experts, int topk, float coeff);
 
 at::Tensor fused_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_tokens,
                               int num_experts, at::Tensor grad_aux_loss);

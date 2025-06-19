@@ -1,7 +1,7 @@
 import torch
 import math
 from typing import Optional, Dict
-from transformer_engine.pytorch.router_func import (
+from transformer_engine.pytorch.router import (
     fused_topk_softmax_sigmoid,
     fused_compute_scores_for_aux_loss,
     fused_aux_loss,
@@ -199,7 +199,7 @@ def run_comparison(
         expert_bias=expert_bias_clone,
     )
 
-    assert torch.allclose(probs, probs_fused, atol=atol, rtol=rtol)
+    assert torch.allclose(probs, probs_fused, atol=atol, rtol=rtol), f"probs are not close: {probs} != {probs_fused}"
     assert torch.allclose(routing_map, routing_map_fused, atol=atol, rtol=rtol)
 
     # Fake the loss
@@ -342,7 +342,7 @@ def test_fused_aux_loss(dtype, num_tokens, num_experts, topk):
     aux_loss_fused = fused_aux_loss(
         probs=probs_clone,
         tokens_per_expert=tokens_per_expert,
-        num_tokens=num_tokens,
+        total_num_tokens=num_tokens,
         num_experts=num_experts,
         topk=topk,
         coeff=coeff,

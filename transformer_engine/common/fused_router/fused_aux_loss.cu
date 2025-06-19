@@ -11,7 +11,7 @@ namespace transformer_engine {
 
 template <typename DataType, typename IndexType>
 __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
-                                              const IndexType* tokens_per_expert, int num_tokens,
+                                              const IndexType* tokens_per_expert, int total_num_tokens, int num_tokens,
                                               int num_experts, int topk, float coeff,
                                               DataType* aux_loss, float* Const_buf) {
   int warp_num = blockDim.x / kThreadsPerWarp;
@@ -61,7 +61,7 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
       /**
              * Section: Compute the aux_loss
              */
-      float C_coeff = (num_experts * coeff) / topk / num_tokens / num_tokens;
+      float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
       aux_loss[0] = DataType(double(intermediate_result) * C_coeff);
       Const_buf[0] = C_coeff;
     }
@@ -70,7 +70,7 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
 
 template <typename DataType, typename IndexType>
 void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
-                                            const IndexType* tokens_per_expert, int num_tokens,
+                                            const IndexType* tokens_per_expert, int total_num_tokens, int num_tokens,
                                             int num_experts, int topk, float coeff,
                                             DataType* aux_loss, float* Const_buf,
                                             cudaStream_t stream) {
@@ -81,10 +81,10 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
   int block_size = 1024;
   fused_aux_loss_forward_kernel<DataType, IndexType>
       <<<grid_size, block_size, shared_memory_size, stream>>>(
-          probs, tokens_per_expert, num_tokens, num_experts, topk, coeff, aux_loss, Const_buf);
+          probs, tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff, aux_loss, Const_buf);
 }
 
-void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert, int num_tokens,
+void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert, int total_num_tokens, int num_tokens,
                             int num_experts, int topk, float coeff, Tensor& aux_loss,
                             Tensor& Const_buf, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
@@ -93,7 +93,7 @@ void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert
           tokens_per_expert.data.dtype, IndexType,
           fused_aux_loss_forward_kernel_launcher<DataType, IndexType>(
               reinterpret_cast<DataType*>(probs.data.dptr),
-              reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), num_tokens, num_experts,
+              reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens, num_tokens, num_experts,
               topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
               reinterpret_cast<float*>(Const_buf.data.dptr), stream);););
 }
@@ -148,12 +148,13 @@ void fused_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_e
 }  // namespace transformer_engine
 
 void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
+                                 int total_num_tokens,
                                  int num_tokens, int num_experts, int topk, float coeff,
                                  NVTETensor aux_loss, NVTETensor Const_buf, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_aux_loss_forward);
   using namespace transformer_engine;
   fused_aux_loss_forward(*convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
-                         num_tokens, num_experts, topk, coeff, *convertNVTETensorCheck(aux_loss),
+                         total_num_tokens, num_tokens, num_experts, topk, coeff, *convertNVTETensorCheck(aux_loss),
                          *convertNVTETensorCheck(Const_buf), stream);
 }
 
