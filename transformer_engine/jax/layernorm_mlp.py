@@ -391,7 +391,7 @@ def _layernorm_mlp_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
-    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name
+    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name, batch_first
     (
         x,
         mu,
