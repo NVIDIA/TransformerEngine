@@ -67,7 +67,7 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
   // also during dequantize, the quantizer param is unknown -> so quantizer is NoneQuantizer
   for (auto [check_type, check_quantizer_type, create_tensor, _] :
        detail::custom_types_converters) {
-    if (check_type(tensor.ptr())) {
+    if (check_type(tensor.ptr()) != PythonTensorType::INVALID) {
       if (!(quantizer.is_none() || check_quantizer_type(quantizer.ptr()))) {
         continue;
       }
@@ -284,11 +284,6 @@ void* getDataPtr(at::Tensor tensor, int offset) {
 
 std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
-}
-
-int roundup(const int value, const int multiple) {
-  assert(multiple > 0);
-  return ((value + multiple - 1) / multiple) * multiple;
 }
 
 }  // namespace transformer_engine::pytorch

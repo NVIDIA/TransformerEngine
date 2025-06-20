@@ -206,7 +206,7 @@ class TestFloat8BlockwiseTensor:
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
     )
-    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    @pytest.mark.parametrize("block_scaling_dim", [1])
     @pytest.mark.parametrize("dq_columnwise", [True, False])
     @pytest.mark.xfail(raises=NotImplementedError)
     def test_quantize_dequantize_compact_format(

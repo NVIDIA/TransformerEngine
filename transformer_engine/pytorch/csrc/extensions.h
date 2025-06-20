@@ -62,7 +62,7 @@ std::vector<py::object> fused_attn_bwd(
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer);
+    py::handle dp_quantizer, py::handle dqkv_quantizer, at::Tensor debug);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
