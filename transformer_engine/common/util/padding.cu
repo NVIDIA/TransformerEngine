@@ -293,8 +293,8 @@ void multi_unpadding(const std::vector<Tensor*> input_list, std::vector<Tensor*>
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     const auto& input = *input_list[tensor_id];
     const auto& output = *output_list[tensor_id];
-    CheckInputTensor(input, "multi_padding_input_" + std::to_string(tensor_id));
-    CheckInputTensor(output, "multi_padding_output_" + std::to_string(tensor_id));
+    CheckInputTensor(input, "multi_unpadding_input_" + std::to_string(tensor_id));
+    CheckInputTensor(output, "multi_unpadding_output_" + std::to_string(tensor_id));
 
     NVTE_CHECK(input.data.dtype == type, "Input tensor types do not match.");
     NVTE_CHECK(output.data.dtype == type, "Output tensor types do not match.");
