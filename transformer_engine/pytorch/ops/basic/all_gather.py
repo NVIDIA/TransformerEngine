@@ -10,7 +10,7 @@ from typing import Optional
 import torch
 
 from ...distributed import gather_along_first_dim
-from ...tensor import QuantizedTensor
+from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
 
 
@@ -71,10 +71,7 @@ class AllGather(BasicOperation):
         input_dims[0] //= self.process_group_size
 
         # Check output gradient tensor
-        dy = grad_output
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize()
-        dy = dy.contiguous()
+        dy = maybe_dequantize(grad_output.contiguous())
 
         # Perform reduce-scatter
         dx = torch.empty(input_dims, dtype=dy.dtype, device=dy.device)

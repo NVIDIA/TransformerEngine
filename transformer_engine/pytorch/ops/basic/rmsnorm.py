@@ -14,7 +14,6 @@ import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from ...fp8 import FP8GlobalStateManager
-from ...tensor import QuantizedTensor
 from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,
@@ -175,11 +174,8 @@ class RMSNorm(BasicOperation):
 
         # Check input tensors
         inner_dim = math.prod(weight_dims)
-        device = weight.device
-        if device.type != "cuda":
-            device = canonicalize_device(None)
         dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
-        x = maybe_dequantize(input_, dtype).view((-1, inner_dim))
+        x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Check if backward pass is needed
@@ -210,7 +206,6 @@ class RMSNorm(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rstdevs)
-            ctx.device = device
             ctx.dtype = dtype
             ctx.has_prev_op = prev_op is not None
 
@@ -232,9 +227,8 @@ class RMSNorm(BasicOperation):
         inner_dim = math.prod(weight_dims)
 
         # Check input tensors
-        device = ctx.device
         dtype = ctx.dtype
-        dy = maybe_dequantize(grad_output, dtype).view(x.size())
+        dy = maybe_dequantize(grad_output.contiguous(), dtype).view(x.size())
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm backward pass

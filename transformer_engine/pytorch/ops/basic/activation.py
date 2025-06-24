@@ -12,10 +12,10 @@ import torch
 
 import transformer_engine_torch as tex
 from ...fp8 import FP8GlobalStateManager
-from ...tensor import QuantizedTensor
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
-from ...utils import clear_tensor_data, devices_match
+from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
+from .._common import maybe_dequantize
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -85,15 +85,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
 
         # Check input tensor
-        x = input_
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        if x.device.type != "cuda":
-            x = x.cuda()
-        if x.dtype != dtype:
-            x = x.to(dtype=dtype)
-        if not x.is_contiguous():
-            x = x.contiguous()
+        x = maybe_dequantize(input_.contiguous(), dtype)
 
         # Check if quantized compute is enabled
         quantized_compute_enabled = FP8GlobalStateManager.is_fp8_enabled()
@@ -139,21 +131,10 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         (x,) = ctx.saved_tensors
 
         # Check input tensor
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize(dtype=ctx.dtype)
-        elif x.dtype != ctx.dtype:
-            x = x.to(dtype=ctx.dtype)
-        if not x.is_contiguous():
-            x = x.contiguous()
+        x = maybe_dequantize(x.contiguous(), ctx.dtype)
 
         # Check grad output tensor
-        dy = grad_output
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize(dtype=ctx.dtype)
-        if not devices_match(dy.device, x.device) or dy.dtype != x.dtype:
-            dy = dy.to(device=x.device, dtype=x.dtype)
-        if not dy.is_contiguous():
-            dy = dy.contiguous()
+        dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
 
         # Check if quantized compute is enabled
         quantizer = None

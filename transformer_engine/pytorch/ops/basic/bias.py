@@ -13,7 +13,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
-from .._common import (
+from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
 )

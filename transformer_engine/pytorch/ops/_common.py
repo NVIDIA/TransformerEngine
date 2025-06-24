@@ -5,7 +5,7 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 import torch
 
@@ -13,12 +13,8 @@ from transformer_engine_torch import FP8TensorMeta
 from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
-from ..tensor import QuantizedTensor
-from ..utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    devices_match,
-)
+from ..tensor.quantized_tensor import QuantizedTensorBase
+from ..utils import canonicalize_dtype
 
 
 def is_float8_tensor(tensor: Any) -> bool:
@@ -26,13 +22,15 @@ def is_float8_tensor(tensor: Any) -> bool:
     return isinstance(tensor, Float8Tensor)
 
 
-def maybe_dequantize(tensor: torch.Tensor | QuantizedTensor, dtype: torch.dtype) -> torch.Tensor:
-    if isinstance(tensor, QuantizedTensor):
+def maybe_dequantize(
+    tensor: torch.Tensor | QuantizedTensorBase, dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    """Dequantize tensor to given dtype or just convert if not a quantized tensor"""
+    if isinstance(tensor, QuantizedTensorBase):
         return tensor.dequantize(dtype=dtype)
-    elif tensor.dtype != dtype:
+    if dtype is not None and tensor.dtype != dtype:
         return tensor.to(dtype)
-    else:
-        return tensor
+    return tensor
 
 
 def maybe_autocast_dtype(
