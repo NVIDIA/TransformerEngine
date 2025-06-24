@@ -2364,9 +2364,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = static_cast<void*>(devPtrQKV);
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2466,9 +2466,9 @@ void fused_attn_fp8_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = devPtrQKV;
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2564,9 +2564,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);
@@ -2671,9 +2671,9 @@ void fused_attn_fp8_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);

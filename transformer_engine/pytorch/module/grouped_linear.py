@@ -241,8 +241,8 @@ class _GroupedLinear(torch.autograd.Function):
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = ctx.main_grads
 
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
-                for i in ctx.num_gemms:
+            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
+                for i in range(ctx.num_gemms):
                     w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
                     w.main_grad = main_grads[i]
                     weights[i] = w

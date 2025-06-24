@@ -232,8 +232,8 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
 
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec x nvec subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
+  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size * 8 / typeToNumBits(type);
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size * 8 / typeToNumBits(type);
 
   // Add tensors to kernel argument struct
   MultiPaddingArgs kernel_args;
