@@ -651,7 +651,7 @@ class TensorWrapper:
     def __init__(
         self,
         data_ptr: int,
-        dtype: Union[torch.dtype, str, np.dtype],
+        dtype: torch.dtype,
         shape: Sequence[int],
     ):
         self._data_ptr = data_ptr
@@ -670,15 +670,8 @@ class TensorWrapper:
         return getattr(self, "_shape", None)
 
     @dtype.setter
-    def dtype(self, dtype: Union[torch.dtype, str, np.dtype]):
-        if isinstance(dtype, torch.dtype):
-            self._dtype = dtype
-        elif isinstance(dtype, str):
-            self._dtype = str_dtype_to_torch(dtype)
-        elif isinstance(dtype, np.dtype):
-            self._dtype = np_dtype_to_torch(dtype)
-        else:
-            raise TypeError(f"Unsupported dtype: {dtype}")
+    def dtype(self, dtype: torch.dtype):
+        self._dtype = dtype
 
     @shape.setter
     def shape(self, shape: Sequence[int]):
