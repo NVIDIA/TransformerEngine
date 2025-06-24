@@ -220,7 +220,6 @@ class InferenceParams:
             device=torch.cuda.current_device(),
         )
 
-
     def reset(self):
         """Reset InferenceParams state"""
         self.sequences = OrderedDict()
@@ -275,7 +274,7 @@ class InferenceParams:
         pre_step_seqlens = torch.Tensor(list(self.sequences_pre_step.values())).to(
             dtype=torch.int32, device="cpu"
         )
-        self.pre_step_seqlens[:len(pre_step_seqlens)].copy_(pre_step_seqlens, non_blocking=True)
+        self.pre_step_seqlens[: len(pre_step_seqlens)].copy_(pre_step_seqlens, non_blocking=True)
 
         seqlens_q = list(step_dict.values())
         cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, self.batch_size + 1)]
