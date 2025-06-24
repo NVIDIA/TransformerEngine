@@ -219,7 +219,7 @@ def _dense_bwd_rule(
     wgrad = tex.gemm(
         casted_x_lhs,
         casted_grad.get_tensor(usage=TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dim, g_contracting_dim), ((x_bdim,), (x_bdim, ))),
+        dimension_numbers=((x_contracting_dim, g_contracting_dim), ((x_bdim,), (x_bdim,))),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 

@@ -289,9 +289,9 @@ def train_and_evaluate(args):
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init,
-                                       in_shardings=in_shardings,
-                                       out_shardings=out_shardings)
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
@@ -315,15 +315,15 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step,
-                                     in_shardings=in_shardings,
-                                     out_shardings=out_shardings)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step,
-                                    in_shardings=in_shardings,
-                                    out_shardings=out_shardings)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -465,8 +465,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.535 and actual[1] > 0.73
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
-    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
-                     "TE cuBLAS GEMM custom op does not support shardy")
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
@@ -474,8 +475,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.535 and actual[1] > 0.73
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
-    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
-                     "TE cuBLAS GEMM custom op does not support shardy")
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         self.args.enable_shardy = True
@@ -487,8 +489,9 @@ class TestEncoder(unittest.TestCase):
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
-    @unittest.skipIf(not tex.gemm_uses_jax_dot(),
-                     "TE cuBLAS GEMM custom op does not support shardy")
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_current_scaling_fp8_shardy(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         self.args.enable_shardy = True

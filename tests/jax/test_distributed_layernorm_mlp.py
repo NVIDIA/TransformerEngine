@@ -239,7 +239,7 @@ class TestDistributedLayernormMLP:
                             m_grad,
                             s_grad,
                             dtype=bwd_test_type,
-                            err_msg=f"multi_grads[{i}] is not close"
+                            err_msg=f"multi_grads[{i}] is not close",
                         )
                 else:
                     assert_allclose(
@@ -400,7 +400,9 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper(
+        "fp8_recipe", SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES
+    )
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm

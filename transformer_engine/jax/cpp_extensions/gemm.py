@@ -475,15 +475,11 @@ class GemmPrimitive(BasePrimitive):
             lambda specs: tuple(spec for spec in specs if spec is not None),
             (lhs_lspecs, rhs_lspecs, lhs_cspecs, rhs_cspecs),
         )
-        assert (
-            len(lhs_lspec_not_none) <= 1 and len(rhs_lspec_not_none) <= 1
-        ), (
+        assert len(lhs_lspec_not_none) <= 1 and len(rhs_lspec_not_none) <= 1, (
             "cuBLAS GEMM operands can have only one sharded non-batched leading dimension: "
             f"{lhs_specs} @ idx {lhs_ldims} x {rhs_specs} @ idx {rhs_ldims}."
         )
-        assert (
-            len(lhs_cspec_not_none) <= 1 and len(rhs_cspec_not_none) <= 1
-        ), (
+        assert len(lhs_cspec_not_none) <= 1 and len(rhs_cspec_not_none) <= 1, (
             "cuBLAS GEMM operands can have only one sharded non-batched contracting dimension: "
             f"{lhs_specs} @ idx {lhs_cdims} x {rhs_specs} @ idx {rhs_cdims}."
         )
@@ -712,7 +708,7 @@ class GemmPrimitive(BasePrimitive):
         del args, kwargs
         raise NotImplementedError(
             "TE cuBLAS GEMM custom op does not support the Shardy partitioner. You can disable the "
-            "custom op by setting `NVTE_JAX_CUSTOM_CALLS_RE=\"^(?!GemmPrimitive$).+$\"` in the "
+            'custom op by setting `NVTE_JAX_CUSTOM_CALLS_RE="^(?!GemmPrimitive$).+$"` in the '
             "environment, which will make GEMM operations in TE will execute with native "
             "`jax.lax.dot_general` and `jax.nn.scaled_matmul` calls."
         )

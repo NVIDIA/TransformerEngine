@@ -450,7 +450,7 @@ def _layernorm_mlp_bwd_rule(
     wgrad_2 = tex.gemm(
         casted_act_out,
         casted_grad.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim, ), (x_bdim, ))),
+        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), (x_bdim,))),
     )
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
@@ -487,7 +487,7 @@ def _layernorm_mlp_bwd_rule(
     wgrad_1 = tex.gemm(
         casted_ln_out,
         casted_dact_out.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), (x_bdim, ))),
+        dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), (x_bdim,))),
     )
 
     wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)

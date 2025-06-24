@@ -321,7 +321,7 @@ def _layernorm_dense_bwd_rule(
     wgrad = tex.gemm(
         casted_ln_out,
         casted_grad.get_tensor(TensorUsage.RHS),
-        dimension_numbers=((x_constracting_dim, g_constracting_dim), ((x_bdim,), (x_bdim, ))),
+        dimension_numbers=((x_constracting_dim, g_constracting_dim), ((x_bdim,), (x_bdim,))),
     )
 
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
