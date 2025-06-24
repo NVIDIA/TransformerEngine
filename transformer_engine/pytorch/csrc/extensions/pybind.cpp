@@ -6,15 +6,15 @@
 
 #include "pybind.h"
 
-#include <memory>
-#include <optional>
-#include <vector>
-
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include "../common.h"
 #include "../extensions.h"

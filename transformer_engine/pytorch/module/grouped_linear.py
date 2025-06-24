@@ -266,7 +266,8 @@ class _GroupedLinear(torch.autograd.Function):
                         # Fused bias grad + quantize kernel
                         for i in range(ctx.num_gemms):
                             grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                grad_output_mats[i], ctx.grad_output_quantizers[i],
+                                grad_output_mats[i],
+                                ctx.grad_output_quantizers[i],
                             )
                     else:
                         # Unfused bias grad and multi-tensor quantize
