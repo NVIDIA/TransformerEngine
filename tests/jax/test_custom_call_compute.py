@@ -109,8 +109,8 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):
-        assert_dequantized_scaled_tensor(a.get_rowwise_tensor(), b)
-        assert_dequantized_scaled_tensor(a.get_colwise_tensor(), b)
+        assert_dequantized_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_scaled_tensor(a.colwise_tensor, b)
     else:
         pytest.fail("a must be a ScaledTensor object")
 
@@ -139,10 +139,10 @@ def assert_dequantized_grouped_scaled_tensor(
             dq_a_i = dq_a_i.reshape(b_i.shape)
             assert_allclose(dq_a_i, b_i, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):
-        assert isinstance(a.get_rowwise_tensor(), GroupedScaledTensor1x)
-        assert isinstance(a.get_colwise_tensor(), GroupedScaledTensor1x)
-        assert_dequantized_grouped_scaled_tensor(a.get_rowwise_tensor(), b)
-        assert_dequantized_grouped_scaled_tensor(a.get_colwise_tensor(), b)
+        assert isinstance(a.rowwise_tensor, GroupedScaledTensor1x)
+        assert isinstance(a.colwise_tensor, GroupedScaledTensor1x)
+        assert_dequantized_grouped_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_grouped_scaled_tensor(a.colwise_tensor, b)
     else:
         pytest.fail("a must be a GroupedScaledTensor object")
 
