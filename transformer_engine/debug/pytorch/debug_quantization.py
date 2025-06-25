@@ -62,6 +62,9 @@ class DebugQuantizer(Quantizer):
         self.tp_group = tp_group  # used in inspect_tensor calls
         self.iteration = debug_api.DEBUG_MANAGER._trainer_iteration_count
 
+        if parent_quantizer is not None:
+            parent_quantizer.internal = False
+
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
