@@ -62,7 +62,7 @@ class DebugQuantizer(Quantizer):
         self.tp_group = tp_group  # used in inspect_tensor calls
         self.iteration = debug_api.DEBUG_MANAGER._trainer_iteration_count
 
-        # .internal = True is slightly faster, but results 
+        # .internal = True is slightly faster, but results
         # in errors when caching the weights.
         # Setting .internal = False is safer.
         if parent_quantizer is not None:
