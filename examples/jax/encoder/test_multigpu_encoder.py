@@ -56,13 +56,11 @@ class Net(nn.Module):
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
-        x = x.reshape(x.shape[0], -1)
-
         x = te_flax.DenseGeneral(features=256)(x)
 
         x = te_flax.DenseGeneral(features=256)(x)
 
-        x = nn.Dense(features=2)(x)
+        x = nn.Dense(features=2)(x.reshape(x.shape[0], -1))
         return x
 
 
