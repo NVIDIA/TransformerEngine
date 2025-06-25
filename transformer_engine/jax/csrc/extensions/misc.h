@@ -87,5 +87,11 @@ constexpr struct Alignment {
 
 std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
 
+template <typename T, typename... Rest>
+void hash_combine(int64_t &seed, const T &v, Rest... rest) {
+  seed ^= std::hash<T>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+  (hash_combine(seed, rest), ...);
+}
+
 }  // namespace jax
 }  // namespace transformer_engine

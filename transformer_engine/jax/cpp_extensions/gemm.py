@@ -5,7 +5,9 @@
 
 import math
 import operator
+from abc import ABC
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Tuple, Sequence, Union
 from functools import partial, reduce
 
@@ -15,7 +17,6 @@ from jax import dtypes
 from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax as tex
-from transformer_engine_jax import get_num_compute_streams
 
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
@@ -47,7 +48,9 @@ __all__ = [
 ]
 
 
-num_cublas_streams = get_num_compute_streams()
+num_cublas_streams = tex.get_num_compute_streams()
+
+num_comm_overlap_max_streams = 3
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -326,6 +329,9 @@ class GemmPrimitive(BasePrimitive):
             "fuse_gelu": fuse_gelu,
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
+            "comm_overlap_id": -1,
+            "comm_overlap_method": tex.CommOverlapMethod.NONE,
+            "comm_type": tex.CommOverlapType.NONE,
         }
 
         operand_output_aliases = {}
@@ -762,6 +768,48 @@ class GemmPrimitive(BasePrimitive):
 
 
 register_primitive(GemmPrimitive)
+
+
+@dataclass
+class CommOverlapHelper:
+
+    buffer_shape: Sequence[int] = (0, )
+    buffer_dtype: jnp.dtype = jnp.bfloat16
+    tp_size: int = 1
+    comm_type: tex.CommOverlapType = tex.CommOverlapType.NONE
+    method: tex.CommOverlapMethod = tex.CommOverlapMethod.NONE
+    unique_id: int = field(default=-1, init=False)
+
+    def __post_init__(self):
+        if self.comm_type == tex.CommOverlapType.NONE:
+            assert self.method == tex.CommOverlapMethod.NONE
+        else:
+            assert self.method != tex.CommOverlapMethod.NONE
+            if self.comm_type == tex.CommOverlapType.AG:
+                assert self.method != tex.CommOverlapType.PIPELINE, (
+                    "Comm+GEMM overlap w/ PIPELINE method does not support all-gather."
+                )
+            else:
+                # Reduce-Scatter overlap always needs an auxiliary output
+                self.needs_aux_out = True
+            assert self.tp_size > 1, (
+                "Comm+GEMM overlap requires tensor-parallel size larger than 1."
+            )
+
+    def is_enabled(self):
+        return self.method != tex.CommOverlapMethod.NONE
+
+    def is_bulk(self):
+        return self.method == tex.CommOverlapMethod.BULK
+
+    def is_p2p(self):
+        return self.method == tex.CommOverlapMethod.RING_EXCHANGE
+
+    def is_all_gather(self):
+        return self.comm_type == tex.CommOverlapType.AG
+
+    def is_reduce_scatter(self):
+        return self.comm_type == tex.CommOverlapType.RS
 
 
 def gemm_uses_jax_dot() -> bool:
