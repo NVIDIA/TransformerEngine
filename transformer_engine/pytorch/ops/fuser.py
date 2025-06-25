@@ -23,6 +23,10 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_userbuffers_backward_linear,
     fuse_userbuffers_forward_linear,
 )
+from transformer_engine.pytorch.tensor.quantized_tensor import (
+    prepare_for_saving,
+    restore_from_saved,
+)
 
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
@@ -177,7 +181,15 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 range_end = len(to_save)
                 ctx.to_save = None
                 ctx._saved_tensors_range = (range_start, range_end)
-            func_ctx.save_for_backward(*to_save)
+
+            # Save tensors for backward
+            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+            if with_quantized_compute:
+                tensors_to_save, tensor_objects = prepare_for_saving(*to_save)
+                func_ctx.save_for_backward(*tensors_to_save)
+                func_ctx.tensor_objects = tensor_objects
+            else:
+                func_ctx.save_for_backward(*to_save)
 
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
@@ -187,6 +199,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.num_extra_inputs = fuser._num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            func_ctx.with_quantized_compute = with_quantized_compute
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
@@ -206,8 +219,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_ops = func_ctx.basic_ops
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
+        # Restore saved tensors
+        if func_ctx.with_quantized_compute:
+            saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
+        else:
+            saved_tensors = func_ctx.saved_tensors
+
         # Unflatten list of saved tensors
-        saved_tensors = func_ctx.saved_tensors
         for ctx in basic_op_ctxs:
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
