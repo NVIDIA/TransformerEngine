@@ -20,11 +20,11 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
+from ...tensor.quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
-from .._common import maybe_dequantize
+from .._common import maybe_dequantize, is_quantized_tensor
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -280,7 +280,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Cast grad output tensor dtype if needed
         dy_local = grad_output
         if with_quantized_compute:
-            if not isinstance(dy_local, QuantizedTensorBase):
+            if not is_quantized_tensor(dy_local):
                 with_columnwise = weight_requires_grad
                 if (
                     with_columnwise
@@ -301,7 +301,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             raise ValueError("Weight tensor is required to compute input grad")
         w = weight
         if with_quantized_compute:
-            if not isinstance(w, QuantizedTensorBase):
+            if not is_quantized_tensor(w):
                 weight_quantizer.set_usage(columnwise=True)
                 w = weight_quantizer(w)
         else:
@@ -314,7 +314,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise ValueError("Input tensor is required to compute weight grad")
             x_local = input
             if with_quantized_compute:
-                if not isinstance(x_local, QuantizedTensorBase):
+                if not is_quantized_tensor(x_local):
                     input_quantizer.set_usage(columnwise=True)
                     x_local = input_quantizer(x_local)
             else:
@@ -425,7 +425,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise RuntimeError(
                     "wgrad GEMM requires grad output tensor, which has not been initialized"
                 )
-            if isinstance(dy, QuantizedTensorBase):
+            if is_quantized_tensor(dy):
                 dy.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Initialize input tensor
@@ -435,7 +435,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise RuntimeError(
                     "wgrad GEMM requires input tensor, which has not been initialized"
                 )
-            if isinstance(x, QuantizedTensorBase):
+            if is_quantized_tensor(x):
                 x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Check grad weight tensor

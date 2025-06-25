@@ -21,13 +21,13 @@ from ...distributed import (
 )
 from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
-from ...tensor import Quantizer, QuantizedTensor
+from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize
+from .._common import maybe_dequantize, is_quantized_tensor
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -272,7 +272,7 @@ class BasicLinear(BasicOperation):
             device = canonicalize_device(None)
 
         # Allocate buffer if needed
-        if isinstance(weight, QuantizedTensor):
+        if is_quantized_tensor(weight):
             weight = torch.empty(
                 weight.size(),
                 dtype=weight.dtype,
@@ -463,7 +463,7 @@ class BasicLinear(BasicOperation):
                     quantizer=input_quantizer,
                 )
             else:
-                if not isinstance(x_local, QuantizedTensor):
+                if not is_quantized_tensor(x_local):
                     x_local = input_quantizer(x_local)
                 x = x_local
         else:
@@ -482,7 +482,7 @@ class BasicLinear(BasicOperation):
         w = weight
         if not with_quantized_compute:
             w = maybe_dequantize(w, dtype)
-        elif with_quantized_compute and not isinstance(w, QuantizedTensor):
+        elif with_quantized_compute and not is_quantized_tensor(w):
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
@@ -495,7 +495,7 @@ class BasicLinear(BasicOperation):
                 output_quantizer = None
             if tensor_parallel_mode == "row":
                 output_quantizer = None
-        elif isinstance(y, QuantizedTensor):
+        elif is_quantized_tensor(y):
             if not with_quantized_compute:
                 raise ValueError("Output tensor is quantized, but quantized compute is not enabled")
             if tensor_parallel_mode == "row":
@@ -560,7 +560,7 @@ class BasicLinear(BasicOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensor):
+            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
@@ -571,7 +571,7 @@ class BasicLinear(BasicOperation):
                 # PyTorch autograd produces esoteric errors if we
                 # cache input tensor directly.
                 x_local = x_local.detach()
-            if with_quantized_compute and isinstance(x_local, QuantizedTensor):
+            if with_quantized_compute and is_quantized_tensor(x_local):
                 if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -692,7 +692,7 @@ class BasicLinear(BasicOperation):
                     quantizer=grad_output_quantizer,
                 )
             else:
-                if not isinstance(dy_local, QuantizedTensor):
+                if not is_quantized_tensor(dy_local):
                     dy_local = grad_output_quantizer(dy_local)
                 dy = dy_local
         else:
@@ -727,7 +727,7 @@ class BasicLinear(BasicOperation):
                         quantizer=input_quantizer,
                     )
                 else:
-                    if isinstance(x_local, QuantizedTensor):
+                    if is_quantized_tensor(x_local):
                         x_local.update_usage(columnwise_usage=True)
                     else:
                         x_local = input_quantizer(x_local)
@@ -754,7 +754,7 @@ class BasicLinear(BasicOperation):
                 raise ValueError("Weight tensor is required to compute input grad")
             w = weight
             if with_quantized_compute:
-                if isinstance(w, QuantizedTensor):
+                if is_quantized_tensor(w):
                     w.update_usage(columnwise_usage=True)
                 else:
                     if weight_quantizer is None:
@@ -775,7 +775,7 @@ class BasicLinear(BasicOperation):
                     grad_input_quantizer = None
                 if tensor_parallel_mode == "column":
                     grad_input_quantizer = None
-            elif isinstance(dx, QuantizedTensor):
+            elif is_quantized_tensor(dx):
                 if not with_quantized_compute:
                     raise ValueError(
                         "Grad input tensor is quantized, but quantized compute is not enabled"
