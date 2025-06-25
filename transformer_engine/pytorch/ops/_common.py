@@ -12,7 +12,7 @@ import torch
 from transformer_engine_torch import FP8TensorMeta
 from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
-from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.float8_tensor import Float8Tensor, QuantizedTensor
 from ..tensor.quantized_tensor import QuantizedTensorBase
 from ..utils import canonicalize_dtype
 
@@ -23,10 +23,11 @@ def is_float8_tensor(tensor: Any) -> bool:
 
 
 def maybe_dequantize(
-    tensor: torch.Tensor | QuantizedTensorBase, dtype: torch.dtype | None = None
+    tensor: torch.Tensor | QuantizedTensor | QuantizedTensorBase,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Dequantize tensor to given dtype or just convert if not a quantized tensor"""
-    if isinstance(tensor, QuantizedTensorBase):
+    if isinstance(tensor, (QuantizedTensor, QuantizedTensorBase)):
         return tensor.dequantize(dtype=dtype)
     if dtype is not None and tensor.dtype != dtype:
         return tensor.to(dtype)
