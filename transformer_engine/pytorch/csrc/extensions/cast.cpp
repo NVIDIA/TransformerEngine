@@ -261,6 +261,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
                             size_t offset, at::ScalarType dtype) -> at::Tensor {
     std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    // in the case where full buffer is empty because local rank receives no tokens for all the experts
+    // then the data_ptr is nullptr, we need to return an empty tensor instead of calling from_blob
+    // but in the case where some experts receive tokens, some not, we want to leverage from_blob
+    // as much as possible to avoid CPU overhead
     if (buffer->data_ptr<uint8_t>() == nullptr) {
       return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
     }
@@ -414,7 +418,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   std::vector<TensorWrapper> input_list;
   std::vector<std::vector<size_t>> split_shapes;
   size_t dim0_offset = 0;
-  const size_t dim0_stride = input_shape[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape[0];
+  const size_t dim0_stride =
+      input_shape[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape[0];
   for (size_t i = 0; i < num_splits; ++i) {
     NVTE_CHECK(split_sections[i] >= 0, "Attempted to split tensor with shape=", input_shape,
                " along dim 0 with split_sections=", split_sections);
