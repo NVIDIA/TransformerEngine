@@ -33,6 +33,7 @@ from transformer_engine.pytorch.constants import (
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
 
@@ -814,7 +815,12 @@ class TransformerLayer(torch.nn.Module):
         return output
 
     def _bias_dropout_add(self, hidden_state, bias, residual, drop_path=None):
-        if drop_path is None and bias is not None and bias.numel() != 0:
+        if (
+            drop_path is None
+            and bias is not None
+            and bias.numel() != 0
+            and not is_in_onnx_export_mode()
+        ):
             if self.bias_dropout_fusion:
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train
