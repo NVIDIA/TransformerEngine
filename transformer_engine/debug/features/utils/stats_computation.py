@@ -17,6 +17,8 @@ def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
+    if tensor_abs.numel() == 0:
+        return torch.inf
     amax = tensor_abs.max().float()
     if not amax.all():
         amax = torch.tensor(1, device=tensor.device).to(torch.float)
@@ -125,7 +127,7 @@ STATS = {
         lambda buffers: min(_get(buffers, "dynamic_range_bottom")),
     ),
     "underflows_num": (
-        lambda x: (x._data == 0).sum(),
+        lambda x: (x.get_data_tensors()[0] == 0).sum(),
         lambda buffers: sum(_get(buffers, "underflows_num")),
     ),
     "std": (

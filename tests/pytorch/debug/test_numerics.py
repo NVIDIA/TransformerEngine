@@ -262,6 +262,18 @@ def _get_tensors():
     return x, weight
 
 
+LOGGING_CONFIG = """logging_config:
+  enabled: True
+  layers:
+    layer_types: [linear]
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors: [activation, gradient, weight, output, wgrad, dgrad]
+      stats: [min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range]
+"""
+
+
 DISABLE_FP8_CONFIG = Template(
     """disable_fp8_config:
   enabled: True
@@ -273,6 +285,24 @@ DISABLE_FP8_CONFIG = Template(
       gemms: [$gemms]
 """
 )
+
+
+@create_config_file
+def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
+    kwargs["config_file"].write(LOGGING_CONFIG)
+    kwargs["config_file"].flush()
+
+    _init_debug(kwargs["config_file"].name, kwargs["log_dir"], feature_dirs)
+
+    x, weight = _get_tensors()
+    x1 = x[:0, :]
+    model = _init_model(weight)
+    _ = _run_forward_backward(x1, model)
+    _ = _run_forward_backward(x, model)
+
+
+def test_logging_zero_numel_tensor(feature_dirs):
+    run_logging_zero_numel_tensor(feature_dirs)
 
 
 @pytest.mark.parametrize("fprop_fp8", all_boolean)
