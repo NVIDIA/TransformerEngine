@@ -567,10 +567,6 @@ class BasicLinear(BasicOperation):
 
         # Prepare input tensor for backward pass
         if weight_requires_grad:
-            if x_local is input:
-                # PyTorch autograd produces esoteric errors if we
-                # cache input tensor directly.
-                x_local = x_local.detach()
             if with_quantized_compute and is_quantized_tensor(x_local):
                 if not (isinstance(x_local, Float8TensorBase) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
