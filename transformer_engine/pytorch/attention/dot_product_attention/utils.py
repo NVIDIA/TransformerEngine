@@ -434,8 +434,8 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        if device_compute_capability == (8, 9) and cudnn_version < (9, 11, 0):
-            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN < 9.11")
+        if device_compute_capability == (8, 9) and cudnn_version < (9, 12, 0):
+            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN < 9.12")
             use_fused_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
@@ -609,11 +609,6 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif head_dim_qk != head_dim_v:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with MLA"
-            )
-            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -767,6 +762,7 @@ def get_attention_backend(
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
         fused_attention_backend = tex.get_fused_attn_backend(
+            is_training,
             q_type,
             kv_type,
             QKVLayout[qkv_layout],

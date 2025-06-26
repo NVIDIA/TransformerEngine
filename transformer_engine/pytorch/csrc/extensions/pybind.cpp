@@ -12,7 +12,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <stdexcept>
+#include <memory>
+#include <optional>
+#include <vector>
 
 #include "../common.h"
 #include "../extensions.h"
@@ -199,10 +201,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
         py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
-  m.def("fused_multi_quantize", &transformer_engine::pytorch::fused_multi_quantize,
-        "Fused Multi-tensor Cast + Transpose", py::arg("input_list"), py::arg("output_list"),
-        py::arg("quantizer_list"), py::arg("otype"));
-
+  m.def("multi_tensor_quantize", &transformer_engine::pytorch::multi_tensor_quantize,
+        "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
+  m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
+        "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
+        py::arg("quantizer_list"));
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
@@ -229,6 +232,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
+        "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -385,7 +390,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt);
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlap::get_communication_stream);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
              transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
@@ -402,5 +408,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt);
+           py::arg("shape") = std::nullopt)
+      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
 }

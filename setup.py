@@ -16,13 +16,8 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     cuda_archs,
-    found_cmake,
-    found_ninja,
-    found_pybind11,
     get_frameworks,
-    install_and_import,
     remove_dups,
-    cuda_toolkit_include_path,
 )
 
 frameworks = get_frameworks()
@@ -36,7 +31,6 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
@@ -72,6 +66,11 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
+    # Add custom CMake arguments from environment variable
+    nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
+    if nvte_cmake_extra_args:
+        cmake_flags.extend(nvte_cmake_extra_args.split())
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
@@ -82,26 +81,13 @@ def setup_common_extension() -> CMakeExtension:
     )
 
 
-def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
+def setup_requirements() -> Tuple[List[str], List[str]]:
     """Setup Python dependencies
 
-    Returns dependencies for build, runtime, and testing.
+    Returns dependencies for runtime and testing.
     """
 
     # Common requirements
-    setup_reqs: List[str] = []
-    if cuda_toolkit_include_path() is None:
-        setup_reqs.extend(
-            [
-                "nvidia-cuda-runtime-cu12",
-                "nvidia-cublas-cu12",
-                "nvidia-cudnn-cu12",
-                "nvidia-cuda-cccl-cu12",
-                "nvidia-cuda-nvcc-cu12",
-                "nvidia-nvtx-cu12",
-                "nvidia-cuda-nvrtc-cu12",
-            ]
-        )
     install_reqs: List[str] = [
         "pydantic",
         "importlib-metadata>=1.0",
@@ -109,30 +95,20 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
-    # Requirements that may be installed outside of Python
-    if not found_cmake():
-        setup_reqs.append("cmake>=3.21")
-    if not found_ninja():
-        setup_reqs.append("ninja")
-    if not found_pybind11():
-        setup_reqs.append("pybind11")
-
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
             from build_tools.pytorch import install_requirements, test_requirements
 
-            setup_reqs.extend(["torch>=2.1"])
             install_reqs.extend(install_requirements())
             test_reqs.extend(test_requirements())
         if "jax" in frameworks:
             from build_tools.jax import install_requirements, test_requirements
 
-            setup_reqs.extend(["jax[cuda12]", "flax>=0.7.1"])
             install_reqs.extend(install_requirements())
             test_reqs.extend(test_requirements())
 
-    return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
+    return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
 if __name__ == "__main__":
@@ -149,14 +125,13 @@ if __name__ == "__main__":
         ext_modules = []
         package_data = {}
         include_package_data = False
-        setup_requires = []
         install_requires = ([f"transformer_engine_cu12=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
     else:
-        setup_requires, install_requires, test_requires = setup_requirements()
+        install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
@@ -203,7 +178,6 @@ if __name__ == "__main__":
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8",
         classifiers=["Programming Language :: Python :: 3"],
-        setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),
         include_package_data=include_package_data,

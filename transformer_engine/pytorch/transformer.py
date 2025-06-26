@@ -236,6 +236,14 @@ class TransformerLayer(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
+    use_qk_norm: bool, default = 'False'
+                    if set to `True`, L2 normalization is applied to query and key tensors
+                    after RoPE (if applicable) but before attention computation.
+                    This follows the Llama4 approach for QK normalization to improve
+                    training stability and model performance.
+    qk_norm_eps: float, default = 1e-6
+                    epsilon value for L2 normalization of query and key tensors.
+                    Only used when `use_qk_norm` is True.
     """
 
     def __init__(
@@ -285,6 +293,8 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
         name: str = None,
+        use_qk_norm: bool = False,
+        qk_norm_eps: float = 1e-6,
     ) -> None:
         super().__init__()
 
@@ -374,6 +384,8 @@ class TransformerLayer(torch.nn.Module):
             "ub_overlap_rs": ub_overlap_rs,
             "ub_overlap_rs_dgrad": ub_overlap_rs_dgrad,
             "qkv_format": self.attn_input_format,
+            "seq_length": seq_length,
+            "micro_batch_size": micro_batch_size,
         }
 
         self.self_attention = MultiheadAttention(
@@ -385,6 +397,8 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
+            use_qk_norm=use_qk_norm,
+            qk_norm_eps=qk_norm_eps,
             name=name + ".self_attention" if name is not None else None,
         )
 
@@ -399,6 +413,8 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
+                use_qk_norm=use_qk_norm,
+                qk_norm_eps=qk_norm_eps,
                 name=name + ".inter_attention" if name is not None else None,
             )
 
