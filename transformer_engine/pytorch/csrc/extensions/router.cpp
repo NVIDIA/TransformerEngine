@@ -29,7 +29,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_softmax_sigmod_fwd(
   TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid",
               "score_function must be softmax or sigmoid for router fusion");
   if (score_function == "softmax") {
-    use_pre_softmax = false; // Pre-softmax only happens at the softmax case
+    use_pre_softmax = false;  // Pre-softmax only happens at the softmax case
   }
 
   // Reformat the input to make it compatible with the kernel
