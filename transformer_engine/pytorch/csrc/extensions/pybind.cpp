@@ -232,6 +232,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
+        "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
