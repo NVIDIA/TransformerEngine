@@ -11,6 +11,7 @@ When log() is called, they gather stats from all nodes, compute combined final s
 
 from collections import defaultdict
 import torch
+import inspect
 
 from nvdlfw_inspect.utils import gather_along_first_dim
 from nvdlfw_inspect.logging import MetricLogger
@@ -65,9 +66,9 @@ class _Buffer:
         gathered_buffer, _ = gather_along_first_dim(
             self._buffer.unsqueeze(0), process_group=self.reduction_group
         )
-        return gathered_buffer[mask.to(bool)]
+        return gathered_buffer[mask.to(torch.bool)]
 
-    def feed(self, tensor, iteration):
+    def feed(self, tensor, iteration, aux_dict=None):
         """
         feed() is used to add tensor for computing the statistics.
         Because of the microbatching, feed() can be used multiple
@@ -88,7 +89,18 @@ class _Buffer:
         # save stats for tensor to tmp buffer
         for stat_name in self.stats_to_compute:
             fn, _ = STATS[stat_name]
-            self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor)
+
+            # Call the statistic function with the appropriate number of arguments.
+            # Some statistics (e.g. FP8-specific ones) expect an auxiliary dictionary,
+            # while the generic statistics expect only the tensor.
+            try:
+                if len(inspect.signature(fn).parameters) == 2:
+                    self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor, aux_dict)
+                else:
+                    self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor)
+            except TypeError:
+                # Fallback to best-effort single-argument call.
+                self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor)
 
         # [num_buffers, num_stats]
         buffers = torch.cat((self._buffer.unsqueeze(0), self._tmp_buffer.unsqueeze(0)), dim=0)
@@ -99,7 +111,13 @@ class _Buffer:
                 self._new_buffer[stats_to_num[stat_name]] = combinator(buffers)
             else:
                 fn = STATS[stat_name][0]
-                self._new_buffer[stats_to_num[stat_name]] = fn(tensor)
+                try:
+                    if len(inspect.signature(fn).parameters) == 2:
+                        self._new_buffer[stats_to_num[stat_name]] = fn(tensor, aux_dict)
+                    else:
+                        self._new_buffer[stats_to_num[stat_name]] = fn(tensor)
+                except TypeError:
+                    self._new_buffer[stats_to_num[stat_name]] = fn(tensor)
 
         self._buffer.copy_(self._new_buffer)
 
@@ -154,10 +172,10 @@ class StatsBuffers:
         self.buffers[(layer_name, tensor_name, options)] = buffer
         self.reduction_group_to_buffer[reduction_group].append(buffer)
 
-    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction):
+    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction, aux_dict=None):
         """Feeds the tensor into the respective buffer."""
         buffer = self.buffers[(layer_name, tensor_name, options)]
-        buffer.feed(tensor, iteration)
+        buffer.feed(tensor, iteration, aux_dict)
         buffer.skip_reduction = skip_reduction
 
     def log_stats(self):

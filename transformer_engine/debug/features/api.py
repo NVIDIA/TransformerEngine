@@ -5,7 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -91,8 +91,10 @@ required_kwargs = {
     "modify_tensor": ["tensor_name", "gemm"],
     "inspect_tensor": ["tensor_name"],
     "inspect_tensor_postquantize": ["tensor_name"],
+    "inspect_tensor_all": ["tensor_name"],
     "inspect_tensor_enabled": ["tensor_name"],
     "inspect_tensor_postquantize_enabled": ["tensor_name"],
+    "inspect_tensor_all_enabled": ["tensor_name"],
     "default": ["tensor_name", "gemm"],
 }
 
@@ -260,10 +262,10 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        gemm: str,
         tensor: torch.Tensor,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
+        rowwise: bool,
     ) -> None:
         """
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
@@ -278,8 +280,6 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in fp8 or processed tensor after the modify_tensor call,
-        gemm: str
-            one of [`fprop`, `dgrad`, `wgrad`],
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -291,6 +291,24 @@ class TEDefaultFeatures:
 
         Should return nothing.
         """
+    
+    def inspect_tensor_all(
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        tensor: Union[torch.Tensor, QuantizedTensor],
+        iteration: int,
+        tp_group: torch.distributed.ProcessGroup,
+        original_tensor: torch.Tensor,
+        quantized_tensor_rowwise: Optional[torch.Tensor] = None,
+        quantized_tensor_columnwise: Optional[torch.Tensor] = None,
+        quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        """
+        Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
+        """
+        pass
 
     def inspect_tensor_enabled(
         self,
@@ -352,6 +370,21 @@ class TEDefaultFeatures:
         bool - default is False
         """
         return False
+    
+    def inspect_tensor_all_enabled(
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        iteration: int,
+    ) -> bool:
+        """
+        It is a routing call, which is run at the initialization of the layer.
+        If it returns true, then *inspect_tensor_all* for
+        a given GEMM and tensor will be invoked.
+        """
+        print("XXX")
+        return False
 
 
 @Registry.register_namespace_api(namespace="transformer_engine")
@@ -371,6 +404,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "modify_tensor": ["tensor_name", "gemm"],
             "inspect_tensor": ["tensor_name"],
             "inspect_tensor_postquantize": ["tensor_name"],
+            "inspect_tensor_all": ["tensor_name"],
             "inspect_tensor_enabled": ["tensor_name"],
             "inspect_tensor_postquantize_enabled": ["tensor_name"],
             "modify_tensor_enabled": ["tensor_name"],
@@ -384,6 +418,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "fp8_gemm_enabled",
             "inspect_tensor",
             "inspect_tensor_postquantize",
+            "inspect_tensor_all",
             "inspect_tensor_enabled",
             "inspect_tensor_postquantize_enabled",
         }
