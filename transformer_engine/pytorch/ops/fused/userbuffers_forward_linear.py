@@ -27,7 +27,6 @@ from ...utils import canonicalize_device, canonicalize_dtype
 from .._common import maybe_dequantize, is_quantized_tensor
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
-    BasicOperation,
     FusedOperation,
     FusibleOperation,
     OperationContext,
@@ -294,8 +293,9 @@ class UserbuffersForwardLinear(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -331,9 +331,7 @@ class UserbuffersForwardLinear(FusedOperation):
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_quantizers("backward") > 0 and recipe.delayed():
-                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+            grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
         dtype = None
@@ -376,7 +374,7 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_requires_grad
         linear_op_ctx.weight_requires_grad = weight_requires_grad
-        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
+        linear_op_ctx.has_prev_op = not is_first_op
 
         return output, [() for _ in range(len(self.basic_ops))]
 

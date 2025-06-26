@@ -886,8 +886,9 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check which grads are required
@@ -906,11 +907,9 @@ class BasicLinear(BasicOperation):
             # Get quantizers
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
-            if next_op is not None and next_op.num_quantizers("forward") > 0:
-                output_quantizer = next_op.get_quantizer("forward", 0)
+            output_quantizer = next_op_input_quantizer
             grad_output_quantizer = self.get_quantizer("backward", 0)
-            if prev_op is not None and prev_op.num_quantizers("backward") > 0:
-                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+            grad_input_quantizer = prev_op_grad_input_quantizer
 
             # Configure quantizers
             # Note: We cache the quantized input for backward pass,
@@ -949,7 +948,7 @@ class BasicLinear(BasicOperation):
         ctx.dtype = dtype
         ctx.input_requires_grad = input_requires_grad
         ctx.weight_requires_grad = weight_requires_grad
-        ctx.has_prev_op = prev_op is not None
+        ctx.has_prev_op = not is_first_op
 
         return output
 

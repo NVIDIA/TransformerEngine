@@ -125,17 +125,25 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
-            prev_ops = [fuser._basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
-            next_ops = [
-                fuser._basic_ops[idx + 1] if (idx < fuser._num_basic_ops - 1) else None
-                for idx in basic_op_idxs
-            ]
+            prev_op_idx = basic_op_idxs[0] - 1
+            prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx > 0 else None
+            prev_op_grad_input_quantizer = None
+            if prev_op is not None:
+                prev_op_grad_input_quantizer = prev_op.get_grad_input_quantizer()
+            next_op_idx = basic_op_idxs[-1] + 1
+            next_op = fuser._basic_ops[next_op_idx] if next_op_idx < fuser._num_basic_ops else None
+            next_op_input_quantizer = None
+            if next_op is not None:
+                next_op_input_quantizer = next_op.get_input_quantizer()
+            is_first_op = prev_op is None
+
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
                 basic_op_extra_inputs=extra_inputs,
-                basic_op_prev_ops=prev_ops,
-                basic_op_next_ops=next_ops,
+                prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
+                next_op_input_quantizer=next_op_input_quantizer,
+                is_first_op=is_first_op,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
             x.requires_grad_(requires_grad=requires_grad)

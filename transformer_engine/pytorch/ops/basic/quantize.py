@@ -12,6 +12,7 @@ import torch
 from ...fp8 import FP8GlobalStateManager
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
+from ...tensor import Quantizer
 
 
 class Quantize(BasicOperation):
@@ -49,8 +50,9 @@ class Quantize(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check if FP8 is enabled
