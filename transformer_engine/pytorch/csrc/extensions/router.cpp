@@ -20,11 +20,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_softmax_sigmod_fwd(
   // Check if the input is valid
   TORCH_CHECK(num_tokens > 0 && num_experts > 0,
               "num_tokens and num_experts must be greater than 0");
-  // Pre-softmax only happens at the softmax case
-  if (use_pre_softmax) {
-    TORCH_CHECK(score_function == "softmax",
-                "score_function must be softmax when use_pre_softmax is true");
-  }
   // Expert bias only happens at the sigmoid case
   if (expert_bias.has_value()) {
     TORCH_CHECK(score_function == "sigmoid",
@@ -33,6 +28,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_softmax_sigmod_fwd(
   // Check if the score function is valid
   TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid",
               "score_function must be softmax or sigmoid for router fusion");
+  if (score_function == "softmax") {
+    use_pre_softmax = false; // Pre-softmax only happens at the softmax case
+  }
 
   // Reformat the input to make it compatible with the kernel
   int group_topk_value = group_topk.has_value() ? group_topk.value() : -1;
