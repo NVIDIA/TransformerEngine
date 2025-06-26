@@ -297,7 +297,6 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        tensor: Union[torch.Tensor, QuantizedTensor],
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: torch.Tensor,
@@ -306,7 +305,35 @@ class TEDefaultFeatures:
         quantizer: Optional[Quantizer] = None,
     ) -> None:
         """
-        Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
+
+
+        Parameters
+        ----------
+
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+        tp_group: torch.distributed.ProcessGroup
+            process group for the tensor parallel group. This is used for weight statistics reduction.
+            This is not reduction group from debug_api.
+        original_tensor: torch.Tensor
+            original tensor in high precision,
+        quantized_tensor_rowwise: Optional[torch.Tensor]
+            quantized tensor in rowwise format,
+        quantized_tensor_columnwise: Optional[torch.Tensor]
+            quantized tensor in columnwise format,
+        quantizer: Optional[Quantizer]
+            quantizer used to quantize the tensor,
+
+        Returns
+        -------
+
+        Should return nothing.
+
         """
         pass
 
@@ -382,8 +409,23 @@ class TEDefaultFeatures:
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_all* for
         a given GEMM and tensor will be invoked.
+
+        Parameters
+        ----------
+
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+
+        Returns
+        -------
+
+        bool - default is False
         """
-        print("XXX")
         return False
 
 

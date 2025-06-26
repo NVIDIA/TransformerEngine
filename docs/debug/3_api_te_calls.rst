@@ -12,14 +12,7 @@ Let's look deeper into how Nvidia-DL-Framework-Inspect with Transformer Engine w
 
    Fig 1: Example of Nvidia-DL-Framework-Inspect affecting training script with 1 Linear Layer. For tensors mentioned in ``config.yaml``, behavior of ``modify_tensor_enabled()`` and ``modify_tensor()`` calls are substituted with definitions from the feature class. Other calls return default values - in fact they do nothing.
 
-In this page, all calls from TransformerEngine to the Nvidia-DL-Framework-Inspect for each GEMM are listed. The order of these calls is illustrated in the image below.
-
-.. figure:: ./img/api_calls2.svg
-   :align: center
-
-   Fig 2: The calls to Nvidia-DL-Framework-Inspect done for Transformer Engine. There are 2 types of calls: GEMM calls and routing calls.
-
-
+In this page, all calls from TransformerEngine to the Nvidia-DL-Framework-Inspect for each GEMM are listed. 
 There are 2 categories of API calls, each is used for different purposes:
 
 - GEMM calls - invoked during every GEMM, used to process or quantize tensors and collect information about them,
