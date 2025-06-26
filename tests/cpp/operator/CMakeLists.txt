@@ -25,6 +25,7 @@ add_executable(test_operator
                test_memset.cu
                test_multi_cast_transpose.cu
                test_multi_padding.cu
+               test_multi_unpadding.cu
                test_causal_softmax.cu
                test_swizzle.cu
                ../test_common.cu)
