@@ -52,7 +52,7 @@ class TestLoadCheckpoint:
 
     @staticmethod
     def _make_module(name: str) -> torch.nn.Module:
-        """"Construct a module"""
+        """ "Construct a module"""
         if name == "linear":
             return te.Linear(1, 1)
         if name == "layernorm_linear":
@@ -130,7 +130,9 @@ def main() -> None:
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--save-checkpoint", type=str, default=None,
+        "--save-checkpoint",
+        type=str,
+        default=None,
         help="Save a checkpoint file for a module",
     )
     args = parser.parse_args()
