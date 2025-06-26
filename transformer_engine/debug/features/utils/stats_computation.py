@@ -50,11 +50,19 @@ def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
     """Computes the overflows of the tensor."""
     scale_inv = quantized_tensor._scale_inv
     dtype = quantized_tensor._fp8_dtype
-    if dtype == tex.DType.kFloat8E4M3:
-        fp8_max = Format.E4M3.value.max_fwd
-    elif dtype == tex.DType.kFloat8E5M2:
-        fp8_max = Format.E5M2.value.max_fwd
-    fp8_min = - fp8_max
+
+    # Map each supported FP8 dtype to its corresponding max forward value.
+    dtype_to_max = {
+        tex.DType.kFloat8E4M3: Format.E4M3.value.max_fwd,
+        tex.DType.kFloat8E5M2: Format.E5M2.value.max_fwd,
+    }
+
+    if dtype not in dtype_to_max:
+        raise ValueError(f"Unsupported FP8 dtype {dtype} passed to compute_fp8_delayed_scaling_overflows_num().")
+
+    fp8_max = dtype_to_max[dtype]
+    fp8_min = -fp8_max
+
     overflows = (tensor > fp8_max * scale_inv) | (tensor < fp8_min * scale_inv)
     return overflows.sum()
 
@@ -127,7 +135,7 @@ STATS = {
             _get(buffers, "variance"), _get(buffers, "numel"), _get(buffers, "sum")
         ),
     ),
-    "cur_amax": (lambda x: x.abs().max(), lambda buffers: max(_get(buffers, "cur_amax"))),
+    "cur_amax": (lambda x, aux_dict: x.abs().max(), lambda buffers: max(_get(buffers, "cur_amax"))),
     "dynamic_range_top": (
         lambda x, aux_dict: _compute_dynamic_range_top(x),
         lambda buffers: max(_get(buffers, "dynamic_range_top")),
@@ -158,85 +166,88 @@ STATS = {
 }
 
 
-def add_underflows_num_stat(recipe_name: str, columnwise: bool = False):
-    """Adds the underflows_num stat to the stats dictionary."""
+def add_underflows_stats(recipe_name: str, columnwise: bool = False):
+    """Register *both* underflow stats (num and %) for the given recipe."""
     columnwise_suffix = "_columnwise" if columnwise else ""
     data_tensor_idx = 1 if columnwise else 0
 
-    stats_to_num[f"{recipe_name}_underflows_num" + columnwise_suffix] = len(stats_to_num)
-    stats_to_num[f"{recipe_name}_underflows%" + columnwise_suffix] = len(stats_to_num)
-    
-    STATS[f"{recipe_name}_underflows_num" + columnwise_suffix] = (
+    # Stat names
+    stat_num = f"{recipe_name}_underflows_num{columnwise_suffix}"
+    stat_pct = f"{recipe_name}_underflows%{columnwise_suffix}"
+
+    stats_to_num[stat_num] = len(stats_to_num)
+    stats_to_num[stat_pct] = len(stats_to_num)
+
+    STATS[stat_num] = (
         lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum(),
-        lambda buffers: sum(_get(buffers, f"{recipe_name}_underflows_num")),
+        lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
-    STATS[f"{recipe_name}_underflows%" + columnwise_suffix] = (
+    STATS[stat_pct] = (
         lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum() / aux_dict[recipe_name].numel() * 100,
-        lambda buffers: 100 * sum(_get(buffers, f"{recipe_name}_underflows_num")) / sum(_get(buffers, "numel")),
+        lambda buffers, _sn_num=stat_num: 100 * sum(_get(buffers, _sn_num)) / sum(_get(buffers, "numel")),
     )
 
-    DEPENDENCIES[f"{recipe_name}_underflows_num" + columnwise_suffix] = {f"{recipe_name}_underflows_num"}
-    DEPENDENCIES[f"{recipe_name}_underflows%" + columnwise_suffix] = {f"{recipe_name}_underflows_num", "numel"}
+    DEPENDENCIES[stat_num] = {stat_num}
+    DEPENDENCIES[stat_pct] = {stat_num, "numel"}
 
-def add_scale_inv_min_stat(recipe_name: str, columnwise: bool = False):
-    """Adds the scale_inv_min stat to the stats dictionary."""
-    columnwise_suffix = "_columnwise" if columnwise else ""
-    scale_inv_name = "_scale_inv"
-    if recipe_name in ["mxfp8", "fp8_block_scaling"]:
-        scale_inv_name = "_columnwise_scale_inv" if columnwise else "_rowwise_scale_inv"
+def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
+    """Register *both* scale-inv min and max stats for a given recipe.
 
-    stats_to_num[f"{recipe_name}_scale_inv_min" + columnwise_suffix] = len(stats_to_num)
+    This replaces the earlier separate helpers and avoids duplicated boilerplate.
+    """
 
-    STATS[f"{recipe_name}_scale_inv_min" + columnwise_suffix] = (
-        lambda x, aux_dict: getattr(aux_dict[recipe_name], scale_inv_name).min(),
-        lambda buffers: min(_get(buffers, f"{recipe_name}_scale_inv_min")),
-    )
-    STATS[f"{recipe_name}_scale_inv_max" + columnwise_suffix] = (
-        lambda x, aux_dict: getattr(aux_dict[recipe_name], scale_inv_name).max(),
-        lambda buffers: max(_get(buffers, f"{recipe_name}_scale_inv_max")),
-    )
-
-    DEPENDENCIES[f"{recipe_name}_scale_inv_min" + columnwise_suffix] = {f"{recipe_name}_scale_inv_min"}
-    DEPENDENCIES[f"{recipe_name}_scale_inv_max" + columnwise_suffix] = {f"{recipe_name}_scale_inv_max"}
-
-def add_scale_inv_max_stat(recipe_name: str, columnwise: bool = False):
-    """Adds the scale_inv_max stat to the stats dictionary."""
-    columnwise_suffix = "_columnwise" if columnwise else ""
-    scale_inv_name = "_scale_inv"
-    if recipe_name in ["mxfp8", "fp8_block_scaling"]:
-        scale_inv_name = "_columnwise_scale_inv" if columnwise else "_rowwise_scale_inv"
-
-    stats_to_num[f"{recipe_name}_scale_inv_max" + columnwise_suffix] = len(stats_to_num)
-    
-    STATS[f"{recipe_name}_scale_inv_max" + columnwise_suffix] = (
-        lambda x, aux_dict: getattr(aux_dict[recipe_name], scale_inv_name).max(),
-        lambda buffers: max(_get(buffers, f"{recipe_name}_scale_inv_max")),
-    )
-    
-    DEPENDENCIES[f"{recipe_name}_scale_inv_max" + columnwise_suffix] = {f"{recipe_name}_scale_inv_max"}
-
-def add_mse_stat(recipe_name: str, columnwise: bool = False):
-    """Adds the mse stat to the stats dictionary."""
     columnwise_suffix = "_columnwise" if columnwise else ""
 
-    stats_to_num[f"{recipe_name}_mse" + columnwise_suffix] = len(stats_to_num)
-    stats_to_num[f"{recipe_name}_total_square_error" + columnwise_suffix] = len(stats_to_num)
-    
-    STATS[f"{recipe_name}_mse" + columnwise_suffix] = (
+    # Determine which attribute holds the scale-inverse tensor.
+    scale_inv_attr = "_scale_inv"
+    if recipe_name in {"mxfp8", "fp8_block_scaling"}:
+        scale_inv_attr = "_columnwise_scale_inv" if columnwise else "_rowwise_scale_inv"
+
+    # Prepare stat names.
+    stat_name_min = f"{recipe_name}_scale_inv_min{columnwise_suffix}"
+    stat_name_max = f"{recipe_name}_scale_inv_max{columnwise_suffix}"
+
+    # Assign indices in `stats_to_num` (order matters — keep insertion order deterministic).
+    stats_to_num[stat_name_min] = len(stats_to_num)
+    stats_to_num[stat_name_max] = len(stats_to_num)
+
+    # Capture the attribute name inside lambdas via default args to avoid late binding.
+    STATS[stat_name_min] = (
+        lambda x, aux_dict, _attr=scale_inv_attr: getattr(aux_dict[recipe_name], _attr).min(),
+        lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
+    )
+    STATS[stat_name_max] = (
+        lambda x, aux_dict, _attr=scale_inv_attr: getattr(aux_dict[recipe_name], _attr).max(),
+        lambda buffers, _sn=stat_name_max: max(_get(buffers, _sn)),
+    )
+
+    DEPENDENCIES[stat_name_min] = {stat_name_min}
+    DEPENDENCIES[stat_name_max] = {stat_name_max}
+
+def add_mse_stats(recipe_name: str, columnwise: bool = False):
+    """Register mse and total_square_error stats for the recipe."""
+    columnwise_suffix = "_columnwise" if columnwise else ""
+
+    stat_mse = f"{recipe_name}_mse{columnwise_suffix}"
+    stat_err = f"{recipe_name}_total_square_error{columnwise_suffix}"
+
+    stats_to_num[stat_mse] = len(stats_to_num)
+    stats_to_num[stat_err] = len(stats_to_num)
+
+    STATS[stat_mse] = (
         lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="mean"),
-        lambda buffers: torch.sum(_get(buffers, f"{recipe_name}_total_square_error" + columnwise_suffix)) / sum(_get(buffers, "numel")),
+        lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err)) / sum(_get(buffers, "numel")),
     )
-    STATS[f"{recipe_name}_total_square_error" + columnwise_suffix] = (
+    STATS[stat_err] = (
         lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="sum"),
-        lambda buffers: torch.sum(_get(buffers, f"{recipe_name}_total_square_error" + columnwise_suffix)),
+        lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err)),
     )
-    
-    DEPENDENCIES[f"{recipe_name}_total_square_error" + columnwise_suffix] = {f"{recipe_name}_total_square_error" + columnwise_suffix}
-    DEPENDENCIES[f"{recipe_name}_mse" + columnwise_suffix] = {f"{recipe_name}_mse", f"{recipe_name}_total_square_error" + columnwise_suffix, "numel"}
+
+    DEPENDENCIES[stat_err] = {stat_err}
+    DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
 for columnwise in [True, False]:
     for recipe_name in ["fp8_delayed_scaling", "mxfp8", "fp8_current_scaling", "fp8_block_scaling"]:
-        add_underflows_num_stat(recipe_name, columnwise)
-        add_scale_inv_min_stat(recipe_name, columnwise)
-        add_scale_inv_max_stat(recipe_name, columnwise)
-        add_mse_stat(recipe_name, columnwise)
+        add_underflows_stats(recipe_name, columnwise)
+        add_scale_inv_stats(recipe_name, columnwise)
+        add_mse_stats(recipe_name, columnwise)
