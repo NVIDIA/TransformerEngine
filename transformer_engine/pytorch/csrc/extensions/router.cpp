@@ -28,7 +28,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_softmax_sigmod_fwd(
   // Check if the score function is valid
   TORCH_CHECK(score_function == "softmax" || score_function == "sigmoid",
               "score_function must be softmax or sigmoid for router fusion");
-  if (score_function == "softmax") {
+  if (score_function == "sigmoid") {
     use_pre_softmax = false;  // Pre-softmax only happens at the softmax case
   }
 
