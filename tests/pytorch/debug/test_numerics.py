@@ -27,6 +27,9 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_WGRAD,
 )
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID
@@ -302,6 +305,8 @@ def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
 
 
 def test_logging_zero_numel_tensor(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_logging_zero_numel_tensor(feature_dirs)
 
 
@@ -309,6 +314,8 @@ def test_logging_zero_numel_tensor(feature_dirs):
 @pytest.mark.parametrize("dgrad_fp8", all_boolean)
 @pytest.mark.parametrize("wgrad_fp8", all_boolean)
 def test_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8)
 
 
@@ -348,7 +355,10 @@ def run_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8, **kwarg
 
 
 def test_disable_fp8_layer(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_disable_fp8_layer(feature_dirs)
+
 
 
 DISABLE_FP8_LAYER_CONFIG = """disable_fp8_config:
@@ -393,6 +403,8 @@ subset_combinations = random.sample(all_combinations, 20)
 def test_per_tensor_scaling(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     if not any([fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad]):
         pytest.skip("Skipping test because all parameters are False")
     run_per_tensor_scaling(
@@ -565,6 +577,8 @@ def run_per_tensor_scaling(
 def test_microbatching_per_tensor_scaling(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     if not any([fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad]):
         pytest.skip("Skipping test because all parameters are False")
 
@@ -654,6 +668,8 @@ subset_combinations = random.sample(all_combinations, 10)
 def test_fake_quant_fp8(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_fake_quant_fp8(
         feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
     )
