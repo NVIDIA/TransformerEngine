@@ -24,6 +24,7 @@ from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ...utils import canonicalize_device, canonicalize_dtype
+from .._common import maybe_dequantize
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     BasicOperation,
@@ -226,22 +227,16 @@ class UserbuffersForwardLinear(FusedOperation):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensorBase):
-                    x_local = x_local.dequantize(dtype=dtype)
-                if x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
             x = x_local
 
         # Initialize weight tensor
         w = weight
-        w_is_quantized = isinstance(w, QuantizedTensorBase)
-        if with_quantized_compute and not w_is_quantized:
+        if not with_quantized_compute:
+            w = maybe_dequantize(w, dtype)
+        elif with_quantized_compute and not isinstance(w, QuantizedTensorBase):
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
-        elif not with_quantized_compute and w_is_quantized:
-            w = w.dequantize()
-        if not with_quantized_compute and w.dtype != dtype:
-            w = w.to(dtype=dtype)
 
         # Construct output tensor if needed
         reduce_scatter_output = None

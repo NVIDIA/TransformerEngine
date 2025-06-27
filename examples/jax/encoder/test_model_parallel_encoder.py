@@ -307,7 +307,9 @@ def train_and_evaluate(args):
                 key: params_sharding[PARAMS_KEY] if key is PARAMS_KEY else None
                 for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             # Check if params are sufficiently sharded after initialization
@@ -344,11 +346,15 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
