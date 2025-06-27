@@ -688,6 +688,7 @@ def make_weak_ref(x):
     """
     This function is to make a weak reference to the input so that the memory can be released.
     """
+
     def convert_to_torch_tensor(tensor: Union[_WeakRefTensor, torch.Tensor]) -> torch.Tensor:
         """
         This function is to convert the `_WeakRefTensor` to torch.Tensor.
