@@ -357,9 +357,7 @@ class GemmPrimitive(BasePrimitive):
         grad,
         use_split_accumulator,
     ):
-        lhs_cdims, rhs_cdims = map(
-            sanitize_dims, (lhs.ndim, rhs.ndim), dimension_numbers[0]
-        )
+        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), dimension_numbers[0])
         lhs_transposed, rhs_transposed = _get_gemm_layout(
             (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
         )
@@ -629,7 +627,13 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del out_dtype, lhs_quantized_colwise, rhs_quantized_colwise, scaling_mode, grad,
+        del (
+            out_dtype,
+            lhs_quantized_colwise,
+            rhs_quantized_colwise,
+            scaling_mode,
+            grad,
+        )
         del use_split_accumulator, result_infos
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
@@ -773,6 +777,7 @@ def _get_scale_inv_without_padding(scaled_tensor):
         is_colwise=scaled_tensor.is_colwise,
         flatten_axis=scaled_tensor.flatten_axis,
     )
+
 
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],

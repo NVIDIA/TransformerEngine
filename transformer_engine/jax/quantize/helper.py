@@ -497,10 +497,7 @@ def remove_padding_from_scale_inv(
     """
     # Get expected unpadded scale shape and check if inverse scale already matches
     unpadded_scale_shape = scaling_mode.get_scale_shape(
-        data_shape,
-        is_colwise=is_colwise,
-        is_padded=False,
-        flatten_axis=flatten_axis
+        data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
     )
     if scaling_mode == ScalingMode.NO_SCALING or scale_inv.shape == unpadded_scale_shape:
         return scale_inv
@@ -519,30 +516,30 @@ def remove_padding_from_scale_inv(
 
     # Reshape scale inverse to 2D in two stages to preserve the flatten axis
     padded_scale_shape_2d = (
-        reduce(operator.mul, padded_scale_shape[ : flatten_axis]),
-        reduce(operator.mul, padded_scale_shape[flatten_axis : ])
+        reduce(operator.mul, padded_scale_shape[:flatten_axis]),
+        reduce(operator.mul, padded_scale_shape[flatten_axis:]),
     )
     scale_inv_2d = jnp.reshape(
-        jnp.reshape(scale_inv, (padded_scale_shape_2d[0], *scale_inv.shape[flatten_axis : ])),
-        padded_scale_shape_2d
+        jnp.reshape(scale_inv, (padded_scale_shape_2d[0], *scale_inv.shape[flatten_axis:])),
+        padded_scale_shape_2d,
     )
 
     # Slice reshaped 2D scale inverse using collapsed 2D unpadded_scale_shape
     unpadded_scale_shape_2d = (
-        reduce(operator.mul, unpadded_scale_shape[ : flatten_axis]),
-        reduce(operator.mul, unpadded_scale_shape[flatten_axis : ])
+        reduce(operator.mul, unpadded_scale_shape[:flatten_axis]),
+        reduce(operator.mul, unpadded_scale_shape[flatten_axis:]),
     )
     scale_inv_2d_unpadded = jnp.asarray(
-        scale_inv_2d[ : unpadded_scale_shape_2d[0], : unpadded_scale_shape_2d[1]]
+        scale_inv_2d[: unpadded_scale_shape_2d[0], : unpadded_scale_shape_2d[1]]
     )
 
     # Reshape 2D scale inverse back in two stages in order to preserve the flatten axis
     scale_inv_unpadded = jnp.reshape(
         jnp.reshape(
             scale_inv_2d_unpadded,
-            (*unpadded_scale_shape[: flatten_axis], scale_inv_2d_unpadded.shape[1])
+            (*unpadded_scale_shape[:flatten_axis], scale_inv_2d_unpadded.shape[1]),
         ),
-        unpadded_scale_shape
+        unpadded_scale_shape,
     )
     return scale_inv_unpadded
 
@@ -585,9 +582,8 @@ def apply_padding_to_scale_inv(
     )
 
     # Pad the scales with the lowest representable value (2^-127) and return
-    pad_width = tuple(
-        (0, a - b) for a, b in zip(padded_scale_shape, unpadded_scale_shape)
-    )
+    pad_width = tuple((0, a - b) for a, b in zip(padded_scale_shape, unpadded_scale_shape))
     return jnp.pad(scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127)
+
 
 NVTE_FP8_COLLECTION_NAME = QuantizeConfig.COLLECTION_NAME
