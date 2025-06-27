@@ -456,9 +456,9 @@ def _make_graphed_callables(
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
                         )
-                        # Weak ref the static grad inputs of the previous backward pass. 
+                        # Weak ref the static grad inputs of the previous backward pass.
                         # Note: After a backward pass, we assume Mcore will send the
-                        # grad input to another pipeline parallel rank and that the 
+                        # grad input to another pipeline parallel rank and that the
                         # communication is finished before the end of the next backward
                         # pass.
                         if previous_per_callable_bwd_idx is not None:
@@ -786,7 +786,7 @@ def make_graphed_callables(
     retain_graph_in_backward: bool, default = `False`
                               Whether to set retain_graph=True in backward graph capture.
     _reuse_graph_input_output_buffers: bool, default = `False`
-        Reduce memory usage by reusing input/output data buffers between 
+        Reduce memory usage by reusing input/output data buffers between
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
