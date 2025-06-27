@@ -52,7 +52,7 @@ model_configs_infer = {
         4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
     ),
     "infer_1": ModelConfig(
-        2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
+        2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
     ),
 }
 
@@ -370,12 +370,24 @@ def generate_args(
         ]
 
 
-def get_tols(module, backend, dtype):
+def get_tols(config, module, backend, dtype):
     if module == "TransformerLayer":
-        tols = {
-            torch.half: (5e-3, 5e-3),
-            torch.bfloat16: (3.5e-2, 3.5e-2),
-        }
+        if config.head_dim_qk <= 128:
+            tols = {
+                torch.half: (5e-3, 5e-3),
+                torch.bfloat16: (3.5e-2, 3.5e-2),
+            }
+        else:
+            if backend == "UnfusedAttention":
+                tols = {
+                    torch.half: (1.6e-2, 1.6e-2),
+                    torch.bfloat16: (1.2e-1, 1e-1),
+                }
+            else:
+                tols = {
+                    torch.half: (1e-2, 1e-2),
+                    torch.bfloat16: (8e-2, 7e-2),
+                }
     if module == "DotProductAttention":
         tols = {
             torch.half: (1e-3, 1e-3),
@@ -662,7 +674,9 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         incremental_output = incremental_output[0]
 
         # compare results
-        atol, rtol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
+        atol, rtol = get_tols(
+            config, module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn
+        )
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":

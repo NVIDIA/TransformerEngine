@@ -21,9 +21,10 @@ from ...module.base import (
     _2X_ACC_FPROP,
 )
 from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
-from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ...utils import canonicalize_device, canonicalize_dtype
+from .._common import maybe_dequantize
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     BasicOperation,
@@ -208,7 +209,9 @@ class UserbuffersForwardLinear(FusedOperation):
             if input_quantizer is not None:
                 if not isinstance(x_local, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-                    if isinstance(input_quantizer, Float8Quantizer):
+                    if isinstance(
+                        input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                    ):
                         input_quantizer.set_usage(columnwise=False)
                     x_local = input_quantizer(x_local)
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -224,22 +227,16 @@ class UserbuffersForwardLinear(FusedOperation):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensorBase):
-                    x_local = x_local.dequantize(dtype=dtype)
-                if x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
             x = x_local
 
         # Initialize weight tensor
         w = weight
-        w_is_quantized = isinstance(w, QuantizedTensorBase)
-        if with_quantized_compute and not w_is_quantized:
+        if not with_quantized_compute:
+            w = maybe_dequantize(w, dtype)
+        elif with_quantized_compute and not isinstance(w, QuantizedTensorBase):
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
-        elif not with_quantized_compute and w_is_quantized:
-            w = w.dequantize()
-        if not with_quantized_compute and w.dtype != dtype:
-            w = w.to(dtype=dtype)
 
         # Construct output tensor if needed
         reduce_scatter_output = None
@@ -327,8 +324,10 @@ class UserbuffersForwardLinear(FusedOperation):
         grad_input_quantizer = None
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if not recipe.delayed() and not recipe.mxfp8():
-                raise RuntimeError("Userbuffers is only supported with FP8 delayed scaling recipe")
+            if not any((recipe.delayed(), recipe.float8_current_scaling(), recipe.mxfp8())):
+                raise RuntimeError(
+                    f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
+                )
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
