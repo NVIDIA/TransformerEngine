@@ -456,9 +456,11 @@ def _make_graphed_callables(
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
                         )
-                        # Weak ref the static grad inputs of the previous backward pass. The static
-                        # grad inputs should be kept alive for one more backward pass because its
-                        # value is still needed as the input of its next layer backward.
+                        # Weak ref the static grad inputs of the previous backward pass. 
+                        # Note: After a backward pass, we assume Mcore will send the
+                        # grad input to another pipeline parallel rank and that the 
+                        # communication is finished before the end of the next backward
+                        # pass.
                         if previous_per_callable_bwd_idx is not None:
                             per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
                                 make_weak_ref(
@@ -784,9 +786,10 @@ def make_graphed_callables(
     retain_graph_in_backward: bool, default = `False`
                               Whether to set retain_graph=True in backward graph capture.
     _reuse_graph_input_output_buffers: bool, default = `False`
-                         Whether or not to reduce memory usage by optimizing input/output
-                         data buffer between graphs. Only available when all callables in
-                         `modules` have the same input/output dtype and shape.
+        Reduce memory usage by reusing input/output data buffers between 
+        graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
+        when `_order` is provided. All callables in `modules` are assumed to have
+        inputs and outputs with the same dtype and shape.
 
     FP8-related parameters
     ----------------------
@@ -890,7 +893,7 @@ def make_graphed_callables(
     else:
         torch.cuda.set_rng_state(original_rng_states)
 
-    # Restore FP8 wrapper.
+    # Remove FP8 wrapper.
     for module_cls, old_call in old_call_funcs.items():
         module_cls.__call__ = old_call
 
