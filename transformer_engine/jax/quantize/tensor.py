@@ -17,6 +17,7 @@ from jax.tree_util import register_pytree_node_class
 
 from transformer_engine_jax import QuantizeLayout
 
+from .helper import apply_padding_to_scale_inv
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
 from ..sharding import (
@@ -136,26 +137,13 @@ class ScaledTensor1x(ScaledTensor):
             self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
 
         else:
-            expected_scale_shape = self.scaling_mode.get_scale_shape(
-                self.data.shape, self.is_colwise, is_padded=True, flatten_axis=self.flatten_axis
+            self.scale_inv = apply_padding_to_scale_inv(
+                self.scale_inv,
+                self.scaling_mode,
+                self.data.shape,
+                is_colwise=self.is_colwise,
+                flatten_axis=self.flatten_axis,
             )
-            expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-                self.data.shape, self.is_colwise, is_padded=False, flatten_axis=self.flatten_axis
-            )
-            if self.scale_inv.shape != expected_scale_shape:
-                assert self.scale_inv.shape == expected_unpadded_scale_shape, (
-                    f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-                    f" scale_inv or {expected_unpadded_scale_shape} for unpadded scale_inv, got"
-                    f" {self.scale_inv.shape}"
-                )
-                pad_width = tuple(
-                    (0, a - b) for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
-                )
-
-                # padding with the smallest number it can present
-                self.scale_inv = jnp.pad(
-                    self.scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127
-                )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.

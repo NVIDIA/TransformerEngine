@@ -66,10 +66,12 @@ class Net(nn.Module):
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
+        x = x.reshape(x.shape[0], -1)
+
         if self.enable_seq_paral:
             # Trigger all-gather to collect a complete tensor alone sequence on each device.
             x = jax.lax.with_sharding_constraint(
-                x, jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None)
+                x, jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             )
 
         x = te_flax.DenseGeneral(
@@ -84,7 +86,7 @@ class Net(nn.Module):
             bias_axes=(NAMED_BROADCAST_AXIS,),
         )(x)
 
-        x = nn.Dense(features=2)(x.reshape(x.shape[0], -1))
+        x = nn.Dense(features=2)(x)
         return x
 
 

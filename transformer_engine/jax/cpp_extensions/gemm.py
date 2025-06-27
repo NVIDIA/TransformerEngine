@@ -31,6 +31,8 @@ from ..quantize import (
     QuantizeLayout,
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
+    apply_padding_to_scale_inv,
+    remove_padding_from_scale_inv,
 )
 from .misc import get_padded_spec
 
@@ -153,7 +155,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12)
+    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -167,13 +169,15 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
         grad,
         use_split_accumulator,
     ):
-        del use_split_accumulator
+        del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
 
         # Sanity-check operand layouts and types
         operand_ndims = (lhs.ndim, rhs.ndim)
@@ -295,13 +299,15 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
         grad,
         use_split_accumulator,
     ):
-        del out_dtype
+        del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype
         contracting_dims, _ = dimension_numbers
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -343,12 +349,36 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
         grad,
         use_split_accumulator,
     ):
+        lhs_cdims, rhs_cdims = map(
+            sanitize_dims, (lhs.ndim, rhs.ndim), dimension_numbers[0]
+        )
+        lhs_transposed, rhs_transposed = _get_gemm_layout(
+            (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
+        )
+
+        lhs_scale_inv = apply_padding_to_scale_inv(
+            lhs_scale_inv,
+            scaling_mode,
+            lhs.shape,
+            is_colwise=lhs_quantized_colwise,
+            flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+        )
+        rhs_scale_inv = apply_padding_to_scale_inv(
+            rhs_scale_inv,
+            scaling_mode,
+            rhs.shape,
+            is_colwise=rhs_quantized_colwise,
+            flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+        )
+
         outputs = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
@@ -358,6 +388,8 @@ class GemmPrimitive(BasePrimitive):
             gelu_input,
             out_dtype=out_dtype,
             dimension_numbers=dimension_numbers,
+            lhs_quantized_colwise=lhs_quantized_colwise,
+            rhs_quantized_colwise=rhs_quantized_colwise,
             scaling_mode=scaling_mode,
             fuse_bias=fuse_bias,
             fuse_gelu=fuse_gelu,
@@ -372,6 +404,8 @@ class GemmPrimitive(BasePrimitive):
         batch_dims,
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -412,6 +446,8 @@ class GemmPrimitive(BasePrimitive):
                 *batched_args,
                 out_dtype=out_dtype,
                 dimension_numbers=dimension_numbers,
+                lhs_quantized_colwise=lhs_quantized_colwise,
+                rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
@@ -582,6 +618,8 @@ class GemmPrimitive(BasePrimitive):
     def infer_sharding_from_operands(
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -591,7 +629,8 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del out_dtype, scaling_mode, grad, use_split_accumulator, result_infos
+        del out_dtype, lhs_quantized_colwise, rhs_quantized_colwise, scaling_mode, grad,
+        del use_split_accumulator, result_infos
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
             GemmPrimitive._parse_operand_output_specs(arg_infos, dimension_numbers)
@@ -614,6 +653,8 @@ class GemmPrimitive(BasePrimitive):
     def partition(
         out_dtype,
         dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -678,6 +719,8 @@ class GemmPrimitive(BasePrimitive):
                 gelu_input,
                 out_dtype=out_dtype,
                 dimension_numbers=dimension_numbers,
+                lhs_quantized_colwise=lhs_quantized_colwise,
+                rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
@@ -722,6 +765,15 @@ def gemm_uses_jax_dot() -> bool:
     return not GemmPrimitive.enabled()
 
 
+def _get_scale_inv_without_padding(scaled_tensor):
+    return remove_padding_from_scale_inv(
+        scaled_tensor.scale_inv,
+        scaled_tensor.scaling_mode,
+        scaled_tensor.data.shape,
+        is_colwise=scaled_tensor.is_colwise,
+        flatten_axis=scaled_tensor.flatten_axis,
+    )
+
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],
@@ -760,7 +812,7 @@ def _te_gemm(
             lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
         scaling_mode = lhs_q.scaling_mode
         lhs_data = lhs_q.data
-        lhs_scale_inv = lhs_q.scale_inv
+        lhs_scale_inv = _get_scale_inv_without_padding(lhs_q)
         if lhs_q.data_layout == "T":
             lhs_cdims = transpose_dims(lhs_q.ndim, lhs_cdims, flatten_axis=lhs_q.flatten_axis)
             lhs_bdims = transpose_dims(lhs_q.ndim, lhs_bdims, flatten_axis=lhs_q.flatten_axis)
@@ -778,7 +830,7 @@ def _te_gemm(
             f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
         )
         rhs_data = rhs_q.data
-        rhs_scale_inv = rhs_q.scale_inv
+        rhs_scale_inv = _get_scale_inv_without_padding(rhs_q)
         if rhs_q.data_layout == "T":
             rhs_cdims = transpose_dims(rhs_q.ndim, rhs_cdims, flatten_axis=rhs_q.flatten_axis)
             rhs_bdims = transpose_dims(rhs_q.ndim, rhs_bdims, flatten_axis=rhs_q.flatten_axis)
@@ -799,6 +851,8 @@ def _te_gemm(
         gelu_input,
         out_dtype=out_dtype,
         dimension_numbers=((lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims)),
+        lhs_quantized_colwise=lhs_q.is_colwise if isinstance(lhs_q, ScaledTensor) else False,
+        rhs_quantized_colwise=rhs_q.is_colwise if isinstance(rhs_q, ScaledTensor) else False,
         scaling_mode=scaling_mode,
         fuse_bias=fuse_bias,
         fuse_gelu=fuse_gelu,

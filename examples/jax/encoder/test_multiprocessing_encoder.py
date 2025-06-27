@@ -66,6 +66,8 @@ class Net(nn.Module):
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
+        x = x.reshape(x.shape[0], -1)
+
         x = te_flax.DenseGeneral(
             features=256,
             kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
@@ -78,7 +80,7 @@ class Net(nn.Module):
             bias_axes=(NAMED_BROADCAST_AXIS,),
         )(x)
 
-        x = nn.Dense(features=2)(x.reshape(x.shape[0], -1))
+        x = nn.Dense(features=2)(x)
         return x
 
 
