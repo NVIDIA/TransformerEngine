@@ -67,7 +67,7 @@ def _make_graphed_callables(
     _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
-    io_memory_reduction: bool = False,
+    _reuse_graph_input_output_buffers: bool = False,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -124,6 +124,8 @@ def _make_graphed_callables(
         num_model_chunks = max(_order)
         num_microbatches = len(_order) // num_model_chunks // 2
         assert num_model_chunks * num_microbatches * 2 == len(_order)
+
+        # Determine number of layers in each model chunk.
         if _num_layers_per_chunk is None:
             assert len(sample_args) * 2 >= len(_order) and (
                 len(sample_args) * 2 % len(_order) == 0
@@ -153,38 +155,37 @@ def _make_graphed_callables(
             + f"args tuple, but got {len(sample_args)}."
         )
 
-        # The starting index of each chunk in callables.
+        # Calculate the starting index of each chunk in callables for future use.
         _prefix_num_layers = [0]
         for m_chunk in range(num_model_chunks):
             num_layers = _num_layers_per_chunk[m_chunk]
             _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
-        assert len(sample_args) == _prefix_num_layers[-1] * num_microbatches, (
-            f"Expected {_prefix_num_layers[-1] * num_microbatches} args tuple, but got"
-            f" {len(sample_args)}."
-        )
 
         assert len(sample_kwargs) == len(sample_args)
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
-    if io_memory_reduction:
-        assert _order is not None, "`_order` must be provided when `io_memory_reduction` is True."
-        assert is_training, "`io_memory_reduction` is only available in training mode."
-        assert isinstance(sample_args, list), "sample_args must be a list for io_memory_reduction."
+    # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
+    # when the graph is replayed. If two model chunk microbatches have no overlap between their
+    # forward and backward, then we can reduce memory usage by reusing the same static buffers.
+    if _reuse_graph_input_output_buffers:
+        assert _order is not None, "`_order` must be provided when `_reuse_graph_input_output_buffers` is True."
+        assert is_training, "`_reuse_graph_input_output_buffers` is only available in training mode."
+        assert isinstance(sample_args, list), "sample_args must be a list for _reuse_graph_input_output_buffers."
         len_args = len(sample_args[0])
         for i in range(len(sample_args)):
             assert len_args == len(
                 sample_args[i]
-            ), f"Arguments must have same length and shape for io_memory_reduction."
+            ), f"Arguments must have same length and shape for _reuse_graph_input_output_buffers."
         len_kwargs = len(sample_kwargs[0])
         assert isinstance(
             sample_kwargs, list
-        ), "sample_kwargs must be a list for io_memory_reduction."
+        ), "sample_kwargs must be a list for _reuse_graph_input_output_buffers."
         for i in range(len(sample_kwargs)):
             assert len_kwargs == len(
                 sample_kwargs[i]
-            ), f"Keyword arguments must have same length and shape for io_memory_reduction."
+            ), f"Keyword arguments must have same length and shape for _reuse_graph_input_output_buffers."
 
-        # Reorganize args and kwargs for input tensor reuse
+        # Reorganize args and kwargs for input tensor reuse.
         fwd_sample_qs = {}
         consumed_sample_q = []
         fwd_idx = [0] * num_model_chunks
@@ -406,7 +407,9 @@ def _make_graphed_callables(
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
-                    if not io_memory_reduction or static_grad_outputs is None:
+                    if not _reuse_graph_input_output_buffers or static_grad_outputs is None:
+                        # Note for _reuse_graph_input_output_buffers: grad output is only used
+                        # within backward, so we can reuse the same static buffers every time.
                         static_grad_outputs = tuple(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
@@ -436,11 +439,19 @@ def _make_graphed_callables(
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
 
-                    if io_memory_reduction:
-                        # Weak ref the static outputs and static grad inputs.
+                    # Weak ref the static outputs and static grad inputs that are no longer needed
+                    # in the following steps. These two type of tensors are both in cudagraph
+                    # mempool, so we just deallocate them and let PyTorch's memory allocator
+                    # reuse them elsewhere.
+                    if _reuse_graph_input_output_buffers:
+                        # Weak ref the static outputs of the forward pass of this backward. It's
+                        # no longer needed after the corresponding backward graph is built up.
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
                         )
+                        # Weak ref the static grad inputs of the previous backward pass. The static
+                        # grad inputs should be kept alive for one more backward pass because its
+                        # value is still needed as the input of its next layer backward.
                         if previous_per_callable_bwd_idx is not None:
                             per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
                                 make_weak_ref(
@@ -448,7 +459,6 @@ def _make_graphed_callables(
                                 )
                             )
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
-                        del static_outputs, static_grad_inputs, grad_inputs
 
                 bwd_idx[m_chunk] += 1
     else:
@@ -737,7 +747,7 @@ def make_graphed_callables(
     _num_layers_per_chunk: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
-    io_memory_reduction: bool = False,
+    _reuse_graph_input_output_buffers: bool = False,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -766,7 +776,7 @@ def make_graphed_callables(
           this graph may share memory with the indicated pool.
     retain_graph_in_backward: bool, default = `False`
                               Whether to set retain_graph=True in backward graph capture.
-    io_memory_reduction: bool, default = `False`
+    _reuse_graph_input_output_buffers: bool, default = `False`
                          Whether or not to reduce memory usage by optimizing input/output
                          data buffer between graphs. Only available when all callables in
                          `modules` have the same input/output dtype and shape.
@@ -846,7 +856,7 @@ def make_graphed_callables(
             _num_layers_per_chunk=_num_layers_per_chunk,
             pool=pool,
             retain_graph_in_backward=retain_graph_in_backward,
-            io_memory_reduction=io_memory_reduction,
+            _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
         )
 
     # Ensures warmup does not affect numerics for ops such as dropout.

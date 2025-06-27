@@ -631,19 +631,7 @@ _torch_dtype_to_np_typestr_dict = {
 }
 
 
-def torch_dtype_to_np_typestr(dtype):
-    """Convert PyTorch dtype to numpy typestr."""
-    ret = _torch_dtype_to_np_typestr_dict.get(dtype)
-    assert ret is not None, f"Unsupported dtype: {dtype}"
-    return ret
-
-
-def volume(d: Sequence[int]):
-    """Calculate the volume of a tensor."""
-    return np.prod(d)
-
-
-class TensorWrapper:
+class _WeakRefTensor:
     """
     A wrapper wraps raw data pointer to a tensor-like object. Could be compatibale with openai triton kernel and be converted to `torch.Tensor` with zero-copy overhead.
     """
@@ -678,40 +666,45 @@ class TensorWrapper:
         self._shape = tuple(int(i) for i in shape)
 
     def numel(self):
-        return volume(self.shape)
+        return np.prod(self.shape)
 
     @property
     def __cuda_array_interface__(self):
         return {
             "shape": self.shape,
-            "typestr": torch_dtype_to_np_typestr(self.dtype),
+            "typestr": self.torch_dtype_to_np_typestr(),
             "data": (self.data_ptr() if self.numel() > 0 else 0, False),
             "version": 3,
         }
 
-
-def convert_to_torch_tensor(tensor: Union[TensorWrapper, torch.Tensor]) -> torch.Tensor:
-    """
-    This function is to convert the `TensorWrapper` to torch.Tensor.
-    """
-    if isinstance(tensor, torch.Tensor):
-        return tensor
-
-    old_ptr = tensor.data_ptr()
-    new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
-    new_ptr = new_tensor.data_ptr()
-    if old_ptr != new_ptr:
-        raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
-    return new_tensor
+    def torch_dtype_to_np_typestr(self):
+        """Convert PyTorch dtype to numpy typestr."""
+        ret = _torch_dtype_to_np_typestr_dict.get(self.dtype)
+        assert ret is not None, f"Unsupported dtype: {self.dtype}"
+        return ret
 
 
 def make_weak_ref(x):
     """
     This function is to make a weak reference to the input so that the memory can be released.
     """
+    def convert_to_torch_tensor(tensor: Union[_WeakRefTensor, torch.Tensor]) -> torch.Tensor:
+        """
+        This function is to convert the `_WeakRefTensor` to torch.Tensor.
+        """
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+
+        old_ptr = tensor.data_ptr()
+        new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
+        new_ptr = new_tensor.data_ptr()
+        if old_ptr != new_ptr:
+            raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
+        return new_tensor
+
     if isinstance(x, torch.Tensor):
         return (
-            convert_to_torch_tensor(TensorWrapper(x.data_ptr(), x.dtype, x.shape))
+            convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
             if x.is_cuda
             else x
         )
