@@ -62,6 +62,8 @@ using fp8e5m2 = __nv_fp8_e5m2;
 using fp8e8m0 = uint8_t;
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif
 
 template <typename T>
@@ -237,6 +239,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -250,6 +254,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -456,12 +462,13 @@ void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  size_t& mismatches_num,
-                                  const size_t scale_diff_abs_tolerance = 0,
-                                  const double abs_tolerable_mismatches_limit = 0,
-                                  const double rel_tolerable_mismatches_limit = 0);
+template <typename T>
+void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                             size_t& mismatches_num,
+                             const size_t scale_diff_abs_tolerance = 0,
+                             const double abs_tolerable_mismatches_limit = 0,
+                             const double rel_tolerable_mismatches_limit = 0);
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
@@ -484,6 +491,7 @@ const std::string& caseName(InputsFillCase type);
 extern std::vector<DType> all_fp_types;
 
 bool isFp8Type(DType type);
+bool isFp4Type(DType type);
 
 int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;

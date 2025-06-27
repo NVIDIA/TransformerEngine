@@ -117,9 +117,10 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);
 }
 
+#define CUDA_ARCH_HAS_CVT_FEATURE ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
-#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+#if CUDA_ARCH_HAS_CVT_FEATURE
   uint16_t out;
   asm volatile(
       "{\n"
@@ -228,11 +229,149 @@ using fp16x2 = FPx2<fp16>;
 using fp8e4m3x2 = FPx2<fp8e4m3>;
 using fp8e5m2x2 = FPx2<fp8e5m2>;
 
+#include <cuda_fp4.h>
+using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
+
 static_assert(sizeof(floatx2) == 8);
 static_assert(sizeof(bf16x2) == 4);
 static_assert(sizeof(fp16x2) == 4);
 static_assert(sizeof(fp8e4m3x2) == 2);
 static_assert(sizeof(fp8e5m2x2) == 2);
+static_assert(sizeof(fp4e2m1x2) == 1);
+
+static_assert(sizeof(fp4e2m1x4) == 2);
+
+// cvt.rn.satfinite.e2m1x2.f32 d, a, b;  // Convert two FP32 values to two packed e2m1
+
+// cvt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 introduced in PTX ISA version 8.6.
+
+// vt.rn.satfinite{.relu}.{e2m1x2/e2m3x2/e3m2x2/ue8m0x2}.f32 is supported on following architectures:
+// sm_100a
+// sm_101a
+// sm_120a
+
+// When converting to .e2m1x2 data formats, the destination operand d has .b8 type.
+// When converting two .f32 inputs to .e2m1x2, each input is converted to the specified format,
+// and the converted values are packed in the destination operand d such that the value
+// converted from input a is stored in the upper 4 bits of d and the value converted
+// from input b is stored in the lower 4 bits of d.
+
+
+// SIMD like "Fused" cast + multiplication (x4)
+// __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
+__device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
+                                           const floatx2 &in23, const floatx2 &scale) {
+#if CUDA_ARCH_HAS_CVT_FEATURE
+  asm volatile(
+      "{\n"
+      ".reg.b8 fp4_pair1; \n\t"
+      ".reg.b8 fp4_pair2; \n\t"
+      ".reg.b64 val_pair1; \n\t"
+      ".reg.b64 val_pair2; \n\t"
+      ".reg.b32 val1; \n\t"
+      ".reg.b32 val2; \n\t"
+      ".reg.b32 val3; \n\t"
+      ".reg.b32 val4; \n\t"
+      "mul.f32x2 val_pair1, %1, %3; \n\t"
+      "mul.f32x2 val_pair2, %2, %3; \n\t"
+      "mov.b64 {val2,val1}, val_pair1; \n\t"
+      "mov.b64 {val4,val3}, val_pair2; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair2, val3, val4; \n\t"
+      "mov.b16 %0, {fp4_pair1, fp4_pair2}; \n\t"
+      "}"
+      : "=h"(reinterpret_cast<uint16_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in01)),
+        "l"(reinterpret_cast<const uint64_t &>(in23)),
+        "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const bf16x2 &in01,
+                                           const bf16x2 &in23, const floatx2 &scale) {
+#if CUDA_ARCH_HAS_CVT_FEATURE
+  asm volatile(
+      "{\n"
+      ".reg.b8 fp4_pair1; \n\t"
+      ".reg.b8 fp4_pair2; \n\t"
+      ".reg.b64 val_pair1_before; \n\t"
+      ".reg.b64 val_pair2_before; \n\t"
+      ".reg.b64 val_pair1_after; \n\t"
+      ".reg.b64 val_pair2_after; \n\t"
+      ".reg.b16 val1_bf16; \n\t"
+      ".reg.b16 val2_bf16; \n\t"
+      ".reg.b16 val3_bf16; \n\t"
+      ".reg.b16 val4_bf16; \n\t"
+      ".reg.b32 val1; \n\t"
+      ".reg.b32 val2; \n\t"
+      ".reg.b32 val3; \n\t"
+      ".reg.b32 val4; \n\t"
+      "mov.b32 {val1_bf16, val2_bf16} , %1; \n\t"
+      "mov.b32 {val3_bf16, val4_bf16} , %2; \n\t"
+      "cvt.f32.bf16 val1, val1_bf16; \n\t"
+      "cvt.f32.bf16 val2, val2_bf16; \n\t"
+      "cvt.f32.bf16 val3, val3_bf16; \n\t"
+      "cvt.f32.bf16 val4, val4_bf16; \n\t"
+      "mov.b64 val_pair1_before, {val1, val2}; \n\t"
+      "mov.b64 val_pair2_before, {val3, val4}; \n\t"
+      "mul.f32x2 val_pair1_after, val_pair1_before, %3; \n\t"
+      "mul.f32x2 val_pair2_after, val_pair2_before, %3; \n\t"
+      "mov.b64 {val2, val1}, val_pair1_after; \n\t"
+      "mov.b64 {val4, val3}, val_pair2_after; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair2, val3, val4; \n\t"
+      "mov.b16 %0, {fp4_pair1, fp4_pair2}; \n\t"
+      "}"
+      : "=h"(reinterpret_cast<uint16_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in01)),
+        "r"(reinterpret_cast<const uint32_t &>(in23)),
+        "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const fp16x2 &in01,
+                                           const fp16x2 &in23, const floatx2 &scale) {
+#if CUDA_ARCH_HAS_CVT_FEATURE
+  asm volatile(
+      "{\n"
+      ".reg.b8 fp4_pair1; \n\t"
+      ".reg.b8 fp4_pair2; \n\t"
+      ".reg.b64 val_pair1_before; \n\t"
+      ".reg.b64 val_pair2_before; \n\t"
+      ".reg.b64 val_pair1_after; \n\t"
+      ".reg.b64 val_pair2_after; \n\t"
+      ".reg.b16 val1_f16; \n\t"
+      ".reg.b16 val2_f16; \n\t"
+      ".reg.b16 val3_f16; \n\t"
+      ".reg.b16 val4_f16; \n\t"
+      ".reg.b32 val1; \n\t"
+      ".reg.b32 val2; \n\t"
+      ".reg.b32 val3; \n\t"
+      ".reg.b32 val4; \n\t"
+      "mov.b32 {val1_f16, val2_f16} , %1; \n\t"
+      "mov.b32 {val3_f16, val4_f16} , %2; \n\t"
+      "cvt.f32.f16 val1, val1_f16; \n\t"
+      "cvt.f32.f16 val2, val2_f16; \n\t"
+      "cvt.f32.f16 val3, val3_f16; \n\t"
+      "cvt.f32.f16 val4, val4_f16; \n\t"
+      "mov.b64 val_pair1_before, {val1, val2}; \n\t"
+      "mov.b64 val_pair2_before, {val3, val4}; \n\t"
+      "mul.f32x2 val_pair1_after, val_pair1_before, %3; \n\t"
+      "mul.f32x2 val_pair2_after, val_pair2_before, %3; \n\t"
+      "mov.b64 {val2, val1}, val_pair1_after; \n\t"
+      "mov.b64 {val4, val3}, val_pair2_after; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
+      "cvt.rn.satfinite.e2m1x2.f32 fp4_pair2, val3, val4; \n\t"
+      "mov.b16 %0, {fp4_pair1, fp4_pair2}; \n\t"
+      "}"
+      : "=h"(reinterpret_cast<uint16_t &>(out))
+      : "r"(reinterpret_cast<const uint32_t &>(in01)),
+        "r"(reinterpret_cast<const uint32_t &>(in23)),
+        "l"(reinterpret_cast<const uint64_t &>(scale)));
+#endif
+}
 
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,

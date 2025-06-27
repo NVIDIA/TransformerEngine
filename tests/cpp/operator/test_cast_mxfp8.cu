@@ -310,12 +310,12 @@ void performTest_x1(const ProcessingMethod processing_method,
     const double rel_tolerable_mismatches_limit = 0.0;
 
     size_t mismatches_scales = 0;
-    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                                 mismatches_scales,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+    compare_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+                            unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                            mismatches_scales,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
@@ -481,22 +481,22 @@ void performTest_x2(const ProcessingMethod processing_method,
     const double rel_tolerable_mismatches_limit = 0.0;
 
     size_t mismatches_scales_rowwise = 0;
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                                 mismatches_scales_rowwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+    compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                            ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                            unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                            mismatches_scales_rowwise,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     size_t mismatches_scales_colwise = 0;
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise,
-                                 mismatches_scales_colwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+    compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                            ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                            unpadded_blocks_X_colwise, scales_stride_colwise,
+                            mismatches_scales_colwise,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
