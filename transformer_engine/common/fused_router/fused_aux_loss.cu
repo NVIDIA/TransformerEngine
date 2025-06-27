@@ -1,7 +1,7 @@
 #include <assert.h>
+#include <cooperative_groups.h>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
-#include <cooperative_groups.h>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -17,84 +17,85 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
                                               int topk, float coeff, DataType* aux_loss,
                                               float* Const_buf) {
 #if __CUDA_ARCH__ >= 900
-    // Using cooperative_groups to manage the cluster
-    namespace cg = cooperative_groups;
-    cg::cluster_group cluster = cg::this_cluster();
-    int thread_id = cg::this_grid().thread_rank();
-    int lane_id = thread_id % kThreadsPerWarp;
-    int warp_id = thread_id / kThreadsPerWarp;
-    int warp_num = blockDim.x * gridDim.x / kThreadsPerWarp;
-    // Only 1 block in the cluster
-    int block_id = cluster.block_rank();
-    int block_num = cluster.dim_blocks().x;
-    int cluster_id = blockIdx.x / block_num;
-    if(cluster_id > 0) return; // Only use the cluster 0
+  // Using cooperative_groups to manage the cluster
+  namespace cg = cooperative_groups;
+  cg::cluster_group cluster = cg::this_cluster();
+  int thread_id = cg::this_grid().thread_rank();
+  int lane_id = thread_id % kThreadsPerWarp;
+  int warp_id = thread_id / kThreadsPerWarp;
+  int warp_num = blockDim.x * gridDim.x / kThreadsPerWarp;
+  // Only 1 block in the cluster
+  int block_id = cluster.block_rank();
+  int block_num = cluster.dim_blocks().x;
+  int cluster_id = blockIdx.x / block_num;
+  if (cluster_id > 0) return;  // Only use the cluster 0
 
-    extern __shared__ float shmem_aux_loss[];
-    DataType* aggregated_probs_per_expert = reinterpret_cast<DataType*>(shmem_aux_loss);
-    // Clear the shmem
-    for(int i = threadIdx.x; i < num_experts; i += blockDim.x) {
-        aggregated_probs_per_expert[i] = 0;
-    }
-    __syncthreads();
+  extern __shared__ float shmem_aux_loss[];
+  DataType* aggregated_probs_per_expert = reinterpret_cast<DataType*>(shmem_aux_loss);
+  // Clear the shmem
+  for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+    aggregated_probs_per_expert[i] = 0;
+  }
+  __syncthreads();
 
-    /**
+  /**
      * Section: Reduce the probs to the aggregated_probs_per_expert
      * 1. reduce on the block
      * 2. reduce on the cluster
      */
-    // Loop: for all positions in each row
-    for(int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        DataType tmp = 0;
-        // Loop: for all rows that this warp is responsible for
-        for(int j = warp_id; j < num_tokens; j += warp_num) {
-            tmp += probs[j * num_experts + i];
-        }
-        atomicAdd(&aggregated_probs_per_expert[i], tmp);
+  // Loop: for all positions in each row
+  for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+    DataType tmp = 0;
+    // Loop: for all rows that this warp is responsible for
+    for (int j = warp_id; j < num_tokens; j += warp_num) {
+      tmp += probs[j * num_experts + i];
     }
-    cluster.sync();
-    // The block 0 will reduce the results of all blocks
-    if(block_id == 0) {
-        for(int i = 1; i < block_num; i++) {
-            // Map the shared memory of the block i to the current block
-            DataType *dst_smem = reinterpret_cast<DataType *>(cluster.map_shared_rank(shmem_aux_loss, i));
-            for(int j = threadIdx.x; j < num_experts; j += blockDim.x) {
-                atomicAdd(&aggregated_probs_per_expert[j], dst_smem[j]);
-            }            
-        }
+    atomicAdd(&aggregated_probs_per_expert[i], tmp);
+  }
+  cluster.sync();
+  // The block 0 will reduce the results of all blocks
+  if (block_id == 0) {
+    for (int i = 1; i < block_num; i++) {
+      // Map the shared memory of the block i to the current block
+      DataType* dst_smem = reinterpret_cast<DataType*>(cluster.map_shared_rank(shmem_aux_loss, i));
+      for (int j = threadIdx.x; j < num_experts; j += blockDim.x) {
+        atomicAdd(&aggregated_probs_per_expert[j], dst_smem[j]);
+      }
     }
-    cluster.sync();
+  }
+  cluster.sync();
 
-    /**
+  /**
      * Section: aggregated_probs_per_expert * tokens_per_expert
      * In-place update on shmem
      */
-    if(block_id == 0) {
-        for(int i = threadIdx.x; i < num_experts; i += blockDim.x) {
-            aggregated_probs_per_expert[i] *= tokens_per_expert[i];
-        }
-        __syncthreads();
+  if (block_id == 0) {
+    for (int i = threadIdx.x; i < num_experts; i += blockDim.x) {
+      aggregated_probs_per_expert[i] *= tokens_per_expert[i];
+    }
+    __syncthreads();
 
-        if(warp_id == 0) {
-            /**
+    if (warp_id == 0) {
+      /**
              * Section: Reduce to get the sum of aggregated_probs_per_expert
              */
-            DataType intermediate_result = warp_reduce_on_shmem(aggregated_probs_per_expert, num_experts, sum, lane_id);
-            __syncwarp();
+      DataType intermediate_result =
+          warp_reduce_on_shmem(aggregated_probs_per_expert, num_experts, sum, lane_id);
+      __syncwarp();
 
-            if(lane_id == 0) {
-              /**
+      if (lane_id == 0) {
+        /**
                     * Section: Compute the aux_loss
                     */
-              float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-              aux_loss[0] = DataType(double(intermediate_result) * C_coeff);
-              Const_buf[0] = C_coeff;
-            }
-        }
+        float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
+        aux_loss[0] = DataType(double(intermediate_result) * C_coeff);
+        Const_buf[0] = C_coeff;
+      }
     }
+  }
 #else
-  // Use Only 1 block/1024 threads to avoid the grid sync 
-  if(blockIdx.x > 0)  return;
+  // Use Only 1 block/1024 threads to avoid the grid sync
+  if (blockIdx.x > 0) return;
   int warp_num = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -156,36 +157,27 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
                                             int total_num_tokens, int num_tokens, int num_experts,
                                             int topk, float coeff, DataType* aux_loss,
                                             float* Const_buf, cudaStream_t stream) {
-    cudaLaunchConfig_t config = {0};
-    int cluster_size = 8;
-    config.gridDim = cluster_size;
-    config.blockDim = 1024; 
-    config.dynamicSmemBytes = sizeof(DataType) * num_experts;
-    
-    // Update the max cluster size based on the device
-    cudaOccupancyMaxPotentialClusterSize(&cluster_size, (void *)fused_aux_loss_forward_kernel<DataType, IndexType>, &config);
+  cudaLaunchConfig_t config = {0};
+  int cluster_size = 8;
+  config.gridDim = cluster_size;
+  config.blockDim = 1024;
+  config.dynamicSmemBytes = sizeof(DataType) * num_experts;
 
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeClusterDimension;
-    attribute[0].val.clusterDim.x = cluster_size;
-    attribute[0].val.clusterDim.y = 1;
-    attribute[0].val.clusterDim.z = 1;
-    config.numAttrs = 1;
-    config.attrs = attribute;
-  
-    cudaLaunchKernelEx(
-        &config, 
-        fused_aux_loss_forward_kernel<DataType, IndexType>, 
-        probs,
-        tokens_per_expert,
-        total_num_tokens,
-        num_tokens,
-        num_experts,
-        topk, 
-        coeff, 
-        aux_loss,
-        Const_buf
-    );
+  // Update the max cluster size based on the device
+  cudaOccupancyMaxPotentialClusterSize(
+      &cluster_size, (void*)fused_aux_loss_forward_kernel<DataType, IndexType>, &config);
+
+  cudaLaunchAttribute attribute[1];
+  attribute[0].id = cudaLaunchAttributeClusterDimension;
+  attribute[0].val.clusterDim.x = cluster_size;
+  attribute[0].val.clusterDim.y = 1;
+  attribute[0].val.clusterDim.z = 1;
+  config.numAttrs = 1;
+  config.attrs = attribute;
+
+  cudaLaunchKernelEx(&config, fused_aux_loss_forward_kernel<DataType, IndexType>, probs,
+                     tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
+                     aux_loss, Const_buf);
 }
 
 void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
