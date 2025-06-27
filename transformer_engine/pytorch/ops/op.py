@@ -68,14 +68,21 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def pre_forward(self) -> None:
         """Preprocessing before forward pass"""
 
+    def get_input_quantizer(self) -> Optional[Quantizer]:
+        """Get builder class for quantized input tensor"""
+
+    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
+        """Get builder class for quantized input's grad tensor"""
+
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         """Forward pass
@@ -94,12 +101,14 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Input tensor
         basic_op_extra_inputs: list of torch.Tensor
             Extra tensor inputs to basic operations
-        basic_op_prev_ops: list of BasicOperation
-            Basic operations that preceed this operation's basic
-            operations
-        basic_op_next_ops: list of BasicOperation
-            Basic operations that follow this operation's basic
-            operations
+        prev_op_grad_input_quantizer: Quantizer, optional
+            The grad_input_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+        is_first_op: bool
+            Does this op have a preceeding op or is it the first one in the
+            fuser. Used in the backward pass to safely delete the saved input
+            tensor when no longer needed and there is a preceeding op.
         basic_op_kwargs: list of dict
             Keyword arguments to forward functions of basic
             operations.
@@ -200,6 +209,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
         return 0
+
+    def get_input_quantizer(self) -> Optional[Quantizer]:
+        if self.num_quantizers("forward") > 0:
+            return self.get_quantizer("forward", 0)
+        return None
+
+    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
+        if self.num_quantizers("backward") > 0:
+            return self.get_quantizer("backward", 0)
+        return None
 
     def _reset_quantization_recipe_state(
         self,
@@ -407,8 +426,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         ctx: OperationContext,
         input_: torch.Tensor,
         *,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
@@ -419,10 +439,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Context to coordinate between forward and backward passes
         input_: torch.Tensor
             Input tensor
-        prev_op: BasicOperation, optional
-            Basic operation that preceeds this operation
-        next_op: BasicOperation, optional
-            Basic operation that follows this operation
+        prev_op_grad_input_quantizer: Quantizer, optional
+            The grad_input_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+        is_first_op: bool
+            Does this op have a preceeding op or is it the first one in the
+            fuser. Used in the backward pass to safely delete the saved input
+            tensor when no longer needed and there is a preceeding op.
 
         Returns
         -------
@@ -461,8 +485,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
@@ -475,8 +500,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         output = self.op_forward(
             basic_op_ctxs[0],
             input_,
-            prev_op=basic_op_prev_ops[0],
-            next_op=basic_op_next_ops[0],
+            prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
+            next_op_input_quantizer=next_op_input_quantizer,
+            is_first_op=is_first_op,
             **basic_op_kwargs[0],
         )
         return output, [()]
@@ -695,6 +721,12 @@ class FusedOperation(FusibleOperation):
     @property
     def is_fused_op(self) -> bool:
         return True
+
+    def get_input_quantizer(self) -> Optional[Quantizer]:
+        return self.basic_ops[0].get_input_quantizer()
+
+    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
+        return self.basic_ops[-1].get_grad_input_quantizer()
 
     def pre_forward(self) -> None:
         """Preprocessing before forward pass"""

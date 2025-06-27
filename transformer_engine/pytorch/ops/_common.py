@@ -5,7 +5,7 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -17,16 +17,16 @@ from ..tensor.quantized_tensor import QuantizedTensorBase
 from ..utils import canonicalize_dtype
 
 
-def is_float8_tensor(tensor: Any) -> bool:
-    """Check if object is a `Float8Tensor`"""
-    return isinstance(tensor, Float8Tensor)
+def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorBase):
+    """Check if tensor is a quantized tensor"""
+    return isinstance(tensor, QuantizedTensorBase)
 
 
 def maybe_dequantize(
     tensor: torch.Tensor | QuantizedTensorBase, dtype: torch.dtype | None = None
 ) -> torch.Tensor:
     """Dequantize tensor to given dtype or just convert if not a quantized tensor"""
-    if isinstance(tensor, QuantizedTensorBase):
+    if is_quantized_tensor(tensor):
         return tensor.dequantize(dtype=dtype)
     if dtype is not None and tensor.dtype != dtype:
         return tensor.to(dtype)

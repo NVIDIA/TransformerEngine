@@ -10,8 +10,9 @@ from typing import Optional
 import torch
 
 from ...fp8 import FP8GlobalStateManager
-from ...tensor import QuantizedTensor
+from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
+from ...tensor import Quantizer
 
 
 class Quantize(BasicOperation):
@@ -49,8 +50,9 @@ class Quantize(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check if FP8 is enabled
@@ -60,7 +62,7 @@ class Quantize(BasicOperation):
 
         # Quantize if needed
         out = input_
-        if quantize_forward and not isinstance(out, QuantizedTensor):
+        if quantize_forward and not is_quantized_tensor(out):
             out = self.get_quantizer("forward", 0)(out)
 
         ctx.quantize_backward = quantize_backward
@@ -72,6 +74,6 @@ class Quantize(BasicOperation):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
         grad_input = grad_output
-        if ctx.quantize_backward and not isinstance(grad_input, QuantizedTensor):
+        if ctx.quantize_backward and not is_quantized_tensor(grad_input):
             grad_input = self.get_quantizer("backward", 0)(grad_input)
         return grad_input, ()

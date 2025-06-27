@@ -19,6 +19,7 @@ from ...jit import (
     set_jit_fusion_options,
     warmup_jit_l2normalization_all_dtypes,
 )
+from ...tensor import Quantizer
 
 
 class L2Normalization(BasicOperation):
@@ -73,8 +74,9 @@ class L2Normalization(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         # Use input directly - torch.compile can handle multi-dimensional tensors
         x = maybe_dequantize(input_)
@@ -95,7 +97,7 @@ class L2Normalization(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rsqrt_norm)
-            ctx.has_prev_op = prev_op is not None
+            ctx.has_prev_op = not is_first_op
 
         return y
 

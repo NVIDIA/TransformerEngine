@@ -12,6 +12,7 @@ import torch
 from ...distributed import gather_along_first_dim
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
+from ...tensor import Quantizer
 
 
 class ReduceScatter(BasicOperation):
@@ -39,8 +40,9 @@ class ReduceScatter(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Trivial case
