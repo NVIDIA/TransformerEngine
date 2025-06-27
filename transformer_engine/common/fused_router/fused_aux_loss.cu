@@ -10,14 +10,13 @@
 
 namespace transformer_engine {
 
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-
 template <typename DataType, typename IndexType>
 __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
                                               const IndexType* tokens_per_expert,
                                               int total_num_tokens, int num_tokens, int num_experts,
                                               int topk, float coeff, DataType* aux_loss,
                                               float* Const_buf) {
+#if __CUDA_ARCH__ >= 900
     // Using cooperative_groups to manage the cluster
     namespace cg = cooperative_groups;
     cg::cluster_group cluster = cg::this_cluster();
@@ -93,54 +92,9 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
             }
         }
     }
-}
-
-template <typename DataType, typename IndexType>
-void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
-                                            const IndexType* tokens_per_expert,
-                                            int total_num_tokens, int num_tokens, int num_experts,
-                                            int topk, float coeff, DataType* aux_loss,
-                                            float* Const_buf, cudaStream_t stream) {
-    cudaLaunchConfig_t config = {0};
-    int cluster_size = 8;
-    config.gridDim = cluster_size;
-    config.blockDim = 1024; 
-    config.dynamicSmemBytes = sizeof(DataType) * num_experts;
-    
-    // Update the max cluster size based on the device
-    cudaOccupancyMaxPotentialClusterSize(&cluster_size, (void *)fused_aux_loss_forward_kernel<DataType, IndexType>, &config);
-
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeClusterDimension;
-    attribute[0].val.clusterDim.x = cluster_size;
-    attribute[0].val.clusterDim.y = 1;
-    attribute[0].val.clusterDim.z = 1;
-    config.numAttrs = 1;
-    config.attrs = attribute;
-  
-    cudaLaunchKernelEx(
-        &config, 
-        fused_aux_loss_forward_kernel<DataType, IndexType>, 
-        probs,
-        tokens_per_expert,
-        total_num_tokens,
-        num_tokens,
-        num_experts,
-        topk, 
-        coeff, 
-        aux_loss,
-        Const_buf
-    );
-}
-
 #else
-
-template <typename DataType, typename IndexType>
-__global__ void fused_aux_loss_forward_kernel(const DataType* probs,
-                                              const IndexType* tokens_per_expert,
-                                              int total_num_tokens, int num_tokens, int num_experts,
-                                              int topk, float coeff, DataType* aux_loss,
-                                              float* Const_buf) {
+  // Use Only 1 block/1024 threads to avoid the grid sync 
+  if(blockIdx.x > 0)  return;
   int warp_num = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -193,6 +147,7 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
       Const_buf[0] = C_coeff;
     }
   }
+#endif
 }
 
 template <typename DataType, typename IndexType>
@@ -201,18 +156,37 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
                                             int total_num_tokens, int num_tokens, int num_experts,
                                             int topk, float coeff, DataType* aux_loss,
                                             float* Const_buf, cudaStream_t stream) {
-  // Meta data for the kernel
-  size_t shared_memory_size = sizeof(DataType) * num_experts * 2;
-  // Use Only 1 block/1024 threads to avoid the grid sync
-  int grid_size = 1;
-  int block_size = 1024;
-  fused_aux_loss_forward_kernel<DataType, IndexType>
-      <<<grid_size, block_size, shared_memory_size, stream>>>(
-          probs, tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
-          aux_loss, Const_buf);
-}
+    cudaLaunchConfig_t config = {0};
+    int cluster_size = 8;
+    config.gridDim = cluster_size;
+    config.blockDim = 1024; 
+    config.dynamicSmemBytes = sizeof(DataType) * num_experts;
+    
+    // Update the max cluster size based on the device
+    cudaOccupancyMaxPotentialClusterSize(&cluster_size, (void *)fused_aux_loss_forward_kernel<DataType, IndexType>, &config);
 
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeClusterDimension;
+    attribute[0].val.clusterDim.x = cluster_size;
+    attribute[0].val.clusterDim.y = 1;
+    attribute[0].val.clusterDim.z = 1;
+    config.numAttrs = 1;
+    config.attrs = attribute;
+  
+    cudaLaunchKernelEx(
+        &config, 
+        fused_aux_loss_forward_kernel<DataType, IndexType>, 
+        probs,
+        tokens_per_expert,
+        total_num_tokens,
+        num_tokens,
+        num_experts,
+        topk, 
+        coeff, 
+        aux_loss,
+        Const_buf
+    );
+}
 
 void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
                             int total_num_tokens, int num_tokens, int num_experts, int topk,
