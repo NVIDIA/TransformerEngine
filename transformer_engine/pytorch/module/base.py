@@ -1447,29 +1447,3 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         " Please check the recipes assigned during fp8_model_init() and"
                         " fp8_autocast() calls."
                     )
-
-    def _turn_off_unsupported_features_in_debug(self):
-        if (
-            getattr(self, "ub_bulk_wgrad", False)
-            or getattr(self, "ub_bulk_dgrad", False)
-            or getattr(self, "ub_overlap_ag", False)
-            or getattr(self, "ub_overlap_rs_dgrad", False)
-            or getattr(self, "ub_overlap_rs", False)
-        ):
-            import nvdlfw_inspect.api as debug_api
-
-            debug_api.log_message(
-                "UserBuffers are not supported in debug module. "
-                "Using UB optimization will not affect the debug module. ",
-                level=logging.WARNING,
-            )
-            if hasattr(self, "ub_bulk_wgrad"):
-                self.ub_bulk_wgrad = None
-            if hasattr(self, "ub_bulk_dgrad"):
-                self.ub_bulk_dgrad = None
-            if hasattr(self, "ub_overlap_ag"):
-                self.ub_overlap_ag = None
-            if hasattr(self, "ub_overlap_rs_dgrad"):
-                self.ub_overlap_rs_dgrad = None
-            if hasattr(self, "ub_overlap_rs"):
-                self.ub_overlap_rs = None

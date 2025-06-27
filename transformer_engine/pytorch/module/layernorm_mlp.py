@@ -222,6 +222,12 @@ class _LayerNormMLP(torch.autograd.Function):
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug: # turn off userbuffers in debug mode
+            ub_overlap_ag = False
+            ub_overlap_rs = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
@@ -1509,9 +1515,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
         )
         self.name = name
-
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 

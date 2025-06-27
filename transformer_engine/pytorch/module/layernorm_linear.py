@@ -161,6 +161,13 @@ class _LayerNormLinear(torch.autograd.Function):
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug: # turn off userbuffers in debug mode
+            ub_overlap_ag_fprop = False
+            ub_overlap_rs_fprop = False
+            ub_overlap_ag_dgrad = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_obj = None
         ub_type = None
         ub_overlap_ag_fprop = (
@@ -1155,8 +1162,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         if tp_group is None:
             self.tp_size = tp_size
