@@ -360,7 +360,6 @@ def test_disable_fp8_layer(feature_dirs):
     run_disable_fp8_layer(feature_dirs)
 
 
-
 DISABLE_FP8_LAYER_CONFIG = """disable_fp8_config:
   enabled: True
   layers:
