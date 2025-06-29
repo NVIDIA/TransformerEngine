@@ -1377,7 +1377,7 @@ class Linear(TransformerEngineBaseModule):
         return out
 
     def _get_quantizers(self, fp8_output, fp8_grad):
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None] * 6
         grad_input_quantizer = None
         grad_weight_quantizer = None
@@ -1479,7 +1479,7 @@ class Linear(TransformerEngineBaseModule):
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
-        if not self.fp8:
+        if not self.fp8 and not self.fp8_calibration:
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
