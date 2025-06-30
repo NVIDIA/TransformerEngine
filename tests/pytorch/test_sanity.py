@@ -56,6 +56,20 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
+NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
+
+if NVTE_TEST_NVINSPECT_ENABLED:
+    # The sanity tests should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
 def create_meta(scale_factor: float, size: int = 1):
     meta = tex.FP8TensorMeta()
     meta.amax_history = torch.zeros(1, size, dtype=torch.float32, device="cuda")
