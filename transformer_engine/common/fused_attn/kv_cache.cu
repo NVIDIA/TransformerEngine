@@ -27,7 +27,8 @@ __global__ void reindex_kv_cache_kernel(dtype *k_cache, dtype *v_cache, int *bat
   bool flag = (batch_indices[0] != 0);
   for (int batch_idx = 0; batch_idx < actual_b; batch_idx++) {
     if (flag || ((batch_indices[batch_idx] - batch_indices[0]) != batch_idx)) {
-      int num_tokens = (cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx]) - (cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx]);
+      int num_tokens = (cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx]) -
+                       (cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx]);
       int num_elts_k = h_kv * d_k;
       int num_elts_v = h_kv * d_v;
       int num_elts = max(num_elts_k, num_elts_v);
@@ -73,15 +74,17 @@ __global__ void copy_to_kv_cache_kernel(dtype *new_k, dtype *new_v, dtype *k_cac
         int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         dtype *new_token_id_k = new_k + (batch_idx * max_ctx_len + i) * num_elts_k;
         dtype *new_token_id_v = new_v + (batch_idx * max_ctx_len + i) * num_elts_v;
-        dtype *token_id_k = k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
-        dtype *token_id_v = v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
-        for (int j = threadIdx.x; j < hd; j+=blockDim.x) {
+        dtype *token_id_k =
+            k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
+        dtype *token_id_v =
+            v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
+        for (int j = threadIdx.x; j < hd; j += blockDim.x) {
           if (j < num_elts_k) {
             *(token_id_k + j) = *(new_token_id_k + j);
-	  }
+          }
           if (j < num_elts_v) {
             *(token_id_v + j) = *(new_token_id_v + j);
-	  }
+          }
         }
       }
     }
@@ -97,13 +100,15 @@ __global__ void copy_to_kv_cache_kernel(dtype *new_k, dtype *new_v, dtype *k_cac
         int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         dtype *new_token_id_k = new_k + (i * b + batch_idx) * num_elts_k;
         dtype *new_token_id_v = new_v + (i * b + batch_idx) * num_elts_v;
-        dtype *token_id_k = k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
-        dtype *token_id_v = v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
-        for (int j = threadIdx.x; j < hd; j+=blockDim.x) {
-	  if (j < num_elts_k) {
+        dtype *token_id_k =
+            k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
+        dtype *token_id_v =
+            v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
+        for (int j = threadIdx.x; j < hd; j += blockDim.x) {
+          if (j < num_elts_k) {
             *(token_id_k + j) = *(new_token_id_k + j);
           }
-	  if (j < num_elts_v) {
+          if (j < num_elts_v) {
             *(token_id_v + j) = *(new_token_id_v + j);
           }
         }
@@ -121,15 +126,17 @@ __global__ void copy_to_kv_cache_kernel(dtype *new_k, dtype *new_v, dtype *k_cac
         int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         dtype *new_token_id_k = new_k + (cu_new_lens[batch_idx] + i) * num_elts_k;
         dtype *new_token_id_v = new_v + (cu_new_lens[batch_idx] + i) * num_elts_v;
-        dtype *token_id_k = k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
-        dtype *token_id_v = v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
-        for (int j = threadIdx.x; j < hd; j+=blockDim.x) {
-	  if (j < num_elts_k) {
+        dtype *token_id_k =
+            k_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_k;
+        dtype *token_id_v =
+            v_cache + (page_idx * page_size + (cached_len - new_len + i) % page_size) * num_elts_v;
+        for (int j = threadIdx.x; j < hd; j += blockDim.x) {
+          if (j < num_elts_k) {
             *(token_id_k + j) = *(new_token_id_k + j);
-	  }
-	  if (j < num_elts_v) {
+          }
+          if (j < num_elts_v) {
             *(token_id_v + j) = *(new_token_id_v + j);
-	  }
+          }
         }
       }
     }
