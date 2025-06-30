@@ -17,7 +17,7 @@ from ..tensor.quantized_tensor import QuantizedTensorBase
 from ..utils import canonicalize_dtype
 
 
-def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorBase):
+def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorBase) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorBase)
 

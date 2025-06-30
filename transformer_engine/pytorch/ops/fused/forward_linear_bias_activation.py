@@ -17,7 +17,7 @@ from transformer_engine.pytorch.ops.op import (
     FusibleOperation,
     OperationContext,
 )
-from transformer_engine.pytorch.tensor import Quantizer
+from ...tensor import Quantizer
 
 
 class ForwardLinearBiasActivation(FusedOperation):

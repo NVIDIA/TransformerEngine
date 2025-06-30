@@ -14,7 +14,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
-from transformer_engine.pytorch.tensor import Quantizer
+from ...tensor import Quantizer
 
 
 class Reshape(BasicOperation):
