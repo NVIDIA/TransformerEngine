@@ -92,7 +92,7 @@ class DebugQuantizer(Quantizer):
             ) = self.get_enabled_look_at_tensors()
             self.rowwise_tensor_plan, self.columnwise_tensor_plan = self.get_tensors_plan()
 
-            self.log_messages_about_plans()
+        self.log_messages_about_plans()
 
     def get_plans_for_output_tensors(self) -> Tuple[bool, str]:
         """
@@ -492,7 +492,6 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         self.quantizer = quantizer
         self._layer_name = layer_name
         self._tensor_name = tensor_name
-        self._original_tensor = original_tensor
 
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
@@ -542,3 +541,19 @@ class DebugQuantizedTensor(QuantizedTensorBase):
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""
+        if rowwise_usage is False:
+            self.rowwise_gemm_tensor = None
+        if columnwise_usage is False:
+            self.columnwise_gemm_tensor = None
+
+        if isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
+            self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+        if isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
+            self.columnwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+        
+        
+        if rowwise_usage and self.rowwise_gemm_tensor is None:
+            raise RuntimeError("Cannot recreate rowwise tensor from columnwise tensor in debug mode.")
+        
+        if columnwise_usage and self.columnwise_gemm_tensor is None:
+            raise RuntimeError("Cannot recreate columnwise tensor from rowwise tensor is debug mode.")

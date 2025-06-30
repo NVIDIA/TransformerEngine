@@ -1399,6 +1399,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
         If no name is assigned, it creates a default name with layer count as the variable.
         """
+        if self.name is not None:
+            return
         assert TEDebugState.debug_enabled
         import nvdlfw_inspect.api as debug_api
 

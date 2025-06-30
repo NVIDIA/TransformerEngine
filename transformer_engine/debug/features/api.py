@@ -26,13 +26,16 @@ class TEConfigAPIMapper(BaseConfigAPIMapper):
         config_copy = copy.deepcopy(config)
         gemm_parsing = kwargs.get("gemm_parsing", False)
         tensor_parsing = kwargs.get("tensor_parsing", False)
-
+        print(f"gemm_parsing: {gemm_parsing}, tensor_parsing: {tensor_parsing}")
         if gemm_parsing:
             # parse with GEMM and/or tensor
             processed_config = self._process_transformer_engine_config(config_copy, **kwargs)
         elif tensor_parsing:
             # parse with only tensor
             processed_config = self._process_tensor_config(config_copy, kwargs["tensor_name"])
+        else:
+            processed_config = config_copy
+            print(f"processed_config: {processed_config}")
 
         if not processed_config:
             return False, None
@@ -94,6 +97,7 @@ required_kwargs = {
     "inspect_tensor_enabled": ["tensor_name"],
     "inspect_tensor_postquantize_enabled": ["tensor_name"],
     "default": ["tensor_name", "gemm"],
+    "enabled": [],
 }
 
 
@@ -410,11 +414,15 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         """
         Overridden APIs are selected based on the GEMM name in the config and kwargs.
         """
+        print("AAAAAAAAAAAAA api_name: ", api_name)
+        print(feature_obj)
+        print(feature_obj.parse_config_and_api)
         tensor_parsing = "tensor_name" in required_kwargs[api_name]
         gemm_parsing = "gemm" in required_kwargs[api_name]
         status, modified_config = feature_obj.parse_config_and_api(
             config, gemm_parsing=gemm_parsing, tensor_parsing=tensor_parsing, **kwargs
         )
+        print(f"status: {status}, modified_config: {modified_config}")
         return status, modified_config
 
     def output_assertions_hook(self, api_name, ret, **kwargs):

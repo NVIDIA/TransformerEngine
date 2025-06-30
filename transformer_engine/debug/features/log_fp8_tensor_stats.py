@@ -86,6 +86,12 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def _get_supported_stats_list(self):
         """Returns stats this feature can log."""
         return {"underflows%"}
+    
+    @api_method 
+    def any_feature_enabled(
+        self, config: Dict, layer_name: str, iteration: int
+    ):
+        return self._check_params(config, layer_name, iteration=iteration)
 
     @api_method
     def inspect_tensor_postquantize_enabled(

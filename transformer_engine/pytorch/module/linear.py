@@ -1275,8 +1275,8 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
         debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+        #if debug:
+        #    self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1304,7 +1304,7 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = None
-
+            
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
                 if not debug
