@@ -56,22 +56,23 @@ Alternatively, navigate to
 Make sure to set the branch name to `te_ci`. The following variables
 may also be set:
 
-| Key             | Default value | Description                                               |
-|-----------------|---------------|-----------------------------------------------------------|
-| `GH_BRANCH`     | `main`        | GitHub branch                                             |
-| `GH_PR`         |               | GitHub PR number (overrides `GH_BRANCH`)                  |
-| `GL_MR`         |               | GitLab MR number (overrides `GH_BRANCH`)                  |
-| `CORE_IMAGE`    |               | Base Docker container for core build                      |
-| `PYTORCH_IMAGE` | Nightly build | Base Docker container for PyTorch build                   |
-| `JAX_IMAGE`     |               | Base Docker container for JAX build                       |
-| `BUILD_CORE`    | `1`           | Enable core build and tests                               |
-| `BUILD_PYTORCH` | `1`           | Enable PyTorch build and tests                            |
-| `BUILD_JAX`     | `1`           | Enable JAX build and tests                                |
-| `RUN_L0_TESTS`  | `1`           | Run L0 tests automatically (otherwise run tests manually) |
-| `RUN_L1_TESTS`  | `0`           | Run L1 tests automatically (otherwise run tests manually) |
-| `RUN_L2_TESTS`  | `0`           | Run L2 tests automatically (otherwise run tests manually) |
-| `RUN_L3_TESTS`  | `0`           | Run L3 tests automatically (otherwise run tests manually) |
-| `TAG_ROOT`      |               | Base string for Docker container tags                     |
+| Key                   | Default value | Description                                               |
+|-----------------------|---------------|-----------------------------------------------------------|
+| `GH_BRANCH`           | `main`        | GitHub branch                                             |
+| `GH_PR`               |               | GitHub PR number (overrides `GH_BRANCH`)                  |
+| `GL_MR`               |               | GitLab MR number (overrides `GH_BRANCH`)                  |
+| `CORE_IMAGE`          |               | Base Docker container for core build                      |
+| `PYTORCH_IMAGE`       | Nightly build | Base Docker container for PyTorch build                   |
+| `JAX_IMAGE`           |               | Base Docker container for JAX build                       |
+| `BUILD_CORE`          | `1`           | Enable core build and tests                               |
+| `BUILD_PYTORCH`       | `1`           | Enable PyTorch build and tests                            |
+| `BUILD_JAX`           | `1`           | Enable JAX build and tests                                |
+| `RUN_L0_TESTS`        | `1`           | Run L0 tests automatically (otherwise run tests manually) |
+| `RUN_L1_TESTS`        | `0`           | Run L1 tests automatically (otherwise run tests manually) |
+| `RUN_L2_TESTS`        | `0`           | Run L2 tests automatically (otherwise run tests manually) |
+| `RUN_L3_TESTS`        | `0`           | Run L3 tests automatically (otherwise run tests manually) |
+| `TAG_ROOT`            |               | Base string for Docker container tags                     |
+| `SEND_SLACK_MESSAGE`  | `0`           | Send Slack message on CI completion                       |
 
 ## Launching a pipeline from GitHub
 
@@ -126,6 +127,9 @@ discussion for more information.
   repository, their GitHub username, and their NVIDIA email. See an
   [example](https://nvbugspro.nvidia.com/bug/4476510) and the
   [documentation for Blossom GitHub support](https://confluence.nvidia.com/display/BLOS/Github+Support+User+Documentation).
+- For optional Slack notification support
+  - Add their GitHub to NVIDIA username mapping in `.gitlab-ci.yml` in the `get_nvidia_username_from_github_username` function in the `send_result_to_slack` job
+  - Add their NVIDIA username to Slack user ID mapping in `.gitlab-ci.yml` in the `get_slack_user_id_from_nvidia_username` function in the `send_result_to_slack` job
 
 ## QA workflow
 

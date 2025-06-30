@@ -51,6 +51,9 @@ variables:
       value: 0
     TAG_ROOT:
       description: Base for container tags (<TAG_ROOT>-<FRAMEWORK>-py3-<BUILD_STAGE>)
+    SEND_SLACK_MESSAGE:
+      description: Send Slack message with the pipeline status
+      value: 0
 
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -214,6 +217,7 @@ before_script:
             --form "variables[PUBLISH_DEV_WHL]=${PUBLISH_DEV_WHL}" \
             --form "variables[CI_TIMESTAMP]=${CI_TIMESTAMP}" \
             --form "variables[CODE_VERSION]=${CODE_VERSION}" \
+            --form "variables[SEND_SLACK_MESSAGE]=${SEND_SLACK_MESSAGE}" \
             --form "variables[githubData]=${githubData}" \
             https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
           echo "\n" | cat ${tmp_file} -
@@ -586,6 +590,130 @@ upload_logs:
   rules:
     - if: $CI_PIPELINE_SOURCE == "pipeline" && $CI_COMMIT_BRANCH =~ /^pr_/
       when: always
+  tags:
+    - vm-builder
+
+send_result_to_slack:
+  stage: finalize
+  variables:
+      FAIL_SLACK_EMOJI: ":red_cross:"
+      PASS_SLACK_EMOJI: ":white_check_mark:"
+  script:
+  - |
+    function get_github_username() {
+        jq -r '.comment.user.login' <<< "${githubData}"
+    }
+
+    function get_nvidia_username_from_github_username() {
+        local github_username="$1"
+        local nv_username="INVALID"
+        # Set the NVIDIA username based on the GitHub username.
+        if [[ "${github_username}" == "jberchtold-nvidia" ]]; then nv_username="jberchtold@nvidia.com" ; fi
+        if [[ "${github_username}" == "denera" ]]; then nv_username="adener@nvidia.com" ; fi
+        if [[ "${github_username}" == "ksivaman" ]]; then nv_username="ksivamani@nvidia.com" ; fi
+        if [[ "${github_username}" == "KshitijLakhani" ]]; then nv_username="klakhani@nvidia.com" ; fi
+        if [[ "${github_username}" == "Oleg-Goncharov" ]]; then nv_username="ogoncharov@nvidia.com" ; fi
+        if [[ "${github_username}" == "phu0ngng" ]]; then nv_username="phuonguyen@nvidia.com" ; fi
+        if [[ "${github_username}" == "ptrendx" ]]; then nv_username="ptredak@nvidia.com" ; fi
+        if [[ "${github_username}" == "sudhakarsingh27" ]]; then nv_username="sudhakars@nvidia.com" ; fi
+        if [[ "${github_username}" == "timmoon10" ]]; then nv_username="tmoon@nvidia.com" ; fi
+        if [[ "${github_username}" == "cyanguwa" ]]; then nv_username="charleney@nvidia.com" ; fi
+        if [[ "${github_username}" == "pggPL" ]]; then nv_username="pgadzinski@nvidia.com" ; fi
+        if [[ "${github_username}" == "mk-61" ]]; then nv_username="vcherepanov@nvidia.com" ; fi
+        if [[ "${github_username}" == "negvet" ]]; then nv_username="etsykunov@nvidia.com" ; fi
+        echo "${nv_username}"
+    }
+
+    function get_slack_user_id_from_nvidia_username() {
+        local nv_username="$1"
+        local slack_user_id="(Unknown nvidia user ${nv_username})"
+        # Set the Slack user ID based on the NVIDIA username. To find a Slack user ID, click on a Slack profile, click on "More actions" (three dots), and select "Copy member ID".
+        if [[ "${nv_username}" == "jberchtold@nvidia.com" ]]; then slack_user_id="<@U023NP29RHV>" ; fi
+        if [[ "${nv_username}" == "adener@nvidia.com" ]]; then slack_user_id="<@U05NSKSK9KL>" ; fi
+        if [[ "${nv_username}" == "ksivamani@nvidia.com" ]]; then slack_user_id="<@U013FFF2QRZ>" ; fi
+        if [[ "${nv_username}" == "klakhani@nvidia.com" ]]; then slack_user_id="<@U081D91JGP4>" ; fi
+        if [[ "${nv_username}" == "ogoncharov@nvidia.com" ]]; then slack_user_id="<@U063MCT3YEP>" ; fi
+        if [[ "${nv_username}" == "phuonguyen@nvidia.com" ]]; then slack_user_id="<@U06RB69AJE8>" ; fi
+        if [[ "${nv_username}" == "ptredak@nvidia.com" ]]; then slack_user_id="<@U7P8MFMLH>" ; fi
+        if [[ "${nv_username}" == "sudhakars@nvidia.com" ]]; then slack_user_id="<@U013DK4P1NU>" ; fi
+        if [[ "${nv_username}" == "tmoon@nvidia.com" ]]; then slack_user_id="<@U037S1HPMLP>" ; fi
+        if [[ "${nv_username}" == "charleney@nvidia.com" ]]; then slack_user_id="<@U01DQ922GMA>" ; fi
+        if [[ "${nv_username}" == "pgadzinski@nvidia.com" ]]; then slack_user_id="<@U06P0EX6R19>" ; fi
+        if [[ "${nv_username}" == "vcherepanov@nvidia.com" ]]; then slack_user_id="<@USE6S7V4Z>" ; fi
+        if [[ "${nv_username}" == "etsykunov@nvidia.com" ]]; then slack_user_id="<@U08F3RZUZA5>" ; fi
+        echo "${slack_user_id}"
+    }
+
+    function jq_in_place() {
+        jq "$@" > "${2}.tmp" && mv "${2}.tmp" "$2";
+    }
+
+    function get_gitlab_pipeline_jobs() {
+        curl --header "PRIVATE-TOKEN: $GITLAB_JOB_QUERY_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs?per_page=100"
+    }
+
+    # Prepare the pipeline status message to be sent to Slack.
+    function get_pipeline_status_message() {
+        local slack_user_id="$1"
+        local RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        local FAILED_JOB_COUNT=$(echo "$RESPONSE" | jq '[.[] | select(.status != "manual") | select(.stage != "finalize") | select(.status != "success")] | length')
+        if [ "$FAILED_JOB_COUNT" -gt 0 ]; then
+            echo -n "$FAIL_SLACK_EMOJI [FAILED] "
+        else
+            echo -n "$PASS_SLACK_EMOJI [PASSED] "
+        fi
+
+        echo "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed."
+
+        echo "Triggered by: $slack_user_id"
+    }
+
+    function get_pipeline_job_summary_message() {
+        local slack_user_id="$1"
+        local RESPONSE=$(get_gitlab_pipeline_jobs)
+
+        echo "Jobs Summary:"
+        echo "$RESPONSE" | jq --raw-output "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status != \"success\")] | [.[] | \"$FAIL_SLACK_EMOJI \" + .name + \" (<\" + .web_url + \"|link>)\"] | join(\"\n\")"
+        echo "$RESPONSE" | jq --raw-output "[.[] | select(.status != \"manual\") | select(.stage != \"finalize\") | select(.status == \"success\")] | [.[] | \"$PASS_SLACK_EMOJI \" + .name + \" (<\" + .web_url + \"|link>)\"] | join(\"\n\")"
+    }
+
+    # Send message via Slack API.
+    # Can optionally pass a parent message to 'sendSlackMessage' as the second arg to post the message as a reply in a thread.
+    function sendSlackMessage() {
+        local SLACK_MESSAGE_MRKDWN=${1}
+        local PARENT_MESSAGE_TS=${2}
+        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json 
+        # Splits the message up into blocks due to Slack's limit of 3000 characters per block.
+        [ -n "${SLACK_MESSAGE_MRKDWN}" ] && jq_in_place '.blocks += ($mrkdwn | split("\n") | map(select(. != "")) | map({type: "section", text: {type: "mrkdwn", text: .}}))' payload.json --arg mrkdwn "${SLACK_MESSAGE_MRKDWN}"
+        [ -n "$PARENT_MESSAGE_TS" ] && jq_in_place '. += {"thread_ts" : $ts}' payload.json --arg ts ${PARENT_MESSAGE_TS//\"/}
+        curl -X POST https://slack.com/api/chat.postMessage -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H "Content-Type: application/json" -d @payload.json -o response.json || (echo "Curl command failed with status $?"; exit 1)
+        cat response.json | jq '.' > /dev/null
+        (jq -e '.ok == true' response.json > /dev/null && echo $(jq -e '.ts' response.json)) || (echo "Slack API request failed"; cat response.json; exit 1)
+    }
+
+    if [[ -z "${githubData}" ]]; then
+      # GitLab username
+      NV_USERNAME=${GITLAB_USER_EMAIL}
+    else
+      GH_USERNAME=$(get_github_username)
+      echo "GitHub username: ${GH_USERNAME}"
+      NV_USERNAME=$(get_nvidia_username_from_github_username "${GH_USERNAME}")
+    fi
+    echo "Nvidia username: ${NV_USERNAME}"
+    SLACK_USER_ID=$(get_slack_user_id_from_nvidia_username "${NV_USERNAME}")
+    echo "Slack user ID: ${SLACK_USER_ID}"
+    thread_id=$(sendSlackMessage "$(get_pipeline_status_message ${SLACK_USER_ID})")
+    # Send job status in thread
+    sendSlackMessage "$(get_pipeline_job_summary_message ${SLACK_USER_ID})" "${thread_id}"
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $SEND_SLACK_MESSAGE == "1"
+      when: always
+      allow_failure: true
+    - when: manual
+      allow_failure: true
   tags:
     - vm-builder
 
