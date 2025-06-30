@@ -60,17 +60,17 @@ NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", Fals
 
 if NVTE_TEST_NVINSPECT_ENABLED and not globals().get("_debug_api_enabled", False):
     # run only if testing directly pytest test_sanity.py
-        # The sanity tests should work the same,
-        # when debug=True. I fed them with dummy feature
-        # to prevent switching off debug, which can happen if
-        # no feature is active.
-        import nvdlfw_inspect.api as debug_api
+    # The sanity tests should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
 
-        debug_api.initialize(
-            os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
-            feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
-        )
-        globals()["_debug_api_enabled"] = True
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+    globals()["_debug_api_enabled"] = True
 
 
 def create_meta(scale_factor: float, size: int = 1):
@@ -104,6 +104,7 @@ def reset_rng_states() -> None:
     """revert back to initial RNG state."""
     torch.set_rng_state(_cpu_rng_state)
     torch.cuda.set_rng_state(_cuda_rng_state)
+
 
 @dataclass
 class ModelConfig:
