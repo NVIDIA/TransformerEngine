@@ -23,7 +23,7 @@ log:
       end_step: 10
 """
 
-def test_log_all(feature_dirs):
+def test_log_quantized(feature_dirs):
     recipes = [
       "fp8_delayed_scaling",
       "fp8_current_scaling",
