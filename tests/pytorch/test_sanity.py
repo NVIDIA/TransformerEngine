@@ -58,8 +58,7 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
 
-if NVTE_TEST_NVINSPECT_ENABLED and not globals().get("_debug_api_enabled", False):
-    # run only if testing directly pytest test_sanity.py
+if NVTE_TEST_NVINSPECT_ENABLED:
     # The sanity tests should work the same,
     # when debug=True. I fed them with dummy feature
     # to prevent switching off debug, which can happen if
@@ -70,8 +69,6 @@ if NVTE_TEST_NVINSPECT_ENABLED and not globals().get("_debug_api_enabled", False
         os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
-    globals()["_debug_api_enabled"] = True
-
 
 def create_meta(scale_factor: float, size: int = 1):
     meta = tex.FP8TensorMeta()
