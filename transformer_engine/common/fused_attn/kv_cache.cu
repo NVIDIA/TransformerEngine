@@ -116,14 +116,14 @@ void copy_to_kv_cache_launcher(Tensor new_k, Tensor new_v, Tensor k_cache, Tenso
                                bool is_non_paged, cudaStream_t stream) {
   if (new_k.has_data() && new_v.has_data() && k_cache.has_data() && v_cache.has_data()) {
     if (is_non_paged) {
-      reindex_kv_cache_kernel<<<16, 256, 0, stream>>>(
+      reindex_kv_cache_kernel<<<128, 1024, 0, stream>>>(
           reinterpret_cast<dtype *>(k_cache.data.dptr),
           reinterpret_cast<dtype *>(v_cache.data.dptr),
           reinterpret_cast<int *>(page_table.data.dptr),
           reinterpret_cast<int *>(cu_new_lens.data.dptr),
           reinterpret_cast<int *>(cu_cached_lens.data.dptr), h_kv, d_k, d_v, b, max_seq_len);
     }
-    copy_to_kv_cache_kernel<<<16, 256, 0, stream>>>(
+    copy_to_kv_cache_kernel<<<128, 1024, 0, stream>>>(
         reinterpret_cast<dtype *>(new_k.data.dptr), reinterpret_cast<dtype *>(new_v.data.dptr),
         reinterpret_cast<dtype *>(k_cache.data.dptr), reinterpret_cast<dtype *>(v_cache.data.dptr),
         reinterpret_cast<int *>(page_table.data.dptr),
