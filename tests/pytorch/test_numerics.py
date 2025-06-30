@@ -115,7 +115,6 @@ if NVTE_TEST_NVINSPECT_ENABLED:
         os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
-
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),

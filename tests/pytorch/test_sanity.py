@@ -46,7 +46,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
-from test_numerics import reset_rng_states, dtype_tols
+from utils import dtype_tols
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -58,17 +58,19 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
 
-if NVTE_TEST_NVINSPECT_ENABLED:
-    # The sanity tests should work the same,
-    # when debug=True. I fed them with dummy feature
-    # to prevent switching off debug, which can happen if
-    # no feature is active.
-    import nvdlfw_inspect.api as debug_api
+if NVTE_TEST_NVINSPECT_ENABLED and not globals().get("_debug_api_enabled", False):
+    # run only if testing directly pytest test_sanity.py
+        # The sanity tests should work the same,
+        # when debug=True. I fed them with dummy feature
+        # to prevent switching off debug, which can happen if
+        # no feature is active.
+        import nvdlfw_inspect.api as debug_api
 
-    debug_api.initialize(
-        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
-        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
-    )
+        debug_api.initialize(
+            os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+            feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+        )
+        globals()["_debug_api_enabled"] = True
 
 
 def create_meta(scale_factor: float, size: int = 1):
@@ -97,6 +99,11 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
     """Custom func to test recipe."""
     return torch.min(amax_history, dim=0).values
 
+
+def reset_rng_states() -> None:
+    """revert back to initial RNG state."""
+    torch.set_rng_state(_cpu_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
 
 @dataclass
 class ModelConfig:
@@ -537,6 +544,8 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
+        pytest.skip("FP8 model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.seq_len
@@ -578,6 +587,8 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 def test_sanity_grouped_linear(
     dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
 ):
+    if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
+        pytest.skip("FP8 model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
@@ -690,6 +701,8 @@ def test_sanity_gpt(
     parallel_attention_mlp,
     cpu_offload,
 ):
+    if cpu_offload and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("CPU offload is not supported in debug mode.")
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -1371,6 +1384,8 @@ def test_inference_mode(
     quantization: Optional[str],
 ) -> None:
     """Test heuristics for initializing quantized weights"""
+    if NVTE_TEST_NVINSPECT_ENABLED and quantization is not None:
+        pytest.skip("FP8 quantization is not supported in debug mode.")
 
     # Tensor dimensions
     sequence_length = 32
