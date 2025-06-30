@@ -70,6 +70,7 @@ if NVTE_TEST_NVINSPECT_ENABLED:
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
 
+
 def create_meta(scale_factor: float, size: int = 1):
     meta = tex.FP8TensorMeta()
     meta.amax_history = torch.zeros(1, size, dtype=torch.float32, device="cuda")
