@@ -114,7 +114,7 @@ To build the C++ extensions with debug symbols, for example, with the `-g` flag:
 
 .. code-block:: bash
 
-  pip3 install --no-build-isolation . --global-option=--debug
+  NVTE_BUILD_DEBUG=1 pip3 install --no-build-isolation .
 
 .. include:: ../README.rst
    :start-after: troubleshooting-begin-marker-do-not-remove

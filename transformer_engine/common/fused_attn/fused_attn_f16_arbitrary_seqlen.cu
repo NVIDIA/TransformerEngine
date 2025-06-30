@@ -377,7 +377,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
-        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
@@ -831,7 +831,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
     const size_t actual_seqlen_workspace_size = is_padding ? 2 * num_bytes_per_seqlen : 0;
     const size_t num_bytes_per_ragged_offset =
-        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+        alignTo<16>(((b + 1) * typeToNumBits(ragged_offset_type)) / 8);
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
       size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
@@ -957,9 +957,9 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrQ = static_cast<void *>(devPtrQKV);
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -990,7 +990,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens, num_attn_heads, 1};
@@ -998,17 +998,17 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen, max_seqlen};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens, num_attn_heads, 1};
@@ -1016,22 +1016,22 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1082,9 +1082,9 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrQ = devPtrQKV;
   void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
@@ -1173,9 +1173,9 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -1216,7 +1216,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
@@ -1224,17 +1224,17 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
@@ -1242,22 +1242,22 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
@@ -1313,9 +1313,9 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void *devPtrK = devPtrKV;
   void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
@@ -1446,7 +1446,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
@@ -1454,17 +1454,17 @@ void fused_attn_arbitrary_seqlen_fwd(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
     } else {
       Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
       if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
@@ -1472,22 +1472,22 @@ void fused_attn_arbitrary_seqlen_fwd(
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
       }
       output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
       output_rng_state->data.shape = {2};
       output_rng_state->data.dtype = DType::kInt64;
     }
   } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[2]);
+    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_bias->data.dptr = devPtrBias;
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");

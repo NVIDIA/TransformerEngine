@@ -12,11 +12,10 @@ import torch
 
 import transformer_engine_torch as tex
 from ...fp8 import FP8GlobalStateManager
-from ...tensor import QuantizedTensor
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
-from ...utils import clear_tensor_data, devices_match
+from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
-from .._common import reshape
+from .._common import maybe_dequantize
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -86,42 +85,37 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             raise RuntimeError(f"Unsupported dtype ({dtype})")
 
         # Check input tensor
-        x = input_
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        if x.device.type != "cuda":
-            x = x.cuda()
-        if x.dtype != dtype:
-            x = x.to(dtype=dtype)
-        if not x.is_contiguous():
-            x = x.contiguous()
+        x = maybe_dequantize(input_.contiguous(), dtype)
 
-        # Check if FP8 is enabled
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        if fp8_enabled and next_op is not None and next_op.num_quantizers("forward") > 0:
+        # Check if quantized compute is enabled
+        quantized_compute_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        quantizer = None
+        if (
+            quantized_compute_enabled
+            and next_op is not None
+            and next_op.num_quantizers("forward") > 0
+        ):
             quantizer = next_op.get_quantizer("forward", 0)
-        else:
-            quantizer = None
 
         # Launch kernel
         y = self._activation_forward_impl(
-            reshape(x, (-1, x.size(-1))),
+            x.view((-1, x.size(-1))),
             quantizer,
         )
 
         # Check output tensor
         if y.dim() != x.dim():
-            y = y.reshape(list(x.shape[:-1]) + [-1])
+            y = y.view(list(x.shape[:-1]) + [-1])
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
-            quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
-            quantizer.set_usage(rowwise=True, columnwise=False)
-            x = quantizer(x)
+            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
+            input_quantizer.set_usage(rowwise=True, columnwise=False)
+            x = input_quantizer(x)
 
         # Save state for backward pass
         ctx.save_for_backward(x.detach())
-        ctx.fp8_enabled = fp8_enabled
+        ctx.quantized_compute_enabled = quantized_compute_enabled
         ctx.dtype = dtype
         ctx.prev_op = prev_op
 
@@ -137,32 +131,30 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         (x,) = ctx.saved_tensors
 
         # Check input tensor
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize(dtype=ctx.dtype)
-        elif x.dtype != ctx.dtype:
-            x = x.to(dtype=ctx.dtype)
-        if not x.is_contiguous():
-            x = x.contiguous()
+        x = maybe_dequantize(x.contiguous(), ctx.dtype)
 
         # Check grad output tensor
-        dy = grad_output
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize(dtype=ctx.dtype)
-        if not devices_match(dy.device, x.device) or dy.dtype != x.dtype:
-            dy = dy.to(device=x.device, dtype=x.dtype)
-        if not dy.is_contiguous():
-            dy = dy.contiguous()
+        dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
+
+        # Check if quantized compute is enabled
+        quantizer = None
+        if (
+            ctx.quantized_compute_enabled
+            and ctx.prev_op is not None
+            and ctx.prev_op.num_quantizers("backward") > 0
+        ):
+            quantizer = ctx.prev_op.get_quantizer("backward", 0)
 
         # Launch kernel
         dx = self._activation_backward_impl(
-            reshape(dy, (-1, dy.size(-1))),
-            reshape(x, (-1, x.size(-1))),
-            None,
+            dy.view((-1, dy.size(-1))),
+            x.view((-1, x.size(-1))),
+            quantizer,
         )
 
         # Check grad input tensor
         if dx.size() != x.size():
-            dx = dx.reshape(x.size())
+            dx = dx.view(x.size())
 
         # Clear input tensor if possible
         if ctx.prev_op is not None:

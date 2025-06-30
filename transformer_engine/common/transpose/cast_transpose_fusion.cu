@@ -17,6 +17,7 @@
 #include "../util/string.h"
 #include "../utils.cuh"
 #include "cast_transpose.h"
+#include "common/common.h"
 
 namespace transformer_engine {
 
@@ -191,17 +192,18 @@ void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /
     workspace->data.dtype = DType::kFloat32;
   } else {
     // Check that workspace matches expected size
-    const size_t workspace_size =
+    const size_t workspace_size = get_buffer_size_bytes(
         std::accumulate(workspace->data.shape.begin(), workspace->data.shape.end(), 1,
-                        std::multiplies<size_t>()) *
-        typeToSize(workspace->data.dtype);
-    const size_t required_size = num_rows_partial_dbias * row_length * typeToSize(DType::kFloat32);
+                        std::multiplies<size_t>()),
+        workspace->data.dtype);
+    const size_t required_size =
+        get_buffer_size_bytes(num_rows_partial_dbias, row_length, DType::kFloat32);
     NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
                num_rows_partial_dbias, ",", row_length, "), found ())");
     NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",
                num_rows_partial_dbias, ",", row_length, "), dtype=", to_string(DType::kFloat32),
                "; found dims=", workspace->data.shape,
-               ", dtype=", typeToSize(workspace->data.dtype), ")");
+               ", dtype=", typeToNumBits(workspace->data.dtype), " bits)");
   }
 }
 
@@ -1267,9 +1269,8 @@ void nvte_cast_transpose_dbias(const NVTETensor input, NVTETensor output, NVTETe
   constexpr const NVTETensor activation_input = nullptr;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, nullptr>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(activation_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensor(activation_input),
+      convertNVTETensor(output), convertNVTETensor(dbias), convertNVTETensor(workspace), stream);
 }
 
 void nvte_cast_transpose_dbias_dgelu(const NVTETensor input, const NVTETensor act_input,
@@ -1284,9 +1285,9 @@ void nvte_cast_transpose_dbias_dgelu(const NVTETensor input, const NVTETensor ac
   constexpr bool IS_ACT = false;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, dgelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(act_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensorCheck(act_input),
+      convertNVTETensorCheck(output), convertNVTETensorCheck(dbias), convertNVTETensor(workspace),
+      stream);
 }
 
 void nvte_cast_transpose_dbias_dsilu(const NVTETensor input, const NVTETensor silu_input,
@@ -1301,9 +1302,9 @@ void nvte_cast_transpose_dbias_dsilu(const NVTETensor input, const NVTETensor si
   constexpr bool IS_ACT = false;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, dsilu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(silu_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensorCheck(silu_input),
+      convertNVTETensorCheck(output), convertNVTETensorCheck(dbias), convertNVTETensor(workspace),
+      stream);
 }
 
 void nvte_cast_transpose_dbias_drelu(const NVTETensor input, const NVTETensor relu_input,
@@ -1318,9 +1319,9 @@ void nvte_cast_transpose_dbias_drelu(const NVTETensor input, const NVTETensor re
   constexpr bool IS_ACT = false;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, drelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(relu_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensorCheck(relu_input),
+      convertNVTETensorCheck(output), convertNVTETensorCheck(dbias), convertNVTETensor(workspace),
+      stream);
 }
 
 void nvte_cast_transpose_dbias_dsrelu(const NVTETensor input, const NVTETensor srelu_input,
@@ -1335,9 +1336,9 @@ void nvte_cast_transpose_dbias_dsrelu(const NVTETensor input, const NVTETensor s
   constexpr bool IS_ACT = false;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, dsrelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(srelu_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensorCheck(srelu_input),
+      convertNVTETensorCheck(output), convertNVTETensorCheck(dbias), convertNVTETensor(workspace),
+      stream);
 }
 
 void nvte_cast_transpose_dbias_dqgelu(const NVTETensor input, const NVTETensor qgelu_input,
@@ -1352,9 +1353,9 @@ void nvte_cast_transpose_dbias_dqgelu(const NVTETensor input, const NVTETensor q
   constexpr bool IS_ACT = false;
 
   cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, ComputeType, Empty, dqgelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), reinterpret_cast<const Tensor *>(qgelu_input),
-      reinterpret_cast<Tensor *>(output), reinterpret_cast<Tensor *>(dbias),
-      reinterpret_cast<Tensor *>(workspace), stream);
+      *convertNVTETensorCheck(input), convertNVTETensorCheck(qgelu_input),
+      convertNVTETensorCheck(output), convertNVTETensorCheck(dbias), convertNVTETensor(workspace),
+      stream);
 }
 
 void nvte_dgeglu_cast_transpose(const NVTETensor input, const NVTETensor gated_act_input,
@@ -1364,8 +1365,8 @@ void nvte_dgeglu_cast_transpose(const NVTETensor input, const NVTETensor gated_a
   using namespace transformer_engine::detail;
 
   dgated_act_cast_transpose<ComputeType, Empty, dgelu<fp32, fp32>, gelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(gated_act_input),
-      reinterpret_cast<Tensor *>(output), stream);
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(gated_act_input),
+      convertNVTETensorCheck(output), stream);
 }
 
 void nvte_dswiglu_cast_transpose(const NVTETensor input, const NVTETensor swiglu_input,
@@ -1375,8 +1376,8 @@ void nvte_dswiglu_cast_transpose(const NVTETensor input, const NVTETensor swiglu
   using namespace transformer_engine::detail;
 
   dgated_act_cast_transpose<ComputeType, Empty, dsilu<fp32, fp32>, silu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(swiglu_input),
-      reinterpret_cast<Tensor *>(output), stream);
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(swiglu_input),
+      convertNVTETensorCheck(output), stream);
 }
 
 void nvte_dreglu_cast_transpose(const NVTETensor input, const NVTETensor gated_act_input,
@@ -1386,8 +1387,8 @@ void nvte_dreglu_cast_transpose(const NVTETensor input, const NVTETensor gated_a
   using namespace transformer_engine::detail;
 
   dgated_act_cast_transpose<ComputeType, Empty, drelu<fp32, fp32>, relu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(gated_act_input),
-      reinterpret_cast<Tensor *>(output), stream);
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(gated_act_input),
+      convertNVTETensorCheck(output), stream);
 }
 
 void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor gated_act_input,
@@ -1397,8 +1398,8 @@ void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor gated_
   using namespace transformer_engine::detail;
 
   dgated_act_cast_transpose<ComputeType, Empty, dsrelu<fp32, fp32>, srelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(gated_act_input),
-      reinterpret_cast<Tensor *>(output), stream);
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(gated_act_input),
+      convertNVTETensorCheck(output), stream);
 }
 
 void nvte_dqgeglu_cast_transpose(const NVTETensor input, const NVTETensor gated_act_input,
@@ -1408,6 +1409,6 @@ void nvte_dqgeglu_cast_transpose(const NVTETensor input, const NVTETensor gated_
   using namespace transformer_engine::detail;
 
   dgated_act_cast_transpose<ComputeType, Empty, dqgelu<fp32, fp32>, qgelu<fp32, fp32>>(
-      *reinterpret_cast<const Tensor *>(input), *reinterpret_cast<const Tensor *>(gated_act_input),
-      reinterpret_cast<Tensor *>(output), stream);
+      *convertNVTETensorCheck(input), *convertNVTETensorCheck(gated_act_input),
+      convertNVTETensorCheck(output), stream);
 }

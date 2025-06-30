@@ -11,13 +11,18 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
+from transformer_engine_torch import Float8BlockScaleTensorFormat
+
+from ..quantized_tensor import QuantizedTensorBase
 
 from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
 
+from ...utils import _empty_tensor
 
-class Float8BlockwiseQTensorBase:
+
+class Float8BlockwiseQTensorBase(QuantizedTensorBase):
     """Mixin class that holds data attributes of Float8BlockwiseQTensor.
 
     Float8BlockwiseQTensor inherits from the PyTorch tensor class and this
@@ -33,10 +38,10 @@ class Float8BlockwiseQTensorBase:
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
     _is_2D_scaled: bool
+    _data_format: Float8BlockScaleTensorFormat
 
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
@@ -44,6 +49,8 @@ class Float8BlockwiseQTensorBase:
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
         is_2D_scaled: bool,
+        data_format: Float8BlockScaleTensorFormat,
+        *args,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
@@ -54,6 +61,7 @@ class Float8BlockwiseQTensorBase:
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._is_2D_scaled = is_2D_scaled
+        instance._data_format = data_format
 
         return instance
 
@@ -66,7 +74,7 @@ class Float8BlockwiseQTensorBase:
             self._columnwise_scale_inv,
         ):
             if t is not None:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
 
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
@@ -78,7 +86,12 @@ class Float8BlockwiseQTensorBase:
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "data_format": self._data_format,
         }
+
+    def _is_gemm_ready_format(self) -> bool:
+        """Whether data is in GEMM_READY format"""
+        return self._data_format == Float8BlockScaleTensorFormat.GEMM_READY
 
     def prepare_for_saving(
         self,
@@ -132,34 +145,69 @@ class Float8BlockwiseQTensorBase:
                 q_K = q.shape[-1]
             for i in range(len(q.shape) - 1):
                 q_M *= q.shape[i]
+            inner_q_dimension_tiled = True
+            if self._is_gemm_ready_format():
+                scales_tiled_dim, scales_untiled_dim = scale_inv.shape
+                inner_scale_dimension_tiled = False
+                scales_are_compact = False
+            else:
+                scales_untiled_dim, scales_tiled_dim = scale_inv.shape
+                inner_scale_dimension_tiled = True
+                scales_are_compact = True
         else:
             assert self._columnwise_data is not None, "No data to dequantize"
             q = self._columnwise_data
             scale_inv = self._columnwise_scale_inv
-            transpose_output = True
-            if len(q.shape) >= 1:
-                q_M = q.shape[0]
-            for i in range(1, len(q.shape)):
-                q_K *= q.shape[i]
+            scales_tiled_dim, scales_untiled_dim = scale_inv.shape
+            inner_scale_dimension_tiled = False
+            if self._is_gemm_ready_format():
+                inner_q_dimension_tiled = True
+                transpose_output = True
+                if len(q.shape) >= 1:
+                    q_M = q.shape[0]
+                for i in range(1, len(q.shape)):
+                    q_K *= q.shape[i]
+                scales_are_compact = False
+            else:
+                inner_q_dimension_tiled = False
+                transpose_output = False
+                if len(q.shape) >= 1:
+                    q_K = q.shape[-1]
+                for i in range(len(q.shape) - 1):
+                    q_M *= q.shape[i]
+                scales_are_compact = True
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
-        k_tiles, scale_m = scale_inv.shape
-        if q_K % block_len != 0:
-            k_pad_amount = (block_len - (q_K % block_len)) % block_len
-            q = torch.nn.functional.pad(
-                q, (0, k_pad_amount, 0, 0), mode="constant", value=0
-            ).contiguous()
-        _, padded_K = q.shape
-        q_tiled = q.reshape(q_M, k_tiles, block_len)
-        if scale_m > q_M:
-            # scale_m is 4 element aligned.
+        if inner_q_dimension_tiled:
+            if q_K % block_len != 0:
+                k_pad_amount = (block_len - (q_K % block_len)) % block_len
+                q = torch.nn.functional.pad(
+                    q, (0, k_pad_amount, 0, 0), mode="constant", value=0
+                ).contiguous()
+            padded_M, padded_K = q.shape
+            q_tiled = q.reshape(q_M, scales_tiled_dim, block_len)
+        else:
+            if q_M % block_len != 0:
+                m_pad_amount = (block_len - (q_M % block_len)) % block_len
+                q = torch.nn.functional.pad(
+                    q, (0, 0, 0, m_pad_amount), mode="constant", value=0
+                ).contiguous()
+            padded_M, padded_K = q.shape
+            q_tiled = q.reshape(scales_tiled_dim, block_len, q_K)
+        if not scales_are_compact and scales_untiled_dim > q_M:
+            # untiled scale dimension is 4 element aligned.
             scale_inv = scale_inv[:, :q_M].contiguous()
-        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, k_tiles, 1)
+        if scales_are_compact and inner_scale_dimension_tiled:
+            dq_scale = scale_inv.contiguous().reshape(q_M, scales_tiled_dim, 1)
+        elif scales_are_compact and not inner_scale_dimension_tiled:
+            dq_scale = scale_inv.contiguous().reshape(scales_tiled_dim, 1, q_K)
+        else:
+            dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, scales_tiled_dim, 1)
         torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
         result = q_tiled.view(torch_q_dtype).to(torch.float32) * dq_scale
-        if padded_K != q_K:
-            result = result.reshape(q_M, padded_K)[:, :q_K]
+        if padded_M != q_M or padded_K != q_K:
+            result = result.reshape(padded_M, padded_K)[:q_M, :q_K]
         result = result.to(dtype)
         if len(orig_shape) == 0:
             result = result.reshape([])
@@ -177,6 +225,12 @@ class Float8BlockwiseQTensorBase:
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
+
+        if not self._is_gemm_ready_format():
+            raise NotImplementedError(
+                "Dequantize is only supported with GEMM_READY data format, "
+                f"but found _data_format={self._data_format}"
+            )
 
         def format_scale_as_logical_shape(q_K, scales, block_len):
             # The GEMM for 2D blocks required padding in the scales.
@@ -243,6 +297,8 @@ class Float8BlockwiseQTensorBase:
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
         dims = list(self._columnwise_data.size(*args, **kwargs))
+        if not self._is_gemm_ready_format():  # compact format
+            return torch.Size(dims)
         reordered = []
         for i in range(1, len(dims)):
             reordered.append(dims[i])
@@ -281,6 +337,13 @@ class Float8BlockwiseQTensorBase:
         w = min(self._columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[1])
         self._columnwise_scale_inv[0:h, 0:w].copy_(columnwise_scale_inv[0:h, 0:w])
 
+    def _transpose_columnwise_data(self):
+        """Plainly transpose the columnwise data and scale inv."""
+        if self._columnwise_data is not None:
+            self._columnwise_data = tex.fp8_transpose(
+                self._columnwise_data, self._fp8_dtype, out=None
+            )
+
     def __repr__(self):
         if self._rowwise_data is not None:
             data = self.dequantize()
@@ -293,3 +356,55 @@ class Float8BlockwiseQTensorBase:
             f"fp8_dtype={self._fp8_dtype}, "
             f"{descriptor}_scaled_data={data}"
         )
+
+    def update_usage(
+        self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
+    ):
+        """
+        update_usage can be used to clear out one of two possible copies of the data.
+        """
+
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
+        assert (
+            columnwise_usage or rowwise_usage
+        ), "Must retain some data either columnwise or rowwise"
+
+        if columnwise_usage and rowwise_usage:
+            if not self._is_2D_scaled:
+                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
+                # data/scale_inv because their scale values are different.
+                assert (
+                    self._rowwise_data is not None
+                    and self._rowwise_scale_inv is not None
+                    and self._columnwise_data is not None
+                    and self._columnwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage."
+            else:
+                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
+                # rowwise data/scale_inv.
+                assert (
+                    self._rowwise_data is not None and self._rowwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+                if self._columnwise_data is None or self._columnwise_scale_inv is None:
+                    self._create_columnwise()
+            return
+
+        if rowwise_usage:
+            assert (
+                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+            ), "Cannot update to rowwise usage."
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+            return
+        if columnwise_usage:
+            assert (
+                self._columnwise_data is not None and self._columnwise_scale_inv is not None
+            ), "Cannot update to columnwise usage."
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+            return
+
+        return
