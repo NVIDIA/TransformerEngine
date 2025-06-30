@@ -258,11 +258,12 @@ CONFIG_LOG_TEST_DISTRIBUTED_NO_FP8 = """log_distributed:
 """
 
 
-
 def _prepare_config_test_log_distributed(config_file):
     if WORLD_RANK != 0:
         return
-    config_file.write(CONFIG_LOG_TEST_DISTRIBUTED_FP8 if fp8_available else CONFIG_LOG_TEST_DISTRIBUTED_NO_FP8)
+    config_file.write(
+        CONFIG_LOG_TEST_DISTRIBUTED_FP8 if fp8_available else CONFIG_LOG_TEST_DISTRIBUTED_NO_FP8
+    )
     config_file.flush()
 
 
