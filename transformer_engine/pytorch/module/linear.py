@@ -400,8 +400,11 @@ class _Linear(torch.autograd.Function):
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
-                if not hasattr(param, "__fsdp_param__"):
-                    ctx.main_grad = weight.main_grad
+                if hasattr(weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.main_grad_func = weight.get_main_grad
+                else:
+                    ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
             ctx.cpu_offloading = cpu_offloading
@@ -456,14 +459,11 @@ class _Linear(torch.autograd.Function):
             ctx.tensor_objects = None
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            if not hasattr(param, "__fsdp_param__"):
-                main_grad = (
-                    ctx.main_grad
-                    if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                    else None
-                )
-            else:
-                main_grad = weight.get_main_grad()
+            main_grad = (
+                ctx.main_grad_func()
+                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
+                else None
+            )
 
             if ctx.cpu_offloading:
                 if ctx.grad_added_to_main_grad:
