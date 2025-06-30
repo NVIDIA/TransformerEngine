@@ -656,14 +656,17 @@ class _WeakRefTensor:
         self.shape = shape
 
     def data_ptr(self):
+        """Data pointer of the tensor."""
         return self._data_ptr
 
     @property
     def dtype(self):
+        """Dtype of the tensor."""
         return self._dtype
 
     @property
     def shape(self):
+        """Shape of the tensor."""
         return getattr(self, "_shape", None)
 
     @dtype.setter
@@ -675,6 +678,7 @@ class _WeakRefTensor:
         self._shape = tuple(int(i) for i in shape)
 
     def numel(self):
+        """Number of elements in the tensor."""
         return np.prod(self.shape)
 
     @property
@@ -718,15 +722,14 @@ def make_weak_ref(x):
             if x.is_cuda
             else x
         )
-    elif isinstance(x, tuple):
+    if isinstance(x, tuple):
         return tuple(make_weak_ref(i) for i in x)
-    elif isinstance(x, list):
+    if isinstance(x, list):
         return [make_weak_ref(i) for i in x]
-    elif isinstance(x, dict):
+    if isinstance(x, dict):
         return {k: make_weak_ref(v) for k, v in x.items()}
-    elif isinstance(x, (int, float, bool)):
+    if isinstance(x, (int, float, bool)):
         return x
-    elif x is None:
+    if x is None:
         return None
-    else:
-        raise TypeError(f"Invalid type {type(x)} to make weak ref")
+    raise TypeError(f"Invalid type {type(x)} to make weak ref")

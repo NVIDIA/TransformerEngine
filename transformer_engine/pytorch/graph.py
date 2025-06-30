@@ -178,19 +178,14 @@ def _make_graphed_callables(
             sample_args, list
         ), "sample_args must be a list for _reuse_graph_input_output_buffers."
         len_args = len(sample_args[0])
-        for i in range(len(sample_args)):
-            assert len_args == len(
-                sample_args[i]
-            ), f"Arguments must have same length and shape for _reuse_graph_input_output_buffers."
+        for i, arg in enumerate(sample_args):
+            assert len_args == len(arg), "Arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
         len_kwargs = len(sample_kwargs[0])
         assert isinstance(
             sample_kwargs, list
         ), "sample_kwargs must be a list for _reuse_graph_input_output_buffers."
-        for i in range(len(sample_kwargs)):
-            assert len_kwargs == len(sample_kwargs[i]), (
-                f"Keyword arguments must have same length and shape for"
-                f" _reuse_graph_input_output_buffers."
-            )
+        for i, kwarg in enumerate(sample_kwargs):
+            assert len_kwargs == len(kwarg), "Keyword arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
 
         # Reorganize args and kwargs for input tensor reuse.
         fwd_sample_qs = {}
