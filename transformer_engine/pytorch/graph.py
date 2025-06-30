@@ -179,13 +179,18 @@ def _make_graphed_callables(
         ), "sample_args must be a list for _reuse_graph_input_output_buffers."
         len_args = len(sample_args[0])
         for i, arg in enumerate(sample_args):
-            assert len_args == len(arg), "Arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
+            assert len_args == len(
+                arg
+            ), "Arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
         len_kwargs = len(sample_kwargs[0])
         assert isinstance(
             sample_kwargs, list
         ), "sample_kwargs must be a list for _reuse_graph_input_output_buffers."
         for i, kwarg in enumerate(sample_kwargs):
-            assert len_kwargs == len(kwarg), "Keyword arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
+            assert len_kwargs == len(kwarg), (
+                "Keyword arguments must have same length and shape for"
+                " `_reuse_graph_input_output_buffers`."
+            )
 
         # Reorganize args and kwargs for input tensor reuse.
         fwd_sample_qs = {}
@@ -360,19 +365,29 @@ def _make_graphed_callables(
                     # Remove module params that do not require grad from static_input_surface.
                     # This is to ensure that the module params that do not require grad will not
                     # trigger their grad_acc functions.
-                    num_required_grad_sample_args = sum(arg.requires_grad for arg in flatten_sample_args[func_idx])
+                    num_required_grad_sample_args = sum(
+                        arg.requires_grad for arg in flatten_sample_args[func_idx]
+                    )
                     required_grad_input_idx = []
                     for i, arg in enumerate(static_input_surface):
                         if arg.requires_grad:
                             required_grad_input_idx.append(i)
                     module_params_with_grad = []
                     for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
-                        if grad_inputs[grad_inputs_idx] is not None and grad_inputs_idx >= num_required_grad_sample_args:
+                        if (
+                            grad_inputs[grad_inputs_idx] is not None
+                            and grad_inputs_idx >= num_required_grad_sample_args
+                        ):
                             module_params_with_grad.append(static_input_surface[inputs_idx])
                     if len(module_params_with_grad) != len(per_callable_module_params[func_idx]):
-                        assert warmup_iter == 0, "no-grad params should only be used as inputs in the first warmup iteration"
+                        assert warmup_iter == 0, (
+                            "no-grad params should only be used as inputs in the first warmup"
+                            " iteration"
+                        )
                         per_callable_module_params[func_idx] = tuple(module_params_with_grad)
-                        static_input_surface = flatten_sample_args[func_idx] + tuple(module_params_with_grad)
+                        static_input_surface = flatten_sample_args[func_idx] + tuple(
+                            module_params_with_grad
+                        )
                         per_callable_static_input_surfaces[func_idx] = static_input_surface
                 else:
                     grad_inputs = None
