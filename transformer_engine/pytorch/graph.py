@@ -362,9 +362,9 @@ def _make_graphed_callables(
                         allow_unused=allow_unused_input,
                     )
 
-                    # Remove module params that do not require grad from static_input_surface.
-                    # This is to ensure that the module params that do not require grad will not
-                    # trigger their grad_acc functions.
+                    # Filter module params that get None grad from grad_inputs and remove them
+                    # from static_input_surface. This is to ensure that the backward hooks
+                    # registered to these params are not wrongly triggered.
                     num_required_grad_sample_args = sum(
                         arg.requires_grad for arg in flatten_sample_args[func_idx]
                     )
