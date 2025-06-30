@@ -17,7 +17,7 @@ import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.pytorch.fp8 import _default_sf_compute
+from transformer_engine.pytorch.fp8 import _default_sf_compute, FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -27,6 +27,8 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_WGRAD,
 )
+
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID

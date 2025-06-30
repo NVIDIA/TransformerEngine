@@ -255,7 +255,7 @@ class DebugQuantizer(Quantizer):
             args["tensor"] = columnwise_gemm_tensor
             args["rowwise"] = False
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
-        
+
         if self.inspect_tensor_all_enabled:
             if "rowwise" in args:
                 del args["rowwise"]
@@ -464,6 +464,7 @@ class DebugQuantizer(Quantizer):
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
+        #pylint: disable=too-many-boolean-expressions
         if (
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled_rowwise

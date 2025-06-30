@@ -246,8 +246,8 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_err] = {stat_err}
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
-for columnwise in [True, False]:
-    for recipe_name in ["fp8_delayed_scaling", "mxfp8", "fp8_current_scaling", "fp8_block_scaling"]:
-        add_underflows_stats(recipe_name, columnwise)
-        add_scale_inv_stats(recipe_name, columnwise)
-        add_mse_stats(recipe_name, columnwise)
+for _columnwise in [True, False]:
+    for _recipe_name in ["fp8_delayed_scaling", "mxfp8", "fp8_current_scaling", "fp8_block_scaling"]:
+        add_underflows_stats(_recipe_name, _columnwise)
+        add_scale_inv_stats(_recipe_name, _columnwise)
+        add_mse_stats(_recipe_name, _columnwise)

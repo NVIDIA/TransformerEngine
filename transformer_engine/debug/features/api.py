@@ -291,7 +291,7 @@ class TEDefaultFeatures:
 
         Should return nothing.
         """
-    
+
     def inspect_tensor_all(
         self,
         config: Dict,
@@ -335,7 +335,6 @@ class TEDefaultFeatures:
         Should return nothing.
 
         """
-        pass
 
     def inspect_tensor_enabled(
         self,
@@ -397,7 +396,7 @@ class TEDefaultFeatures:
         bool - default is False
         """
         return False
-    
+
     def inspect_tensor_all_enabled(
         self,
         config: Dict,
