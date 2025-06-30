@@ -21,8 +21,6 @@ import torch
 
 """
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-
 if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")
 
@@ -32,8 +30,6 @@ LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
 def test_debug_distributed(feature_dirs):
-    if not fp8_available:
-        pytest.skip(reason_for_no_fp8)
     test_path = TEST_ROOT / "run_distributed.py"
     test_cmd = LAUNCH_CMD + [str(test_path), f"--feature_dirs={feature_dirs[0]}"]
 

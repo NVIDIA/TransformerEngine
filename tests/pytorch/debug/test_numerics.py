@@ -249,8 +249,8 @@ def _init_model(weight):
     return model
 
 
-def _run_forward_backward(x, model, loss_scale=1.0, is_first_microbatch=None):
-    with tepytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+def _run_forward_backward(x, model, loss_scale=1.0, is_first_microbatch=None, fp8=True):
+    with tepytorch.fp8_autocast(enabled=fp8, fp8_recipe=FP8_RECIPE):
         y = model(x, is_first_microbatch=is_first_microbatch)
     (y.sum() * loss_scale).backward()
     debug_api.step()
@@ -300,13 +300,11 @@ def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
     x, weight = _get_tensors()
     x1 = x[:0, :]
     model = _init_model(weight)
-    _ = _run_forward_backward(x1, model)
-    _ = _run_forward_backward(x, model)
+    _ = _run_forward_backward(x1, model, fp8=False)
+    _ = _run_forward_backward(x, model, fp8=False)
 
 
 def test_logging_zero_numel_tensor(feature_dirs):
-    if not fp8_available:
-        pytest.skip(reason_for_no_fp8)
     run_logging_zero_numel_tensor(feature_dirs)
 
 
