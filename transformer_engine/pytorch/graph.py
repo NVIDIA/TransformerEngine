@@ -340,7 +340,7 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
-            for _ in range(num_warmup_iters):
+            for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
@@ -356,6 +356,24 @@ def _make_graphed_callables(
                         only_inputs=True,
                         allow_unused=allow_unused_input,
                     )
+
+                    # Remove module params that do not require grad from static_input_surface.
+                    # This is to ensure that the module params that do not require grad will not
+                    # trigger their grad_acc functions.
+                    num_required_grad_sample_args = sum(arg.requires_grad for arg in flatten_sample_args[func_idx])
+                    required_grad_input_idx = []
+                    for i, arg in enumerate(static_input_surface):
+                        if arg.requires_grad:
+                            required_grad_input_idx.append(i)
+                    module_params_with_grad = []
+                    for grad_inputs_idx, inputs_idx in enumerate(required_grad_input_idx):
+                        if grad_inputs[grad_inputs_idx] is not None and grad_inputs_idx >= num_required_grad_sample_args:
+                            module_params_with_grad.append(static_input_surface[inputs_idx])
+                    if len(module_params_with_grad) != len(per_callable_module_params[func_idx]):
+                        assert warmup_iter == 0, "no-grad params should only be used as inputs in the first warmup iteration"
+                        per_callable_module_params[func_idx] = tuple(module_params_with_grad)
+                        static_input_surface = flatten_sample_args[func_idx] + tuple(module_params_with_grad)
+                        per_callable_static_input_surfaces[func_idx] = static_input_surface
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
