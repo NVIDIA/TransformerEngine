@@ -92,7 +92,7 @@ class TestFP8Functions(unittest.TestCase):
         self._check_default_state()
 
     @unittest.skipIf(not is_mxfp8_supported, reason=mxfp8_reason)
-    def test_fp8_autocast_mxfp8_scaling(self):
+    def test_fp8_autocast_mxfp8_current_scaling(self):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
@@ -116,7 +116,7 @@ class TestFP8Functions(unittest.TestCase):
         self._check_default_state()
 
     @unittest.skipIf(not is_mxfp8_supported, reason=mxfp8_reason)
-    def test_fp8_autocast_mxfp8_scaling(self):
+    def test_fp8_autocast_mxfp8_block_scaling(self):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
 
