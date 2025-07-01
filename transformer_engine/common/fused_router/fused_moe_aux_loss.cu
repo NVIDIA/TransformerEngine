@@ -11,7 +11,7 @@
 namespace transformer_engine {
 
 template <typename DataType, typename IndexType>
-__global__ void fused_aux_loss_forward_kernel(const DataType* probs,
+__global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                               const IndexType* tokens_per_expert,
                                               int total_num_tokens, int num_tokens, int num_experts,
                                               int topk, float coeff, DataType* aux_loss,
@@ -152,7 +152,7 @@ __global__ void fused_aux_loss_forward_kernel(const DataType* probs,
 }
 
 template <typename DataType, typename IndexType>
-void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
+void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                             const IndexType* tokens_per_expert,
                                             int total_num_tokens, int num_tokens, int num_experts,
                                             int topk, float coeff, DataType* aux_loss,
@@ -165,7 +165,7 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
 
   // Update the max cluster size based on the device
   cudaOccupancyMaxPotentialClusterSize(
-      &cluster_size, (void*)fused_aux_loss_forward_kernel<DataType, IndexType>, &config);
+      &cluster_size, (void*)fused_moe_aux_loss_forward_kernel<DataType, IndexType>, &config);
 
   cudaLaunchAttribute attribute[1];
   attribute[0].id = cudaLaunchAttributeClusterDimension;
@@ -175,19 +175,19 @@ void fused_aux_loss_forward_kernel_launcher(const DataType* probs,
   config.numAttrs = 1;
   config.attrs = attribute;
 
-  cudaLaunchKernelEx(&config, fused_aux_loss_forward_kernel<DataType, IndexType>, probs,
+  cudaLaunchKernelEx(&config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs,
                      tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
                      aux_loss, Const_buf);
 }
 
-void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
+void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
                             int total_num_tokens, int num_tokens, int num_experts, int topk,
                             float coeff, Tensor& aux_loss, Tensor& Const_buf, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
           tokens_per_expert.data.dtype, IndexType,
-          fused_aux_loss_forward_kernel_launcher<DataType, IndexType>(
+          fused_moe_aux_loss_forward_kernel_launcher<DataType, IndexType>(
               reinterpret_cast<DataType*>(probs.data.dptr),
               reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), total_num_tokens,
               num_tokens, num_experts, topk, coeff, reinterpret_cast<DataType*>(aux_loss.data.dptr),
@@ -195,7 +195,7 @@ void fused_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert
 }
 
 template <typename DataType, typename IndexType>
-__global__ void fused_aux_loss_backward_kernel(const float* Const_buf,
+__global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
                                                const IndexType* tokens_per_expert, int num_tokens,
                                                int num_experts, DataType* grad_aux_loss,
                                                DataType* grad_probs) {
@@ -216,25 +216,25 @@ __global__ void fused_aux_loss_backward_kernel(const float* Const_buf,
 }
 
 template <typename DataType, typename IndexType>
-void fused_aux_loss_backward_kernel_launcher(const float* Const_buf,
+void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
                                              const IndexType* tokens_per_expert, int num_tokens,
                                              int num_experts, DataType* grad_aux_loss,
                                              DataType* grad_probs, cudaStream_t stream) {
   // Meta data for the kernel
   int block_size = 256;
   int grid_size = (num_tokens + block_size - 1) / block_size;
-  fused_aux_loss_backward_kernel<DataType, IndexType><<<grid_size, block_size, 0, stream>>>(
+  fused_moe_aux_loss_backward_kernel<DataType, IndexType><<<grid_size, block_size, 0, stream>>>(
       Const_buf, tokens_per_expert, num_tokens, num_experts, grad_aux_loss, grad_probs);
 }
 
-void fused_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_expert,
+void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_expert,
                              int num_tokens, int num_experts, Tensor& grad_aux_loss,
                              Tensor& grad_probs, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_aux_loss.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
           tokens_per_expert.data.dtype, IndexType,
-          fused_aux_loss_backward_kernel_launcher<DataType, IndexType>(
+          fused_moe_aux_loss_backward_kernel_launcher<DataType, IndexType>(
               reinterpret_cast<float*>(Const_buf.data.dptr),
               reinterpret_cast<IndexType*>(tokens_per_expert.data.dptr), num_tokens, num_experts,
               reinterpret_cast<DataType*>(grad_aux_loss.data.dptr),
@@ -243,24 +243,24 @@ void fused_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_e
 
 }  // namespace transformer_engine
 
-void nvte_fused_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
+void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
                                  int total_num_tokens, int num_tokens, int num_experts, int topk,
                                  float coeff, NVTETensor aux_loss, NVTETensor Const_buf,
                                  cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_aux_loss_forward);
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_aux_loss_forward(*convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
+  fused_moe_aux_loss_forward(*convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
                          total_num_tokens, num_tokens, num_experts, topk, coeff,
                          *convertNVTETensorCheck(aux_loss), *convertNVTETensorCheck(Const_buf),
                          stream);
 }
 
-void nvte_fused_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert,
+void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert,
                                   int num_tokens, int num_experts, NVTETensor grad_aux_loss,
                                   NVTETensor grad_probs, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_aux_loss_backward);
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_backward);
   using namespace transformer_engine;
-  fused_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
+  fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
                           *convertNVTETensorCheck(tokens_per_expert), num_tokens, num_experts,
                           *convertNVTETensorCheck(grad_aux_loss),
                           *convertNVTETensorCheck(grad_probs), stream);

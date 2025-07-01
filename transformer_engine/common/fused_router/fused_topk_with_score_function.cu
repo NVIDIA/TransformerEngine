@@ -10,7 +10,7 @@
 namespace transformer_engine {
 
 template <typename DataType, typename BiasType>
-__global__ void fused_topk_softmax_sigmod_forward_kernel(
+__global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, bool *routing_map,
@@ -231,7 +231,7 @@ __global__ void fused_topk_softmax_sigmod_forward_kernel(
 }
 
 template <typename DataType, typename BiasType>
-void fused_topk_softmax_sigmoid_forward_kernel_launcher(
+void fused_topk_with_score_function_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, bool *routing_map, DataType *intermediate_output,
@@ -245,13 +245,13 @@ void fused_topk_softmax_sigmoid_forward_kernel_launcher(
     shared_memory_size += num_groups * num_token_per_block * sizeof(DataType);   // group_scores
     shared_memory_size += num_experts * num_token_per_block * sizeof(DataType);  // maksed_scores
   }
-  fused_topk_softmax_sigmod_forward_kernel<DataType, BiasType>
+  fused_topk_with_score_function_forward_kernel<DataType, BiasType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
           scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
 }
 
-void fused_topk_softmax_sigmoid_forward(const Tensor logits, int num_tokens, int num_experts,
+void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens, int num_experts,
                                         int topk, bool use_pre_softmax, int num_groups,
                                         int group_topk, float scaling_factor, int score_function,
                                         const Tensor expert_bias, Tensor probs, Tensor routing_map,
@@ -260,7 +260,7 @@ void fused_topk_softmax_sigmoid_forward(const Tensor logits, int num_tokens, int
       logits.data.dtype, DataType,
       TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
           expert_bias.data.dtype, BiasType,
-          fused_topk_softmax_sigmoid_forward_kernel_launcher<DataType, BiasType>(
+          fused_topk_with_score_function_forward_kernel_launcher<DataType, BiasType>(
               reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
               use_pre_softmax, num_groups, group_topk, scaling_factor, score_function,
               reinterpret_cast<BiasType *>(expert_bias.data.dptr),
@@ -270,7 +270,7 @@ void fused_topk_softmax_sigmoid_forward(const Tensor logits, int num_tokens, int
 }
 
 template <typename DataType>
-__global__ void fused_topk_softmax_sigmod_backward_kernel(
+__global__ void fused_topk_with_score_function_backward_kernel(
     // Inputs tensor
     const bool *routing_map, const DataType *intermediate_output, const DataType *grad_probs,
     // Other parameters
@@ -421,7 +421,7 @@ __global__ void fused_topk_softmax_sigmod_backward_kernel(
 }
 
 template <typename DataType>
-void fused_topk_softmax_sigmoid_backward_kernel_launcher(
+void fused_topk_with_score_function_backward_kernel_launcher(
     const bool *routing_map, const DataType *intermediate_output, const DataType *grad_probs,
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
@@ -433,13 +433,13 @@ void fused_topk_softmax_sigmoid_backward_kernel_launcher(
                               num_experts * num_token_per_block * sizeof(DataType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(DataType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
-  fused_topk_softmax_sigmod_backward_kernel<DataType>
+  fused_topk_with_score_function_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,
           use_pre_softmax, scaling_factor, score_function, grad_logits);
 }
 
-void fused_topk_softmax_sigmoid_backward(const Tensor &routing_map,
+void fused_topk_with_score_function_backward(const Tensor &routing_map,
                                          const Tensor &intermediate_output,
                                          const Tensor &grad_probs, int num_tokens, int num_experts,
                                          int topk, bool use_pre_softmax, float scaling_factor,
@@ -447,7 +447,7 @@ void fused_topk_softmax_sigmoid_backward(const Tensor &routing_map,
                                          cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_logits.data.dtype, DataType,
-      fused_topk_softmax_sigmoid_backward_kernel_launcher<DataType>(
+      fused_topk_with_score_function_backward_kernel_launcher<DataType>(
           reinterpret_cast<bool *>(routing_map.data.dptr),
           reinterpret_cast<DataType *>(intermediate_output.data.dptr),
           reinterpret_cast<DataType *>(grad_probs.data.dptr), num_tokens, num_experts, topk,
@@ -457,30 +457,30 @@ void fused_topk_softmax_sigmoid_backward(const Tensor &routing_map,
 
 }  // namespace transformer_engine
 
-void nvte_fused_topk_softmax_sigmoid_forward(const NVTETensor logits, int num_tokens,
+void nvte_fused_topk_with_score_function_forward(const NVTETensor logits, int num_tokens,
                                              int num_experts, int topk, bool use_pre_softmax,
                                              int num_groups, int group_topk, float scaling_factor,
                                              int score_function, const NVTETensor expert_bias,
                                              NVTETensor probs, NVTETensor routing_map,
                                              NVTETensor intermediate_output, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_topk_softmax_sigmoid_forward);
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
-  fused_topk_softmax_sigmoid_forward(
+  fused_topk_with_score_function_forward(
       *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, use_pre_softmax, num_groups,
       group_topk, scaling_factor, score_function, *convertNVTETensorCheck(expert_bias),
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(routing_map),
       *convertNVTETensorCheck(intermediate_output), stream);
 }
 
-void nvte_fused_topk_softmax_sigmoid_backward(const NVTETensor routing_map,
+void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
                                               const NVTETensor intermediate_output,
                                               const NVTETensor grad_probs, int num_tokens,
                                               int num_experts, int topk, bool use_pre_softmax,
                                               float scaling_factor, int score_function,
                                               NVTETensor grad_logits, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_scores_for_aux_loss_backward);
+  NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
   using namespace transformer_engine;
-  fused_topk_softmax_sigmoid_backward(
+  fused_topk_with_score_function_backward(
       *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output),
       *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk, use_pre_softmax,
       scaling_factor, score_function, *convertNVTETensorCheck(grad_logits), stream);

@@ -10,7 +10,7 @@
 namespace transformer_engine {
 
 template <typename DataType>
-__global__ void fused_scores_for_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
+__global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
                                                          int num_experts, int topk,
                                                          int score_function, DataType *scores,
                                                          bool *routing_map,
@@ -130,7 +130,7 @@ __global__ void fused_scores_for_aux_loss_forward_kernel(const DataType *logits,
 }
 
 template <typename DataType>
-void fused_scores_for_aux_loss_forward_kernel_launcher(
+void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
     DataType *scores, bool *routing_map, DataType *intermediate_output, cudaStream_t stream) {
   // Meta data for the kernel
@@ -139,19 +139,19 @@ void fused_scores_for_aux_loss_forward_kernel_launcher(
   size_t shared_memory_size = num_experts * num_token_per_block * sizeof(DataType)  // logits
                               + topk * num_token_per_block * sizeof(DataType)       // topk_logits
                               + topk * num_token_per_block * sizeof(int);           // topk_indices
-  fused_scores_for_aux_loss_forward_kernel<DataType>
+  fused_score_for_moe_aux_loss_forward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
           intermediate_output);
 }
 
-void fused_scores_for_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
+void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
                                        int topk, int score_function, Tensor &scores,
                                        Tensor &routing_map, Tensor &intermediate_output,
                                        cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
-      fused_scores_for_aux_loss_forward_kernel_launcher<DataType>(
+      fused_score_for_moe_aux_loss_forward_kernel_launcher<DataType>(
           reinterpret_cast<DataType *>(logits.data.dptr), num_tokens, num_experts, topk,
           score_function, reinterpret_cast<DataType *>(scores.data.dptr),
           reinterpret_cast<bool *>(routing_map.data.dptr),
@@ -159,7 +159,7 @@ void fused_scores_for_aux_loss_forward(const Tensor &logits, int num_tokens, int
 }
 
 template <typename DataType>
-__global__ void fused_scores_for_aux_loss_backward_kernel(const DataType *intermediate_output,
+__global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *intermediate_output,
                                                           const DataType *grad_scores,
                                                           int num_tokens, int num_experts, int topk,
                                                           int score_function,
@@ -260,7 +260,7 @@ __global__ void fused_scores_for_aux_loss_backward_kernel(const DataType *interm
 }
 
 template <typename DataType>
-void fused_scores_for_aux_loss_backward_kernel_launcher(const DataType *intermediate_output,
+void fused_score_for_moe_aux_loss_backward_kernel_launcher(const DataType *intermediate_output,
                                                         const DataType *grad_scores, int num_tokens,
                                                         int num_experts, int topk,
                                                         int score_function, DataType *grad_logits,
@@ -272,19 +272,19 @@ void fused_scores_for_aux_loss_backward_kernel_launcher(const DataType *intermed
                               +
                               num_experts * num_token_per_block * sizeof(DataType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(DataType);  // comp_buf
-  fused_scores_for_aux_loss_backward_kernel<DataType>
+  fused_score_for_moe_aux_loss_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
           grad_logits);
 }
 
-void fused_scores_for_aux_loss_backward(const Tensor &intermediate_output,
+void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
                                         const Tensor &grad_scores, int num_tokens, int num_experts,
                                         int topk, int score_function, Tensor &grad_logits,
                                         cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_scores.data.dtype, DataType,
-      fused_scores_for_aux_loss_backward_kernel_launcher<DataType>(
+      fused_score_for_moe_aux_loss_backward_kernel_launcher<DataType>(
           reinterpret_cast<DataType *>(intermediate_output.data.dptr),
           reinterpret_cast<DataType *>(grad_scores.data.dptr), num_tokens, num_experts, topk,
           score_function, reinterpret_cast<DataType *>(grad_logits.data.dptr), stream););
@@ -292,26 +292,26 @@ void fused_scores_for_aux_loss_backward(const Tensor &intermediate_output,
 
 }  // namespace transformer_engine
 
-void nvte_fused_scores_for_aux_loss_forward(const NVTETensor logits, int num_tokens,
+void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
                                             int num_experts, int topk, int score_function,
                                             NVTETensor scores, const NVTETensor routing_map,
                                             const NVTETensor intermediate_output,
                                             cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_scores_for_aux_loss_forward);
+  NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_scores_for_aux_loss_forward(*convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
+  fused_score_for_moe_aux_loss_forward(*convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
                                     score_function, *convertNVTETensorCheck(scores),
                                     *convertNVTETensorCheck(routing_map),
                                     *convertNVTETensorCheck(intermediate_output), stream);
 }
 
-void nvte_fused_scores_for_aux_loss_backward(const NVTETensor intermediate_output,
+void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_output,
                                              const NVTETensor grad_scores, int num_tokens,
                                              int num_experts, int topk, int score_function,
                                              NVTETensor grad_logits, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_scores_for_aux_loss_backward);
+  NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_backward);
   using namespace transformer_engine;
-  fused_scores_for_aux_loss_backward(
+  fused_score_for_moe_aux_loss_backward(
       *convertNVTETensorCheck(intermediate_output), *convertNVTETensorCheck(grad_scores),
       num_tokens, num_experts, topk, score_function, *convertNVTETensorCheck(grad_logits), stream);
 }
