@@ -108,10 +108,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
-                                             std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list, DType otype);
-
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
@@ -182,9 +178,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  **************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop);
+                    std::optional<at::Tensor> noop_flag);
 
 py::object dequantize(const py::handle &input, DType otype);
+
+std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
+                                              std::vector<py::handle> quantizer_list);
+
+std::vector<py::object> split_quantize(const at::Tensor &tensor,
+                                       const std::vector<int> &split_sections,
+                                       std::vector<py::handle> quantizer_list);
 
 /***************************************************************************************************
  * Bias gradient fusions
@@ -365,6 +368,9 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
 
+void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
+                               std::vector<size_t> input_row_list,
+                               std::vector<size_t> unpadded_input_row_list);
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/

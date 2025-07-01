@@ -24,6 +24,7 @@ from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
+from .._common import maybe_dequantize
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -293,10 +294,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 )
                 dy_local = grad_output_quantizer(dy_local)
         else:
-            if isinstance(dy_local, QuantizedTensorBase):
-                dy_local = dy_local.dequantize(dtype=dtype)
-            elif dy_local.dtype != dtype:
-                dy_local = dy_local.to(dtype=dtype)
+            dy_local = maybe_dequantize(dy_local, dtype)
 
         # Cast weight tensor dtype if needed
         if weight is None:
@@ -307,10 +305,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 weight_quantizer.set_usage(columnwise=True)
                 w = weight_quantizer(w)
         else:
-            if isinstance(w, QuantizedTensorBase):
-                w = w.dequantize(dtype=dtype)
-            elif w.dtype != dtype:
-                w = w.to(dtype=dtype)
+            w = maybe_dequantize(w, dtype)
 
         # Cast input tensor dtype if needed
         x_local = None
@@ -323,10 +318,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                     input_quantizer.set_usage(columnwise=True)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensorBase):
-                    x_local = x_local.dequantize(dtype=dtype)
-                elif x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
 
         # dgrad GEMM
         dx_local = None
