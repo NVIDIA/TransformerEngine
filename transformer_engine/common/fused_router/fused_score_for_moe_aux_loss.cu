@@ -11,10 +11,10 @@ namespace transformer_engine {
 
 template <typename DataType>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
-                                                         int num_experts, int topk,
-                                                         int score_function, DataType *scores,
-                                                         bool *routing_map,
-                                                         DataType *intermediate_output) {
+                                                            int num_experts, int topk,
+                                                            int score_function, DataType *scores,
+                                                            bool *routing_map,
+                                                            DataType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
      * - Assume the sizeof(DataType) >= sizeof(int),
@@ -146,9 +146,9 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
 }
 
 void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
-                                       int topk, int score_function, Tensor &scores,
-                                       Tensor &routing_map, Tensor &intermediate_output,
-                                       cudaStream_t stream) {
+                                          int topk, int score_function, Tensor &scores,
+                                          Tensor &routing_map, Tensor &intermediate_output,
+                                          cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
       fused_score_for_moe_aux_loss_forward_kernel_launcher<DataType>(
@@ -160,10 +160,10 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
 
 template <typename DataType>
 __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *intermediate_output,
-                                                          const DataType *grad_scores,
-                                                          int num_tokens, int num_experts, int topk,
-                                                          int score_function,
-                                                          DataType *grad_logits) {
+                                                             const DataType *grad_scores,
+                                                             int num_tokens, int num_experts,
+                                                             int topk, int score_function,
+                                                             DataType *grad_logits) {
   /***
      * Section: Global Variables/Addresses init
      * - Assume the sizeof(DataType) >= sizeof(int),
@@ -260,11 +260,9 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
 }
 
 template <typename DataType>
-void fused_score_for_moe_aux_loss_backward_kernel_launcher(const DataType *intermediate_output,
-                                                        const DataType *grad_scores, int num_tokens,
-                                                        int num_experts, int topk,
-                                                        int score_function, DataType *grad_logits,
-                                                        cudaStream_t stream) {
+void fused_score_for_moe_aux_loss_backward_kernel_launcher(
+    const DataType *intermediate_output, const DataType *grad_scores, int num_tokens,
+    int num_experts, int topk, int score_function, DataType *grad_logits, cudaStream_t stream) {
   // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
@@ -279,9 +277,9 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(const DataType *inter
 }
 
 void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
-                                        const Tensor &grad_scores, int num_tokens, int num_experts,
-                                        int topk, int score_function, Tensor &grad_logits,
-                                        cudaStream_t stream) {
+                                           const Tensor &grad_scores, int num_tokens,
+                                           int num_experts, int topk, int score_function,
+                                           Tensor &grad_logits, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_scores.data.dtype, DataType,
       fused_score_for_moe_aux_loss_backward_kernel_launcher<DataType>(
@@ -293,22 +291,22 @@ void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
 }  // namespace transformer_engine
 
 void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
-                                            int num_experts, int topk, int score_function,
-                                            NVTETensor scores, const NVTETensor routing_map,
-                                            const NVTETensor intermediate_output,
-                                            cudaStream_t stream) {
+                                               int num_experts, int topk, int score_function,
+                                               NVTETensor scores, const NVTETensor routing_map,
+                                               const NVTETensor intermediate_output,
+                                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_score_for_moe_aux_loss_forward(*convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
-                                    score_function, *convertNVTETensorCheck(scores),
-                                    *convertNVTETensorCheck(routing_map),
-                                    *convertNVTETensorCheck(intermediate_output), stream);
+  fused_score_for_moe_aux_loss_forward(*convertNVTETensorCheck(logits), num_tokens, num_experts,
+                                       topk, score_function, *convertNVTETensorCheck(scores),
+                                       *convertNVTETensorCheck(routing_map),
+                                       *convertNVTETensorCheck(intermediate_output), stream);
 }
 
 void nvte_fused_score_for_moe_aux_loss_backward(const NVTETensor intermediate_output,
-                                             const NVTETensor grad_scores, int num_tokens,
-                                             int num_experts, int topk, int score_function,
-                                             NVTETensor grad_logits, cudaStream_t stream) {
+                                                const NVTETensor grad_scores, int num_tokens,
+                                                int num_experts, int topk, int score_function,
+                                                NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_backward);
   using namespace transformer_engine;
   fused_score_for_moe_aux_loss_backward(

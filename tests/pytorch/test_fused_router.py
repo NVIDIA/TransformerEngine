@@ -14,6 +14,7 @@ torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
 
+
 # Pytorch-based group topk
 def group_limited_topk(
     scores: torch.Tensor,

@@ -252,10 +252,11 @@ void fused_topk_with_score_function_forward_kernel_launcher(
 }
 
 void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens, int num_experts,
-                                        int topk, bool use_pre_softmax, int num_groups,
-                                        int group_topk, float scaling_factor, int score_function,
-                                        const Tensor expert_bias, Tensor probs, Tensor routing_map,
-                                        Tensor intermediate_output, cudaStream_t stream) {
+                                            int topk, bool use_pre_softmax, int num_groups,
+                                            int group_topk, float scaling_factor,
+                                            int score_function, const Tensor expert_bias,
+                                            Tensor probs, Tensor routing_map,
+                                            Tensor intermediate_output, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
       TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
@@ -440,11 +441,11 @@ void fused_topk_with_score_function_backward_kernel_launcher(
 }
 
 void fused_topk_with_score_function_backward(const Tensor &routing_map,
-                                         const Tensor &intermediate_output,
-                                         const Tensor &grad_probs, int num_tokens, int num_experts,
-                                         int topk, bool use_pre_softmax, float scaling_factor,
-                                         int score_function, Tensor &grad_logits,
-                                         cudaStream_t stream) {
+                                             const Tensor &intermediate_output,
+                                             const Tensor &grad_probs, int num_tokens,
+                                             int num_experts, int topk, bool use_pre_softmax,
+                                             float scaling_factor, int score_function,
+                                             Tensor &grad_logits, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_logits.data.dtype, DataType,
       fused_topk_with_score_function_backward_kernel_launcher<DataType>(
@@ -457,12 +458,11 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map,
 
 }  // namespace transformer_engine
 
-void nvte_fused_topk_with_score_function_forward(const NVTETensor logits, int num_tokens,
-                                             int num_experts, int topk, bool use_pre_softmax,
-                                             int num_groups, int group_topk, float scaling_factor,
-                                             int score_function, const NVTETensor expert_bias,
-                                             NVTETensor probs, NVTETensor routing_map,
-                                             NVTETensor intermediate_output, cudaStream_t stream) {
+void nvte_fused_topk_with_score_function_forward(
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
+    int num_groups, int group_topk, float scaling_factor, int score_function,
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTETensor intermediate_output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
   fused_topk_with_score_function_forward(
@@ -473,11 +473,11 @@ void nvte_fused_topk_with_score_function_forward(const NVTETensor logits, int nu
 }
 
 void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
-                                              const NVTETensor intermediate_output,
-                                              const NVTETensor grad_probs, int num_tokens,
-                                              int num_experts, int topk, bool use_pre_softmax,
-                                              float scaling_factor, int score_function,
-                                              NVTETensor grad_logits, cudaStream_t stream) {
+                                                  const NVTETensor intermediate_output,
+                                                  const NVTETensor grad_probs, int num_tokens,
+                                                  int num_experts, int topk, bool use_pre_softmax,
+                                                  float scaling_factor, int score_function,
+                                                  NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
   using namespace transformer_engine;
   fused_topk_with_score_function_backward(

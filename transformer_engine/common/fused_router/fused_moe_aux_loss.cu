@@ -12,10 +12,10 @@ namespace transformer_engine {
 
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
-                                              const IndexType* tokens_per_expert,
-                                              int total_num_tokens, int num_tokens, int num_experts,
-                                              int topk, float coeff, DataType* aux_loss,
-                                              float* Const_buf) {
+                                                  const IndexType* tokens_per_expert,
+                                                  int total_num_tokens, int num_tokens,
+                                                  int num_experts, int topk, float coeff,
+                                                  DataType* aux_loss, float* Const_buf) {
 #if __CUDA_ARCH__ >= 900
   // Using cooperative_groups to manage the cluster
   namespace cg = cooperative_groups;
@@ -153,10 +153,11 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
 
 template <typename DataType, typename IndexType>
 void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
-                                            const IndexType* tokens_per_expert,
-                                            int total_num_tokens, int num_tokens, int num_experts,
-                                            int topk, float coeff, DataType* aux_loss,
-                                            float* Const_buf, cudaStream_t stream) {
+                                                const IndexType* tokens_per_expert,
+                                                int total_num_tokens, int num_tokens,
+                                                int num_experts, int topk, float coeff,
+                                                DataType* aux_loss, float* Const_buf,
+                                                cudaStream_t stream) {
   cudaLaunchConfig_t config = {0};
   int cluster_size = 8;
   config.gridDim = cluster_size;
@@ -181,8 +182,9 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
 }
 
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
-                            int total_num_tokens, int num_tokens, int num_experts, int topk,
-                            float coeff, Tensor& aux_loss, Tensor& Const_buf, cudaStream_t stream) {
+                                int total_num_tokens, int num_tokens, int num_experts, int topk,
+                                float coeff, Tensor& aux_loss, Tensor& Const_buf,
+                                cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
@@ -196,9 +198,9 @@ void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_ex
 
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
-                                               const IndexType* tokens_per_expert, int num_tokens,
-                                               int num_experts, DataType* grad_aux_loss,
-                                               DataType* grad_probs) {
+                                                   const IndexType* tokens_per_expert,
+                                                   int num_tokens, int num_experts,
+                                                   DataType* grad_aux_loss, DataType* grad_probs) {
   int global_warp_num = gridDim.x * blockDim.x / kThreadsPerWarp;
   int global_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -217,9 +219,9 @@ __global__ void fused_moe_aux_loss_backward_kernel(const float* Const_buf,
 
 template <typename DataType, typename IndexType>
 void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
-                                             const IndexType* tokens_per_expert, int num_tokens,
-                                             int num_experts, DataType* grad_aux_loss,
-                                             DataType* grad_probs, cudaStream_t stream) {
+                                                 const IndexType* tokens_per_expert, int num_tokens,
+                                                 int num_experts, DataType* grad_aux_loss,
+                                                 DataType* grad_probs, cudaStream_t stream) {
   // Meta data for the kernel
   int block_size = 256;
   int grid_size = (num_tokens + block_size - 1) / block_size;
@@ -228,8 +230,8 @@ void fused_moe_aux_loss_backward_kernel_launcher(const float* Const_buf,
 }
 
 void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_per_expert,
-                             int num_tokens, int num_experts, Tensor& grad_aux_loss,
-                             Tensor& grad_probs, cudaStream_t stream) {
+                                 int num_tokens, int num_experts, Tensor& grad_aux_loss,
+                                 Tensor& grad_probs, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       grad_aux_loss.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
@@ -244,24 +246,25 @@ void fused_moe_aux_loss_backward(const Tensor& Const_buf, const Tensor& tokens_p
 }  // namespace transformer_engine
 
 void nvte_fused_moe_aux_loss_forward(const NVTETensor probs, const NVTETensor tokens_per_expert,
-                                 int total_num_tokens, int num_tokens, int num_experts, int topk,
-                                 float coeff, NVTETensor aux_loss, NVTETensor Const_buf,
-                                 cudaStream_t stream) {
+                                     int total_num_tokens, int num_tokens, int num_experts,
+                                     int topk, float coeff, NVTETensor aux_loss,
+                                     NVTETensor Const_buf, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
   using namespace transformer_engine;
-  fused_moe_aux_loss_forward(*convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert),
-                         total_num_tokens, num_tokens, num_experts, topk, coeff,
-                         *convertNVTETensorCheck(aux_loss), *convertNVTETensorCheck(Const_buf),
-                         stream);
+  fused_moe_aux_loss_forward(
+      *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
+      num_tokens, num_experts, topk, coeff, *convertNVTETensorCheck(aux_loss),
+      *convertNVTETensorCheck(Const_buf), stream);
 }
 
-void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf, const NVTETensor tokens_per_expert,
-                                  int num_tokens, int num_experts, NVTETensor grad_aux_loss,
-                                  NVTETensor grad_probs, cudaStream_t stream) {
+void nvte_fused_moe_aux_loss_backward(const NVTETensor Const_buf,
+                                      const NVTETensor tokens_per_expert, int num_tokens,
+                                      int num_experts, NVTETensor grad_aux_loss,
+                                      NVTETensor grad_probs, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_moe_aux_loss_backward);
   using namespace transformer_engine;
   fused_moe_aux_loss_backward(*convertNVTETensorCheck(Const_buf),
-                          *convertNVTETensorCheck(tokens_per_expert), num_tokens, num_experts,
-                          *convertNVTETensorCheck(grad_aux_loss),
-                          *convertNVTETensorCheck(grad_probs), stream);
+                              *convertNVTETensorCheck(tokens_per_expert), num_tokens, num_experts,
+                              *convertNVTETensorCheck(grad_aux_loss),
+                              *convertNVTETensorCheck(grad_probs), stream);
 }
