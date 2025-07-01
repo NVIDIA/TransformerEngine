@@ -208,7 +208,9 @@ class _GroupedLinear(torch.autograd.Function):
                     # MCore FSDP creates main_grad lazily before backward
                     ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
                 else:
-                    ctx.main_grad_funcs = [lambda j=i: weights[j].main_grad for i in range(num_gemms)]
+                    ctx.main_grad_funcs = [
+                        lambda j=i: weights[j].main_grad for i in range(num_gemms)
+                    ]
             else:
                 ctx.main_grad_funcs = [lambda: None for i in range(num_gemms)]
             ctx.device = device

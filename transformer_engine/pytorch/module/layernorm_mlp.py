@@ -557,8 +557,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 # the main_grad buffer lazily before backprop
                 if hasattr(fc1_weight, "__fsdp_param__") and hasattr(fc2_weight, "__fsdp_param__"):
                     # MCore FSDP creates main_grad lazily before backward
-                    ctx.fc1_main_grad_func = fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
-                    ctx.fc2_main_grad_func = fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
+                    ctx.fc1_main_grad_func = (
+                        fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
+                    )
+                    ctx.fc2_main_grad_func = (
+                        fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
+                    )
                 else:
                     ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
                     ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
