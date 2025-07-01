@@ -493,7 +493,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
-                shape = list(inp.shape)
+                shape = list(inp_shape)
                 shape[0] *= tp_size if with_input_all_gather else 1
                 return out, ln_out_return.view(shape)
             return out, ln_out_return.view(inp_shape)
