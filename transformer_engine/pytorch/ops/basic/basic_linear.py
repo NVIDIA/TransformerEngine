@@ -964,6 +964,9 @@ class BasicLinear(BasicOperation):
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
+            if hasattr(self.weight, "__fsdp_param__"):
+                self.weight.main_grad = self.weight.get_main_grad()
+
             if not hasattr(self.weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
