@@ -56,7 +56,7 @@ def test_distributed(quantization):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "fp8_cs" and not fp8_available:
-        pytest.skip(fp8_available)
+        pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
     if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:

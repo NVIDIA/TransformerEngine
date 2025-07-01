@@ -8,6 +8,7 @@
 #include <cublas_v2.h>
 #include <cuda.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
+#include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
 
 namespace {
@@ -523,6 +525,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const auto B_alignment = _getAlignment(reinterpret_cast<uintptr_t>(param.B));
   const auto C_alignment = _getAlignment(reinterpret_cast<uintptr_t>(C));
   const auto D_alignment = _getAlignment(reinterpret_cast<uintptr_t>(D));
+  const auto workspace_alignment = _getAlignment(reinterpret_cast<uintptr_t>(workspace));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, &A_alignment, sizeof(A_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
@@ -531,6 +534,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, &C_alignment, sizeof(C_alignment)));
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
       preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, &D_alignment, sizeof(D_alignment)));
+  NVTE_CHECK(workspace_alignment % 256 == 0,
+             "cuBLAS workspace pointer must be aligned to 256 bytes, got ", workspace_alignment);
 
   const auto status =
       cublasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc, preference,
@@ -566,18 +571,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Bdesc));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Adesc));
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-}
-
-static std::once_flag init_flag;
-static cudaStream_t compute_streams[num_streams];
-static cudaEvent_t cublas_event[num_streams];
-
-// Warning: only call once per device!
-static void init_streams_and_events() {
-  for (int i = 0; i < num_streams; i++) {
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&compute_streams[i], cudaStreamNonBlocking, -1));
-    NVTE_CHECK_CUDA(cudaEventCreate(&cublas_event[i]));
-  }
 }
 
 }  // namespace transformer_engine
@@ -641,29 +634,31 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
                                    cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
   using namespace transformer_engine;
-  // Inits streams and events (once, globally)
-  std::call_once(init_flag, init_streams_and_events);
+
+  int num_streams = nvte_get_num_compute_streams();
 
   int num_stream_used = std::min(num_streams, num_gemms);
   // wait for current stream to finish
-  NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[0], stream));
+  NVTE_CHECK_CUDA(cudaEventRecord(detail::get_compute_stream_event(0), stream));
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(compute_streams[s], cublas_event[0]));
+    NVTE_CHECK_CUDA(
+        cudaStreamWaitEvent(detail::get_compute_stream(s), detail::get_compute_stream_event(0)));
   }
 
   for (int i = 0; i < num_gemms; i++) {
     nvte_cublas_gemm(A[i], B[i], D[i], bias[i], pre_gelu_out[i], transa, transb, grad,
                      workspace[i % num_streams], accumulate, use_split_accumulator, math_sm_count,
-                     compute_streams[i % num_streams]);
+                     detail::get_compute_stream(i % num_streams));
   }
 
   // record events on compute streams
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaEventRecord(cublas_event[s], compute_streams[s]));
+    NVTE_CHECK_CUDA(
+        cudaEventRecord(detail::get_compute_stream_event(s), detail::get_compute_stream(s)));
   }
   // wait for all compute streams to finish
   for (int s = 0; s < num_stream_used; s++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
 }
 

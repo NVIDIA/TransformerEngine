@@ -22,17 +22,18 @@ from ...distributed import (
 from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer, QuantizedTensor
-from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
-from .._common import (
+from .._common import maybe_dequantize
+from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
+    clear_tensor_data,
     devices_match,
 )
-from ...utils import clear_tensor_data
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -324,12 +325,38 @@ class BasicLinear(BasicOperation):
             weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
+            # Recipe-specific configuration
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if recipe.float8_current_scaling():
+                if any(
+                    not isinstance(q, Float8CurrentScalingQuantizer)
+                    for q in (input_quantizer, weight_quantizer, grad_output_quantizer)
+                ):
+                    raise RuntimeError(
+                        "FP8 current-scaling recipe is enabled, "
+                        f"but input quantizer is {input_quantizer.__class__.__name__}, "
+                        f"weight quantizer is {weight_quantizer.__class__.__name__}, "
+                        f"grad output quantizer is {grad_output_quantizer.__class__.__name__}"
+                    )
+                input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                input_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                weight_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                weight_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                grad_output_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+                grad_output_quantizer.amax_epsilon_scales = recipe.fp8_quant_fwd_inp.amax_epsilon
+                if self.sequence_parallel and self.tensor_parallel_mode == "column":
+                    input_quantizer.with_amax_reduction = True
+                    input_quantizer.amax_reduction_group = self.tensor_parallel_group
+                if self.sequence_parallel and self.tensor_parallel_mode == "row":
+                    grad_output_quantizer.with_amax_reduction = True
+                    grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+
             # Make sure weight tensor has correct quantizer
             # Note: Quantizer might have changed if quantization
             # recipe changed
-            if isinstance(weight_quantizer, Float8Quantizer) and isinstance(
-                weight, Float8TensorBase
-            ):
+            if isinstance(
+                weight_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+            ) and isinstance(weight, Float8TensorBase):
                 weight._quantizer = weight_quantizer
 
     @staticmethod
@@ -440,10 +467,8 @@ class BasicLinear(BasicOperation):
                     x_local = input_quantizer(x_local)
                 x = x_local
         else:
-            if isinstance(x_local, QuantizedTensor):
-                x_local = x_local.dequantize()
-            if x_local.dtype != dtype:
-                x_local = x_local.to(dtype=dtype)
+            x_local = maybe_dequantize(x_local, dtype)
+
             if with_x_all_gather:
                 x, x_async = gather_along_first_dim(
                     x_local,
@@ -455,16 +480,13 @@ class BasicLinear(BasicOperation):
 
         # Check weight tensor
         w = weight
-        w_is_quantized = isinstance(w, QuantizedTensor)
-        if with_quantized_compute and not w_is_quantized:
+        if not with_quantized_compute:
+            w = maybe_dequantize(w, dtype)
+        elif with_quantized_compute and not isinstance(w, QuantizedTensor):
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
-        elif not with_quantized_compute and w_is_quantized:
-            w = w.dequantize()
-        if not with_quantized_compute and w.dtype != dtype:
-            w = w.to(dtype=dtype)
 
         # Check output tensor
         y = out
@@ -674,10 +696,8 @@ class BasicLinear(BasicOperation):
                     dy_local = grad_output_quantizer(dy_local)
                 dy = dy_local
         else:
-            if isinstance(dy_local, QuantizedTensor):
-                dy_local = dy_local.dequantize()
-            if dy_local.dtype != dtype:
-                dy_local = dy_local.to(dtype=dtype)
+            dy_local = maybe_dequantize(dy_local, dtype)
+
             if with_dy_all_gather:
                 dy, dy_async = gather_along_first_dim(
                     dy_local,
@@ -713,10 +733,8 @@ class BasicLinear(BasicOperation):
                         x_local = input_quantizer(x_local)
                     x = x_local
             else:
-                if isinstance(x_local, QuantizedTensor):
-                    x_local = x_local.dequantize()
-                if x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
+
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -735,9 +753,8 @@ class BasicLinear(BasicOperation):
             if weight is None:
                 raise ValueError("Weight tensor is required to compute input grad")
             w = weight
-            w_is_quantized = isinstance(w, QuantizedTensor)
             if with_quantized_compute:
-                if w_is_quantized:
+                if isinstance(w, QuantizedTensor):
                     w.update_usage(columnwise_usage=True)
                 else:
                     if weight_quantizer is None:
@@ -745,10 +762,7 @@ class BasicLinear(BasicOperation):
                     weight_quantizer.set_usage(columnwise=True)
                     w = weight_quantizer(w)
             else:
-                if w_is_quantized:
-                    w = w.dequantize(dtype=dtype)
-                elif w.dtype != dtype:
-                    w = w.to(dtype=dtype)
+                w = maybe_dequantize(w, dtype)
 
             # Synchronize tensor-parallel communication
             _wait_async(dy_async)

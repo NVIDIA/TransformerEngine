@@ -38,22 +38,22 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
 
   # Wait for the process to finish
   wait
+  tail -n +7 "${TEST_CASE}_gpu_0.log"
 
   # Check and print the log content accordingly
-  if grep -q "FAILED" "${TEST_CASE}_gpu_0.log"; then
-    HAS_FAILURE=1
-    echo "... $TEST_CASE FAILED"
-    tail -n +7 "${TEST_CASE}_gpu_0.log"
-  elif grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
+  if grep -q "SKIPPED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE SKIPPED"
   elif grep -q "PASSED" "${TEST_CASE}_gpu_0.log"; then
     echo "... $TEST_CASE PASSED"
   else
-    echo "Invalid ${TEST_CASE}_gpu_0.log"
+    HAS_FAILURE=1
+    echo "... $TEST_CASE FAILED"
   fi
 
   # Remove the log file after processing it
+  wait
   rm ${TEST_CASE}_gpu_*.log
 done
 
+wait
 exit $HAS_FAILURE

@@ -77,6 +77,14 @@ def general_gemm(
         # There is not use_split_accumulator == False
         # implementation for Float8BlockwiseQTensorBase GEMM
         use_split_accumulator = True
+
+        # Check that data format is supported
+        if (
+            A._data_format != tex.Float8BlockScaleTensorFormat.GEMM_READY
+            or B._data_format != tex.Float8BlockScaleTensorFormat.GEMM_READY
+        ):
+            raise RuntimeError("GEMM with Float8BlockwiseQTensor requires GEMM_READY format")
+
     args = (
         A,
         transa,  # transa
