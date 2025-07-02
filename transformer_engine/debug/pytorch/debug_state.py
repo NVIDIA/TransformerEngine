@@ -66,6 +66,7 @@ class TEDebugState:
     def get_iteration(cls):
         """Returns the current iteration."""
         import nvdlfw_inspect.api as debug_api
+
         return debug_api.DEBUG_MANAGER._trainer_iteration_count
 
 

@@ -88,8 +88,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
         return {"underflows%"}
 
     def next_enabled_iter(self, start_step, end_step, start_end_list, freq, iteration):
-        if start_end_list:                  
-                intervals = sorted(start_end_list)
+        if start_end_list:
+            intervals = sorted(start_end_list)
         else:
             if start_step is None:
                 return None
@@ -103,13 +103,18 @@ class LogFp8TensorStats(BaseLogTensorStats):
             if candidate <= e:
                 return candidate
 
-
     @api_method
     def inspect_tensor_postquantize_enabled(
         self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
-        return self.next_enabled_iter(config.get("start_step", None), config.get("end_step", None), config.get("start_end_list", None), config.get("freq", 1), iteration)
+        return self.next_enabled_iter(
+            config.get("start_step", None),
+            config.get("end_step", None),
+            config.get("start_end_list", None),
+            config.get("freq", 1),
+            iteration,
+        )
 
     @api_method
     def inspect_tensor_postquantize(

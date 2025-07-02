@@ -92,10 +92,9 @@ class LogTensorStats(BaseLogTensorStats):
         """Returns stats this feature can log."""
         return BaseLogTensorStats._get_supported_stats_list(None) | {"cur_amax", "dynamic_range"}
 
-
     def next_enabled_iter(self, start_step, end_step, start_end_list, freq, iteration):
-        if start_end_list:                  
-                intervals = sorted(start_end_list)
+        if start_end_list:
+            intervals = sorted(start_end_list)
         else:
             if start_step is None:
                 return None
@@ -114,7 +113,13 @@ class LogTensorStats(BaseLogTensorStats):
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run look_at_tensor_before_process() in the forward."""
-        return self.next_enabled_iter(config.get("start_step", None), config.get("end_step", None), config.get("start_end_list", None), config.get("freq", 1), iteration)
+        return self.next_enabled_iter(
+            config.get("start_step", None),
+            config.get("end_step", None),
+            config.get("start_end_list", None),
+            config.get("freq", 1),
+            iteration,
+        )
 
     @api_method
     def inspect_tensor(
@@ -172,6 +177,3 @@ class LogTensorStats(BaseLogTensorStats):
             layer_name,
             extra_cachable_args=(tensor_name),
         )
-
-
-        

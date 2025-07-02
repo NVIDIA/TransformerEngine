@@ -4,6 +4,7 @@
 
 """Utils functions for the debug module."""
 
+
 def next_iter_for_debug(quantizers):
     """Returns True if at least one API call is made from DebugQuantizer."""
     if any(q.get_next_debug_iter() is None for q in quantizers):

@@ -430,27 +430,32 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
-    
-    def handle_multi_feature_output(self, api_name, multi_feature_outputs, features_to_invoke, **kwargs):
+
+    def handle_multi_feature_output(
+        self, api_name, multi_feature_outputs, features_to_invoke, **kwargs
+    ):
         """
         Handle multi-tensor output of the API calls.
         """
         if "enabled" in api_name:
             # *_enabled feature calls can return int, bool or None.
-            # If any of them returns bool, 
+            # If any of them returns bool,
             # then we return bool - this means that we cannot state anything
             # about enablement in the next steps.
             # If all of them return int, we return the minimum value,
             # representing the number of steps after the feature will be enabled
             # next time. This also means that the feature is enabled in current step.
             all_ret_int = all(
-                type(feature_output) is int for feature_output in multi_feature_outputs.values())
+                type(feature_output) is int for feature_output in multi_feature_outputs.values()
+            )
             if all_ret_int:
                 return min(multi_feature_outputs.values())
             else:
                 return any(feature_output for feature_output in multi_feature_outputs.values())
         else:
-            return super().handle_multi_feature_output(api_name, multi_feature_outputs, features_to_invoke, **kwargs)
+            return super().handle_multi_feature_output(
+                api_name, multi_feature_outputs, features_to_invoke, **kwargs
+            )
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""

@@ -38,6 +38,7 @@ API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
+
 class DebugQuantizer(Quantizer):
     """
     DebugQuantizer is a Quantizer object used for debugging with nvidia-dlframework-inspect.
@@ -69,7 +70,7 @@ class DebugQuantizer(Quantizer):
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
-        self.next_debug_iter = float('inf')
+        self.next_debug_iter = float("inf")
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
         # rowwise_tensor_plan, and columnwise_tensor_plan are computed.
@@ -145,7 +146,9 @@ class DebugQuantizer(Quantizer):
             if self.next_debug_iter is None:
                 self.next_debug_iter = inspect_tensor_postquantize_enabled_rowwise
             else:
-                self.next_debug_iter = min(self.next_debug_iter, inspect_tensor_postquantize_enabled_rowwise)
+                self.next_debug_iter = min(
+                    self.next_debug_iter, inspect_tensor_postquantize_enabled_rowwise
+                )
             inspect_tensor_postquantize_enabled_rowwise = True
         elif inspect_tensor_postquantize_enabled_rowwise is True:
             self.next_debug_iter = self.iteration + 1
@@ -161,7 +164,9 @@ class DebugQuantizer(Quantizer):
             if self.next_debug_iter is None:
                 self.next_debug_iter = inspect_tensor_postquantize_enabled_columnwise
             else:
-                self.next_debug_iter = min(self.next_debug_iter, inspect_tensor_postquantize_enabled_columnwise)
+                self.next_debug_iter = min(
+                    self.next_debug_iter, inspect_tensor_postquantize_enabled_columnwise
+                )
             inspect_tensor_postquantize_enabled_columnwise = True
         elif inspect_tensor_postquantize_enabled_columnwise is True:
             self.next_debug_iter = self.iteration + 1
@@ -576,10 +581,13 @@ class DebugQuantizedTensor(QuantizedTensorBase):
             self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
         if isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
             self.columnwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
-        
-        
+
         if rowwise_usage and self.rowwise_gemm_tensor is None:
-            raise RuntimeError("Cannot recreate rowwise tensor from columnwise tensor in debug mode.")
-        
+            raise RuntimeError(
+                "Cannot recreate rowwise tensor from columnwise tensor in debug mode."
+            )
+
         if columnwise_usage and self.columnwise_gemm_tensor is None:
-            raise RuntimeError("Cannot recreate columnwise tensor from rowwise tensor is debug mode.")
+            raise RuntimeError(
+                "Cannot recreate columnwise tensor from rowwise tensor is debug mode."
+            )

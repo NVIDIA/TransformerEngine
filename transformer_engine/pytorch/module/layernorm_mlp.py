@@ -222,7 +222,7 @@ class _LayerNormMLP(torch.autograd.Function):
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
-        if debug: # turn off userbuffers in debug mode
+        if debug:  # turn off userbuffers in debug mode
             ub_overlap_ag = False
             ub_overlap_rs = False
             ub_overlap_rs_dgrad = False

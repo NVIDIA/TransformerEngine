@@ -137,7 +137,7 @@ class _Linear(torch.autograd.Function):
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
-        if debug: # turn off userbuffers in debug mode
+        if debug:  # turn off userbuffers in debug mode
             ub_overlap_rs_fprop = False
             ub_overlap_ag_fprop = False
             ub_overlap_rs_dgrad = False
@@ -1307,7 +1307,7 @@ class Linear(TransformerEngineBaseModule):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
             else:
                 bias_tensor = None
-            
+
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
                 if not debug
@@ -1317,7 +1317,7 @@ class Linear(TransformerEngineBaseModule):
                 if next_iter_for_debug(quantizers) is not None:
                     self.next_iter_for_debug = next_iter_for_debug(quantizers)
                     print(f"next_iter_for_debug: {self.next_iter_for_debug}")
-                
+
                 if isinstance(weight_tensor, QuantizedTensor):
                     raise RuntimeError("FP8 weights are not supported in debug mode.")
 
