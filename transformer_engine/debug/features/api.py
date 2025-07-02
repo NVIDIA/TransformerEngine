@@ -5,7 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union
+from typing import Dict, Union, Tuple
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -133,9 +133,13 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> Union[bool, Tuple[bool, int]]:
         """
-        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. 
+        It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
 
         Parameters
         ----------
@@ -153,7 +157,7 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int]] - default is False
         """
         return False
 
@@ -298,9 +302,12 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> Union[bool, Tuple[bool, int]]:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
+        
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
 
         Parameters
         ----------
@@ -316,7 +323,7 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int]] - default is False
         """
         return False
 
@@ -327,11 +334,14 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> Union[bool, Tuple[bool, int]]:
         """
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
+
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor_postquantize is large.
 
         Parameters
         ----------
@@ -349,7 +359,7 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int]] - default is False
         """
         return False
 
@@ -439,20 +449,21 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         Handle multi-tensor output of the API calls.
         """
         if "enabled" in api_name:
-            # *_enabled feature calls can return int, bool or None.
-            # If any of them returns bool,
-            # then we return bool - this means that we cannot state anything
+            # *_enabled feature calls can return bool, or tuple (bool, int).
+            # If any of them returns bool, then we return bool - this means that we cannot state anything
             # about enablement in the next steps.
-            # If all of them return int, we return the minimum value,
-            # representing the number of steps after the feature will be enabled
-            # next time. This also means that the feature is enabled in current step.
-            all_ret_int = all(
-                type(feature_output) is int for feature_output in multi_feature_outputs.values()
+            # If all of them return a tuple (bool, int), we return the minimum value,
+            # representing the number of steps after the feature will be enabled next time.
+            all_ret_tuple = all(
+                type(feature_output) is tuple for feature_output in multi_feature_outputs.values()
             )
-            if all_ret_int:
-                return min(multi_feature_outputs.values())
+            if all_ret_tuple:
+                run_current = any(feature_output[0] for feature_output in multi_feature_outputs.values())
+                next_iter = min(feature_output[1] for feature_output in multi_feature_outputs.values())
+                return run_current, next_iter
             else:
-                return any(feature_output for feature_output in multi_feature_outputs.values())
+                run_current = any(feature_output for feature_output in multi_feature_outputs.values())
+                return run_current, None
         else:
             return super().handle_multi_feature_output(
                 api_name, multi_feature_outputs, features_to_invoke, **kwargs

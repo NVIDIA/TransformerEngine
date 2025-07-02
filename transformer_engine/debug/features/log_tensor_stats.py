@@ -98,13 +98,14 @@ class LogTensorStats(BaseLogTensorStats):
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run look_at_tensor_before_process() in the forward."""
-        return next_enabled_iter(
+        run_current, next_iter = next_enabled_iter(
             config.get("start_step", None),
             config.get("end_step", None),
             config.get("start_end_list", None),
             config.get("freq", 1),
             iteration,
         )
+        return run_current, next_iter
 
     @api_method
     def inspect_tensor(
