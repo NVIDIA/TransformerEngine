@@ -40,12 +40,6 @@ STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
 
-def _min_none(a, b):
-    if a is None or b is None:
-        return None
-    return min(a, b)
-
-
 class DebugQuantizer(Quantizer):
     """
     DebugQuantizer is a Quantizer object used for debugging with nvidia-dlframework-inspect.
@@ -60,7 +54,6 @@ class DebugQuantizer(Quantizer):
         parent_quantizer: Optional[Quantizer],
         tp_group: torch.distributed.ProcessGroup,
     ):
-        import nvdlfw_inspect.api as debug_api
 
         super().__init__(rowwise=True, columnwise=True)
         self.layer_name = layer_name
@@ -366,8 +359,7 @@ class DebugQuantizer(Quantizer):
             columnwise_gemm_tensor=columnwise_gemm_tensor,
             quantizer=self,
             layer_name=self.layer_name,
-            tensor_name=self.tensor_name,
-            original_tensor=tensor,
+            tensor_name=self.tensor_name
         )
 
     def process_gemm_output(self, tensor: torch.Tensor):
@@ -519,8 +511,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         columnwise_gemm_tensor,
         quantizer,
         layer_name=None,
-        tensor_name=None,
-        original_tensor=None,
+        tensor_name=None
     ):
 
         self.rowwise_gemm_tensor = rowwise_gemm_tensor

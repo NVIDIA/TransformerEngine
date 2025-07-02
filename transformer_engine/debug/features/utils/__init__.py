@@ -20,7 +20,7 @@ def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
         intervals = [(start_step, end)]
 
     for s, e in intervals:
-        if iteration % freq == 0 and iteration >= s and iteration <= e:
+        if iteration % freq == 0 and s <= iteration <= e:
             run_current = True
 
         first = max(iteration + 1, s)
@@ -28,3 +28,5 @@ def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
         candidate = first if offset == 0 else first + (freq - offset)
         if candidate <= e:
             return run_current, candidate
+
+    raise RuntimeError("No next iteration found")

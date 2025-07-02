@@ -430,7 +430,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
     def output_assertions_hook(self, api_name, ret, **kwargs):
         """Output hooks used to check correctness of the outputs of the API calls."""
         if "enabled" in api_name or api_name == "fp8_gemm":
-            assert isinstance(ret, bool) or isinstance(ret, int)
+            assert isinstance(ret, (bool, tuple))
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
@@ -455,7 +455,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             # If all of them return a tuple (bool, int), we return the minimum value,
             # representing the number of steps after the feature will be enabled next time.
             all_ret_tuple = all(
-                type(feature_output) is tuple for feature_output in multi_feature_outputs.values()
+                isinstance(feature_output, tuple) for feature_output in multi_feature_outputs.values()
             )
             if all_ret_tuple:
                 run_current = any(
@@ -465,15 +465,13 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                     feature_output[1] for feature_output in multi_feature_outputs.values()
                 )
                 return run_current, next_iter
-            else:
-                run_current = any(
-                    feature_output for feature_output in multi_feature_outputs.values()
-                )
-                return run_current, None
-        else:
-            return super().handle_multi_feature_output(
-                api_name, multi_feature_outputs, features_to_invoke, **kwargs
+            run_current = any(
+                feature_output for feature_output in multi_feature_outputs.values()
             )
+            return run_current, None
+        return super().handle_multi_feature_output(
+            api_name, multi_feature_outputs, features_to_invoke, **kwargs
+        )
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""
