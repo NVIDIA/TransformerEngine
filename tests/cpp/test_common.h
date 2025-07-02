@@ -310,10 +310,10 @@ constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
-constexpr size_t scale_tensor_alignment_X_rowwise = 4;
-constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
-constexpr size_t scale_tensor_alignment_X_colwise = 128;
-constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t scale_tensor_alignment_X_rowwise = 128;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 4;
+constexpr size_t scale_tensor_alignment_X_colwise = 4;
+constexpr size_t scale_tensor_alignment_Y_colwise = 128;
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
     return (N - 1 + M) / M;

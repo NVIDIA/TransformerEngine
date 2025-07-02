@@ -195,6 +195,8 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
 endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --generate-line-info")	# Add source code mapping into the profiler output 
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --ptxas-options=-v")		# Add info about registers usage
 
 # Number of parallel build jobs
 if(ENV{MAX_JOBS})

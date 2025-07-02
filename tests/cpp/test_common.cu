@@ -147,16 +147,16 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     auto block_alignment = std::vector<size_t>{128ul, 4ul};
     {
-      auto alignment = block_alignment[0];
+      auto alignment = block_alignment[1];
       auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
-      alignment = block_alignment[1];
+      alignment = block_alignment[0];
       auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(16)), alignment) * alignment;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto alignment = block_alignment[1];
+      auto alignment = block_alignment[0];
       auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(16)), alignment) * alignment;
-      alignment = block_alignment[0];
+      alignment = block_alignment[1];
       auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
@@ -733,21 +733,41 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
                              const double rel_tolerable_mismatches_limit)
 {
   using UpcastType = typename CastToType<T>::type;
+  auto [atol_fp8e4m3, rtol_fp8e4m3] = getTolerances(DType::kFloat8E4M3);
 
   const size_t N = row_blocks * col_blocks;
   const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
                                                      std::ceil(N * rel_tolerable_mismatches_limit));
+  printf("row_blocks: %lu, col_blocks: %lu, tolerable_mismatches_limit: %lu\n",
+         row_blocks, col_blocks, tolerable_mismatches_limit);
   mismatches_num = 0;
   std::vector<int> mismatch_indices;
 
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int idx = i * stride + j;
-      const int test_val = static_cast<UpcastType>(test[idx]);
-      const int ref_val = static_cast<UpcastType>(ref[idx]);
-      const int abs_delta = std::abs(test_val - ref_val);
+      const UpcastType t = static_cast<UpcastType>(test[idx]);
+      const UpcastType r = static_cast<UpcastType>(ref[idx]);
 
-      if (abs_delta > atol) {
+      bool assertion = false;
+
+      if (std::is_same<T, uint8_t>::value) {
+        assertion = std::abs(t - r) > atol;
+      } else {       
+        const bool mismatch = (fabs(t - r) > atol_fp8e4m3)
+                              && (r == 0 || fabs((t - r) / r) > rtol_fp8e4m3);
+        if (mismatch) {
+          /* Check if it is just a failure of round to nearest choosing different
+            side of the real value */
+          const double mean = (t + r) / 2;
+          const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
+          const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+          const double cast_mean_p = static_cast<double>(static_cast<T>(mean_p));
+          const double cast_mean_m = static_cast<double>(static_cast<T>(mean_m));
+          assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+        }
+      }
+      if (assertion) {
         mismatches_num++;
         mismatch_indices.push_back(idx);
       }

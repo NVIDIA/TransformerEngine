@@ -1263,21 +1263,21 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
   const Tensor gated_input_tensor = *convertNVTETensorCheck(gated_input);
   Tensor *output_tensor = convertNVTETensorCheck(output);
 
-  if (is_supported_by_CC_100()) {
-    quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
-                                                      output_tensor, stream);
-  } else {
-    if (is_delayed_tensor_scaling(output_tensor->scaling_mode)) {
-      if constexpr (IS_DGATED) {
-        cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, stream);
-      } else {
-        cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, stream);
-      }
-    } else {
-      // MX scaling
-      NVTE_ERROR("Not supported by the Arch < 10.0");
-    }
-  }
+  // if (is_supported_by_CC_100()) {
+  //   quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
+  //                                                     output_tensor, stream);
+  // } else {
+  //   if (is_delayed_tensor_scaling(output_tensor->scaling_mode)) {
+  //     if constexpr (IS_DGATED) {
+  //       cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, stream);
+  //     } else {
+  //       cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, stream);
+  //     }
+  //   } else {
+  //     // MX scaling
+  //     NVTE_ERROR("Not supported by the Arch < 10.0");
+  //   }
+  // }
 }
 }  // namespace detail
 

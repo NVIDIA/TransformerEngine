@@ -226,28 +226,28 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
-  const size_t N = product(input.data.shape);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      input.data.dtype, IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-          output->data.dtype, OType,
+  // const size_t N = product(input.data.shape);
+  // TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+  //     input.data.dtype, IType,
+  //     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+  //         output->data.dtype, OType,
 
-          constexpr int nvec = 32 / sizeof(OType);
-          detail::DequantizeParam p;
-          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
-          VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
-              reinterpret_cast<const IType *>(input.data.dptr), nullptr,
-              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
+  //         constexpr int nvec = 32 / sizeof(OType);
+  //         detail::DequantizeParam p;
+  //         p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
+  //         VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
+  //             reinterpret_cast<const IType *>(input.data.dptr), nullptr,
+  //             reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
+  //             stream););  // NOLINT(*)
+  // );                      // NOLINT(*)
 }
 
-static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);
@@ -268,67 +268,67 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
-  // TODO: Make more general
-  const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
-  const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
+  // // TODO: Make more general
+  // const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
+  // const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
-  const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
-  const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
+  // const size_t rows = input.flat_first_dim();
+  // const size_t cols = input.flat_last_dim();
+  // const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
+  // const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
 
-  const size_t unpadded_scales_Y_rowwise = rows;
-  const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
-  const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
-  const size_t unpadded_scales_X_colwise = cols;
+  // const size_t unpadded_scales_Y_rowwise = rows;
+  // const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  // const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
+  // const size_t unpadded_scales_X_colwise = cols;
 
-  const size_t scales_Y_rowwise =
-      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
-      scale_tensor_alignment_Y_rowwise;
-  const size_t scales_X_rowwise =
-      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
-      scale_tensor_alignment_X_rowwise;
-  const size_t scales_Y_colwise =
-      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
-      scale_tensor_alignment_Y_colwise;
-  const size_t scales_X_colwise =
-      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
-      scale_tensor_alignment_X_colwise;
+  // const size_t scales_Y_rowwise =
+  //     DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
+  //     scale_tensor_alignment_Y_rowwise;
+  // const size_t scales_X_rowwise =
+  //     DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
+  //     scale_tensor_alignment_X_rowwise;
+  // const size_t scales_Y_colwise =
+  //     DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
+  //     scale_tensor_alignment_Y_colwise;
+  // const size_t scales_X_colwise =
+  //     DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
+  //     scale_tensor_alignment_X_colwise;
 
-  const e8m0_t *const scales_ptr =
-      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
-                          : reinterpret_cast<e8m0_t *>(input.columnwise_scale_inv.dptr);
+  // const e8m0_t *const scales_ptr =
+  //     use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
+  //                         : reinterpret_cast<e8m0_t *>(input.columnwise_scale_inv.dptr);
 
-  const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
+  // const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
 
-  const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
+  // const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
 
-  const dim3 block(THREADS_PER_CHUNK);
-  const dim3 grid(chunks_X, chunks_Y);
+  // const dim3 block(THREADS_PER_CHUNK);
+  // const dim3 grid(chunks_X, chunks_Y);
 
-  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-      scale_dim_Y_colwise, SCALE_DIM_Y,
-      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-          scale_dim_X_rowwise, SCALE_DIM_X,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              input.dtype(), IType,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-                  output->dtype(), OType,
+  // TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+  //     scale_dim_Y_colwise, SCALE_DIM_Y,
+  //     TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+  //         scale_dim_X_rowwise, SCALE_DIM_X,
+  //         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+  //             input.dtype(), IType,
+  //             TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+  //                 output->dtype(), OType,
 
-                  alignas(64) CUtensorMap tensor_map_input{};
-                  alignas(64) CUtensorMap tensor_map_output{};
+  //                 alignas(64) CUtensorMap tensor_map_input{};
+  //                 alignas(64) CUtensorMap tensor_map_output{};
 
-                  create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
-                  create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
+  //                 create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
+  //                                      SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
+  //                 create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
+  //                                      SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
 
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
-          );                                                                  // NOLINT(*)
-      );                                                                      // NOLINT(*)
-  );                                                                          // NOLINT(*)
+  //                 dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+  //                 <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
+  //                                              rows, cols, scales_stride););  // NOLINT(*)
+  //         );                                                                  // NOLINT(*)
+  //     );                                                                      // NOLINT(*)
+  // );                                                                          // NOLINT(*)
 }
 }  // namespace dequantization
 
@@ -338,18 +338,18 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
   CheckInputTensor(input, "cast_input");
   CheckOutputTensor(*output, "cast_output");
 
-  if (is_tensor_scaling(input.scaling_mode)) {
-    dequantization::fp8_dequantize(input, output, stream);
-  } else if (is_mxfp_scaling(input.scaling_mode)) {
-    if (is_supported_by_CC_100()) {
-      dequantization::mxfp8_dequantize(input, output, stream);
-    } else {
-      NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
-    }
-  } else {
-    // TODO(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
-    NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
-  }
+  // if (is_tensor_scaling(input.scaling_mode)) {
+  //   dequantization::fp8_dequantize(input, output, stream);
+  // } else if (is_mxfp_scaling(input.scaling_mode)) {
+  //   if (is_supported_by_CC_100()) {
+  //     dequantization::mxfp8_dequantize(input, output, stream);
+  //   } else {
+  //     NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
+  //   }
+  // } else {
+  //   // TODO(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
+  //   NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
+  // }
 }
 
 }  // namespace detail

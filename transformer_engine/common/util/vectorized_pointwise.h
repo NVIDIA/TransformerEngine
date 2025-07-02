@@ -343,22 +343,22 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
     constexpr size_t max_blocks = 65535;
     num_blocks = std::min(num_blocks, max_blocks);
 
-    switch (align) {
-      case Alignment::SAME_ALIGNED:
-        unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
-        break;
-      case Alignment::SAME_UNALIGNED:
-        unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
-        break;
-      case Alignment::DIFFERENT: {
-        // If the pointers are aligned differently we cannot vectorize
-        unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, noop, output, scale, amax, scale_inv, params, N, N);
-        break;
-      }
-    }
+    // switch (align) {
+    //   case Alignment::SAME_ALIGNED:
+    //     unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+    //     break;
+    //   case Alignment::SAME_UNALIGNED:
+    //     unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+    //     break;
+    //   case Alignment::DIFFERENT: {
+    //     // If the pointers are aligned differently we cannot vectorize
+    //     unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         input, noop, output, scale, amax, scale_inv, params, N, N);
+    //     break;
+    //   }
+    // }
   }
 }
 
@@ -377,22 +377,22 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
     constexpr size_t max_blocks = 65535;
     num_blocks = std::min(num_blocks, max_blocks);
 
-    switch (align) {
-      case Alignment::SAME_ALIGNED:
-        unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
-        break;
-      case Alignment::SAME_UNALIGNED:
-        unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
-        break;
-      case Alignment::DIFFERENT: {
-        // If the pointers are aligned differently we cannot vectorize
-        unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            grad, input, output, scale, amax, scale_inv, params, N, N);
-        break;
-      }
-    }
+    // switch (align) {
+    //   case Alignment::SAME_ALIGNED:
+    //     unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+    //     break;
+    //   case Alignment::SAME_UNALIGNED:
+    //     unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+    //     break;
+    //   case Alignment::DIFFERENT: {
+    //     // If the pointers are aligned differently we cannot vectorize
+    //     unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+    //         grad, input, output, scale, amax, scale_inv, params, N, N);
+    //     break;
+    //   }
+    // }
   }
 }
 
@@ -464,24 +464,24 @@ void GatedActivationKernelLauncher(const InputType *input, OutputType *output, c
     constexpr size_t max_blocks = 65535;
     num_blocks = std::min(num_blocks, max_blocks);
 
-    switch (auto align = CheckAlignment(n, nvec, input, input + n, output)) {
-      case Alignment::SAME_ALIGNED:
-        gated_act_kernel<nvec, true, ComputeType, Param, Activation>
-            <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p,
-                                                 num_aligned_elements);
-        break;
-      case Alignment::SAME_UNALIGNED:
-        gated_act_kernel<nvec, false, ComputeType, Param, Activation>
-            <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p,
-                                                 num_aligned_elements);
-        break;
-      case Alignment::DIFFERENT: {
-        // If the pointers are aligned differently we cannot vectorize
-        gated_act_kernel<1, true, ComputeType, Param, Activation>
-            <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p, n);
-        break;
-      }
-    }
+    // switch (auto align = CheckAlignment(n, nvec, input, input + n, output)) {
+    //   case Alignment::SAME_ALIGNED:
+    //     gated_act_kernel<nvec, true, ComputeType, Param, Activation>
+    //         <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p,
+    //                                              num_aligned_elements);
+    //     break;
+    //   case Alignment::SAME_UNALIGNED:
+    //     gated_act_kernel<nvec, false, ComputeType, Param, Activation>
+    //         <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p,
+    //                                              num_aligned_elements);
+    //     break;
+    //   case Alignment::DIFFERENT: {
+    //     // If the pointers are aligned differently we cannot vectorize
+    //     gated_act_kernel<1, true, ComputeType, Param, Activation>
+    //         <<<num_blocks, threads, 0, stream>>>(input, output, scale, amax, scale_inv, m, n, p, n);
+    //     break;
+    //   }
+    // }
   }
 }
 
@@ -571,23 +571,23 @@ void DGatedActivationKernelLauncher(const InputType *grad, const InputType *inpu
     num_blocks = std::min(num_blocks, max_blocks);
 
     switch (auto align = CheckAlignment(n, nvec, input, input + n, output, output + n)) {
-      case Alignment::SAME_ALIGNED:
-        dgated_act_kernel<nvec, true, ComputeType, Param, Activation, Dactivation>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
-                                                 p, num_aligned_elements);
-        break;
-      case Alignment::SAME_UNALIGNED:
-        dgated_act_kernel<nvec, false, ComputeType, Param, Activation, Dactivation>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
-                                                 p, num_aligned_elements);
-        break;
-      case Alignment::DIFFERENT: {
-        // If the pointers are aligned differently we cannot vectorize
-        dgated_act_kernel<1, true, ComputeType, Param, Activation, Dactivation>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
-                                                 p, n);
-        break;
-      }
+      // case Alignment::SAME_ALIGNED:
+      //   dgated_act_kernel<nvec, true, ComputeType, Param, Activation, Dactivation>
+      //       <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
+      //                                            p, num_aligned_elements);
+      //   break;
+      // case Alignment::SAME_UNALIGNED:
+      //   dgated_act_kernel<nvec, false, ComputeType, Param, Activation, Dactivation>
+      //       <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
+      //                                            p, num_aligned_elements);
+      //   break;
+      // case Alignment::DIFFERENT: {
+      //   // If the pointers are aligned differently we cannot vectorize
+      //   dgated_act_kernel<1, true, ComputeType, Param, Activation, Dactivation>
+      //       <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv, m, n,
+      //                                            p, n);
+      //   break;
+      // }
     }
   }
 }

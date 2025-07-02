@@ -225,7 +225,7 @@ void compareResults_nvfp4(const std::string &name, const Tensor &test,
           const double cast_mean_m = static_cast<double>(static_cast<fp4e2m1>(mean_m));
           assertion = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
         }
-        // printf("%lu GPU: %f CPU: %f\n", i + k, t, r);
+        // printf("%3lu GPU: %6.2f    CPU: %6.2f\n", i + k, t, r);
         if (assertion) {
             ASSERT_FALSE(assertion) << "Error in tensor " << name << " in "
                                     << direction << " direction." << std::endl
@@ -276,7 +276,6 @@ void performTest_x1(float (*OP)(const float),
     Tensor input("input", shape, itype);
 
     std::vector<size_t> shape_nvfp4 = shape;
-    // shape.back()
 
     Tensor output("output", shape, otype, rowwise, colwise, NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
 
@@ -321,8 +320,8 @@ void performTest_x1(float (*OP)(const float),
                                        scales_stride);
 
     // auto [atol, rtol] = getTolerances(otype);
-    const double atol = 0.125;
-    const double rtol = 0.5;
+    const double atol = 0.05;
+    const double rtol = 0.1;
     compareResults_nvfp4("output", output, ref_output_nvfp4.get(), rowwise, atol, rtol);
 
     const fp8e4m3* const gpu_scales_ptr = rowwise
@@ -333,6 +332,7 @@ void performTest_x1(float (*OP)(const float),
     compare_scaling_factors("scales", gpu_scales_ptr, ref_scales_nvfp4.get(),
                             unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                             scale_mismatches_num);
+    printf("scale_mismatches_num: %lu \n", scale_mismatches_num);
 }
 
 /**
@@ -422,22 +422,22 @@ void performTest_x1(float (*OP)(const float),
 // }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    // {1, 32},
+    {2, 32},
     // {16, 48},    
-    // {65, 96},
-    // {128, 128},
-    // {256, 256},
-    // {993, 512},
-    // {256, 65536},
-    // {2048, 6144},
-    // {16384, 128},
-    // {32768, 160},
-    // {4096, 1632},
-    // {1024},
-    // {8, 32, 1024},
-    // {16, 8, 4, 512},
+    {65, 96},
+    {128, 128},
+    {256, 256},
+    {993, 512},
+    {256, 65536},
+    {2048, 6144},
+    {16384, 128},
+    {32768, 160},
+    {4096, 1632},
+    {1024},
+    {8, 32, 1024},
+    {16, 8, 4, 512},
     {1024, 16384},
-    {4096, 13312},  
+    {4096, 13312},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
