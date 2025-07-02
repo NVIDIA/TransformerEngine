@@ -69,27 +69,51 @@ pybind11::dict Registrations() {
   return dict;
 }
 
+}  // namespace jax
+}  // namespace transformer_engine
+
 PYBIND11_MODULE(transformer_engine_jax, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
 
-  m.def("registrations", &Registrations);
-  m.def("get_fused_attn_backend", &GetFusedAttnBackend);
-  m.def("get_cuda_version", &GetCudaRuntimeVersion);
-  m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
-  m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+  m.def("registrations", &transformer_engine::jax::Registrations);
+  m.def("get_fused_attn_backend", &transformer_engine::jax::GetFusedAttnBackend);
+  m.def("get_cuda_version", &transformer_engine::jax::GetCudaRuntimeVersion);
+  m.def("get_cudnn_version", &transformer_engine::jax::GetCudnnRuntimeVersion);
+  m.def("get_device_compute_capability", &transformer_engine::jax::GetDeviceComputeCapability);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
-  m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
-  m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
-  m.def("get_norm_fwd_workspace_sizes", &GetNormForwardWorkspaceSizes);
-  m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
-  m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
-  m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("get_dact_dbias_quantize_workspace_sizes",
+        &transformer_engine::jax::GetDActDBiasQuantizeWorkspaceSizes);
+  m.def("get_dbias_quantize_workspace_sizes",
+        &transformer_engine::jax::GetDBiasQuantizeWorkspaceSizes);
+  m.def("get_norm_fwd_workspace_sizes", &transformer_engine::jax::GetNormForwardWorkspaceSizes);
+  m.def("get_norm_bwd_workspace_sizes", &transformer_engine::jax::GetNormBackwardWorkspaceSizes);
+  m.def("get_fused_attn_fwd_workspace_sizes",
+        &transformer_engine::jax::GetFusedAttnForwardWorkspaceSizes);
+  m.def("get_fused_attn_bwd_workspace_sizes",
+        &transformer_engine::jax::GetFusedAttnBackwardWorkspaceSizes);
+  m.def("create_comm_overlap_buffer", &transformer_engine::jax::CreateCommOverlapBuffer,
+        pybind11::arg("comm_type"), pybind11::arg("method"), pybind11::arg("buffer_shape"),
+        pybind11::arg("buffer_dtype"), pybind11::arg("tp_size"), pybind11::pos_only(),
+        pybind11::kw_only(), pybind11::arg("num_splits") = 4, pybind11::arg("num_max_streams") = 3,
+        pybind11::arg("comm_cga_size") = 2, pybind11::arg("gemm_priority") = 0,
+        pybind11::arg("comm_priority") = 0, pybind11::arg("num_comm_sm") = 16,
+        pybind11::arg("set_sm_margin") = true, pybind11::arg("use_ce") = true,
+        pybind11::arg("atomic_gemm") = false, pybind11::arg("rs_overlap_first_gemm") = false,
+        pybind11::arg("aggregate_ag") = false,
+        pybind11::call_guard<pybind11::gil_scoped_release>());
+  m.def("destroy_comm_overlap_buffer", &transformer_engine::jax::DestroyCommOverlapBuffer,
+        pybind11::call_guard<pybind11::gil_scoped_release>());
+  m.def("destroy_all_comm_overlap_buffers", &transformer_engine::jax::DestroyAllCommOverlapBuffers,
+        pybind11::call_guard<pybind11::gil_scoped_release>());
 
-  pybind11::enum_<JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode", pybind11::module_local())
-      .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
-      .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
-      .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
-      .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING);
+  pybind11::enum_<transformer_engine::jax::JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode",
+                                                              pybind11::module_local())
+      .value("NO_SCALING", transformer_engine::jax::JAXX_Scaling_Mode::NO_SCALING)
+      .value("DELAYED_TENSOR_SCALING",
+             transformer_engine::jax::JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", transformer_engine::jax::JAXX_Scaling_Mode::MXFP8_1D_SCALING)
+      .value("CURRENT_TENSOR_SCALING",
+             transformer_engine::jax::JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING);
 
   pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
                                                            pybind11::module_local())
@@ -98,5 +122,4 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE);
 }
 
-}  // namespace jax
-}  // namespace transformer_engine
+

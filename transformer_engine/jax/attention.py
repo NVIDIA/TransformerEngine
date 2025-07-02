@@ -17,7 +17,7 @@ from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import get_qkv_format
 
 from . import cpp_extensions as tex
 
@@ -109,7 +109,7 @@ class QKVLayout(Enum):
         """
         Return the corresponding qkv_format (BSHD, SBHD, THD)
         """
-        return QKVFormat(nvte_get_qkv_format(self.value))
+        return QKVFormat(get_qkv_format(self.value))
 
     def is_qkvpacked(self):
         """

@@ -101,6 +101,8 @@ class CommOverlapCore {
 
   virtual ~CommOverlapCore();
 
+  void* get_ubuf_dptr() { return _ubuf.dptr(); }
+
   void set_ubuf_scale_inv(float *scale_inv) {
     _ubuf_scale_inv = scale_inv;
     _ubuf_scale_inv_initialized = true;
@@ -116,6 +118,8 @@ class CommOverlapCore {
 
   TensorWrapper get_buffer_chunk_like(const TensorWrapper &source, size_t offset,
                                       const std::vector<size_t> &shape);
+
+
 
   int get_tp_size() { return _tp_size; }
 
