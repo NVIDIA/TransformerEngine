@@ -145,6 +145,11 @@ class StatsBuffers:
     def __init__(self):
         self.buffers = {}  # (layer_name, tensor_name) -> buffer
         self.reduction_group_to_buffer = defaultdict(list)
+
+        # Logging stats involves synchronization between nodes
+        # and non-trivial cpu overhead.
+        # It should be only done if at least one stat is logged,
+        # and it should not be run if no stats are logged for current step.
         self.log_stats_after_debug_step = False
 
     def reset(self):

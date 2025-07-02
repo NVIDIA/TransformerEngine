@@ -69,7 +69,7 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import next_iter_for_debug
+from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
 __all__ = ["Linear"]
 
@@ -1277,9 +1277,8 @@ class Linear(TransformerEngineBaseModule):
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
-            if self.next_iter_for_debug is not None:
-                debug = False
-                debug = TEDebugState.get_iteration() == self.next_iter_for_debug
+            if self.next_iter_when_debug_should_be_run is not None:
+                debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1314,9 +1313,11 @@ class Linear(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
             if debug:
-                if next_iter_for_debug(quantizers) is not None:
-                    self.next_iter_for_debug = next_iter_for_debug(quantizers)
-                    print(f"next_iter_for_debug: {self.next_iter_for_debug}")
+                if next_iter_when_debug_should_be_run(quantizers) is not None:
+                    run_current = any_feature_enabled(quantizers)
+                    self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+                    if not run_current:
+                        quantizers = self._get_quantizers(fp8_output, fp8_grad)
 
                 if isinstance(weight_tensor, QuantizedTensor):
                     raise RuntimeError("FP8 weights are not supported in debug mode.")

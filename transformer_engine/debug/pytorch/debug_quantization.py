@@ -9,7 +9,7 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union, NamedTuple
+from typing import Optional, Tuple, Iterable, Union
 import torch
 
 import transformer_engine_torch as tex
@@ -22,6 +22,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 aten = torch.ops.aten
 
@@ -60,7 +61,7 @@ class DebugQuantizer(Quantizer):
         self.tensor_name = tensor_name
         self.parent_quantizer = parent_quantizer
         self.tp_group = tp_group  # used in inspect_tensor calls
-        self.iteration = debug_api.DEBUG_MANAGER._trainer_iteration_count
+        self.iteration = TEDebugState.get_iteration()
 
         # .internal = True is slightly faster, but results
         # in errors when caching the weights.
@@ -275,7 +276,7 @@ class DebugQuantizer(Quantizer):
             "layer_name": self.layer_name,
             "tensor": tensor,
             "tensor_name": self.tensor_name,
-            "iteration": debug_api.DEBUG_MANAGER._trainer_iteration_count,
+            "iteration": TEDebugState.get_iteration(),
             "tp_group": self.tp_group,
         }
         if tensor is not None and self.inspect_tensor_enabled:
@@ -408,6 +409,25 @@ class DebugQuantizer(Quantizer):
             )
         self._call_inspect_tensor_api(tensor)
         return tensor
+
+    def any_feature_enabled(self) -> bool:
+        """Returns bool if there is at least one API call enabled."""
+        if self.output_tensor:
+            return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY	
+        if (	
+            self.inspect_tensor_enabled	
+            or self.inspect_tensor_postquantize_enabled_rowwise	
+            or self.inspect_tensor_postquantize_enabled_columnwise	
+            or self.rowwise_tensor_plan == API_CALL_MODIFY	
+            or self.columnwise_tensor_plan == API_CALL_MODIFY	
+        ):	
+            return True	
+        if self.parent_quantizer is not None:	
+            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:	
+                return True	
+            if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:	
+                return True	
+        return False
 
     def make_empty(
         self,

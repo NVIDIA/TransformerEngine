@@ -77,7 +77,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-from ...debug.pytorch.utils import next_iter_for_debug
+from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["LayerNormMLP"]
@@ -1713,11 +1713,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                produced)
         """
         debug = TEDebugState.debug_enabled
-        debug = False
         if debug:
             self._validate_name()
-            if self.next_iter_for_debug is not None:
-                debug = TEDebugState.get_iteration() == self.next_iter_for_debug
+            if self.next_iter_when_debug_should_be_run is not None:
+                debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1739,8 +1738,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output)
             )
             if debug:
-                if next_iter_for_debug(quantizers) is not None:
-                    self.next_iter_for_debug = next_iter_for_debug(quantizers)
+                run_current = any_feature_enabled(quantizers)
+                self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+                if not run_current:
+                    quantizers = self._get_quantizers(fp8_output)
 
                 if isinstance(self.fc1_weight, QuantizedTensor):
                     raise RuntimeError("FP8 weights are not supported in debug mode.")

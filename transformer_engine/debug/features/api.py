@@ -26,6 +26,7 @@ class TEConfigAPIMapper(BaseConfigAPIMapper):
         config_copy = copy.deepcopy(config)
         gemm_parsing = kwargs.get("gemm_parsing", False)
         tensor_parsing = kwargs.get("tensor_parsing", False)
+
         if gemm_parsing:
             # parse with GEMM and/or tensor
             processed_config = self._process_transformer_engine_config(config_copy, **kwargs)
