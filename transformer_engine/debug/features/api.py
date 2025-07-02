@@ -135,10 +135,10 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> Union[bool, Tuple[bool, int]]:
         """
-        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. 
+        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
         It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
 
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
 
         Parameters
@@ -305,8 +305,8 @@ class TEDefaultFeatures:
     ) -> Union[bool, Tuple[bool, int]]:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
-        
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
 
         Parameters
@@ -340,7 +340,7 @@ class TEDefaultFeatures:
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
 
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled. 
+        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor_postquantize is large.
 
         Parameters
@@ -458,11 +458,17 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 type(feature_output) is tuple for feature_output in multi_feature_outputs.values()
             )
             if all_ret_tuple:
-                run_current = any(feature_output[0] for feature_output in multi_feature_outputs.values())
-                next_iter = min(feature_output[1] for feature_output in multi_feature_outputs.values())
+                run_current = any(
+                    feature_output[0] for feature_output in multi_feature_outputs.values()
+                )
+                next_iter = min(
+                    feature_output[1] for feature_output in multi_feature_outputs.values()
+                )
                 return run_current, next_iter
             else:
-                run_current = any(feature_output for feature_output in multi_feature_outputs.values())
+                run_current = any(
+                    feature_output for feature_output in multi_feature_outputs.values()
+                )
                 return run_current, None
         else:
             return super().handle_multi_feature_output(

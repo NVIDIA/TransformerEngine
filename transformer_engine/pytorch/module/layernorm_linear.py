@@ -1500,7 +1500,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
             if debug:
                 run_current = any_feature_enabled(quantizers)
-                self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+                self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(
+                    quantizers
+                )
                 if not run_current:
                     quantizers = self._get_quantizers(fp8_output, fp8_grad)
 

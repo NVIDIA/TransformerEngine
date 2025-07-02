@@ -39,10 +39,12 @@ API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
+
 def _min_none(a, b):
     if a is None or b is None:
         return None
     return min(a, b)
+
 
 class DebugQuantizer(Quantizer):
     """
@@ -390,20 +392,20 @@ class DebugQuantizer(Quantizer):
     def any_feature_enabled(self) -> bool:
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
-            return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY	
-        if (	
-            self.inspect_tensor_enabled	
-            or self.inspect_tensor_postquantize_enabled_rowwise	
-            or self.inspect_tensor_postquantize_enabled_columnwise	
-            or self.rowwise_tensor_plan == API_CALL_MODIFY	
-            or self.columnwise_tensor_plan == API_CALL_MODIFY	
-        ):	
-            return True	
-        if self.parent_quantizer is not None:	
-            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:	
-                return True	
-            if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:	
-                return True	
+            return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
+        if (
+            self.inspect_tensor_enabled
+            or self.inspect_tensor_postquantize_enabled_rowwise
+            or self.inspect_tensor_postquantize_enabled_columnwise
+            or self.rowwise_tensor_plan == API_CALL_MODIFY
+            or self.columnwise_tensor_plan == API_CALL_MODIFY
+        ):
+            return True
+        if self.parent_quantizer is not None:
+            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:
+                return True
+            if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
+                return True
         return False
 
     def make_empty(
@@ -496,7 +498,7 @@ class DebugQuantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Probably not needed for debug quantizer"""
         return None
-    
+
     def update_next_iter(self, next_iter: Optional[int]):
         """Updates the next debug iteration for this tensor."""
         if next_iter is None:

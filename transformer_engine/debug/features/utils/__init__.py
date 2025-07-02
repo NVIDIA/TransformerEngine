@@ -8,7 +8,7 @@ Utils for the debug features.
 
 
 def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
-    """ Returns next iteration at which the feature will be enabled. """
+    """Returns next iteration at which the feature will be enabled."""
 
     run_current = False
 
