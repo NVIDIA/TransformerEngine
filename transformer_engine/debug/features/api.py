@@ -26,16 +26,12 @@ class TEConfigAPIMapper(BaseConfigAPIMapper):
         config_copy = copy.deepcopy(config)
         gemm_parsing = kwargs.get("gemm_parsing", False)
         tensor_parsing = kwargs.get("tensor_parsing", False)
-        print(f"gemm_parsing: {gemm_parsing}, tensor_parsing: {tensor_parsing}")
         if gemm_parsing:
             # parse with GEMM and/or tensor
             processed_config = self._process_transformer_engine_config(config_copy, **kwargs)
         elif tensor_parsing:
             # parse with only tensor
             processed_config = self._process_tensor_config(config_copy, kwargs["tensor_name"])
-        else:
-            processed_config = config_copy
-            print(f"processed_config: {processed_config}")
 
         if not processed_config:
             return False, None
@@ -97,7 +93,6 @@ required_kwargs = {
     "inspect_tensor_enabled": ["tensor_name"],
     "inspect_tensor_postquantize_enabled": ["tensor_name"],
     "default": ["tensor_name", "gemm"],
-    "enabled": [],
 }
 
 
@@ -436,27 +431,29 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
     
-    def handle_multi_tensor_output(self, api_name, multi_feature_out):
+    def handle_multi_feature_output(self, api_name, multi_feature_outputs, features_to_invoke, **kwargs):
         """
         Handle multi-tensor output of the API calls.
         """
         if "enabled" in api_name:
-            output = False 
-            for _, feature_output in multi_feature_out.items():
-                if type(feature_output) is int:
-                    output = feature_output if output is None else min(output, feature_output)
-                elif feature_output is True:
-                    output = True
-                    break
-            return output
+            # *_enabled feature calls can return int, bool or None.
+            # If any of them returns bool, 
+            # then we return bool - this means that we cannot state anything
+            # about enablement in the next steps.
+            # If all of them return int, we return the minimum value,
+            # representing the number of steps after the feature will be enabled
+            # next time. This also means that the feature is enabled in current step.
+            all_ret_int = all(
+                type(feature_output) is int for feature_output in multi_feature_outputs.values())
+            if all_ret_int:
+                return min(multi_feature_outputs.values())
+            else:
+                return any(feature_output for feature_output in multi_feature_outputs.values())
         else:
-            assert all(multi_feature_out[0] == x for x in multi_feature_out), "Different Outputs when invoking multiple features per API call is not allowed. "\
-            + f"Found {len(multi_feature_out)} ops {multi_feature_out.keys()} enabled for {api_name} returning outputs: {multi_feature_out}."
-            return multi_feature_out[0]
+            return super().handle_multi_feature_output(api_name, multi_feature_outputs, features_to_invoke, **kwargs)
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""
-        return
         STATS_BUFFERS.log_stats()
 
     def end_debug(self):
