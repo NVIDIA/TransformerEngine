@@ -271,7 +271,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Configure quantizer
             if weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -447,7 +447,14 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
-                ctx.main_grad = weight.main_grad
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.main_grad_func = weight.get_main_grad
+                else:
+                    ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -493,7 +500,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
-                shape = list(inp.shape)
+                shape = list(inp_shape)
                 shape[0] *= tp_size if with_input_all_gather else 1
                 return out, ln_out_return.view(shape)
             return out, ln_out_return.view(inp_shape)
@@ -528,7 +535,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
-                ctx.main_grad
+                ctx.main_grad_func()
                 if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
                 else None
             )
@@ -743,6 +750,31 @@ class _LayerNormLinear(torch.autograd.Function):
 
             wgrad = None
             if ctx.requires_wgrad:
+                # Prepare grad output tensor
+                # Note: Synchronize tensor-parallel communication and
+                # make sure required data is available
+                if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
+                    # UB does not support overlapping grad output
+                    # all-gather with wgrad GEMM. Also, we can't
+                    # convert row-scaled MXFP8 to column-scaled, so we
+                    # can't reuse the grad output that was gathered
+                    # for the dgrad GEMM. We work around by explicitly
+                    # overlapping the NCCL operation with the dgrad GEMM.
+                    ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+
+                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
+                    dgrad_comm_stream = ub_obj_dgrad.get_communication_stream()
+                    with torch.cuda.stream(dgrad_comm_stream):
+                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
+                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
+                        grad_output, mxfp8_grad_output_work = gather_along_first_dim(
+                            grad_outputs[0],
+                            ctx.tp_group,
+                            async_op=True,
+                            quantizer=ctx.grad_output_quantizer,
+                        )
+                    # Synchronize with the main stream
+                    mxfp8_grad_output_work.wait()
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -757,22 +789,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
                         ln_out_total = ctx.input_quantizer(ln_out_total)
 
-                # Prepare grad output tensor
-                # Note: Synchronize tensor-parallel communication and
-                # make sure required data is available
-                if ctx.ub_overlap_ag and isinstance(ctx.grad_output_quantizer, MXFP8Quantizer):
-                    # UB does not support overlapping grad output
-                    # all-gather with wgrad GEMM. Also, we can't
-                    # convert row-scaled MXFP8 to column-scaled, so we
-                    # can't reuse the grad output that was gathered
-                    # for the dgrad GEMM. We work around with blocking
-                    # all-gather for column-scaled MXFP8 data.
-                    ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    grad_output, _ = gather_along_first_dim(
-                        grad_outputs[0],
-                        ctx.tp_group,
-                        quantizer=ctx.grad_output_quantizer,
-                    )
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorBase):
                         grad_output.update_usage(columnwise_usage=True)

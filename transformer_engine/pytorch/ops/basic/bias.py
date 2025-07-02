@@ -13,10 +13,11 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
-from .._common import (
+from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
 )
+from ...tensor import Quantizer
 
 
 class Bias(BasicOperation):
@@ -120,11 +121,12 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         x = input_
-        b = self.bias.reshape([1] * (x.dim() - 1) + [self.local_size])
+        b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
         return x + b
 
     def op_backward(
