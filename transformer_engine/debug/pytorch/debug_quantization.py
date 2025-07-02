@@ -9,7 +9,7 @@ These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
+from typing import Optional, Tuple, Iterable, Union, NamedTuple
 import torch
 
 import transformer_engine_torch as tex
@@ -37,7 +37,6 @@ _tensor_to_gemm_names_map = {
 API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
-
 
 class DebugQuantizer(Quantizer):
     """
@@ -70,6 +69,8 @@ class DebugQuantizer(Quantizer):
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
+        self.next_debug_iter = float('inf')
+
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
         # rowwise_tensor_plan, and columnwise_tensor_plan are computed.
         # These fields indicate the path where API calls will be inserted.
@@ -92,7 +93,7 @@ class DebugQuantizer(Quantizer):
             ) = self.get_enabled_look_at_tensors()
             self.rowwise_tensor_plan, self.columnwise_tensor_plan = self.get_tensors_plan()
 
-        self.log_messages_about_plans()
+            self.log_messages_about_plans()
 
     def get_plans_for_output_tensors(self) -> Tuple[bool, str]:
         """
@@ -124,6 +125,14 @@ class DebugQuantizer(Quantizer):
         inspect_tensor_enabled = debug_api.transformer_engine.inspect_tensor_enabled(
             layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
         )
+        if type(inspect_tensor_enabled) is int:
+            if self.next_debug_iter is None:
+                self.next_debug_iter = inspect_tensor_enabled
+            else:
+                self.next_debug_iter = min(self.next_debug_iter, inspect_tensor_enabled)
+            inspect_tensor_enabled = True
+        elif inspect_tensor_enabled is True:
+            self.next_debug_iter = self.iteration + 1
         inspect_tensor_postquantize_enabled_rowwise = (
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
@@ -132,6 +141,14 @@ class DebugQuantizer(Quantizer):
                 gemm=self.rowwise_gemm_name,
             )
         )
+        if type(inspect_tensor_postquantize_enabled_rowwise) is int:
+            if self.next_debug_iter is None:
+                self.next_debug_iter = inspect_tensor_postquantize_enabled_rowwise
+            else:
+                self.next_debug_iter = min(self.next_debug_iter, inspect_tensor_postquantize_enabled_rowwise)
+            inspect_tensor_postquantize_enabled_rowwise = True
+        elif inspect_tensor_postquantize_enabled_rowwise is True:
+            self.next_debug_iter = self.iteration + 1
         inspect_tensor_postquantize_enabled_columnwise = (
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
@@ -140,6 +157,14 @@ class DebugQuantizer(Quantizer):
                 gemm=self.columnwise_gemm_name,
             )
         )
+        if type(inspect_tensor_postquantize_enabled_columnwise) is int:
+            if self.next_debug_iter is None:
+                self.next_debug_iter = inspect_tensor_postquantize_enabled_columnwise
+            else:
+                self.next_debug_iter = min(self.next_debug_iter, inspect_tensor_postquantize_enabled_columnwise)
+            inspect_tensor_postquantize_enabled_columnwise = True
+        elif inspect_tensor_postquantize_enabled_columnwise is True:
+            self.next_debug_iter = self.iteration + 1
 
         return (
             inspect_tensor_enabled,
@@ -164,6 +189,14 @@ class DebugQuantizer(Quantizer):
             tensor_name=self.tensor_name,
             iteration=self.iteration,
         )
+        if type(modify_rowwise) is int:
+            if self.next_debug_iter is None:
+                self.next_debug_iter = modify_rowwise
+            else:
+                self.next_debug_iter = min(self.next_debug_iter, modify_rowwise)
+            modify_rowwise = True
+        elif modify_rowwise is True:
+            self.next_debug_iter = self.iteration + 1
         if modify_rowwise:
             rowwise_plan = API_CALL_MODIFY
         else:
@@ -185,6 +218,14 @@ class DebugQuantizer(Quantizer):
                 tensor_name=self.tensor_name,
                 iteration=self.iteration,
             )
+            if type(modify_columnwise) is int:
+                if self.next_debug_iter is None:
+                    self.next_debug_iter = modify_columnwise
+                else:
+                    self.next_debug_iter = min(self.next_debug_iter, modify_columnwise)
+                modify_columnwise = True
+            elif modify_columnwise is True:
+                self.next_debug_iter = self.iteration + 1
             if modify_columnwise:
                 columnwise_plan = API_CALL_MODIFY
             else:
@@ -446,24 +487,9 @@ class DebugQuantizer(Quantizer):
 
         self._call_inspect_tensor_api(src, dst.rowwise_gemm_tensor, dst.columnwise_gemm_tensor)
 
-    def any_feature_enabled(self) -> bool:
-        """Returns bool if there is at least one API call enabled."""
-        if self.output_tensor:
-            return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
-        if (
-            self.inspect_tensor_enabled
-            or self.inspect_tensor_postquantize_enabled_rowwise
-            or self.inspect_tensor_postquantize_enabled_columnwise
-            or self.rowwise_tensor_plan == API_CALL_MODIFY
-            or self.columnwise_tensor_plan == API_CALL_MODIFY
-        ):
-            return True
-        if self.parent_quantizer is not None:
-            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:
-                return True
-            if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
-                return True
-        return False
+    def get_next_debug_iter(self) -> int:
+        """Returns the next iteration for which the debug is enabled for this tensor."""
+        return self.next_debug_iter
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Probably not needed for debug quantizer"""

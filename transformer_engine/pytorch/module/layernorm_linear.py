@@ -62,7 +62,7 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import any_feature_enabled
+from ...debug.pytorch.utils import next_iter_for_debug
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -1462,8 +1462,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
         debug = TEDebugState.debug_enabled
+        debug = False
         if debug:
             self._validate_name()
+            if self.next_iter_for_debug is not None:
+                debug = TEDebugState.get_iteration() == self.next_iter_for_debug
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1497,10 +1500,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
             if debug:
-                if not any_feature_enabled(quantizers):
-                    # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
-                    debug = False
+                if next_iter_for_debug(quantizers) is not None:
+                    self.next_iter_for_debug = next_iter_for_debug(quantizers)
 
                 if isinstance(weight_tensor, QuantizedTensor):
                     raise RuntimeError("FP8 weights are not supported in debug mode.")

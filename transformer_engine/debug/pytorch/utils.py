@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 
 """Utils functions for the debug module."""
-import time
 
-def any_feature_enabled(quantizers):
+def next_iter_for_debug(quantizers):
     """Returns True if at least one API call is made from DebugQuantizer."""
-    t = any(q.any_feature_enabled() for q in quantizers)
-    return t
+    if any(q.get_next_debug_iter() is None for q in quantizers):
+        return None
+    return min(q.get_next_debug_iter() for q in quantizers)

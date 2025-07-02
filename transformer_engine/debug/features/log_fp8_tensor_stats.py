@@ -86,20 +86,30 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def _get_supported_stats_list(self):
         """Returns stats this feature can log."""
         return {"underflows%"}
-    
-    @api_method 
-    def any_feature_enabled(
-        self, config: Dict, layer_name: str, iteration: int
-    ):
-        return self._check_params(config, layer_name, iteration=iteration)
+
+    def next_enabled_iter(self, start_step, end_step, start_end_list, freq, iteration):
+        if start_end_list:                  
+                intervals = sorted(start_end_list)
+        else:
+            if start_step is None:
+                return None
+            end = float("inf") if end_step is None else end_step
+            intervals = [(start_step, end)]
+
+        for s, e in intervals:
+            first = max(iteration, s)
+            offset = first % freq
+            candidate = first if offset == 0 else first + (freq - offset)
+            if candidate <= e:
+                return candidate
+
 
     @api_method
     def inspect_tensor_postquantize_enabled(
         self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
-        # check whether logging should happen in this iteration
-        return self._check_params(config, layer_name, iteration=iteration)
+        return self.next_enabled_iter(config.get("start_step", None), config.get("end_step", None), config.get("start_end_list", None), config.get("freq", 1), iteration)
 
     @api_method
     def inspect_tensor_postquantize(

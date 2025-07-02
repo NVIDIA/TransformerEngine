@@ -145,6 +145,7 @@ class StatsBuffers:
     def __init__(self):
         self.buffers = {}  # (layer_name, tensor_name) -> buffer
         self.reduction_group_to_buffer = defaultdict(list)
+        self.log_stats_after_debug_step = False
 
     def reset(self):
         """Resets all buffers."""
@@ -163,12 +164,15 @@ class StatsBuffers:
 
     def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction):
         """Feeds the tensor into the respective buffer."""
+        self.log_stats_after_debug_step = True
         buffer = self.buffers[(layer_name, tensor_name, options)]
         buffer.feed(tensor, iteration)
         buffer.skip_reduction = skip_reduction
 
     def log_stats(self):
         """Logs the stats from all the buffers."""
+        if not self.log_stats_after_debug_step:
+            return {}
         output = {}
         for reduction_group, buffers in self.reduction_group_to_buffer.items():
             changed_buffers = [
@@ -181,7 +185,7 @@ class StatsBuffers:
             for _, buffer in changed_buffers:
                 stats = buffer.log()
                 output.update(stats)
-
+        self.log_stats_after_debug_step = False
         return output
 
 

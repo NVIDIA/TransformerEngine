@@ -414,21 +414,17 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         """
         Overridden APIs are selected based on the GEMM name in the config and kwargs.
         """
-        print("AAAAAAAAAAAAA api_name: ", api_name)
-        print(feature_obj)
-        print(feature_obj.parse_config_and_api)
         tensor_parsing = "tensor_name" in required_kwargs[api_name]
         gemm_parsing = "gemm" in required_kwargs[api_name]
         status, modified_config = feature_obj.parse_config_and_api(
             config, gemm_parsing=gemm_parsing, tensor_parsing=tensor_parsing, **kwargs
         )
-        print(f"status: {status}, modified_config: {modified_config}")
         return status, modified_config
 
     def output_assertions_hook(self, api_name, ret, **kwargs):
         """Output hooks used to check correctness of the outputs of the API calls."""
         if "enabled" in api_name or api_name == "fp8_gemm":
-            assert isinstance(ret, bool)
+            assert isinstance(ret, bool) or isinstance(ret, int)
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
@@ -439,9 +435,28 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
+    
+    def handle_multi_tensor_output(self, api_name, multi_feature_out):
+        """
+        Handle multi-tensor output of the API calls.
+        """
+        if "enabled" in api_name:
+            output = False 
+            for _, feature_output in multi_feature_out.items():
+                if type(feature_output) is int:
+                    output = feature_output if output is None else min(output, feature_output)
+                elif feature_output is True:
+                    output = True
+                    break
+            return output
+        else:
+            assert all(multi_feature_out[0] == x for x in multi_feature_out), "Different Outputs when invoking multiple features per API call is not allowed. "\
+            + f"Found {len(multi_feature_out)} ops {multi_feature_out.keys()} enabled for {api_name} returning outputs: {multi_feature_out}."
+            return multi_feature_out[0]
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""
+        return
         STATS_BUFFERS.log_stats()
 
     def end_debug(self):
