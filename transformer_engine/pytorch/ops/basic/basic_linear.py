@@ -665,7 +665,7 @@ class BasicLinear(BasicOperation):
         if dtype is None:
             if weight is not None and not is_quantized_tensor(weight):
                 dtype = weight.dtype
-            else:
+            elif not is_quantized_tensor(grad_output):
                 dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -693,6 +693,11 @@ class BasicLinear(BasicOperation):
             else:
                 if not is_quantized_tensor(dy_local):
                     dy_local = grad_output_quantizer(dy_local)
+                else:
+                    dy_local.update_usage(
+                        rowwise_usage=input_requires_grad,
+                        columnwise_usage=weight_requires_grad,
+                    )
                 dy = dy_local
         else:
             dy_local = maybe_dequantize(dy_local, dtype)
