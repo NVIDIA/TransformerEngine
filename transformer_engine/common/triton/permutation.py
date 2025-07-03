@@ -200,6 +200,7 @@ def _permute_kernel(
     probs_ptr,
     scale_ptr,
     permuted_scale_ptr,
+    pad_offsets_ptr,
     # sizes
     scale_hidden_dim,
     # strides
@@ -224,6 +225,7 @@ def _permute_kernel(
     hidden_size: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
     PERMUTE_SCALE: tl.constexpr,
+    FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
@@ -246,6 +248,14 @@ def _permute_kernel(
         dst_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
+        if FUSION_PAD:
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            dst_row = dst_row + pad_off
         output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
         if PERMUTE_SCALE:
             permuted_scale_off = (
@@ -297,6 +307,7 @@ def _unpermute_kernel(
     row_id_map_ptr,
     merging_probs_ptr,
     permuted_probs_ptr,
+    pad_offsets_ptr,
     # strides
     stride_row_id_map_token,
     stride_row_id_map_expert,
@@ -318,6 +329,7 @@ def _unpermute_kernel(
     PROBS_LOAD_WIDTH: tl.constexpr,
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
+    FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = input_ptr.dtype.element_ty
@@ -348,6 +360,14 @@ def _unpermute_kernel(
         src_row = tl.load(
             row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
         ).to(tl.int64)
+        if FUSION_UNPAD:
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
+            pad_off = tl.load(pad_offsets_ptr + expert_idx)
+            src_row = src_row + pad_off
         input_off = src_row * stride_input_token + current_offset * stride_input_hidden
         inp = tl.load(input_ptr + input_off, mask=mask)
         inp = inp.to(compute_type)

@@ -123,6 +123,7 @@ def permute_with_mask_map(
     row_id_map: torch.Tensor,
     probs: torch.Tensor,
     scale: torch.Tensor,
+    pad_offsets: torch.Tensor,
     num_tokens: int,
     num_experts: int,
     num_out_tokens: int,
@@ -142,6 +143,9 @@ def permute_with_mask_map(
         The probabilities of the input tensor. If it is not None, it will be permuted.
     scale : torch.Tensor
         The scale of the input tensor. If it is not None, it will be permuted.
+    pad_offsets : torch.Tensor
+        The padding offsets for FP8 fused padding. If it is not None, it will be allocated output
+        buffers with aligned sizes.
     num_tokens : int
         Number of tokens in the input tensor.
     num_experts : int
@@ -153,18 +157,18 @@ def permute_with_mask_map(
     scale_hidden_dim : int
         Hidden size of the scale tensor.
     """
-    output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
-    if probs is not None:
-        permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
-    else:
-        permuted_probs = None
-
-    if scale is not None:
-        permuted_scale = torch.empty(
-            (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
-        )
-    else:
-        permuted_scale = None
+    alloc = torch.zeros if pad_offsets is not None else torch.empty
+    output = alloc((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    permuted_probs = (
+        alloc((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        if probs is not None
+        else None
+    )
+    permuted_scale = (
+        torch.empty((num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda")
+        if scale is not None
+        else None
+    )
     # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _permute_kernel[grid](
@@ -173,6 +177,7 @@ def permute_with_mask_map(
         probs,
         scale,
         permuted_scale,
+        pad_offsets,
         scale_hidden_dim,
         row_id_map.stride(0),
         row_id_map.stride(1),
@@ -193,6 +198,7 @@ def permute_with_mask_map(
         hidden_size,
         PERMUTE_PROBS=probs is not None,
         PERMUTE_SCALE=scale is not None,
+        FUSION_PAD=pad_offsets is not None,
     )
     return output, permuted_scale, permuted_probs
 
@@ -202,6 +208,7 @@ def unpermute_with_mask_map(
     row_id_map: torch.Tensor,
     merging_probs: Union[torch.Tensor, None],
     permuted_probs: Union[torch.Tensor, None],
+    pad_offsets: Union[torch.Tensor, None],
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
@@ -220,6 +227,9 @@ def unpermute_with_mask_map(
         to reduce the unpermuted tokens.
     permuted_probs : torch.Tensor
         The permuted probabilities of the input tensor. If it is not None, it will be unpermuted.
+    pad_offsets : torch.Tensor
+        The padding offsets used for FP8 fused unpadding. If it is not None, it will remove the
+        previously fused padding.
     num_tokens : int
         Number of tokens in the permuted tensor.
     num_experts : int
@@ -241,6 +251,7 @@ def unpermute_with_mask_map(
         row_id_map,
         merging_probs,
         permuted_probs,
+        pad_offsets,
         row_id_map.stride(0),
         row_id_map.stride(1),
         inp.stride(0),
@@ -259,6 +270,7 @@ def unpermute_with_mask_map(
         PROBS_LOAD_WIDTH=triton.next_power_of_2(num_experts),
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
+        FUSION_UNPAD=pad_offsets is not None,
     )
     return output, unpermuted_probs
 
