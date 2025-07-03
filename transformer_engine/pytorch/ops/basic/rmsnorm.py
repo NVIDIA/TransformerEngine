@@ -150,8 +150,8 @@ class RMSNorm(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(self, *args, **kwargs) -> None:
+        super().pre_first_forward(*args, **kwargs)
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
