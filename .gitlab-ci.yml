@@ -7,13 +7,22 @@ variables:
     DATADIR: /mnt/nvdl/datasets
 
     # framework containers
-    CORE_IMAGE:
-      description: Base Docker container for core build
+    CORE_AMD64_IMAGE:
+      description: Base Docker container for core AMD64 build
       value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:12.9-devel-ubuntu24.04--main-amd64  # Last build with main branch
-    PYTORCH_IMAGE:
-      description: Base Docker container for PyTorch build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel  # Last build with main branch (nightly build)
-    JAX_IMAGE:
+    CORE_ARM64_IMAGE:
+      description: Base Docker container for core ARM64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/cuda:12.9-devel-ubuntu24.04--main-arm64  # Last build with main branch
+    PYTORCH_AMD64_IMAGE:
+      description: Base Docker container for PyTorch AMD64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-amd64  # Last build with main branch (nightly build)
+    PYTORCH_ARM64_IMAGE:
+      description: Base Docker container for PyTorch ARM64 build
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-arm64  # Last build with main branch (nightly build)
+    JAX_AMD64_IMAGE:
+      description: Base Docker container for JAX build
+      value: ghcr.io/nvidia/jax:jax-2025-04-18
+    JAX_ARM64_IMAGE:
       description: Base Docker container for JAX build
       value: ghcr.io/nvidia/jax:jax-2025-05-18
 
@@ -26,14 +35,20 @@ variables:
     GL_MR:
       description: GitLab MR number (overrides GH_BRANCH)
     BUILD_CORE:
-      description: Enable core build and tests
+      description: Enable core builds and tests
       value: 1
     BUILD_PYTORCH:
-      description: Enable PyTorch build and tests
+      description: Enable PyTorch builds and tests
       value: 1
     BUILD_JAX:
-      description: Enable JAX build and tests
+      description: Enable JAX builds and tests
       value: 1
+    BUILD_AMD64:
+      description: Enable AMD64 builds and tests
+      value: 1
+    BUILD_ARM64:
+      description: Enable ARM64 builds and tests
+      value: 0
     RUN_L0_TESTS:
       description: Run L0 tests automatically (otherwise run tests manually)
       value: 1
@@ -73,6 +88,7 @@ stages:
     - build base
     - build devel
     - build stage
+    - manifests
     - trigger
     - test
     - finalize
@@ -88,21 +104,23 @@ stages:
 
 before_script:
     - export FRAMEWORK=${FRAMEWORK:-core}                                                          && echo "${FRAMEWORK}"
-    - export PYVER=3.8   && echo "${PYVER}"
+    - export ARCH=${ARCH:-amd64}                                                                   && echo "${ARCH}"
+    - export PYVER=3.8                                                                             && echo "${PYVER}"
     - export GH_BRANCH=${GH_BRANCH:-main}                                                          && echo "${GH_BRANCH}"
     - export FROM_IMAGE_NAME=${FROM_IMAGE_NAME}                                                    && echo "${FROM_IMAGE_NAME}"
     - export RELEASE_BRANCH_NAME=${CI_COMMIT_REF_NAME%%-devel}                                     && echo "${RELEASE_BRANCH_NAME}"
     - export RELEASE_BRANCH_NAME_SLUG=$(echo "${RELEASE_BRANCH_NAME}" | sed 's/[^A-Za-z0-9._\-]/../g') && echo "${RELEASE_BRANCH_NAME_SLUG}" # only letters, numbers, period, hyphen, and dash are valid in docker tags; want to keep all valid characters, though, which CI_COMMIT_REF_SLUG doesn't do
     - test ${TAG_ROOT} || export TAG_ROOT=${RELEASE_BRANCH_NAME_SLUG}                              && echo "${TAG_ROOT}"
     - export IMAGE_NAME_ROOT="${CI_REGISTRY_IMAGE}:${TAG_ROOT}-${FRAMEWORK}-py${PYVER%.*}"         && echo "${IMAGE_NAME_ROOT}"
-    - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
     - export CI_PIPELINE_ID="${CI_PIPELINE_ID}"                                                    && echo "${CI_PIPELINE_ID}"
-    - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}"                      && echo "${BASE_IMAGE_NAME_VERSIONED}"
+    - export BASE_IMAGE_NAME="${IMAGE_NAME_ROOT}-base"                                             && echo "${BASE_IMAGE_NAME}"
+    - export BASE_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-base"                 && echo "${BASE_IMAGE_NAME_VERSIONED}"
     - export DEVEL_IMAGE_NAME="${IMAGE_NAME_ROOT}-devel"                                           && echo "${DEVEL_IMAGE_NAME}"
     - export DEVEL_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-devel"               && echo "${DEVEL_IMAGE_NAME_VERSIONED}"
     - export DEVEL_IMAGE_NAME_PIPELINEID="${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}-devel"            && echo "${DEVEL_IMAGE_NAME_PIPELINEID}"
     - export STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"                                           && echo "${STAGE_IMAGE_NAME}"
     - export QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa"                                                 && echo "${QA_IMAGE_NAME}"
+    - export QA_IMAGE_NAME_VERSIONED="${IMAGE_NAME_ROOT}.${CI_PIPELINE_ID}-qa"                     && echo "${QA_IMAGE_NAME_VERSIONED}"
     - export DOCS_IMAGE_NAME="${IMAGE_NAME_ROOT}-docs"                                             && echo "${DOCS_IMAGE_NAME}"
     - export ORIGIN1="${CI_REPOSITORY_URL##*@}"
     - export ORIGIN_SSH=ssh://git@${ORIGIN1/\//:12051\/}                                           && echo "${ORIGIN_SSH}"
@@ -195,13 +213,18 @@ before_script:
             --form "variables[GIT_SHA]=${GIT_SHA}" \
             --form "variables[GH_PR]=${GH_PR}" \
             --form "variables[GL_MR]=${GL_MR}" \
-            --form "variables[CORE_IMAGE]=${CORE_IMAGE}" \
-            --form "variables[PYTORCH_IMAGE]=${PYTORCH_IMAGE}" \
-            --form "variables[JAX_IMAGE]=${JAX_IMAGE}" \
+            --form "variables[CORE_AMD64_IMAGE]=${CORE_AMD64_IMAGE}" \
+            --form "variables[CORE_ARM64_IMAGE]=${CORE_ARM64_IMAGE}" \
+            --form "variables[PYTORCH_AMD64_IMAGE]=${PYTORCH_AMD64_IMAGE}" \
+            --form "variables[PYTORCH_ARM64_IMAGE]=${PYTORCH_ARM64_IMAGE}" \
+            --form "variables[JAX_AMD64_IMAGE]=${JAX_AMD64_IMAGE}" \
+            --form "variables[JAX_ARM64_IMAGE]=${JAX_ARM64_IMAGE}" \
             --form "variables[TAG_ROOT]=${TAG_ROOT}" \
             --form "variables[BUILD_CORE]=${BUILD_CORE}" \
             --form "variables[BUILD_PYTORCH]=${BUILD_PYTORCH}" \
             --form "variables[BUILD_JAX]=${BUILD_JAX}" \
+            --form "variables[BUILD_AMD64]=${BUILD_AMD64}" \
+            --form "variables[BUILD_ARM64]=${BUILD_ARM64}" \
             --form "variables[RUN_L0_TESTS]=${RUN_L0_TESTS}" \
             --form "variables[RUN_L1_TESTS]=${RUN_L1_TESTS}" \
             --form "variables[RUN_L2_TESTS]=${RUN_L2_TESTS}" \
@@ -241,6 +264,7 @@ create_branch:
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
       FRAMEWORK: core
+      ARCH: amd64
     script:
     - !reference [.setup-docker ]
     - echo ${JOB_START_STRING}
@@ -251,6 +275,7 @@ create_branch:
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
                            $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
     - echo ${JOB_END_STRING}
     tags:
     - builder
@@ -265,30 +290,64 @@ create_branch:
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
     - when: on_success
       allow_failure: false
 
-core-py3-base:
+core-py3-base-amd64:
     stage: build base
     variables:
-      FROM_IMAGE_NAME: $CORE_IMAGE
+      FROM_IMAGE_NAME: $CORE_AMD64_IMAGE
       FRAMEWORK: core
+      ARCH: amd64
     extends:
     - .base_template
 
-pytorch-py3-base:
+core-py3-base-arm64:
     stage: build base
     variables:
-      FROM_IMAGE_NAME: $PYTORCH_IMAGE
+      FROM_IMAGE_NAME: $CORE_ARM64_IMAGE
+      FRAMEWORK: core
+      ARCH: arm64
+    extends:
+    - .base_template
+
+pytorch-py3-base-amd64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $PYTORCH_AMD64_IMAGE
       FRAMEWORK: pytorch
+      ARCH: amd64
     extends:
     - .base_template
 
-jax-py3-base:
+pytorch-py3-base-arm64:
     stage: build base
     variables:
-      FROM_IMAGE_NAME: $JAX_IMAGE
+      FROM_IMAGE_NAME: $PYTORCH_ARM64_IMAGE
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    extends:
+    - .base_template
+
+jax-py3-base-amd64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_AMD64_IMAGE
       FRAMEWORK: jax
+      ARCH: amd64
+    extends:
+    - .base_template
+
+jax-py3-base-arm64:
+    stage: build base
+    variables:
+      FROM_IMAGE_NAME: $JAX_ARM64_IMAGE
+      FRAMEWORK: jax
+      ARCH: arm64
     extends:
     - .base_template
 
@@ -298,6 +357,7 @@ jax-py3-base:
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
       FRAMEWORK: core
+      ARCH: amd64
     script:
     - !reference [.setup-docker ]
     - bash docker-build.sh --pyver=${PYVER}
@@ -306,6 +366,7 @@ jax-py3-base:
                            $(test -n "$FROM_IMAGE_NAME" && echo "--from-image=${FROM_IMAGE_NAME}")
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
     rules:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
@@ -317,30 +378,64 @@ jax-py3-base:
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
     - when: on_success
       allow_failure: false
 
-core-py3-devel:
+core-py3-devel-amd64:
     stage: build devel
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-base ]
+      ARCH: amd64
+    needs: [ core-py3-base-amd64 ]
     extends:
     - .devel_template
 
-pytorch-py3-devel:
+core-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-base-arm64 ]
+    extends:
+    - .devel_template
+
+pytorch-py3-devel-amd64:
     stage: build devel
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-base ]
+      ARCH: amd64
+    needs: [ pytorch-py3-base-amd64 ]
     extends:
     - .devel_template
 
-jax-py3-devel:
+pytorch-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-base-arm64 ]
+    extends:
+    - .devel_template
+
+jax-py3-devel-amd64:
     stage: build devel
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-base ]
+      ARCH: amd64
+    needs: [ jax-py3-base-amd64 ]
+    extends:
+    - .devel_template
+
+jax-py3-devel-arm64:
+    stage: build devel
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-base-arm64 ]
     extends:
     - .devel_template
 
@@ -351,6 +446,7 @@ jax-py3-devel:
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
       FRAMEWORK: core
+      ARCH: amd64
     dependencies: []
     script:
     - !reference [.setup-docker ]
@@ -360,6 +456,7 @@ jax-py3-devel:
                            $(test -n "$FROM_SCRIPTS_IMAGE" && echo "--devops-image=${FROM_SCRIPTS_IMAGE}")
                            $(test -n "$FRAMEWORK" && echo "--framework=${FRAMEWORK}")
                            $(test -n "$TAG_ROOT" && echo "--tag-root=${TAG_ROOT}")
+                           --arch $ARCH
     rules:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
@@ -371,31 +468,204 @@ jax-py3-devel:
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
     - if: $CI_COMMIT_BRANCH =~ /^test_release_v.*$/
 
-core-py3-stage:
+core-py3-stage-amd64:
     stage: build stage
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-base, core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-base-amd64, core-py3-devel-amd64 ]
     extends:
     - .stage_template
 
-pytorch-py3-stage:
+core-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-base-arm64, core-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+pytorch-py3-stage-amd64:
     stage: build stage
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-base, pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-base-amd64, pytorch-py3-devel-amd64 ]
     extends:
     - .stage_template
 
-jax-py3-stage:
+pytorch-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-base-arm64, pytorch-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+jax-py3-stage-amd64:
     stage: build stage
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-base, jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-base-amd64, jax-py3-devel-amd64 ]
     extends:
     - .stage_template
+
+jax-py3-stage-arm64:
+    stage: build stage
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-base-arm64, jax-py3-devel-arm64 ]
+    extends:
+    - .stage_template
+
+# Combine images from a build stage into a multi-arch image
+.manifest_template:
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: base
+    script:
+    - !reference [.setup-docker ]
+    - |
+      if [[ "${IMAGE_BUILD_STAGE}" == "base" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${BASE_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${BASE_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${BASE_IMAGE_NAME_VERSIONED}
+      elif [[ "${IMAGE_BUILD_STAGE}" == "devel" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${DEVEL_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${DEVEL_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${DEVEL_IMAGE_NAME_VERSIONED}
+      elif [[ "${IMAGE_BUILD_STAGE}" == "qa" ]]; then
+          export SOURCE_IMAGE_NAME_ROOT=${QA_IMAGE_NAME_VERSIONED}
+          export TARGET_MANIFEST=${QA_IMAGE_NAME}
+          export TARGET_MANIFEST_VERSIONED=${QA_IMAGE_NAME_VERSIONED}
+      else
+          echo "Could not make multi-arch image for build stage ${IMAGE_BUILD_STAGE}"
+          exit 1
+      fi
+    - |
+      export SOURCE_IMAGE_NAMES=""
+      if [[ "${BUILD_AMD64}" != "0" ]]; then
+          export SOURCE_IMAGE_NAMES="${SOURCE_IMAGE_NAME_ROOT}-amd64 ${SOURCE_IMAGE_NAMES}"
+      fi
+      if [[ "${BUILD_ARM64}" != "0" ]]; then
+          export SOURCE_IMAGE_NAMES="${SOURCE_IMAGE_NAME_ROOT}-arm64 ${SOURCE_IMAGE_NAMES}"
+      fi
+    - docker rmi --no-prune ${SOURCE_IMAGE_NAMES} || true
+    - |
+      if [[ "${VIRTUAL}" != "1" ]]; then
+          docker manifest rm ${TARGET_MANIFEST} || true
+          docker manifest create "${TARGET_MANIFEST}" ${SOURCE_IMAGE_NAMES}
+          docker manifest push ${TARGET_MANIFEST}
+      fi
+    - docker manifest rm ${TARGET_MANIFEST_VERSIONED} || true
+    - docker manifest create "${TARGET_MANIFEST_VERSIONED}" ${SOURCE_IMAGE_NAMES}
+    - docker manifest push ${TARGET_MANIFEST_VERSIONED}
+    rules:
+    - if: $CI_PIPELINE_SOURCE != "pipeline"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: never
+    - if: $FRAMEWORK == "core" && $BUILD_CORE == "0"
+      when: never
+    - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
+      when: never
+    - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $IMAGE_BUILD_STAGE == "qa" && $CI_COMMIT_BRANCH !~ /^test_release_v.*$/
+      when: never
+    - when: on_success
+      allow_failure: false
+
+core-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: base
+    needs: [ core-py3-base-amd64, core-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+core-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: devel
+    needs: [ core-py3-devel-amd64, core-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+core-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: core
+      IMAGE_BUILD_STAGE: qa
+    needs: [ core-py3-stage-amd64, core-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: base
+    needs: [ pytorch-py3-base-amd64, pytorch-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: devel
+    needs: [ pytorch-py3-devel-amd64, pytorch-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+pytorch-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: pytorch
+      IMAGE_BUILD_STAGE: qa
+    needs: [ pytorch-py3-stage-amd64, pytorch-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-base-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: base
+    needs: [ jax-py3-base-amd64, jax-py3-base-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-devel-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: devel
+    needs: [ jax-py3-devel-amd64, jax-py3-devel-arm64 ]
+    extends:
+    - .manifest_template
+
+jax-py3-qa-manifest:
+    stage: manifests
+    variables:
+      FRAMEWORK: jax
+      IMAGE_BUILD_STAGE: qa
+    needs: [ jax-py3-stage-amd64, jax-py3-stage-arm64 ]
+    extends:
+    - .manifest_template
 
 .test_template: &TEST_TEMPLATE
     environment: "${CI_JOB_NAME}"
@@ -403,6 +673,7 @@ jax-py3-stage:
       TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
       TEST_SCRIPT: "./test.sh"
       FRAMEWORK: core
+      ARCH: amd64
     script:
     - !reference [.setup-docker ]
     - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
@@ -412,7 +683,7 @@ jax-py3-stage:
     - echo Test timeout set to $TEST_TIMEOUT seconds
     - cat /proc/driver/nvidia/version
     - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
-    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
     - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker stop "${CONTAINER_NAME}") &
       set -x &&
       docker run $(eval ${NV_DOCKER_ARGS})
@@ -420,7 +691,7 @@ jax-py3-stage:
              -v $DATADIR:/data:ro,rslave
              $(eval echo ${EXTRA_DOCKER_RUN_ARGS})
              -w ${TEST_WORK_DIR}
-             ${DEVEL_IMAGE_NAME_VERSIONED}
+             ${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}
              /bin/bash -c "nvidia-smi && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -e ${TEST_SCRIPT}" || RV=$?;
       echo ${JOB_END_STRING};
       if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
@@ -443,7 +714,7 @@ jax-py3-stage:
       when: always
     tags:
     - must_specify_runner
-    needs: [ core-py3-devel ]
+    needs: [ core-py3-devel-amd64 ]
 
 .test_on_cluster_template: &TEST_ON_CLUSTER_TEMPLATE
     environment: "${CI_JOB_NAME}"
@@ -451,6 +722,7 @@ jax-py3-stage:
       TEST_WORK_DIR: "/opt/${CI_PROJECT_NAME}/qa/${CI_JOB_NAME}/"
       TEST_SCRIPT: "./test.sh"
       FRAMEWORK: core
+      ARCH: amd64
     script:
     - !reference [.setup-enroot ]
     - export TEST_WORK_DIR="${TEST_WORK_DIR%%--*}"
@@ -464,7 +736,7 @@ jax-py3-stage:
     - export JOBNAME="${SLURM_ACCOUNT}:${CI_PIPELINE_ID}:${GITLAB_USER_LOGIN}:${CI_JOB_NAME}:${CI_PROJECT_PATH}:${CI_COMMIT_BRANCH}:${CI_JOB_ID}"
     - ( sleep $TEST_TIMEOUT && echo "******TIMEOUT EXPIRED******" && docker stop "${CONTAINER_NAME}") &
       set -x &&
-      srun -p ${SLURM_PARTITION} -A ${SLURM_ACCOUNT} -N ${SLURM_NODES} --job-name ${JOBNAME} --mpi=pmix --export=ALL --container-image=${DEVEL_IMAGE_NAME_VERSIONED} --container-name=${CONTAINER_NAME} --container-mounts=$DATADIR:/data --container-mounts=${CI_PROJECT_DIR}/${CI_JOB_ID}/logs:/logs --container-workdir=${TEST_WORK_DIR} /bin/bash -c "([ ! -x /usr/bin/nvidia-smi ] || nvidia-smi) && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -ex ${TEST_SCRIPT}" || RV=$?;
+      srun -p ${SLURM_PARTITION} -A ${SLURM_ACCOUNT} -N ${SLURM_NODES} --job-name ${JOBNAME} --mpi=pmix --export=ALL --container-image=${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH} --container-name=${CONTAINER_NAME} --container-mounts=$DATADIR:/data --container-mounts=${CI_PROJECT_DIR}/${CI_JOB_ID}/logs:/logs --container-workdir=${TEST_WORK_DIR} /bin/bash -c "([ ! -x /usr/bin/nvidia-smi ] || nvidia-smi) && echo -n 'nproc = ' && nproc && echo ${JOB_START_STRING} && exec ${LOGGER} bash -ex ${TEST_SCRIPT}" || RV=$?;
       echo ${JOB_END_STRING};
       if [[ -z "$RV" ]]; then touch $CI_PROJECT_DIR/success ; fi;
       set +x;
@@ -485,7 +757,7 @@ jax-py3-stage:
       when: always
     tags:
     - must_specify_runner
-    needs: [ core-py3-devel ]
+    needs: [ core-py3-devel-amd64 ]
 
 .docs_template: &DOCS_BUILD
     stage: test
@@ -494,6 +766,7 @@ jax-py3-stage:
       GIT_SUBMODULE_STRATEGY: recursive
       GET_SOURCES_ATTEMPTS: 3
       FRAMEWORK: core
+      ARCH: amd64
     script:
     - !reference [.setup-docker ]
     - export CONTAINER_NAME="${CI_PROJECT_NAME}.${CI_JOB_ID}.${CI_JOB_NAME}"
@@ -501,10 +774,10 @@ jax-py3-stage:
     - echo Test timeout set to $TEST_TIMEOUT seconds
     - cat /proc/driver/nvidia/version
     - if test -f "$CI_PROJECT_DIR/success"; then rm $CI_PROJECT_DIR/success; fi
-    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}"
+    - docker pull "${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
     - docker build --progress=plain
                    -t ${DOCS_IMAGE_NAME}
-                   --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}"
+                   --build-arg "BASE_IMAGE_NAME=${DEVEL_IMAGE_NAME_VERSIONED}-${ARCH}"
                    --build-arg "GIT_SHA=${GIT_SHA}"
                    -f Dockerfile.docs .
     - echo ${JOB_START_STRING}
@@ -530,7 +803,7 @@ jax-py3-stage:
       expire_in: 1 month
     tags:
     - 1GPU
-    needs: [ core-py3-devel ]
+    needs: [ core-py3-devel-amd64 ]
     rules:
     - if: $CI_PIPELINE_SOURCE != "pipeline"
       when: never
@@ -541,6 +814,10 @@ jax-py3-stage:
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
       when: never
     - when: on_success
       allow_failure: false
@@ -685,7 +962,7 @@ send_result_to_slack:
     function sendSlackMessage() {
         local SLACK_MESSAGE_MRKDWN=${1}
         local PARENT_MESSAGE_TS=${2}
-        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json 
+        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json
         # Splits the message up into blocks due to Slack's limit of 3000 characters per block.
         [ -n "${SLACK_MESSAGE_MRKDWN}" ] && jq_in_place '.blocks += ($mrkdwn | split("\n") | map(select(. != "")) | map({type: "section", text: {type: "mrkdwn", text: .}}))' payload.json --arg mrkdwn "${SLACK_MESSAGE_MRKDWN}"
         [ -n "$PARENT_MESSAGE_TS" ] && jq_in_place '. += {"thread_ts" : $ts}' payload.json --arg ts ${PARENT_MESSAGE_TS//\"/}
@@ -748,6 +1025,10 @@ send_result_to_slack:
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
     - if: $RUN_L0_TESTS == "0"
       when: manual
       allow_failure: true
@@ -773,6 +1054,10 @@ send_result_to_slack:
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
       when: never
     - if: $RUN_L1_TESTS == "0"
       when: manual
@@ -800,6 +1085,10 @@ send_result_to_slack:
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
       when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
+      when: never
     - if: $RUN_L2_TESTS == "0"
       when: manual
       allow_failure: true
@@ -825,6 +1114,10 @@ send_result_to_slack:
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $ARCH == "amd64" && $BUILD_AMD64 == "0"
+      when: never
+    - if: $ARCH == "arm64" && $BUILD_ARM64 == "0"
       when: never
     - if: $RUN_L3_TESTS == "0"
       when: manual
@@ -902,6 +1195,34 @@ send_result_to_slack:
       DATADIR: "/lustre/fsw/core_dlfw_ci/datasets"
       SLURM_NODES: 1
 
+.GB200_1GPU:
+    tags:
+      - dlcluster_ogb_1gpu
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+.GB200_4GPU:
+    tags:
+      - dlcluster_ogb_mnnvl
+    variables:
+      CI_SCHEDULER_TYPE: docker
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
+      CI_SLURM_TIME: 240
+
+.GB200NVL_4GPU:
+    tags:
+      - ptyche
+    variables:
+      GPUS: 4
+      SLURM_NODES: 1
+      SLURM_PARTITION: "batch"
+      SLURM_ACCOUNT: "core_dlfw_ci"
+      SLURM_TIMELIMIT: 240
+      CI_ARCH: arm64
+      DATADIR: "/lustre/fsw/core_dlfw_ci/datasets"
+
 ######################################################
 ##
 ## Test definitions.
@@ -924,6 +1245,7 @@ send_result_to_slack:
 ##   L0_mytest:
 ##      variables:
 ##        FRAMEWORK: core
+##        ARCH: amd64
 ##        TEST_WORK_DIR: "/some/other/path"
 ##        TEST_SCRIPT: "./test.sh"
 ##      extends:
@@ -934,7 +1256,8 @@ send_result_to_slack:
 L0_license:
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
     extends:
     - .L0_test
     tags:
@@ -943,7 +1266,8 @@ L0_license:
 L0_pytorch_lint:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test
     tags:
@@ -952,7 +1276,8 @@ L0_pytorch_lint:
 L0_jax_lint:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     tags:
@@ -961,7 +1286,8 @@ L0_jax_lint:
 L0_pytorch_wheel--L40_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .L40_1GPU
@@ -969,7 +1295,8 @@ L0_pytorch_wheel--L40_1GPU:
 L0_jax_wheel--L40_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .L40_1GPU
@@ -977,7 +1304,8 @@ L0_jax_wheel--L40_1GPU:
 L0_cppunittest--A100_1GPU:
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .A100_1GPU
@@ -985,7 +1313,8 @@ L0_cppunittest--A100_1GPU:
 L0_cppunittest--H100_1GPU:
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .H100_1GPU
@@ -993,15 +1322,26 @@ L0_cppunittest--H100_1GPU:
 L0_cppunittest--B200_1GPU:
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
     extends:
     - .L0_test_on_cluster
     - .B200_1GPU
 
+L0_cppunittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: arm64
+    needs: [ core-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
 L0_pytorch_unittest--A100_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .A100_1GPU
@@ -1009,7 +1349,8 @@ L0_pytorch_unittest--A100_1GPU:
 L0_pytorch_unittest--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .H100_1GPU
@@ -1017,7 +1358,8 @@ L0_pytorch_unittest--H100_1GPU:
 L0_pytorch_unittest--L40_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .L40_1GPU
@@ -1025,15 +1367,26 @@ L0_pytorch_unittest--L40_1GPU:
 L0_pytorch_unittest--B200_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L0_test_on_cluster
     - .B200_1GPU
 
+L0_pytorch_unittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
 L1_pytorch_mcore_integration--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test
     - .H100_1GPU
@@ -1041,15 +1394,26 @@ L1_pytorch_mcore_integration--H100_1GPU:
 L1_pytorch_mcore_integration--B200_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test_on_cluster
     - .B200_1GPU
 
+L1_pytorch_mcore_integration--GB200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_1GPU
+
 L1_pytorch_thunder_integration--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test
     - .H100_1GPU
@@ -1057,15 +1421,26 @@ L1_pytorch_thunder_integration--H100_1GPU:
 L1_pytorch_thunder_integration--B200_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test_on_cluster
     - .B200_1GPU
 
+L1_pytorch_thunder_integration--GB200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_1GPU
+
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test
     - .H100_4GPU
@@ -1073,15 +1448,26 @@ L1_pytorch_distributed_unittest--H100_4GPU:
 L1_pytorch_distributed_unittest--B200_8GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L1_test_on_cluster
     - .B200_8GPU
 
+L1_pytorch_distributed_unittest--GB200NVL_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: arm64
+    needs: [ pytorch-py3-devel-arm64 ]
+    extends:
+    - .L1_test_on_cluster
+    - .GB200NVL_4GPU
+
 L3_pytorch_FA_versions_test--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L3_test
     - .H100_1GPU
@@ -1089,7 +1475,8 @@ L3_pytorch_FA_versions_test--H100_1GPU:
 L3_pytorch_FA_versions_test--B200_1GPU:
     variables:
       FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L3_test_on_cluster
     - .B200_1GPU
@@ -1097,7 +1484,8 @@ L3_pytorch_FA_versions_test--B200_1GPU:
 L0_jax_unittest--A100_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .A100_1GPU
@@ -1105,7 +1493,8 @@ L0_jax_unittest--A100_1GPU:
 L0_jax_unittest--H100_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .H100_1GPU
@@ -1113,7 +1502,8 @@ L0_jax_unittest--H100_1GPU:
 L0_jax_unittest--L40_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .L40_1GPU
@@ -1121,15 +1511,26 @@ L0_jax_unittest--L40_1GPU:
 L0_jax_unittest--B200_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test_on_cluster
     - .B200_1GPU
 
+L0_jax_unittest--GB200_1GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_1GPU
+
 L0_jax_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test
     - .H100_4GPU
@@ -1137,15 +1538,26 @@ L0_jax_distributed_unittest--H100_4GPU:
 L0_jax_distributed_unittest--B200_8GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L0_test_on_cluster
     - .B200_8GPU
 
+L0_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L0_test
+    - .GB200_4GPU
+
 L1_jax_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L1_test
     - .H100_4GPU
@@ -1153,15 +1565,26 @@ L1_jax_distributed_unittest--H100_4GPU:
 L1_jax_distributed_unittest--B200_8GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L1_test_on_cluster
     - .B200_8GPU
 
+L1_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L1_test
+    - .GB200_4GPU
+
 L2_jax_unittest--A100_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L2_test
     - .A100_1GPU
@@ -1169,7 +1592,8 @@ L2_jax_unittest--A100_1GPU:
 L2_jax_unittest--H100_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L2_test
     - .H100_1GPU
@@ -1177,7 +1601,8 @@ L2_jax_unittest--H100_1GPU:
 L2_jax_unittest--L40_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L2_test
     - .L40_1GPU
@@ -1185,14 +1610,25 @@ L2_jax_unittest--L40_1GPU:
 L2_jax_unittest--B200_1GPU:
     variables:
       FRAMEWORK: jax
-    needs: [ jax-py3-devel ]
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
     extends:
     - .L2_test_on_cluster
     - .B200_1GPU
 
+L2_jax_unittest--GB200NVL_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L2_test_on_cluster
+    - .GB200NVL_4GPU
+
 docs:
     variables:
       FRAMEWORK: core
-    needs: [ core-py3-devel ]
+      ARCH: amd64
+    needs: [ core-py3-devel-amd64 ]
     extends:
     - .docs_template

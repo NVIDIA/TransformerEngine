@@ -47,7 +47,7 @@ Usage:
   --framework    Framework extensions to build with Transformer Engine. Options
                  include 'pytorch', 'jax', 'core', 'all'. Framework should
                  already be installed in base image.
-
+  --arch         CPU architecture. Options inlcude 'amd64', 'arm64'.
 
 EOF
 }
@@ -69,6 +69,7 @@ PUSH=0
 PULL=1
 VIRTUAL=0
 DOCKER_IMG="${CI_REGISTRY_IMAGE:-mxlocal}"
+ARCH=amd64
 
 # Parse options
 while [[ $# -gt 0 ]]; do
@@ -150,6 +151,11 @@ while [[ $# -gt 0 ]]; do
     --mode)
       valcheck "$key" "$val"
       MODE="$val"
+      shift $((val_separate+1))
+      ;;
+    --arch)
+      valcheck "$key" "$val"
+      ARCH="$val"
       shift $((val_separate+1))
       ;;
     --help|-h)
@@ -253,9 +259,9 @@ TAG_ATTRIB="${FRAMEWORK}-py${PYVER%.*}"
 IMAGE_NAME_ROOT="${DOCKER_IMG}:${BRANCH_NAME_SLUG}-${TAG_ATTRIB}"
 VER_IMAGE_NAME_ROOT="${IMAGE_NAME_ROOT}.${PIPELINE}"
 
-[[ "$BUILD_BASE" -eq 0 ]] && echo "BUILDING BASE IMAGE"
-[[ "$BUILD_DEVEL" -eq 0 ]] && echo "BUILDING DEVEL IMAGE"
-[[ "$BUILD_STAGE" -eq 0 ]] && echo "STAGING RELEASE"
+[[ "$BUILD_BASE" -eq 1 ]] && echo "BUILDING BASE IMAGE"
+[[ "$BUILD_DEVEL" -eq 1 ]] && echo "BUILDING DEVEL IMAGE"
+[[ "$BUILD_STAGE" -eq 1 ]] && echo "STAGING RELEASE"
 echo "(versioned stem: $VER_IMAGE_NAME_ROOT)"
 echo "Building at rev $COMMIT_SHA"
 echo "TransformerEngine sources at rev $TRANSFORMERENGINE_HASH"
@@ -283,17 +289,19 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   CACHE_TO="--cache-to type=local,dest=/tmp/docker-cache,mode=max"
   if [[ $PULL -eq 1 ]]; then
     PULL_FLAG="--pull"
-    MASTER_BASE_IMAGE_NAME="${DOCKER_IMG}:master-${TAG_ATTRIB}-base"
+    MASTER_BASE_IMAGE_NAME="${DOCKER_IMG}:main-${TAG_ATTRIB}-base-${ARCH}"
     docker pull "${MASTER_BASE_IMAGE_NAME}"
-    docker pull "${IMAGE_NAME_ROOT}-base"
+    docker pull "${IMAGE_NAME_ROOT}-base-${ARCH}"
     docker pull "${FROM_SCRIPTS_IMAGE}"
     CACHE_FROM="--cache-from type=registry,ref=${DOCKER_IMG}"
     CACHE_TO="--cache-to type=registry,ref=${DOCKER_IMG},mode=max"
   fi
 
-  [[ "${VIRTUAL}" -ne 1 && "${ONE_OFF_BUILD}" -eq "0" ]] \
-      && GENERIC_TAG="-t ${IMAGE_NAME_ROOT}-base" \
-      || GENERIC_TAG=""
+  # Docker arguments for image tags
+  TAGS="-t ${VER_IMAGE_NAME_ROOT}-base-${ARCH}"
+  if [[ "${VIRTUAL}" -ne 1 && "${ONE_OFF_BUILD}" -eq "0" ]]; then
+      TAGS="-t ${IMAGE_NAME_ROOT}-base-${ARCH} ${TAGS}"
+  fi
 
   export DOCKER_CLI_EXPERIMENTAL=enabled
   docker buildx create --name buildkit --node node_${CI_RUNNER_ID} --config dlfw-ci/buildkitd.toml \
@@ -303,7 +311,9 @@ if [[ "$BUILD_BASE" -eq 1 ]]; then
   docker buildx build $PULL_FLAG $FROM_FLAG \
       ${CACHE_FROM} \
       ${CACHE_TO} \
-      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-base" \
+      ${TAGS} \
+      --platform "linux/${ARCH}" \
+      --provenance=false \
       $FROM_IMAGE_ARG \
       $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
@@ -326,16 +336,18 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   ## TEMPORARY WAR https://jirasw.nvidia.com/browse/DLR-316 - do not merge to master
   FROM_SCRIPTS_IMAGE="${FROM_SCRIPTS_IMAGE:-${REGISTRY}/dl/devops/build-scripts:bringup}"
   ########
-  BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base"
+  BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base-${ARCH}"
 
   if [[ "$PULL" -eq 1 ]]; then
     docker pull "${FROM_SCRIPTS_IMAGE}"
     docker pull "${BASE_IMAGE}"
   fi
 
-  [[ "${VIRTUAL}" -ne 1 && "${ONE_OFF_BUILD}" -eq "0" ]] \
-      && GENERIC_TAG="-t ${IMAGE_NAME_ROOT}-devel" \
-      || GENERIC_TAG=""
+  # Docker arguments for image tags
+  TAGS="-t ${VER_IMAGE_NAME_ROOT}-devel-${ARCH}"
+  if [[ "${VIRTUAL}" -ne 1 && "${ONE_OFF_BUILD}" -eq "0" ]]; then
+      TAGS="-t ${IMAGE_NAME_ROOT}-devel-${ARCH} ${TAGS}"
+  fi
 
   if [[ "$VIRTUAL" -eq 1 ]]; then
       OVERRIDES="--build-arg VIRTUAL=${VIRTUAL}"
@@ -360,7 +372,8 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   fi
 
   docker build --progress=plain --network=host \
-      ${GENERIC_TAG} -t "${VER_IMAGE_NAME_ROOT}-devel" \
+      ${TAGS} \
+      --platform "linux/${ARCH}" \
       $FRAMEWORK_ARG \
       --build-arg "FROM_SCRIPTS_IMAGE=${FROM_SCRIPTS_IMAGE}" \
       --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
@@ -372,15 +385,15 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
   fi
   if [[ "${PUSH}" -eq 1 ]]; then
     if [[ "${VIRTUAL}" -ne 1 ]]; then
-      docker push "${IMAGE_NAME_ROOT}-devel"
+      docker push "${IMAGE_NAME_ROOT}-devel-${ARCH}"
       if [[ $? -ne 0 ]]; then
-        echo "Failed to push ${IMAGE_NAME_ROOT}-devel"
+        echo "Failed to push ${IMAGE_NAME_ROOT}-devel-${ARCH}"
         exit 1
       fi
     fi
-    docker push "${VER_IMAGE_NAME_ROOT}-devel"
+    docker push "${VER_IMAGE_NAME_ROOT}-devel-${ARCH}"
     if [[ $? -ne 0 ]]; then
-      echo "Failed to push ${VER_IMAGE_NAME_ROOT}-devel"
+      echo "Failed to push ${VER_IMAGE_NAME_ROOT}-devel-${ARCH}"
       exit 1
     fi
   fi
@@ -388,10 +401,11 @@ if [[ "$BUILD_DEVEL" -eq 1 ]]; then
 fi
 
 if [[ "$BUILD_STAGE" -eq 1 ]]; then
-  BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base"
-  DEVEL_IMAGE_NAME="${VER_IMAGE_NAME_ROOT}-devel"
-  QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa"
-  STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage"
+  BASE_IMAGE="${VER_IMAGE_NAME_ROOT}-base-${ARCH}"
+  DEVEL_IMAGE_NAME="${VER_IMAGE_NAME_ROOT}-devel-${ARCH}"
+  QA_IMAGE_NAME="${IMAGE_NAME_ROOT}-qa-${ARCH}"
+  STAGE_IMAGE_NAME="${IMAGE_NAME_ROOT}-stage-${ARCH}"
+  QA_IMAGE_NAME_VERSIONED="${VER_IMAGE_NAME_ROOT}-qa-${ARCH}"
   DEVEL_IMAGE_NAME_SQRL="${DEVEL_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
   QA_IMAGE_NAME_SQRL="${QA_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
   STAGE_IMAGE_NAME_SQRL="${STAGE_IMAGE_NAME/$CI_REGISTRY/$SQRL_REGISTRY_URL}"
@@ -403,6 +417,7 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   docker tag "$BASE_IMAGE" "${STAGE_IMAGE_NAME}"
   # Create xx.yy-qa image
   docker build --progress=plain -t "${QA_IMAGE_NAME}" -f Dockerfile.qa \
+      --platform "linux/${ARCH}" \
       --build-arg "FROM_IMAGE_DEVEL=${DEVEL_IMAGE_NAME}" \
       --build-arg "FROM_IMAGE=${BASE_IMAGE}" \
       --build-arg "FRAMEWORK=${FRAMEWORK}" \
@@ -412,6 +427,7 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
     exit 1
   fi
 
+  docker tag "${QA_IMAGE_NAME}" "${QA_IMAGE_NAME_VERSIONED}"
   docker tag "${DEVEL_IMAGE_NAME}" "${DEVEL_IMAGE_NAME_SQRL}"
   docker tag "${QA_IMAGE_NAME}" "${QA_IMAGE_NAME_SQRL}"
   docker tag "${STAGE_IMAGE_NAME}" "${STAGE_IMAGE_NAME_SQRL}"
@@ -419,6 +435,7 @@ if [[ "$BUILD_STAGE" -eq 1 ]]; then
   if [[ "${PUSH}" -eq 1 ]]; then
     docker push "${STAGE_IMAGE_NAME}"
     docker push "${QA_IMAGE_NAME}"
+    docker push "${QA_IMAGE_NAME_VERSIONED}"
     docker push "${DEVEL_IMAGE_NAME_SQRL}"
     docker push "${QA_IMAGE_NAME_SQRL}"
     docker push "${STAGE_IMAGE_NAME_SQRL}"
@@ -441,12 +458,12 @@ if [[ "$CONTAMER_SCAN" -eq 1 ]]; then
    git clone --branch master --single-branch "https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab-master.nvidia.com/dl/devops/contamer.git" "${CONTAMERDIR}"
    cd "${CONTAMERDIR}"
    pip3 install -r requirements.txt
-   docker pull "${BASE_IMAGE_NAME_VERSIONED}-base"
+   docker pull "${BASE_IMAGE_NAME_VERSIONED}-base-${ARCH}"
    docker images | grep anchore
-   python3 contamer.py -ls "${BASE_IMAGE_NAME_VERSIONED}-base"
+   python3 contamer.py -ls "${BASE_IMAGE_NAME_VERSIONED}-base-${ARCH}"
    if [[ $? -ne 0 ]]; then
        docker images | grep anchore
-       echo "${BASE_IMAGE_NAME_VERSIONED}-base Failed contamer scan"
+       echo "${BASE_IMAGE_NAME_VERSIONED}-base-${ARCH} Failed contamer scan"
        exit 1
    fi
    docker images | grep anchore
