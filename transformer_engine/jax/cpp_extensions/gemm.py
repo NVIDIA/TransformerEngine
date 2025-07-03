@@ -104,8 +104,10 @@ class GroupedGemmPrimitive(BasePrimitive):
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
-        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING or \
-           scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        if (
+            scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+            or scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING
+        ):
             # For tensor scaling, each matrix has a single scale value, but it
             # needs to be aligned to 16 bytes for CUDA 12.9.1 and later. We use
             # a 256 bytes alignment to simplify the code.

@@ -87,8 +87,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   if (is_mxfp8_scaling) {
     // For MXFP8 swizzled scale_inv buffers, each has 256B alignment padding.
     workspace_size -= lhs_sinv_size + rhs_sinv_size + 2 * mxfp8_scaling_sinv_alignment_padding;
-  }
-  else if (is_tensor_scaling) {
+  } else if (is_tensor_scaling) {
     // For tensor scaling, each matrix has a single scale value, but it needs to be aligned
     // to 256 bytes for CUDA 12.9.1 and later.
     workspace_size -= tensor_scaling_sinv_aligment * (lhs_sinv_size + rhs_sinv_size);
@@ -114,13 +113,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     size_t spitch = lhs_sinv_dtype_bytes;
     size_t width = lhs_sinv_dtype_bytes;
     size_t height = lhs_sinv_size;
-    cudaMemcpy2DAsync(lhs_scatter_aligned_ptr, dpitch, lhs_sinv_ptr, spitch,
-                      width, height, cudaMemcpyHostToDevice, stream_0);
+    cudaMemcpy2DAsync(lhs_scatter_aligned_ptr, dpitch, lhs_sinv_ptr, spitch, width, height,
+                      cudaMemcpyHostToDevice, stream_0);
     spitch = rhs_sinv_dtype_bytes;
     width = rhs_sinv_dtype_bytes;
     height = rhs_sinv_size;
-    cudaMemcpy2DAsync(rhs_scatter_aligned_ptr, dpitch, rhs_sinv_ptr, spitch,
-                      width, height, cudaMemcpyHostToDevice, stream_0);
+    cudaMemcpy2DAsync(rhs_scatter_aligned_ptr, dpitch, rhs_sinv_ptr, spitch, width, height,
+                      cudaMemcpyHostToDevice, stream_0);
     lhs_sinv_ptr = lhs_scatter_aligned_ptr;
     rhs_sinv_ptr = rhs_scatter_aligned_ptr;
   }
