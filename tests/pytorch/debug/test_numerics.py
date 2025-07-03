@@ -28,7 +28,6 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_WGRAD,
 )
 
-
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID
 AMAX_HISTORY_LEN = 16
