@@ -161,7 +161,9 @@ class StatsBuffers:
         self.buffers[(layer_name, tensor_name, options)] = buffer
         self.reduction_group_to_buffer[reduction_group].append(buffer)
 
-    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction, aux_dict=None):
+    def feed(
+        self, layer_name, tensor_name, options, tensor, iteration, skip_reduction, aux_dict=None
+    ):
         """Feeds the tensor into the respective buffer."""
         buffer = self.buffers[(layer_name, tensor_name, options)]
         buffer.feed(tensor, iteration, aux_dict)

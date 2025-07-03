@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from transformer_engine.common.recipe import Format
 import transformer_engine_torch as tex
 
+
 @torch.compile
 def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
@@ -48,6 +49,7 @@ def compute_std(variances, numels, sums):
     """Computates standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
 
+
 def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
     """Computes the overflows of the tensor."""
     scale_inv = quantized_tensor._scale_inv
@@ -60,7 +62,9 @@ def compute_fp8_delayed_scaling_overflows_num(tensor, quantized_tensor):
     }
 
     if dtype not in dtype_to_max:
-        raise ValueError(f"Unsupported FP8 dtype {dtype} passed to compute_fp8_delayed_scaling_overflows_num().")
+        raise ValueError(
+            f"Unsupported FP8 dtype {dtype} passed to compute_fp8_delayed_scaling_overflows_num()."
+        )
 
     fp8_max = dtype_to_max[dtype]
     fp8_min = -fp8_max
@@ -117,12 +121,18 @@ STATS = {
     "min": (lambda x, aux_dict: torch.min(x), lambda buffers: min(_get(buffers, "min"))),
     "max": (lambda x, aux_dict: torch.max(x), lambda buffers: max(_get(buffers, "max"))),
     "sum": (lambda x, aux_dict: torch.sum(x), lambda buffers: sum(_get(buffers, "sum"))),
-    "mean": (lambda x, aux_dict: torch.mean(x), lambda buffers: sum(_get(buffers, "sum")) / sum(_get(buffers, "numel"))),
+    "mean": (
+        lambda x, aux_dict: torch.mean(x),
+        lambda buffers: sum(_get(buffers, "sum")) / sum(_get(buffers, "numel")),
+    ),
     "numel": (
         lambda x, aux_dict: x.numel() if hasattr(x, "numel") else x.get_data_tensors()[0].numel(),
         lambda buffers: sum(_get(buffers, "numel")),
     ),
-    "l1_norm": (lambda x, aux_dict: torch.norm(x, p=1), lambda buffers: sum(_get(buffers, "l1_norm"))),
+    "l1_norm": (
+        lambda x, aux_dict: torch.norm(x, p=1),
+        lambda buffers: sum(_get(buffers, "l1_norm")),
+    ),
     "l2_norm_square": (
         lambda x, aux_dict: torch.sum(x**2),
         lambda buffers: sum(_get(buffers, "l2_norm_square")),
@@ -158,12 +168,20 @@ STATS = {
         - min(_get(buffers, "dynamic_range_bottom")),
     ),
     "fp8_delayed_scaling_overflows_num": (
-        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(x, aux_dict["fp8_delayed_scaling"]),
+        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(
+            x, aux_dict["fp8_delayed_scaling"]
+        ),
         lambda buffers: sum(_get(buffers, "fp8_delayed_scaling_overflows_num")),
     ),
     "fp8_delayed_scaling_overflows%": (
-        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(x, aux_dict["fp8_delayed_scaling"]) / x.numel() * 100,
-        lambda buffers: 100 * sum(_get(buffers, "fp8_delayed_scaling_overflows_num")) / sum(_get(buffers, "numel")),
+        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(
+            x, aux_dict["fp8_delayed_scaling"]
+        )
+        / x.numel()
+        * 100,
+        lambda buffers: 100
+        * sum(_get(buffers, "fp8_delayed_scaling_overflows_num"))
+        / sum(_get(buffers, "numel")),
     ),
 }
 
@@ -185,12 +203,17 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
     STATS[stat_pct] = (
-        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum() / aux_dict[recipe_name].numel() * 100,
-        lambda buffers, _sn_num=stat_num: 100 * sum(_get(buffers, _sn_num)) / sum(_get(buffers, "numel")),
+        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum()
+        / aux_dict[recipe_name].numel()
+        * 100,
+        lambda buffers, _sn_num=stat_num: 100
+        * sum(_get(buffers, _sn_num))
+        / sum(_get(buffers, "numel")),
     )
 
     DEPENDENCIES[stat_num] = {stat_num}
     DEPENDENCIES[stat_pct] = {stat_num, "numel"}
+
 
 def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
     """Register *both* scale-inv min and max stats for a given recipe.
@@ -226,6 +249,7 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_name_min] = {stat_name_min}
     DEPENDENCIES[stat_name_max] = {stat_name_max}
 
+
 def add_mse_stats(recipe_name: str, columnwise: bool = False):
     """Register mse and total_square_error stats for the recipe."""
     columnwise_suffix = "_columnwise" if columnwise else ""
@@ -238,7 +262,8 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
     STATS[stat_mse] = (
         lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="mean"),
-        lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err)) / sum(_get(buffers, "numel")),
+        lambda buffers, _sn_err=stat_err: torch.sum(_get(buffers, _sn_err))
+        / sum(_get(buffers, "numel")),
     )
     STATS[stat_err] = (
         lambda x, aux_dict: F.mse_loss(x, aux_dict[recipe_name].dequantize(), reduction="sum"),
@@ -248,8 +273,14 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     DEPENDENCIES[stat_err] = {stat_err}
     DEPENDENCIES[stat_mse] = {stat_mse, stat_err, "numel"}
 
+
 for _columnwise in [True, False]:
-    for _recipe_name in ["fp8_delayed_scaling", "mxfp8", "fp8_current_scaling", "fp8_block_scaling"]:
+    for _recipe_name in [
+        "fp8_delayed_scaling",
+        "mxfp8",
+        "fp8_current_scaling",
+        "fp8_block_scaling",
+    ]:
         add_underflows_stats(_recipe_name, _columnwise)
         add_scale_inv_stats(_recipe_name, _columnwise)
         add_mse_stats(_recipe_name, _columnwise)

@@ -470,7 +470,7 @@ class DebugQuantizer(Quantizer):
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
-        #pylint: disable=too-many-boolean-expressions
+        # pylint: disable=too-many-boolean-expressions
         if (
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled_rowwise

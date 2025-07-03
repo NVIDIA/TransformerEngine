@@ -14,13 +14,17 @@ from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.pytorch.tensor import Quantizer
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
+
 
 def _get_recipe_name(quantizer: Optional[Quantizer]):
     if quantizer is None:
@@ -35,6 +39,7 @@ def _get_recipe_name(quantizer: Optional[Quantizer]):
         return "fp8_block_scaling"
     raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
 
+
 def _get_new_quantizer(recipe_name, fp8_dtype):
     if recipe_name == "fp8_block_scaling":
         return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
@@ -45,6 +50,7 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
     if recipe_name == "fp8_delayed_scaling":
         raise ValueError("Cannot recreate quantizer for fp8_delayed_scaling")
     raise ValueError(f"Unsupported recipe name: {recipe_name}")
+
 
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
@@ -144,12 +150,14 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def check_if_stat_is_supported(self, stat: str, current_recipe: str):
         """Returns True if stat is supported, raises ValueError otherwise."""
         if stat.endswith("_columnwise"):
-            stat = stat[:-len("_columnwise")]
+            stat = stat[: -len("_columnwise")]
         recipe_from_stat = self.get_recipe_from_stat(stat)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
         if current_recipe == "" and recipe_from_stat == "":
-            raise ValueError(f"Stat {stat} does not contain a recipe name and the current recipe is not set.")
+            raise ValueError(
+                f"Stat {stat} does not contain a recipe name and the current recipe is not set."
+            )
 
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
@@ -157,12 +165,17 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat == "fp8_delayed_scaling" and stat_without_recipe == "overflows%":
             return True
 
-        if recipe_from_stat in ["mxfp8", "fp8_block_scaling", "fp8_current_scaling"] and torch.cuda.get_device_capability()[0] < 9:
+        if (
+            recipe_from_stat in ["mxfp8", "fp8_block_scaling", "fp8_current_scaling"]
+            and torch.cuda.get_device_capability()[0] < 9
+        ):
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
 
         supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "mse"]
         if stat_without_recipe not in supported_stats:
-            raise ValueError(f"Stat {stat} contains an unsupported stat name: {stat_without_recipe}")
+            raise ValueError(
+                f"Stat {stat} contains an unsupported stat name: {stat_without_recipe}"
+            )
 
         return True
 
@@ -192,7 +205,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         original_tensor: torch.Tensor,
         quantized_tensor_rowwise: Optional[torch.Tensor] = None,
         quantized_tensor_columnwise: Optional[torch.Tensor] = None,
-        quantizer: Optional[Quantizer] = None
+        quantizer: Optional[Quantizer] = None,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
@@ -230,13 +243,16 @@ class LogFp8TensorStats(BaseLogTensorStats):
         )
 
         recipes_in_stats = [
-            self.get_recipe_from_stat(stat) for stat in config["stats"]
+            self.get_recipe_from_stat(stat)
+            for stat in config["stats"]
             if self.get_recipe_from_stat(stat) != ""
         ]
 
         fp8_dtype = None
         if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
-            assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer))
+            assert isinstance(
+                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
+            )
             fp8_dtype = quantizer.dtype
 
         aux_dict = {
@@ -247,7 +263,15 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 quantizer = _get_new_quantizer(recipe_name, fp8_dtype)
                 aux_dict[cur_recipe_name] = quantizer(original_tensor)
 
-        STATS_BUFFERS.feed(layer_name, tensor_name, options, original_tensor, iteration, skip_reduction, aux_dict=aux_dict)
+        STATS_BUFFERS.feed(
+            layer_name,
+            tensor_name,
+            options,
+            original_tensor,
+            iteration,
+            skip_reduction,
+            aux_dict=aux_dict,
+        )
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",
