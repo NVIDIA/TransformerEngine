@@ -265,7 +265,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
         assert stats[("decoder.1.mlp.fc1", "activation", "cur_amax", 200)] == tensor.abs().max()
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
-        )
+        )[0]
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.2.mlp.fc1", tensor_name="activation", iteration=200
         )
@@ -274,12 +274,11 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )
 
         expected_underflows = (tensor_fp8._data == 0).sum() * 100 / (100 * 100 * 5)
-        expected_overflows = (tensor_fp8._data == 126).sum() * 100 / (100 * 100 * 5)
 
         # TE FP8 tensor stats --
         assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
             "decoder.1.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
-        )
+        )[0]
         debug_api.transformer_engine.inspect_tensor_postquantize(
             "decoder.1.mlp.fc1",
             tensor=tensor_fp8,
@@ -328,7 +327,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
 
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.7.mlp.fc1", tensor_name="weight", iteration=201
-        )
+        )[0]    
         assert_empty()
 
     finally:

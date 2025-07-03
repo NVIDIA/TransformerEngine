@@ -19,7 +19,8 @@ from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from .utils import next_enabled_iter
+from transformer_engine.debug.features.utils import next_enabled_iter
+
 
 
 @Registry.register_feature(namespace="transformer_engine")

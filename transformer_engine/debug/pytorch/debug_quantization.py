@@ -39,6 +39,12 @@ API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
+def second_arg_default_none(x):
+    if isinstance(x, tuple):
+        return x
+    else:
+        return x, None
+
 
 class DebugQuantizer(Quantizer):
     """
@@ -70,7 +76,7 @@ class DebugQuantizer(Quantizer):
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
-        self.next_debug_iter = None
+        self.next_debug_iter = float('inf')
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
         # rowwise_tensor_plan, and columnwise_tensor_plan are computed.
@@ -104,17 +110,19 @@ class DebugQuantizer(Quantizer):
         """
         import nvdlfw_inspect.api as debug_api
 
-        inspect_tensor_enabled, next_iter = debug_api.transformer_engine.inspect_tensor_enabled(
+        inspect_tensor_enabled, next_iter = second_arg_default_none(
+            debug_api.transformer_engine.inspect_tensor_enabled(
             layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
-        )
+        ))
         self.update_next_iter(next_iter)
 
-        modify_enabled, next_iter = debug_api.transformer_engine.modify_tensor_enabled(
+        modify_enabled, next_iter = second_arg_default_none(
+            debug_api.transformer_engine.modify_tensor_enabled(
             layer_name=self.layer_name,
             gemm=self.rowwise_gemm_name,
             tensor_name=self.tensor_name,
             iteration=self.iteration,
-        )
+        ))
         self.update_next_iter(next_iter)
 
         plan = API_CALL_MODIFY if modify_enabled else HIGH_PRECISION
@@ -127,12 +135,13 @@ class DebugQuantizer(Quantizer):
         """
         import nvdlfw_inspect.api as debug_api
 
-        inspect_tensor_enabled, next_iter = debug_api.transformer_engine.inspect_tensor_enabled(
+        inspect_tensor_enabled, next_iter = second_arg_default_none(
+            debug_api.transformer_engine.inspect_tensor_enabled(
             layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
-        )
+        ))
         self.update_next_iter(next_iter)
 
-        inspect_tensor_postquantize_enabled_rowwise, next_iter = (
+        inspect_tensor_postquantize_enabled_rowwise, next_iter = second_arg_default_none(
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
                 tensor_name=self.tensor_name,
@@ -142,7 +151,7 @@ class DebugQuantizer(Quantizer):
         )
         self.update_next_iter(next_iter)
 
-        inspect_tensor_postquantize_enabled_columnwise, next_iter = (
+        inspect_tensor_postquantize_enabled_columnwise, next_iter = second_arg_default_none(
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
                 tensor_name=self.tensor_name,
@@ -169,23 +178,25 @@ class DebugQuantizer(Quantizer):
         rowwise_plan = None
         columnwise_plan = None
 
-        modify_rowwise, next_iter = debug_api.transformer_engine.modify_tensor_enabled(
+        modify_rowwise, next_iter = second_arg_default_none(
+            debug_api.transformer_engine.modify_tensor_enabled(
             layer_name=self.layer_name,
             gemm=self.rowwise_gemm_name,
             tensor_name=self.tensor_name,
             iteration=self.iteration,
-        )
+        ))
         self.update_next_iter(next_iter)
 
         if modify_rowwise:
             rowwise_plan = API_CALL_MODIFY
         else:
             if self.parent_quantizer is not None:
-                fp8_quantize, next_iter = debug_api.transformer_engine.fp8_gemm_enabled(
+                fp8_quantize, next_iter = second_arg_default_none(
+                    debug_api.transformer_engine.fp8_gemm_enabled(
                     layer_name=self.layer_name,
                     gemm=self.rowwise_gemm_name,
                     iteration=self.iteration,
-                )
+                ))
                 self.update_next_iter(next_iter)
 
                 if fp8_quantize:
@@ -194,23 +205,25 @@ class DebugQuantizer(Quantizer):
             rowwise_plan = HIGH_PRECISION
 
         if self.columnwise_gemm_name is not None:
-            modify_columnwise, next_iter = debug_api.transformer_engine.modify_tensor_enabled(
+            modify_columnwise, next_iter = second_arg_default_none(
+                debug_api.transformer_engine.modify_tensor_enabled(
                 layer_name=self.layer_name,
                 gemm=self.columnwise_gemm_name,
                 tensor_name=self.tensor_name,
                 iteration=self.iteration,
-            )
+            ))
             self.update_next_iter(next_iter)
 
             if modify_columnwise:
                 columnwise_plan = API_CALL_MODIFY
             else:
                 if self.parent_quantizer is not None:
-                    fp8_quantize, next_iter = debug_api.transformer_engine.fp8_gemm_enabled(
+                    fp8_quantize, next_iter = second_arg_default_none(
+                        debug_api.transformer_engine.fp8_gemm_enabled(
                         layer_name=self.layer_name,
                         gemm=self.columnwise_gemm_name,
                         iteration=self.iteration,
-                    )
+                    ))
                     self.update_next_iter(next_iter)
 
                     if fp8_quantize:

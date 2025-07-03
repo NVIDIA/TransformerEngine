@@ -47,6 +47,7 @@ from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTens
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
+from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -1393,6 +1394,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
+
+    def validate_debug(self):
+        self._validate_name()
+        debug = TEDebugState.debug_enabled
+        started_new_iteration = TEDebugState.get_iteration() != getattr(self, "debug_last_iteration_name", None)
+        if not debug:
+            return False
+        if self.next_iter_when_debug_should_be_run is not None and started_new_iteration:
+            debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
+        self.debug_last_iteration_name = TEDebugState.get_iteration()
+        return debug
+    
+    def can_disable_debug(self, quantizers):
+        if next_iter_when_debug_should_be_run(quantizers) is not None:
+            run_current = any_feature_enabled(quantizers)
+            self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(
+                quantizers
+            )
+            if not run_current:
+                return True
+        
+        if self.primary_weights_in_fp8 :
+            raise RuntimeError("FP8 weights are not supported in debug mode.")
+        return False
 
     def _validate_name(self):
         """
