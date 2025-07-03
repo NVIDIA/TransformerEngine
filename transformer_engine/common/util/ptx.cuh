@@ -223,11 +223,25 @@ struct FPx2 {
   T y;
 };
 
+template <typename T>
+struct FPx4 {
+  T x1;
+  T x2;
+  T x3;
+  T x4;
+};
+
 using floatx2 = FPx2<float>;
 using bf16x2 = FPx2<bf16>;
 using fp16x2 = FPx2<fp16>;
 using fp8e4m3x2 = FPx2<fp8e4m3>;
 using fp8e5m2x2 = FPx2<fp8e5m2>;
+
+using floatx4 = FPx4<float>;
+using bf16x4 = FPx4<bf16>;
+using fp16x4 = FPx4<fp16>;
+using fp8e4m3x4 = FPx4<fp8e4m3>;
+using fp8e5m2x4 = FPx4<fp8e5m2>;
 
 #include <cuda_fp4.h>
 using fp4e2m1 = __nv_fp4_e2m1;
@@ -262,7 +276,7 @@ static_assert(sizeof(fp4e2m1x4) == 2);
 // SIMD like "Fused" cast + multiplication (x4)
 // __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
 __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
-                                           const floatx2 &in23, const floatx2 &scale) {
+                                           const floatx2 &in23, const float scale) {
 #if CUDA_ARCH_HAS_CVT_FEATURE
   asm volatile(
       "{\n"
@@ -274,8 +288,10 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
       ".reg.b32 val2; \n\t"
       ".reg.b32 val3; \n\t"
       ".reg.b32 val4; \n\t"
-      "mul.f32x2 val_pair1, %1, %3; \n\t"
-      "mul.f32x2 val_pair2, %2, %3; \n\t"
+      ".reg.b64 scale_pair; \n\t"
+      "mov.b64 scale_pair, {%3, %3}; \n\t"
+      "mul.f32x2 val_pair1, %1, scale_pair; \n\t"
+      "mul.f32x2 val_pair2, %2, scale_pair; \n\t"
       "mov.b64 {val2,val1}, val_pair1; \n\t"
       "mov.b64 {val4,val3}, val_pair2; \n\t"
       "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
@@ -285,12 +301,53 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const floatx2 &in01,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "l"(reinterpret_cast<const uint64_t &>(in01)),
         "l"(reinterpret_cast<const uint64_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
+        "f"(scale));
 #endif
 }
 
+// __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out,
+//                                            const bf16 in0,
+//                                            const bf16 in1,
+//                                            const bf16 in2,
+//                                            const bf16 in3,
+//                                            const float scale) {
+// #if CUDA_ARCH_HAS_CVT_FEATURE
+//   asm volatile(
+//       "{\n"
+//       ".reg.b8 out12, out34; \n\t"
+//       ".reg.b16 b1, b2, b3, b4; \n\t"
+//       ".reg.f32 f1, f2, f3, f4; \n\t"
+//       ".reg.b32 f12, f34; \n\t"
+//       ".reg.b16 scale; \n\t"
+//       ".reg.b32 scale2x; \n\t"
+//       "cvt.rn.bf16.f32 scale, %5; \n\t"
+//       "mov.b32 scale2x, {scale, scale}; \n\t"
+//       "mov.b32 f12, {%1, %2}; \n\t"
+//       "mov.b32 f34, {%3, %4}; \n\t"
+//       "mul.bf16x2 f12, f12, scale2x; \n\t"
+//       "mul.bf16x2 f34, f34, scale2x; \n\t"
+//       "mov.b32 {b2, b1}, f12; \n\t"
+//       "mov.b32 {b4, b3}, f34; \n\t"
+//       "cvt.f32.bf16 f1, b1; \n\t"
+//       "cvt.f32.bf16 f2, b2; \n\t"
+//       "cvt.f32.bf16 f3, b3; \n\t"
+//       "cvt.f32.bf16 f4, b4; \n\t"
+//       "cvt.rn.satfinite.e2m1x2.f32 out12, f1, f2; \n\t"
+//       "cvt.rn.satfinite.e2m1x2.f32 out34, f3, f4; \n\t"
+//       "mov.b16 %0, {out12, out34}; \n\t"
+//       "}"
+//       : "=h"(reinterpret_cast<uint16_t &>(out))
+//       : "h"(reinterpret_cast<const uint16_t &>(in0)),
+//         "h"(reinterpret_cast<const uint16_t &>(in1)),
+//         "h"(reinterpret_cast<const uint16_t &>(in2)),
+//         "h"(reinterpret_cast<const uint16_t &>(in3)),
+//         "f"(scale));
+// #endif
+// }
+
+
 __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const bf16x2 &in01,
-                                           const bf16x2 &in23, const floatx2 &scale) {
+                                           const bf16x2 &in23, const float scale) {
 #if CUDA_ARCH_HAS_CVT_FEATURE
   asm volatile(
       "{\n"
@@ -308,6 +365,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const bf16x2 &in01,
       ".reg.b32 val2; \n\t"
       ".reg.b32 val3; \n\t"
       ".reg.b32 val4; \n\t"
+      ".reg.b64 scale_pair; \n\t"
+      "mov.b64 scale_pair, {%3, %3}; \n\t"
       "mov.b32 {val1_bf16, val2_bf16} , %1; \n\t"
       "mov.b32 {val3_bf16, val4_bf16} , %2; \n\t"
       "cvt.f32.bf16 val1, val1_bf16; \n\t"
@@ -316,8 +375,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const bf16x2 &in01,
       "cvt.f32.bf16 val4, val4_bf16; \n\t"
       "mov.b64 val_pair1_before, {val1, val2}; \n\t"
       "mov.b64 val_pair2_before, {val3, val4}; \n\t"
-      "mul.f32x2 val_pair1_after, val_pair1_before, %3; \n\t"
-      "mul.f32x2 val_pair2_after, val_pair2_before, %3; \n\t"
+      "mul.f32x2 val_pair1_after, val_pair1_before, scale_pair; \n\t"
+      "mul.f32x2 val_pair2_after, val_pair2_before, scale_pair; \n\t"
       "mov.b64 {val2, val1}, val_pair1_after; \n\t"
       "mov.b64 {val4, val3}, val_pair2_after; \n\t"
       "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
@@ -327,12 +386,12 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const bf16x2 &in01,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in01)),
         "r"(reinterpret_cast<const uint32_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
+        "f"(scale));
 #endif
 }
 
 __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const fp16x2 &in01,
-                                           const fp16x2 &in23, const floatx2 &scale) {
+                                           const fp16x2 &in23, const float scale) {
 #if CUDA_ARCH_HAS_CVT_FEATURE
   asm volatile(
       "{\n"
@@ -350,6 +409,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const fp16x2 &in01,
       ".reg.b32 val2; \n\t"
       ".reg.b32 val3; \n\t"
       ".reg.b32 val4; \n\t"
+      ".reg.b64 scale_pair; \n\t"
+      "mov.b64 scale_pair, {%3, %3}; \n\t"
       "mov.b32 {val1_f16, val2_f16} , %1; \n\t"
       "mov.b32 {val3_f16, val4_f16} , %2; \n\t"
       "cvt.f32.f16 val1, val1_f16; \n\t"
@@ -358,8 +419,8 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const fp16x2 &in01,
       "cvt.f32.f16 val4, val4_f16; \n\t"
       "mov.b64 val_pair1_before, {val1, val2}; \n\t"
       "mov.b64 val_pair2_before, {val3, val4}; \n\t"
-      "mul.f32x2 val_pair1_after, val_pair1_before, %3; \n\t"
-      "mul.f32x2 val_pair2_after, val_pair2_before, %3; \n\t"
+      "mul.f32x2 val_pair1_after, val_pair1_before, scale_pair; \n\t"
+      "mul.f32x2 val_pair2_after, val_pair2_before, scale_pair; \n\t"
       "mov.b64 {val2, val1}, val_pair1_after; \n\t"
       "mov.b64 {val4, val3}, val_pair2_after; \n\t"
       "cvt.rn.satfinite.e2m1x2.f32 fp4_pair1, val1, val2; \n\t"
@@ -369,7 +430,7 @@ __device__ __forceinline__ void mul_cvt_4x(fp4e2m1x4 &out, const fp16x2 &in01,
       : "=h"(reinterpret_cast<uint16_t &>(out))
       : "r"(reinterpret_cast<const uint32_t &>(in01)),
         "r"(reinterpret_cast<const uint32_t &>(in23)),
-        "l"(reinterpret_cast<const uint64_t &>(scale)));
+        "f"(scale));
 #endif
 }
 

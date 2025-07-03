@@ -562,9 +562,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT = (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
 
   const bool printing_thread = (threadIdx.x < cols / 2) && (threadIdx.y == 0) && (blockIdx.x == 0) && (blockIdx.y == 0);
+  using IType4 = typename ptx::FPx4<IType>;
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
 
+  // constexpr float rcp_6 = 1.0f / 6.0f;
   if constexpr (!COMPUTE_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
@@ -648,9 +650,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const bool is_master_thread = (threadIdx.x == 0);
 
   // Compute a global encoding/decoding scaling factor for all S_dec_b 
-  const float S_enc = 6.0f * 448.0f / global_prev_amax;
+  const float S_enc = __fdiv_rn(6.0f * 448.0f, global_prev_amax);
+  // const float S_enc_p = __fdiv_rn(448.0f, global_prev_amax);
 
-  float block_amax = 0.0f;
+  float thread_amax = 0.0f;
 
   // Initialize shared memory barrier with the number of threads participating in the barrier.
   #pragma nv_diag_suppress static_var_with_dynamic_init
@@ -687,23 +690,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
 
-    float thread_amax = 0.0f;
+    float block_amax = 0.0f;
 //     if constexpr (COLWISE_SCALING) {
 //       const int shmem_offset_base_colwise = buff * BUFF_IN_DIM + tid_X_colwise;
-//       thread_amax = 0.0f;
+//       block_amax = 0.0f;
 //       float in_compute_colwise[BUFF_DIM_Y];
 //       IType in_colwise_IType[BUFF_DIM_Y];
 
 //       // 1. Read/Compute elements. Find MXFP8-block AMAX
 //       if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-//         IType thread_amax_f16 = static_cast<IType>(0.0f);
+//         IType block_amax_f16 = static_cast<IType>(0.0f);
 //         #pragma unroll
 //         for (int i = 0; i < BUFF_DIM_Y; ++i) {
 //           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
 //           in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-//           thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
+//           block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
 //         }
-//         thread_amax = static_cast<float>(thread_amax_f16);
+//         block_amax = static_cast<float>(block_amax_f16);
 //       } else {
 //         #pragma unroll
 //         for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -726,11 +729,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 //             const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
 //             const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
 //             if (!out_of_bounds) {
-//               thread_amax = fmaxf(thread_amax, fabsf(elt));
+//               block_amax = fmaxf(block_amax, fabsf(elt));
 //             }
 //           } else {
 //             // If no activation, elt is 0 so we can safely do this
-//             thread_amax = fmaxf(thread_amax, fabsf(elt));
+//             block_amax = fmaxf(block_amax, fabsf(elt));
 //           }
 //           in_compute_colwise[i] = elt;
 //         }
@@ -738,7 +741,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 //       // 2. Compute E8M0 scaling factor
 //       const e8m0_t biased_exponent =
-//           ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+//           ptx::float_to_e8m0(block_amax * Quantized_Limits<OType>::max_norm_rcp);
 
 //       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
 //       const int global_scales_offset_X = scales_offset_X_colwise;
@@ -767,7 +770,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (ROWWISE_SCALING) {
       const int shmem_offset_base_rowwise_in = buff * BUFF_IN_DIM + thread_offset_Y_rowwise * BUFF_IN_DIM_X;
       const int shmem_offset_base_rowwise_out = buff * BUFF_OUT_DIM + thread_offset_Y_rowwise * BUFF_OUT_DIM_X;
-      thread_amax = 0.0f;
+      block_amax = 0.0f;
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
@@ -789,7 +792,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
           }
         }
-        thread_amax =
+        block_amax =
             static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
       } else if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
@@ -813,7 +816,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             if constexpr (std::is_same_v<IType, float>) {
               #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
-                thread_amax = fmaxf(thread_amax, fabsf(in_cached[w].data.elt[e]));
+                block_amax = fmaxf(block_amax, fabsf(in_cached[w].data.elt[e]));
               }
             } else {
               #pragma unroll
@@ -826,7 +829,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         if constexpr (!std::is_same_v<IType, float>) {
-          thread_amax =
+          block_amax =
               static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
         }
       } else {
@@ -858,11 +861,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                   (block_offset_X + swizzled_thread_idx >= cols);
               const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
               if (!out_of_bounds) {
-                thread_amax = fmaxf(thread_amax, fabsf(elt));
+                block_amax = fmaxf(block_amax, fabsf(elt));
               }
             } else {
               // If no activation, elt is 0 so we can safely do this
-              thread_amax = fmaxf(thread_amax, fabsf(elt));
+              block_amax = fmaxf(block_amax, fabsf(elt));
             }
             in_compute_rowwise[j] = elt;
           }
@@ -871,11 +874,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 2. Compute E4M3 scaling factor
       // Compute per-block encoding/decoding scaling factor
-      const float S_dec_b = thread_amax / 6.0f;
+      const float S_dec_b = block_amax / 6.0f;
 
       // Scale & Store per-block decoding scaling factor
       const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
-      
+
       // const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       // const int stage_scales_offset_X = scales_offset_X_rowwise;
       // const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
@@ -887,13 +890,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
 
       // Compute "correct" per-block encoding scaling factor
-      const float S_enc_b_fp8 = S_enc / static_cast<float>(S_dec_b_fp8);
-      const ptx::floatx2 block_scale_inverse_2x = {S_enc_b_fp8, S_enc_b_fp8};
+      // const float S_enc_b_fp8 = S_enc / static_cast<float>(S_dec_b_fp8);
+      const float S_enc_b_fp8 = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));
+      const float block_scale_inverse = S_enc_b_fp8;
+
+      // const ptx::floatx2 block_scale_inverse_2x = {S_enc_b_fp8, S_enc_b_fp8};
 
       // At the moment, ONLY the Rowwise NVFP4 is supported
       // if constexpr (SCALE_DIM_X == 32) {
       //   // TODO: Choose MXFP8 or NVFP4 scaling depending on the provided value of SCALE_DIM_X
-      //   const e8m0_t biased_exponent = ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+      //   const e8m0_t biased_exponent = ptx::float_to_e8m0(block_amax * Quantized_Limits<OType>::max_norm_rcp);
       //   const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       //   const int stage_scales_offset_X = scales_offset_X_rowwise;
       //   const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
@@ -909,6 +915,31 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       for (int w = 0; w < WAVES; ++w) {
         Vec<fp4e2m1x4, PACK_SIZE / 4> out;    // Vec<fp4e2m1x4, PACK_SIZE / 4> out;
         #pragma unroll
+        // for (int e = 0; e < PACK_SIZE / 4; ++e) {
+        //   fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
+        //   if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+        //     // in01 = in_IType[w].data.elt[2 * e];
+        //     // in23 = in_IType[w].data.elt[2 * e + 1];
+        //     IType4& in = *reinterpret_cast<IType4*>(&in_IType[w].data.elt[2 * e]);
+        //     ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
+        //   }
+        //   // else if constexpr (IS_CACHED_ACT_OP) {
+        //   //   // in01.x = in_cached[w].data.elt[4 * e];
+        //   //   // in01.y = in_cached[w].data.elt[4 * e + 1];
+        //   //   // in23.x = in_cached[w].data.elt[4 * e + 2];
+        //   //   // in23.y = in_cached[w].data.elt[4 * e + 3];
+        //   //   IType4& in = *reinterpret_cast<IType4*>(&in_cached[w].data.elt[4 * e]);
+        //   //   ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
+        //   // } else {
+        //   //   const int j = w * PACK_SIZE + 4 * e;
+        //   //   // in01.x = in_compute_rowwise[j];
+        //   //   // in01.y = in_compute_rowwise[j + 1];
+        //   //   // in23.x = in_compute_rowwise[j + 2];
+        //   //   // in23.y = in_compute_rowwise[j + 3];
+        //   //   IType4& in = *reinterpret_cast<IType4*>(&in_compute_rowwise[j]);
+        //   //   ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
+        //   // }
+        // }
         for (int e = 0; e < PACK_SIZE / 4; ++e) {
           IType2 in01;
           IType2 in23;
@@ -928,7 +959,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             in23.y = in_compute_rowwise[j + 3];
           }
           fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
-          ptx::mul_cvt_4x(out_quad, in01, in23, block_scale_inverse_2x);
+          ptx::mul_cvt_4x(out_quad, in01, in23, block_scale_inverse);
         }
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
@@ -937,9 +968,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
 
-    __builtin_assume(block_amax >= 0);
     __builtin_assume(thread_amax >= 0);
-    block_amax = fmaxf(block_amax, thread_amax);
+    __builtin_assume(block_amax >= 0);
+    thread_amax = fmaxf(thread_amax, block_amax);
 
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
@@ -982,14 +1013,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
   }
 
+  float chunk_amax = 0.0f;
   if (amax_ptr != nullptr) {
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
     // Reduce the amax over the block
-    block_amax = reduce_max<THREADS_PER_CHUNK / THREADS_PER_WARP>(block_amax, warp_id);
+    chunk_amax = reduce_max<THREADS_PER_CHUNK / THREADS_PER_WARP>(thread_amax, warp_id);
   }
 
   if (is_master_thread && amax_ptr != nullptr) {
-    atomicMaxFloat(amax_ptr, block_amax);
+    atomicMaxFloat(amax_ptr, chunk_amax);
   }
 
   destroy_barriers<STAGES>(mbar, is_master_thread);
