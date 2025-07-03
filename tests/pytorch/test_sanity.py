@@ -545,7 +545,7 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("use_bias", all_boolean)
 def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
     if NVTE_TEST_NVINSPECT_ENABLED and fp8_model_params:
-        pytest.skip("FP8 model parameters are not supported in debug mode.")
+        pytest.skip("Quantized model parameters are not supported in debug mode.")
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.seq_len
