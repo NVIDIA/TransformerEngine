@@ -23,6 +23,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
 )
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
+from transformer_engine.debug.pytorch.utils import _as_pair
 
 aten = torch.ops.aten
 
@@ -39,7 +40,6 @@ API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
-from transformer_engine.debug.pytorch.utils import _as_pair
 
 
 class DebugQuantizer(Quantizer):

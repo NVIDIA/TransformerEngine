@@ -68,7 +68,6 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
-    QuantizedTensor,
     QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
@@ -77,7 +76,6 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["LayerNormMLP"]

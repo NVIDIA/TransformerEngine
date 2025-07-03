@@ -69,7 +69,6 @@ from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
 __all__ = ["Linear"]
 

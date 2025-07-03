@@ -20,5 +20,4 @@ def _as_pair(x):
     if isinstance(x, tuple):
         assert len(x) == 2, "Expected a tuple of length 2"
         return x
-    else:
-        return x, None
+    return x, None
