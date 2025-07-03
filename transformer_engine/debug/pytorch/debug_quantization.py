@@ -506,6 +506,8 @@ class DebugQuantizer(Quantizer):
 
     def get_next_debug_iter(self) -> int:
         """Returns the next iteration for which the debug is enabled for this tensor."""
+        if self.next_debug_iter == float("inf"):
+            return False
         return int(self.next_debug_iter)
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:

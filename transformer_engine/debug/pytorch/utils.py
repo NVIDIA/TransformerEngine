@@ -7,7 +7,11 @@
 
 def next_iter_when_debug_should_be_run(quantizers):
     """Returns next iteration at which the debug should be run."""
-    return min(q.get_next_debug_iter() for q in quantizers)
+    values = [q.get_next_debug_iter() for q in quantizers]
+    non_false_values = [v for v in values if v != False]
+    if len(non_false_values) == 0:
+        return False
+    return min(non_false_values)
 
 
 def any_feature_enabled(quantizers):

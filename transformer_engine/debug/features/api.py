@@ -124,7 +124,7 @@ class TEDefaultFeatures:
 
         bool - default is True
         """
-        return True  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
+        return True, float("inf")  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
         self,
@@ -159,7 +159,7 @@ class TEDefaultFeatures:
 
         Union[bool, Tuple[bool, int]] - default is False
         """
-        return False
+        return False, float("inf")
 
     def modify_tensor(
         self,
@@ -325,7 +325,7 @@ class TEDefaultFeatures:
 
         Union[bool, Tuple[bool, int]] - default is False
         """
-        return False
+        return False, float("inf")
 
     def inspect_tensor_postquantize_enabled(
         self,
@@ -361,7 +361,7 @@ class TEDefaultFeatures:
 
         Union[bool, Tuple[bool, int]] - default is False
         """
-        return False
+        return False, float("inf")
 
 
 @Registry.register_namespace_api(namespace="transformer_engine")

@@ -1398,22 +1398,25 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def validate_debug(self):
         self._validate_name()
         debug = TEDebugState.debug_enabled
+        if not debug:
+            return False
         started_new_iteration = TEDebugState.get_iteration() != getattr(
             self, "debug_last_iteration_name", None
         )
-        if not debug:
-            return False
         if self.next_iter_when_debug_should_be_run is not None and started_new_iteration:
-            debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
+            if self.next_iter_when_debug_should_be_run is False:
+                debug = False
+            else:
+                debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
         self.debug_last_iteration_name = TEDebugState.get_iteration()
         return debug
 
     def can_disable_debug(self, quantizers):
-        if next_iter_when_debug_should_be_run(quantizers) is not None:
-            run_current = any_feature_enabled(quantizers)
-            self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
-            if not run_current:
-                return True
+        run_current = any_feature_enabled(quantizers)
+        self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+        
+        if not run_current:
+            return True
 
         if self.primary_weights_in_fp8:
             raise RuntimeError("FP8 weights are not supported in debug mode.")
