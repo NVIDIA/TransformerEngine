@@ -260,6 +260,7 @@ class BlockwiseQuantizerReference:
         eps: float = 0.0,
         pow_2_scales: bool = False,
         quant_tile_shape: Tuple[int, int] = (128, 128),
+        munge_scale_shapes: bool = True,
     ) -> QuantizeResult:
         # sanity checks
         assert x.dim() == 2
@@ -277,27 +278,33 @@ class BlockwiseQuantizerReference:
         assert quant_tile_shape in ((1, 128), (128, 128))
         if quant_tile_shape[0] == 1:
             # Quantize row-wise
-            return self.scale_munger.munge_scale_shapes_for_backend(
-                self._quantize_vector_tiling(
-                    x,
-                    quant_dtype,
-                    tile_len=quant_tile_shape[1],
-                    return_transpose=return_transpose,
-                    pow_2_scales=pow_2_scales,
-                    eps=eps,
-                ),
-                quant_tile_shape,
+            result = self._quantize_vector_tiling(
+                x,
+                quant_dtype,
+                tile_len=quant_tile_shape[1],
+                return_transpose=return_transpose,
+                pow_2_scales=pow_2_scales,
+                eps=eps,
             )
+            if munge_scale_shapes:
+                result = self.scale_munger.munge_scale_shapes_for_backend(
+                    result,
+                    quant_tile_shape,
+                )
+            return result
         else:
             # Quantize block-wise
-            return self.scale_munger.munge_scale_shapes_for_backend(
-                self._quantize_square_block_tiling(
-                    x,
-                    quant_dtype,
-                    tile_len=quant_tile_shape[0],
-                    return_transpose=return_transpose,
-                    pow_2_scales=pow_2_scales,
-                    eps=eps,
-                ),
-                quant_tile_shape,
+            result = self._quantize_square_block_tiling(
+                x,
+                quant_dtype,
+                tile_len=quant_tile_shape[0],
+                return_transpose=return_transpose,
+                pow_2_scales=pow_2_scales,
+                eps=eps,
             )
+            if munge_scale_shapes:
+                result = self.scale_munger.munge_scale_shapes_for_backend(
+                    result,
+                    quant_tile_shape,
+                )
+            return result

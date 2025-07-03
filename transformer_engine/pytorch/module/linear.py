@@ -66,7 +66,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -136,12 +136,6 @@ class _Linear(torch.autograd.Function):
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
 
-        # Do TP communication in high precision if quantized format
-        # does not support communication
-        force_hp_input_gather = (
-            fp8 and with_input_all_gather_nccl and isinstance(input_quantizer, Float8BlockQuantizer)
-        )
-
         # Configure Userbuffers communication (comm+GEMM overlap)
         ub_obj = None
         ub_type = None
@@ -168,7 +162,7 @@ class _Linear(torch.autograd.Function):
             if fp8 or debug:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                if not force_hp_input_gather and not isinstance(inputmat, QuantizedTensorBase):
+                if not isinstance(inputmat, QuantizedTensorBase):
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
@@ -347,10 +341,11 @@ class _Linear(torch.autograd.Function):
                     # For sequence parallel in vanilla FP8, rowwise data is
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
-                    if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
+                    if (
+                        isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
+                        or not ctx.backward_input_needs_gather
+                    ):
                         inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
-                if force_hp_input_gather:
-                    assert not isinstance(inputmat, QuantizedTensorBase)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -396,14 +391,20 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.force_hp_input_gather = force_hp_input_gather
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
-                ctx.main_grad = weight.main_grad
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.main_grad_func = weight.get_main_grad
+                else:
+                    ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
             ctx.cpu_offloading = cpu_offloading
@@ -459,7 +460,7 @@ class _Linear(torch.autograd.Function):
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
-                ctx.main_grad
+                ctx.main_grad_func()
                 if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
                 else None
             )
@@ -557,7 +558,7 @@ class _Linear(torch.autograd.Function):
             inputmat_total_work = None
             if ctx.backward_input_needs_gather:
                 quantizer = None
-                if (ctx.fp8 or ctx.debug) and not ctx.force_hp_input_gather:
+                if ctx.fp8 or ctx.debug:
                     quantizer = ctx.input_quantizer
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually
@@ -695,14 +696,23 @@ class _Linear(torch.autograd.Function):
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
-                    # for the dgrad GEMM. We work around with blocking
-                    # all-gather for column-scaled MXFP8 data.
+                    # for the dgrad GEMM. We work around by explicitly
+                    # overlapping the NCCL operation with the dgrad GEMM.
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    grad_output, _ = gather_along_first_dim(
-                        grad_output_arg,
-                        ctx.tp_group,
-                        quantizer=ctx.grad_output_quantizer,
-                    )
+                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
+                    dgrad_comm_stream = ub_obj_dgrad.get_communication_stream()
+                    with torch.cuda.stream(dgrad_comm_stream):
+                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
+                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
+                        grad_output, grad_output_work = gather_along_first_dim(
+                            grad_output_arg,
+                            ctx.tp_group,
+                            async_op=True,
+                            quantizer=ctx.grad_output_quantizer,
+                        )
+                    # Synchronize with the main stream
+                    grad_output_work.wait()
+
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorBase):
                         grad_output.update_usage(columnwise_usage=True)
@@ -1214,6 +1224,8 @@ class Linear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        elif recipe.float8_block_scaling():
+            self._customize_quantizers_float8_blockwise_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
     def reset_parameters(self, defer_init=False):
@@ -1479,3 +1491,22 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         return [weight_quantizer]
+
+    def _customize_quantizers_float8_blockwise_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on blockwise scaling recipe + linear."""
+        assert (
+            recipe.float8_block_scaling()
+        ), "blockwise scaling recipe quantizer customization here"
+
+        if fwd:
+            if self.sequence_parallel and self.parallel_mode == "column":
+                # set compact for inp tensor X
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].all_gather_usage = True
+        else:
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # set compact for grad_output tensor dY
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].all_gather_usage = True

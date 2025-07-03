@@ -12,6 +12,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
+from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
     divide,
@@ -174,6 +175,22 @@ class MultiheadAttention(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
+    use_qk_norm: bool, default = 'False'
+                    if set to `True`, L2 normalization is applied to query and key tensors
+                    after RoPE (if applicable) but before attention computation.
+                    This follows the Llama4 approach for QK normalization to improve
+                    training stability and model performance.
+    qk_norm_eps: float, default = 1e-6
+                    epsilon value for L2 normalization of query and key tensors.
+                    Only used when `use_qk_norm` is True.
+    seq_length: Optional[int], default = `None`
+                    sequence length of input samples. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are used for
+                    forward propagation and activation recompute phase.
+    micro_batch_size: Optional[int], default = `None`
+                    batch size per training step. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are
+                    used for forward propagation and activation recompute phase.
     """
 
     def __init__(
@@ -214,6 +231,10 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         qkv_format: str = "sbhd",
         name: str = None,
+        use_qk_norm: bool = False,
+        qk_norm_eps: float = 1e-6,
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -267,6 +288,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
+        self.use_qk_norm = use_qk_norm
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -277,6 +299,14 @@ class MultiheadAttention(torch.nn.Module):
             "params_dtype": self.params_dtype,
             "device": device,
         }
+
+        # Initialize L2 normalization modules for query and key if enabled
+        if self.use_qk_norm:
+            self.qk_norm = L2Normalization(
+                eps=qk_norm_eps,
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+            )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
@@ -482,6 +512,8 @@ class MultiheadAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
@@ -555,6 +587,12 @@ class MultiheadAttention(torch.nn.Module):
                    with shape [batch_size + 1] and dtype torch.int32.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
+                   with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
@@ -714,6 +752,18 @@ class MultiheadAttention(torch.nn.Module):
                 for x in (key_layer, value_layer)
             )
 
+            if self.qkv_format == "thd":
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
+            else:
+                # key, value: -> [sq, b, ng, hn]
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
+
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
@@ -793,6 +843,14 @@ class MultiheadAttention(torch.nn.Module):
             )
 
         # ===========================
+        # Apply L2 normalization to query and key tensors
+        # ===========================
+
+        if self.use_qk_norm:
+            query_layer = self.qk_norm(query_layer)
+            key_layer = self.qk_norm(key_layer)
+
+        # ===========================
         # Core attention computation
         # ===========================
 
@@ -803,6 +861,8 @@ class MultiheadAttention(torch.nn.Module):
             qkv_format=self.qkv_format,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             attention_mask=attention_mask,

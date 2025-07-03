@@ -30,6 +30,7 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
@@ -173,6 +174,8 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
+  // Whether quantized tensor will be used in an all-gather
+  bool all_gather_usage = false;
 
  private:
   int block_scaling_dim = 2;
@@ -194,6 +197,8 @@ class Float8BlockQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
 class MXFP8Quantizer : public Quantizer {
@@ -218,21 +223,23 @@ std::vector<size_t> getTensorShape(at::Tensor t);
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
 
-inline size_t typeToSize(transformer_engine::DType t) {
+inline size_t typeToNumBits(transformer_engine::DType t) {
   switch (t) {
     case transformer_engine::DType::kInt64:
-      return 8;
+      return 64;
     case transformer_engine::DType::kInt32:
     case transformer_engine::DType::kFloat32:
-      return 4;
+      return 32;
     case transformer_engine::DType::kInt16:
     case transformer_engine::DType::kFloat16:
     case transformer_engine::DType::kBFloat16:
-      return 2;
+      return 16;
     case transformer_engine::DType::kByte:
     case transformer_engine::DType::kFloat8E4M3:
     case transformer_engine::DType::kFloat8E5M2:
-      return 1;
+      return 8;
+    case transformer_engine::DType::kFloat4E2M1:
+      return 4;
     default:
       NVTE_ERROR("Invalid type");
   }

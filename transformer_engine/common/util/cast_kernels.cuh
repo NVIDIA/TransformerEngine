@@ -895,15 +895,15 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           alignas(64) CUtensorMap tensor_map_output{};
 
           create_2D_tensor_map(tensor_map_input, input.data, rows, cols, FP8_SHMEM_DIM_Y,
-                               FP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
+                               FP8_SHMEM_DIM_X, cols, 0, typeToNumBits(input.data.dtype));
 
           if constexpr (IS_DACT) {
             create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, FP8_SHMEM_DIM_Y,
-                                 FP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
+                                 FP8_SHMEM_DIM_X, cols, 0, typeToNumBits(input.data.dtype));
           }
 
           create_2D_tensor_map(tensor_map_output, output->data, rows, cols, FP8_SHMEM_DIM_Y,
-                               FP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
+                               FP8_SHMEM_DIM_X, cols, 0, typeToNumBits(output->data.dtype));
 
           cast_fp8_2D_kernel<IS_DBIAS, IS_DACT, ParamOP, OP, IType, OType>
           <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_act_input, tensor_map_output,
@@ -991,24 +991,24 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   alignas(64) CUtensorMap tensor_map_output_colwise{};
 
                   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, MXFP8_SHMEM_DIM_Y,
-                                       MXFP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
+                                       MXFP8_SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
 
                   if constexpr (IS_DACT) {
                     create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols,
                                          MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
-                                         sizeof(IType));
+                                         typeToNumBits(input.dtype()));
                   }
 
                   if (use_rowwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
                                          MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
-                                         sizeof(OType));
+                                         typeToNumBits(output->dtype()));
                   }
 
                   if (use_colwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows,
                                          cols, MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
-                                         sizeof(OType));
+                                         typeToNumBits(output->dtype()));
                   }
 
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
@@ -1101,7 +1101,7 @@ static bool is_full_tile_1D_tensor(const Tensor *const t) {
 bool dimensions_supported_by_TMA(const Tensor *const t) {
   const size_t cols = t->flat_last_dim();
   constexpr int TMA_bytes = 16;
-  const int alignment_requirement = TMA_bytes / typeToSize(t->dtype());
+  const int alignment_requirement = (TMA_bytes * 8) / typeToNumBits(t->dtype());
   return cols % alignment_requirement == 0;
 }
 
@@ -1283,12 +1283,25 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
       bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
       float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
-      FP8BlockwiseRowwiseOption rowwise_option = output_tensor->has_data()
-                                                     ? FP8BlockwiseRowwiseOption::ROWWISE
-                                                     : FP8BlockwiseRowwiseOption::NONE;
-      FP8BlockwiseColumnwiseOption columnwise_option =
-          output_tensor->has_columnwise_data() ? FP8BlockwiseColumnwiseOption::COLUMNWISE_TRANSPOSE
-                                               : FP8BlockwiseColumnwiseOption::NONE;
+      FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
+      FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
+      if (output_tensor->has_data()) {
+        bool rowwise_compact = quant_config_cpp
+                                   ? quant_config_cpp->float8_block_scale_tensor_format ==
+                                         Float8BlockScaleTensorFormat::COMPACT
+                                   : false;
+        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
+                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+      }
+      if (output_tensor->has_columnwise_data()) {
+        bool columnwise_compact = quant_config_cpp
+                                      ? quant_config_cpp->float8_block_scale_tensor_format ==
+                                            Float8BlockScaleTensorFormat::COMPACT
+                                      : false;
+        columnwise_option = columnwise_compact
+                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
+                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+      }
       quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
                                           output_tensor->columnwise_scale_inv, output_tensor->data,
                                           output_tensor->columnwise_data, epsilon, rowwise_option,

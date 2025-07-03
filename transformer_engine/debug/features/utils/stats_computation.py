@@ -17,6 +17,8 @@ def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
+    if tensor_abs.numel() == 0:
+        return torch.inf
     amax = tensor_abs.max().float()
     if not amax.all():
         amax = torch.tensor(1, device=tensor.device).to(torch.float)

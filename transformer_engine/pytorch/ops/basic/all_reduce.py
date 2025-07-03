@@ -9,8 +9,9 @@ from typing import Optional
 
 import torch
 
-from ...tensor import QuantizedTensor
+from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
+from ...tensor import Quantizer
 
 
 class AllReduce(BasicOperation):
@@ -41,8 +42,9 @@ class AllReduce(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Trivial case
@@ -50,10 +52,7 @@ class AllReduce(BasicOperation):
             return input_
 
         # Perform all-reduce
-        x = input_
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        x = x.contiguous()
+        x = maybe_dequantize(input_.contiguous())
         torch.distributed.all_reduce(x, group=self.process_group)
         return x
 

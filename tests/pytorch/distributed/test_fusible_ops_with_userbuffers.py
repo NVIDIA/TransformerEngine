@@ -21,26 +21,30 @@ import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import dtype_tols, str_to_dtype
+from utils import dtype_tols, make_recipe, str_to_dtype
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
-    quantization_list.append("fp8")
+    quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
     quantization_list.append("mxfp8")
 
@@ -118,11 +122,12 @@ def reset_rng(seed: int = 1234) -> None:
 @torch.no_grad()
 def make_reference_and_test_tensors(
     shape: int | Iterable[int],
+    quantization: Optional[str] = None,
     ref_dtype: torch.dtype = torch.float64,
     ref_device: torch.device = "cpu",
     test_dtype: torch.dtype = torch.float32,
     test_device: torch.device = "cuda",
-    test_is_fp8: bool = False,
+    test_is_quantized: bool = False,
     requires_grad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct tensors with the same values
@@ -131,45 +136,47 @@ def make_reference_and_test_tensors(
     operations in high precision. The test tensor is intended for use
     in Transformer Engine operations.
 
+    If a quantization scheme is provided, the tensor values are
+    quantized so that they are representable.
+
     """
 
-    # Random data
+    # Random reference tensor
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
 
-    # Make copy of tensor
+    # Construct test tensor from reference tensor
     test = ref.to(device=test_device, dtype=test_dtype)
-    if test_is_fp8:
+    if quantization is None:
+        if test_is_quantized:
+            raise ValueError("Quantization scheme not provided")
+        if test.data_ptr() == ref.data_ptr():
+            test = test.clone()
+    elif quantization in ("fp8", "fp8_delayed_scaling"):
         quantizer = Float8Quantizer(
-            scale=torch.ones(1, dtype=torch.float32, device=test_device),
+            scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
             fp8_dtype=tex.DType.kFloat8E4M3,
         )
         test = quantizer(test)
-    elif test.data_ptr() == ref.data_ptr():
-        test = test.clone()
+    elif quantization == "fp8_current_scaling":
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=test_device,
+        )
+        test = quantizer(test)
+    elif quantization == "mxfp8":
+        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+    else:
+        raise ValueError(f"Unsupported quantization scheme ({quantization})")
+    if isinstance(test, QuantizedTensor) and not test_is_quantized:
+        test = test.dequantize()
 
-    # Make sure reference and test tensors represent exact same values
+    # Make sure reference and test tensors match each other
     ref.copy_(test)
 
-    # Return reference and test tensors
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
-
-
-def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
-    """Make recipe for quantization scheme"""
-    if name is None:
-        return None
-    if name == "fp8":
-        return transformer_engine.common.recipe.DelayedScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
-        )
-    if name == "mxfp8":
-        return transformer_engine.common.recipe.MXFP8BlockScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
-        )
-    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def _test_linear(
@@ -201,21 +208,16 @@ def _test_linear(
     reset_rng()
     x_ref, x_test = make_reference_and_test_tensors(
         in_shape,
+        quantization=quantization,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=quantized_compute,
     )
-    if isinstance(x_test, QuantizedTensor):
-        with torch.no_grad():
-            x_test = x_test.dequantize().requires_grad_()
     w_ref, w_test = make_reference_and_test_tensors(
         (out_features, in_features),
+        quantization=quantization,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=quantized_compute,
     )
-    if isinstance(w_test, QuantizedTensor):
-        w_test = w_test.dequantize()
     b_ref, b_test = None, None
     if bias:
         if tensor_parallel_mode == "row":
@@ -229,13 +231,11 @@ def _test_linear(
         )
     dy_ref, dy_test = make_reference_and_test_tensors(
         out_shape,
+        quantization=quantization,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=quantized_compute,
         requires_grad=False,
     )
-    if isinstance(dy_test, QuantizedTensor):
-        dy_test = dy_test.dequantize()
 
     # Plain PyTorch implementation
     y_ref = torch.nn.functional.linear(x_ref, w_ref)
@@ -370,7 +370,7 @@ def _test_linear(
     if quantized_compute:
         tols = dtype_tols(
             model[0].weight._fp8_dtype
-            if is_float8_tensor(model[0].weight)
+            if isinstance(model[0].weight, Float8Tensor)
             else tex.DType.kFloat8E4M3
         )
 
