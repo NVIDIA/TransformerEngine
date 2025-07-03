@@ -2081,6 +2081,7 @@ class TestCheckpointing:
         for x_load, x_save in zip(xs_load, xs_save):
             torch.testing.assert_close(x_load.grad, x_save.grad, **tols)
 
+
 class TestSequentialModules:
     """Test for larger Sequentials with modules commonly used together"""
 
@@ -2115,7 +2116,7 @@ class TestSequentialModules:
     ) -> None:
         """
         LayerNorm/RMSNorm + Linear + GELU + Linear
-        
+
         Note that this test checks only if the module runs
         as when chaining multiple modules it is hard to validate
         numerical accuracy.

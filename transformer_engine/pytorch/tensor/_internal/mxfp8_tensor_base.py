@@ -150,7 +150,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
             return self._rowwise_data.size(*args, **kwargs)
         size = self._columnwise_data.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
-    
+
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
 
@@ -176,7 +176,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
                 "MXFP8Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(cur_shape)} to {tuple(shape)})"
             )
-        
+
         # Construct new tensor
         cur_rowwise_data = self._rowwise_data
         cur_columnwise_data = self._columnwise_data
@@ -194,7 +194,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=self._columnwise_scale_inv,
             fp8_dtype=self._fp8_dtype,
-            quantizer=self._quantizer
+            quantizer=self._quantizer,
         )
 
     def __repr__(self):
