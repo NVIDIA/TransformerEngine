@@ -6,7 +6,6 @@
 import pytest
 import torch
 import transformer_engine.pytorch as te
-import time
 import tempfile
 import os
 
@@ -16,7 +15,11 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
-def test_cpu_overhead(layer, configs_dir, feature_dirs):
+def test_log_every_3_layers(layer, configs_dir, feature_dirs):
+    # If layer does not invoke any feature in current iteration,
+    # then it changed into non-debug mode.
+    # This test checks whether this works correctly -
+    # layer should be logged every 3 iterations.
     with tempfile.TemporaryDirectory() as temp_dir:
         debug_api.initialize(
             config_file=configs_dir + "/log_config.yaml",
@@ -24,13 +27,19 @@ def test_cpu_overhead(layer, configs_dir, feature_dirs):
             log_dir=temp_dir,
         )
 
-        model = te.TransformerLayer(128, 128, 4, name="transformer1")
+        if layer == "linear":
+            model = te.Linear(128, 128, name="linear1")
+        elif layer == "transformer":
+            model = te.TransformerLayer(128, 128, 4, name="transformer1")
+        else:
+            raise ValueError(f"Invalid layer: {layer}")
+
         for i in range(10):
             x = torch.randn(4, 4, 128).cuda()
-            y = model(x)
+            with te.fp8_autocast(enabled=True):
+                y = model(x)
             y.sum().backward()
             debug_api.step()
-        os.system(f"ls -l {temp_dir}")
 
         with open(
             os.path.join(

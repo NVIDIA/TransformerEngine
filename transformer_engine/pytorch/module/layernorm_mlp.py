@@ -1734,7 +1734,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output)
             )
             if debug:
-                if self.can_disable_debug(quantizers):
+                if self.no_debug_features_active(quantizers):
                     debug = False
                     quantizers = self._get_quantizers(fp8_output)
 

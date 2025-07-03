@@ -1396,10 +1396,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
 
     def validate_debug(self):
+        """
+            This function checks if the debug should be enabled for this layer.
+        """
         self._validate_name()
         debug = TEDebugState.debug_enabled
         if not debug:
             return False
+        
+        # If layer is run first time in new iteration,
+        # we need to check if the debug should be enabled for this layer - 
+        # maybe in previous iterations debug features returned information
+        # that no feature will be active for this layer for multiple next iterations.
         started_new_iteration = TEDebugState.get_iteration() != getattr(
             self, "debug_last_iteration_name", None
         )
@@ -1411,8 +1419,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.debug_last_iteration_name = TEDebugState.get_iteration()
         return debug
 
-    def can_disable_debug(self, quantizers):
+    def no_debug_features_active(self, quantizers):
+        """
+            Checks if any debug feature is active for this layer.
+        """
         run_current = any_feature_enabled(quantizers)
+
+        # Sometimes features inform that they will not be enabled for particular layer
+        # for multiple next iterations.
         self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
 
         if not run_current:

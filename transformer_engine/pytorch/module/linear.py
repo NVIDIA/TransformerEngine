@@ -1310,7 +1310,7 @@ class Linear(TransformerEngineBaseModule):
             )
 
             if debug:
-                if self.can_disable_debug(quantizers):
+                if self.no_debug_features_active(quantizers):
                     debug = False
                     quantizers = self._get_quantizers(fp8_output, fp8_grad)
 

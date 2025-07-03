@@ -6,9 +6,18 @@
 Utils for the debug features.
 """
 
-
 def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
-    """Returns next iteration at which the feature will be enabled."""
+    """
+    Determines whether the feature should be enabled at the current iteration,
+    and computes the next iteration at which the feature will be enabled.
+
+    Returns
+    -------
+    run_current : bool
+        True if the feature should be enabled at the current iteration.
+    next_iter : int
+        The next iteration index at which the feature will be enabled.
+    """
 
     run_current = False
 

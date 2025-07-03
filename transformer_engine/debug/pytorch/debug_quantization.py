@@ -39,14 +39,7 @@ API_CALL_MODIFY = "modify_tensor()"
 STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
-
-def _as_pair(x):
-    """ If x is a tuple, return x, otherwise return (x, None) """
-    if isinstance(x, tuple):
-        assert len(x) == 2, "Expected a tuple of length 2"
-        return x
-    else:
-        return x, None
+from transformer_engine.debug.pytorch.utils import _as_pair
 
 
 class DebugQuantizer(Quantizer):
@@ -79,6 +72,10 @@ class DebugQuantizer(Quantizer):
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
+        # next iteration when this quantizer will call any API
+        # it is inf at the init and it is computed after_enabled api calls.
+        # inf at the beginning means that if nothing will be done,
+        # this quantizer will never call any API.
         self.next_debug_iter = float("inf")
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
@@ -404,6 +401,18 @@ class DebugQuantizer(Quantizer):
         self._call_inspect_tensor_api(tensor)
         return tensor
 
+    def make_empty(
+        self,
+        shape: Iterable[int],
+        *,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> QuantizedTensor:
+        """Override make_empty() from Quantizer class."""
+        if self.parent_quantizer is not None:
+            return self.parent_quantizer.make_empty(shape, dtype=dtype, device=device)
+        return torch.empty(shape, dtype=dtype, device=device)
+
     def any_feature_enabled(self) -> bool:
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
@@ -422,18 +431,6 @@ class DebugQuantizer(Quantizer):
             if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
                 return True
         return False
-
-    def make_empty(
-        self,
-        shape: Iterable[int],
-        *,
-        dtype: torch.dtype = torch.float32,
-        device: Optional[torch.device] = None,
-    ) -> QuantizedTensor:
-        """Override make_empty() from Quantizer class."""
-        if self.parent_quantizer is not None:
-            return self.parent_quantizer.make_empty(shape, dtype=dtype, device=device)
-        return torch.empty(shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor):
         """Calibration override, should not be invoked."""
@@ -506,20 +503,25 @@ class DebugQuantizer(Quantizer):
 
         self._call_inspect_tensor_api(src, dst.rowwise_gemm_tensor, dst.columnwise_gemm_tensor)
 
-    def get_next_debug_iter(self) -> int:
-        """Returns the next iteration for which the debug is enabled for this tensor."""
-
-        if self.next_debug_iter == float("inf"):
-            return False
-        return int(self.next_debug_iter)
+    def get_next_debug_iter(self) -> int | float:
+        """ 
+            Returns the next iteration for which the debug is enabled for this tensor.
+            If the next iteration is inf, then the debug is not enabled for this tensor.
+        """
+        return self.next_debug_iter
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Probably not needed for debug quantizer"""
         return None
 
     def update_next_iter(self, next_iter: Optional[int]):
-        """Updates the next debug iteration for this tensor."""
+        """
+            If there is _enabled API that returned some next_iter,
+            this function updates the next_debug_iter field accordingly.
+        """
         if next_iter is None:
+            # If api returned only bool, then we do not know when it will be enabled next time,
+            # so we need to run debug quantizer next time to check if it will be enabled.
             next_iter = self.iteration + 1
         self.next_debug_iter = min(self.next_debug_iter, next_iter)
 
