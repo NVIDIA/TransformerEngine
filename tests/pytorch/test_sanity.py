@@ -56,7 +56,7 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
-NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
     # The sanity tests should work the same,
