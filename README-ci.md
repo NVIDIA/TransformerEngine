@@ -26,9 +26,9 @@ user-specified TE branch from GitHub or GitLab, pushes the merged
 branch to GitLab, and launches the main CI pipeline on that branch.
 The main CI pipeline involves several stages:
 
-- `build base`: Build TE Docker container for each DL framework. TE is
-  installed and a copy of the source code is available at
-  `/opt/transformerengine`.
+- `build base`: Build TE Docker container for each DL framework and
+  processor architecture. TE is installed and a copy of the source
+  code is available at `/opt/transformerengine`.
 - `build devel`: Build TE development containers. They are similar to
   the base containers, but the TE source code at
   `/opt/transformerengine` has Git metadata and objects from the
@@ -37,6 +37,7 @@ The main CI pipeline involves several stages:
   development containers, but with special handling for QA workflows.
   This stage is only enabled with TE releases, i.e. GitHub branches
   with the name `release_v*`.
+- `manifests`: Create multi-arch container for each build stage.
 - `test`: Run tests. Each test is a shell script within the
   [`qa` directory](https://github.com/NVIDIA/TransformerEngine/tree/main/qa).
   The tests are run on a variety of GPU systems.
@@ -44,8 +45,12 @@ The main CI pipeline involves several stages:
 
 The build stages will push Docker containers to the container registry
 at `gitlab-master.nvidia.com/dl/transformerengine/transformerengine`
-with a tag in the form `<TAG_ROOT>-<DLFW>-py3-<build stage>` (e.g.
-`test_main_12345678_CI-pytorch-py3-base`).
+with a tag in the form `<TAG_ROOT>-<DLFW>-py3-<build stage>-<ARCH>`
+(e.g. `main-pytorch-py3-devel-amd64`). The manifest stages will push
+multi-arch containers to the container registry with a tag in the form
+`<TAG_ROOT>-<DLFW>-py3-<build stage>-<ARCH>` (e.g.
+`main-pytorch-py3-devel`).
+
 
 ## Launching a pipeline manually
 
@@ -56,23 +61,28 @@ Alternatively, navigate to
 Make sure to set the branch name to `te_ci`. The following variables
 may also be set:
 
-| Key                   | Default value | Description                                               |
-|-----------------------|---------------|-----------------------------------------------------------|
-| `GH_BRANCH`           | `main`        | GitHub branch                                             |
-| `GH_PR`               |               | GitHub PR number (overrides `GH_BRANCH`)                  |
-| `GL_MR`               |               | GitLab MR number (overrides `GH_BRANCH`)                  |
-| `CORE_IMAGE`          |               | Base Docker container for core build                      |
-| `PYTORCH_IMAGE`       | Nightly build | Base Docker container for PyTorch build                   |
-| `JAX_IMAGE`           |               | Base Docker container for JAX build                       |
-| `BUILD_CORE`          | `1`           | Enable core build and tests                               |
-| `BUILD_PYTORCH`       | `1`           | Enable PyTorch build and tests                            |
-| `BUILD_JAX`           | `1`           | Enable JAX build and tests                                |
-| `RUN_L0_TESTS`        | `1`           | Run L0 tests automatically (otherwise run tests manually) |
-| `RUN_L1_TESTS`        | `0`           | Run L1 tests automatically (otherwise run tests manually) |
-| `RUN_L2_TESTS`        | `0`           | Run L2 tests automatically (otherwise run tests manually) |
-| `RUN_L3_TESTS`        | `0`           | Run L3 tests automatically (otherwise run tests manually) |
-| `TAG_ROOT`            |               | Base string for Docker container tags                     |
-| `SEND_SLACK_MESSAGE`  | `0`           | Send Slack message on CI completion                       |
+| Key                   | Default value         | Description                                               |
+|-----------------------|-----------------------|-----------------------------------------------------------|
+| `GH_BRANCH`           | `main`                | GitHub branch                                             |
+| `GH_PR`               |                       | GitHub PR number (overrides `GH_BRANCH`)                  |
+| `GL_MR`               |                       | GitLab MR number (overrides `GH_BRANCH`)                  |
+| `CORE_AMD64_IMAGE`    | Latest CUDA build     | Base Docker container for core AMD64 build                |
+| `CORE_ARM64_IMAGE`    | Latest CUDA build     | Base Docker container for core ARM64 build                |
+| `PYTORCH_AMD64_IMAGE` | Nightly PyTorch build | Base Docker container for PyTorch AMD64 build             |
+| `PYTORCH_ARM64_IMAGE` | Nightly PyTorch build | Base Docker container for PyTorch ARM64 build             |
+| `JAX_AMD64_IMAGE`     |                       | Base Docker container for JAX AMD64 build                 |
+| `JAX_ARM64_IMAGE`     |                       | Base Docker container for JAX ARM64 build                 |
+| `BUILD_CORE`          | `1`                   | Enable core builds and tests                              |
+| `BUILD_PYTORCH`       | `1`                   | Enable PyTorch builds and tests                           |
+| `BUILD_JAX`           | `1`                   | Enable JAX builds and tests                               |
+| `BUILD_AMD64`         | `1`                   | Enable AMD64 build and tests                              |
+| `BUILD_ARM64`         | `0`                   | Enable ARM64 build and tests                              |
+| `RUN_L0_TESTS`        | `1`                   | Run L0 tests automatically (otherwise run tests manually) |
+| `RUN_L1_TESTS`        | `0`                   | Run L1 tests automatically (otherwise run tests manually) |
+| `RUN_L2_TESTS`        | `0`                   | Run L2 tests automatically (otherwise run tests manually) |
+| `RUN_L3_TESTS`        | `0`                   | Run L3 tests automatically (otherwise run tests manually) |
+| `TAG_ROOT`            |                       | Base string for Docker container tags                     |
+| `SEND_SLACK_MESSAGE`  | `0`                   | Send Slack message on CI completion                       |
 
 ## Launching a pipeline from GitHub
 
@@ -139,15 +149,17 @@ with their scripts. The QA containers should have the form
 To build these containers, launch a GitLab CI pipeline on the `te_ci`
 branch with the following variables:
 
-| Key             | Value                                                                           |
-|-----------------|---------------------------------------------------------------------------------|
-| `GH_BRANCH`     | `release_v<latest TE version>`                                                  |
-| `PYTORCH_IMAGE` | `gitlab-master.nvidia.com:5005/dl/dgx/pytorch:<release version>-py3-base-amd64` |
-| `TAG_ROOT`      | TE release version                                                              |
-| `RUN_L0_TESTS`  | `1` (optional)                                                                  |
-| `RUN_L1_TESTS`  | `1` (optional)                                                                  |
-| `RUN_L2_TESTS`  | `1` (optional)                                                                  |
-| `RUN_L3_TESTS`  | `1` (optional)                                                                  |
+| Key                   | Value                                                                           |
+|-----------------------|---------------------------------------------------------------------------------|
+| `GH_BRANCH`           | `release_v<latest TE version>`                                                  |
+| `PYTORCH_AMD64_IMAGE` | `gitlab-master.nvidia.com:5005/dl/dgx/pytorch:<release version>-py3-base-amd64` |
+| `PYTORCH_ARM64_IMAGE` | `gitlab-master.nvidia.com:5005/dl/dgx/pytorch:<release version>-py3-base-arm64` |
+| `BUILD_ARM64`         | `1`                                                                             |
+| `TAG_ROOT`            | TE release version                                                              |
+| `RUN_L0_TESTS`        | `1` (optional)                                                                  |
+| `RUN_L1_TESTS`        | `1` (optional)                                                                  |
+| `RUN_L2_TESTS`        | `1` (optional)                                                                  |
+| `RUN_L3_TESTS`        | `1` (optional)                                                                  |
 
 This is somewhat of a messy process since other framework teams may
 delay building their containers or may need to rebuild. When
