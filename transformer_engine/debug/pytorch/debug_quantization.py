@@ -41,7 +41,6 @@ STANDARD_FP8_QUANTIZE = "FP8 Quantize"
 HIGH_PRECISION = "High Precision"
 
 
-
 class DebugQuantizer(Quantizer):
     """
     DebugQuantizer is a Quantizer object used for debugging with nvidia-dlframework-inspect.
