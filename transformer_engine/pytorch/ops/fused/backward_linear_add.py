@@ -57,6 +57,9 @@ class BackwardLinearAdd(FusedOperation):
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
+            if hasattr(linear_op.weight, "__fsdp_param__"):
+                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
+
             if not hasattr(linear_op.weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "

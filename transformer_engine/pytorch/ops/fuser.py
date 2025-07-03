@@ -23,6 +23,10 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_userbuffers_backward_linear,
     fuse_userbuffers_forward_linear,
 )
+from transformer_engine.pytorch.tensor.quantized_tensor import (
+    prepare_for_saving,
+    restore_from_saved,
+)
 
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
@@ -117,31 +121,33 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx].requires_grad = requires_grad
-            if requires_grad != x.requires_grad:
-                if requires_grad:
-                    x.requires_grad_()
-                else:
-                    x = x.detach()
 
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
-            prev_ops = [fuser._basic_ops[idx - 1] if idx > 0 else None for idx in basic_op_idxs]
-            next_ops = [
-                fuser._basic_ops[idx + 1] if (idx < fuser._num_basic_ops - 1) else None
-                for idx in basic_op_idxs
-            ]
+            prev_op_idx = basic_op_idxs[0] - 1
+            prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx > 0 else None
+            prev_op_grad_input_quantizer = None
+            if prev_op is not None:
+                prev_op_grad_input_quantizer = prev_op.get_grad_input_quantizer()
+            next_op_idx = basic_op_idxs[-1] + 1
+            next_op = fuser._basic_ops[next_op_idx] if next_op_idx < fuser._num_basic_ops else None
+            next_op_input_quantizer = None
+            if next_op is not None:
+                next_op_input_quantizer = next_op.get_input_quantizer()
+            is_first_op = prev_op is None
+
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
                 x,
                 basic_op_extra_inputs=extra_inputs,
-                basic_op_prev_ops=prev_ops,
-                basic_op_next_ops=next_ops,
+                prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
+                next_op_input_quantizer=next_op_input_quantizer,
+                is_first_op=is_first_op,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
-            x.requires_grad_(requires_grad=requires_grad)
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    y.requires_grad_(requires_grad=requires_grad)
+                    y.requires_grad_(requires_grad)
                 extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
@@ -169,7 +175,15 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 range_end = len(to_save)
                 ctx.to_save = None
                 ctx._saved_tensors_range = (range_start, range_end)
-            func_ctx.save_for_backward(*to_save)
+
+            # Save tensors for backward
+            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+            if with_quantized_compute:
+                tensors_to_save, tensor_objects = prepare_for_saving(*to_save)
+                func_ctx.save_for_backward(*tensors_to_save)
+                func_ctx.tensor_objects = tensor_objects
+            else:
+                func_ctx.save_for_backward(*to_save)
 
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
@@ -179,9 +193,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.num_extra_inputs = fuser._num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            func_ctx.with_quantized_compute = with_quantized_compute
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
+
+        x.requires_grad_(requires_grad)
+
         return x
 
     @staticmethod
@@ -198,8 +216,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_ops = func_ctx.basic_ops
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
+        # Restore saved tensors
+        if func_ctx.with_quantized_compute:
+            saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
+        else:
+            saved_tensors = func_ctx.saved_tensors
+
         # Unflatten list of saved tensors
-        saved_tensors = func_ctx.saved_tensors
         for ctx in basic_op_ctxs:
             ctx.saved_tensors = saved_tensors[slice(*ctx._saved_tensors_range)]
             ctx._saved_tensors_range = None
