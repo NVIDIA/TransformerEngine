@@ -55,8 +55,15 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 )
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
+# Record initial RNG state from script run.
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+_cpu_rng_state = torch.get_rng_state()
+_cuda_rng_state = torch.cuda.get_rng_state()
 
 NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
+
 
 if NVTE_TEST_NVINSPECT_ENABLED:
     # The sanity tests should work the same,
@@ -1385,7 +1392,7 @@ def test_inference_mode(
 ) -> None:
     """Test heuristics for initializing quantized weights"""
     if NVTE_TEST_NVINSPECT_ENABLED and quantization is not None:
-        pytest.skip("FP8 quantization is not supported in debug mode.")
+        pytest.skip("Quantized model parameters are not supported in debug mode.")
 
     # Tensor dimensions
     sequence_length = 32
