@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.debug
 import transformer_engine.pytorch as te

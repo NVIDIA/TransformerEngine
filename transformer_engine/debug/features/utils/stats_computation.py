@@ -9,8 +9,8 @@ Mathematical functions used to tensor statistics computation.
 import math
 import torch
 import torch.nn.functional as F
-from transformer_engine.common.recipe import Format
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Format
 
 
 @torch.compile
