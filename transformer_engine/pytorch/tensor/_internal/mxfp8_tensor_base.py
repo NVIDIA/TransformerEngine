@@ -148,8 +148,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
-        size = self._columnwise_data.size(*args, **kwargs)
-        return torch.Size([size[-1], math.prod(size[:-1])])
+        return self._columnwise_data.size(*args, **kwargs)
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
@@ -185,8 +184,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         if cur_rowwise_data is not None:
             new_rowwise_data = cur_rowwise_data.view(*shape)
         if cur_columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
-            new_columnwise_data = cur_columnwise_data.view(columnwise_shape)
+            new_columnwise_data = cur_columnwise_data.view(*shape)
 
         return MXFP8TensorBase(
             rowwise_data=new_rowwise_data,
