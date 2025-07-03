@@ -22,7 +22,6 @@ from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8T
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
-
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """

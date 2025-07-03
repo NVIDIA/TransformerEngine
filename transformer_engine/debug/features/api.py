@@ -455,7 +455,8 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             # If all of them return a tuple (bool, int), we return the minimum value,
             # representing the number of steps after the feature will be enabled next time.
             all_ret_tuple = all(
-                isinstance(feature_output, tuple) for feature_output in multi_feature_outputs.values()
+                isinstance(feature_output, tuple)
+                for feature_output in multi_feature_outputs.values()
             )
             if all_ret_tuple:
                 run_current = any(
@@ -465,9 +466,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                     feature_output[1] for feature_output in multi_feature_outputs.values()
                 )
                 return run_current, next_iter
-            run_current = any(
-                feature_output for feature_output in multi_feature_outputs.values()
-            )
+            run_current = any(feature_output for feature_output in multi_feature_outputs.values())
             return run_current, None
         return super().handle_multi_feature_output(
             api_name, multi_feature_outputs, features_to_invoke, **kwargs

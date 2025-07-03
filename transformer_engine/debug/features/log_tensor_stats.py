@@ -22,7 +22,6 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import next_enabled_iter
 
 
-
 @Registry.register_feature(namespace="transformer_engine")
 class LogTensorStats(BaseLogTensorStats):
     """

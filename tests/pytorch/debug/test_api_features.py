@@ -327,7 +327,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
 
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.7.mlp.fc1", tensor_name="weight", iteration=201
-        )[0]    
+        )[0]
         assert_empty()
 
     finally:
