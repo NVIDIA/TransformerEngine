@@ -98,15 +98,23 @@ class GroupedGemmPrimitive(BasePrimitive):
             A jnp.ndarray containing the result of the grouped GEMM operation
         """
         del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
-        del K, lhs_is_trans, rhs_is_trans, scaling_mode, has_bias
+        del K, lhs_is_trans, rhs_is_trans, has_bias
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
-        # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
         workspace_size += 256
-        workspace_size += lhs_scale_inv_aval.size + 256
-        workspace_size += rhs_scale_inv_aval.size + 256
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING or \
+           scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+            # For tensor scaling, each matrix has a single scale value, but it
+            # needs to be aligned to 16 bytes for CUDA 12.9.1 and later. We use
+            # a 256 bytes alignment to simplify the code.
+            workspace_size += lhs_scale_inv_aval.size * 256
+            workspace_size += rhs_scale_inv_aval.size * 256
+        elif scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+            # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
+            workspace_size += lhs_scale_inv_aval.size + 256
+            workspace_size += rhs_scale_inv_aval.size + 256
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         out_shape = (M, N)
