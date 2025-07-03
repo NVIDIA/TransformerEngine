@@ -5,7 +5,7 @@
 
 import pytest
 import torch
-import transformer_engine.pytorch as te 
+import transformer_engine.pytorch as te
 import time
 
 import nvdlfw_inspect.api as debug_api
@@ -18,24 +18,22 @@ def _run_cpu_overhead(debug_tools_initialized, layer, configs_dir, feature_dirs)
     TEDebugState._reset()
     if debug_tools_initialized:
         debug_api.initialize(
-            config_file=configs_dir + "/perf_config.yaml",
-            feature_dirs=feature_dirs
+            config_file=configs_dir + "/perf_config.yaml", feature_dirs=feature_dirs
         )
 
     try:
         if layer == "linear":
             model = torch.nn.Sequential(
-                te.Linear(1, 1, name="linear1"),
-                te.Linear(1, 1, name="linear2")
+                te.Linear(1, 1, name="linear1"), te.Linear(1, 1, name="linear2")
             ).cuda()
             NUM_ITERS = 18000
         elif layer == "transformer":
             model = torch.nn.Sequential(
                 te.TransformerLayer(1, 1, 1, name="transformer1"),
-                te.TransformerLayer(1, 1, 1, name="transformer2")
+                te.TransformerLayer(1, 1, 1, name="transformer2"),
             ).cuda()
             NUM_ITERS = 2000
-        
+
         x = torch.randn(1, 1, 1).cuda()
         y = model(x)
         y.sum().backward()
@@ -52,23 +50,17 @@ def _run_cpu_overhead(debug_tools_initialized, layer, configs_dir, feature_dirs)
     finally:
         if debug_tools_initialized:
             debug_api.end_debug()
-    
+
     return time_end - time_start
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_cpu_overhead(layer, configs_dir, feature_dirs):
-    
+
     with_debug_tools = _run_cpu_overhead(True, layer, configs_dir, feature_dirs)
     without_debug_tools = _run_cpu_overhead(False, layer, configs_dir, feature_dirs)
 
     print(f"with_debug_tools: {with_debug_tools} s")
     print(f"without_debug_tools: {without_debug_tools} s")
-    
-    assert with_debug_tools < without_debug_tools * 1.1 # 10% overhead margin
 
-
-
-
-
-
+    assert with_debug_tools < without_debug_tools * 1.1  # 10% overhead margin

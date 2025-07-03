@@ -1414,7 +1414,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def can_disable_debug(self, quantizers):
         run_current = any_feature_enabled(quantizers)
         self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
-        
+
         if not run_current:
             return True
 

@@ -124,7 +124,9 @@ class TEDefaultFeatures:
 
         bool - default is True
         """
-        return True, float("inf")  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
+        return True, float(
+            "inf"
+        )  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
         self,
