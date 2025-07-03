@@ -100,6 +100,7 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
 
 def reset_rng_states() -> None:
     """revert back to initial RNG state."""
+    global _cpu_rng_state, _cuda_rng_state
     torch.set_rng_state(_cpu_rng_state)
     torch.cuda.set_rng_state(_cuda_rng_state)
 
