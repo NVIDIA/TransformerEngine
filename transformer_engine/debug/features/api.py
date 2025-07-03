@@ -349,7 +349,7 @@ class TEDefaultFeatures:
         a given GEMM and tensor will be invoked.
 
         This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
-        Returning the next enabled iteration can help optimize CPU usage, 
+        Returning the next enabled iteration can help optimize CPU usage,
         especially when the interval between inspect_tensor_postquantize is large.
 
         Parameters

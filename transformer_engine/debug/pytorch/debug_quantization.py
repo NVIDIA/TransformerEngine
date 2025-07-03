@@ -504,9 +504,9 @@ class DebugQuantizer(Quantizer):
         self._call_inspect_tensor_api(src, dst.rowwise_gemm_tensor, dst.columnwise_gemm_tensor)
 
     def get_next_debug_iter(self) -> int | float:
-        """ 
-            Returns the next iteration for which the debug is enabled for this tensor.
-            If the next iteration is inf, then the debug is not enabled for this tensor.
+        """
+        Returns the next iteration for which the debug is enabled for this tensor.
+        If the next iteration is inf, then the debug is not enabled for this tensor.
         """
         return self.next_debug_iter
 
@@ -516,8 +516,8 @@ class DebugQuantizer(Quantizer):
 
     def update_next_iter(self, next_iter: Optional[int]):
         """
-            If there is _enabled API that returned some next_iter,
-            this function updates the next_debug_iter field accordingly.
+        If there is _enabled API that returned some next_iter,
+        this function updates the next_debug_iter field accordingly.
         """
         if next_iter is None:
             # If api returned only bool, then we do not know when it will be enabled next time,

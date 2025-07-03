@@ -1397,15 +1397,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def validate_debug(self):
         """
-            This function checks if the debug should be enabled for this layer.
+        This function checks if the debug should be enabled for this layer.
         """
         self._validate_name()
         debug = TEDebugState.debug_enabled
         if not debug:
             return False
-        
+
         # If layer is run first time in new iteration,
-        # we need to check if the debug should be enabled for this layer - 
+        # we need to check if the debug should be enabled for this layer -
         # maybe in previous iterations debug features returned information
         # that no feature will be active for this layer for multiple next iterations.
         started_new_iteration = TEDebugState.get_iteration() != getattr(
@@ -1421,7 +1421,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def no_debug_features_active(self, quantizers):
         """
-            Checks if any debug feature is active for this layer.
+        Checks if any debug feature is active for this layer.
         """
         run_current = any_feature_enabled(quantizers)
 

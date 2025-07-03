@@ -14,8 +14,9 @@ def any_feature_enabled(quantizers):
     """Returns True if at least one API call is made from DebugQuantizer."""
     return any(q.any_feature_enabled() for q in quantizers)
 
+
 def _as_pair(x):
-    """ If x is a tuple, return x, otherwise return (x, None) """
+    """If x is a tuple, return x, otherwise return (x, None)"""
     if isinstance(x, tuple):
         assert len(x) == 2, "Expected a tuple of length 2"
         return x
