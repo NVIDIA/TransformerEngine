@@ -1399,10 +1399,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         This function checks if the debug should be enabled for this layer.
         """
-        self._validate_name()
         debug = TEDebugState.debug_enabled
         if not debug:
             return False
+        self._validate_name()
 
         # If layer is run first time in new iteration,
         # we need to check if the debug should be enabled for this layer -
