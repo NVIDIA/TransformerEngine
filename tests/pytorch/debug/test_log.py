@@ -9,7 +9,7 @@ import torch
 import tempfile
 
 
-LOG_ALL_CONFIG = """
+LOG_QUANTIZED_CONFIG_BASE = """
 log:
   layers:
     layer_name_regex_pattern: .*
@@ -26,46 +26,38 @@ log:
       start_step: 0
       end_step: 10
 """
+recipes = [
+  "fp8_delayed_scaling",
+  "fp8_current_scaling",
+  "fp8_block_scaling",
+  #"mxfp8",
+]
 
+bare_stats = [
+  "underflows%",
+  "scale_inv_min",
+  "scale_inv_max",
+  "mse",
+]
 
-def test_log_quantized(feature_dirs):
-    # Simple test - log all possible quantized stats and check that they are present in the log stats file.
-    recipes = [
-        "fp8_delayed_scaling",
-        "fp8_current_scaling",
-        "fp8_block_scaling",
-        "mxfp8",
-    ]
+stats = []
 
-    bare_stats = [
-        "underflows%",
-        "scale_inv_min",
-        "scale_inv_max",
-        "mse",
-    ]
+for recipe in recipes:
+  for stat in bare_stats:
+    for columnwise_postfix in ["", "_columnwise"]:
+      if recipe in ["fp8_current_scaling", "fp8_block_scaling", "mxfp8"] and torch.cuda.get_device_capability()[0] < 9:
+        # hopper in needed for current-scaling, block-scaling and mxfp8
+        continue
+      stats.append(f"{recipe}_{stat}{columnwise_postfix}")
 
-    stats = []
+stats.append("fp8_delayed_scaling_overflows%") # only delayed-scaling supports overflows%
 
-    for recipe in recipes:
-        for stat in bare_stats:
-            for columnwise_postfix in ["", "_columnwise"]:
-                if (
-                    recipe in ["fp8_current_scaling", "fp8_block_scaling"]
-                    and torch.cuda.get_device_capability()[0] < 9
-                ):
-                    # hopper in needed for current-scaling and block-scaling
-                    continue
-                if recipe == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
-                    # mxfp8 is only supported on blackwell and above
-                    continue
-                stats.append(f"{recipe}_{stat}{columnwise_postfix}")
+LOG_QUANTIZED_CONFIG = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(stats))
 
-    stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
-
-    config = LOG_ALL_CONFIG.format(stats=", ".join(stats))
+def test_log_quantized(feature_dirs):    
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
         with tempfile.TemporaryDirectory() as temp_dir:
-            temp_file.write(config)
+            temp_file.write(LOG_QUANTIZED_CONFIG)
             temp_file.flush()
             temp_file_path = temp_file.name
             debug_api.initialize(

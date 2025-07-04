@@ -44,9 +44,9 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
     if recipe_name == "fp8_block_scaling":
         return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_current_scaling":
-        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=torch.device("cuda"))
+        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=torch.device("cuda"), rowwise=True, columnwise=True)
     if recipe_name == "mxfp8":
-        return MXFP8Quantizer(fp8_dtype=fp8_dtype)
+        return MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_delayed_scaling":
         raise ValueError("Cannot recreate quantizer for fp8_delayed_scaling")
     raise ValueError(f"Unsupported recipe name: {recipe_name}")
@@ -148,8 +148,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def check_if_stat_is_supported(self, stat: str, current_recipe: str):
         """Returns True if stat is supported, raises ValueError otherwise."""
         if stat.endswith("_columnwise"):
-            stat = stat[: -len("_columnwise")]
-        recipe_from_stat = self.get_recipe_from_stat(stat)
+            stat = stat[:-len("_columnwise")]
+        recipe_from_stat, _ = self.get_recipe_from_stat(stat)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
         if current_recipe == "" and recipe_from_stat == "":
@@ -182,10 +182,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     def get_recipe_from_stat(self, stat: str):
         """Returns the recipe name from the stat string."""
+        columnwise_stat = stat.endswith("_columnwise")
         for recipe_name in ALL_RECIPE_NAMES:
             if recipe_name in stat:
-                return recipe_name
-        return ""
+                return recipe_name, columnwise_stat
+        return "", False
 
     @api_method
     def inspect_tensor_all_enabled(
@@ -259,10 +260,17 @@ class LogFp8TensorStats(BaseLogTensorStats):
         aux_dict = {
             recipe_name: quantized_tensor,
         }
-        for cur_recipe_name in recipes_in_stats:
+        
+        old_rowwise_usage = quantizer.rowwise_usage if quantizer is not None else None
+        old_columnwise_usage = quantizer.columnwise_usage if quantizer is not None else None
+        for cur_recipe_name, cur_columnwise_stat in recipes_in_stats:
             if recipe_name is not cur_recipe_name:
-                quantizer = _get_new_quantizer(recipe_name, fp8_dtype)
+                quantizer = _get_new_quantizer(cur_recipe_name, fp8_dtype)
                 aux_dict[cur_recipe_name] = quantizer(original_tensor)
+            else:
+                quantized_tensor.update_usage(rowwise_usage=True)
+                if cur_columnwise_stat:
+                    quantized_tensor.update_usage(columnwise_usage=True)
 
         STATS_BUFFERS.feed(
             layer_name,
@@ -273,6 +281,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
             skip_reduction,
             aux_dict=aux_dict,
         )
+
+        quantizer.update_usage(rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage)
+    
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",
