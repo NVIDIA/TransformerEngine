@@ -55,8 +55,8 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """
-    Logs statistics of quantized tensors. 
-    
+    Logs statistics of quantized tensors.
+
     Supports computing statistics for current recipe, but also
     allows to see what would happend if different recipes were used for these tensors in current iteration.
     For example, during delayed-scaling training you may wish to track

@@ -168,10 +168,10 @@ class StatsBuffers:
         self, layer_name, tensor_name, options, tensor, iteration, skip_reduction, aux_dict=None
     ):
         """
-            Feeds the tensor into the respective buffer.
+        Feeds the tensor into the respective buffer.
 
-            The aux_dict is used to share common computation between different stats.
-            For example for LogFp8TensorStats in can contain quantized tensors in different precisions.
+        The aux_dict is used to share common computation between different stats.
+        For example for LogFp8TensorStats in can contain quantized tensors in different precisions.
         """
         buffer = self.buffers[(layer_name, tensor_name, options)]
         buffer.feed(tensor, iteration, aux_dict)
