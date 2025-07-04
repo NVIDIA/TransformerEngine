@@ -101,7 +101,7 @@ class LogTensorStats(BaseLogTensorStats):
         return self._check_params(config, layer_name, iteration=iteration)
 
     @api_method
-    def inspect_tensor_all  (
+    def inspect_tensor_all(
         self,
         config: Dict,
         layer_name: str,
@@ -109,14 +109,19 @@ class LogTensorStats(BaseLogTensorStats):
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: Union[torch.Tensor, QuantizedTensor],
-        quantizer: Quantizer, # pylint: disable=unused-argument
-        quantized_tensor_rowwise: Union[Float8Tensor, MXFP8Tensor], # pylint: disable=unused-argument
-        quantized_tensor_columnwise: Union[Float8Tensor, MXFP8Tensor], # pylint: disable=unused-argument
+        quantizer: Quantizer,  # pylint: disable=unused-argument
+        quantized_tensor_rowwise: Union[
+            Float8Tensor, MXFP8Tensor
+        ],  # pylint: disable=unused-argument
+        quantized_tensor_columnwise: Union[
+            Float8Tensor, MXFP8Tensor
+        ],  # pylint: disable=unused-argument
     ):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
-            type(original_tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
+            type(original_tensor)
+            not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
             and original_tensor.dtype != torch.uint8
         ), (
             f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be in high precision when using"
@@ -129,7 +134,9 @@ class LogTensorStats(BaseLogTensorStats):
             config.get("start_end_list", None),
         )
 
-        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(tensor_name, tp_group)
+        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
+            tensor_name, tp_group
+        )
 
         for stat in config["stats"]:
             assert (
@@ -145,7 +152,9 @@ class LogTensorStats(BaseLogTensorStats):
             reduce_within_microbatch=reduce_within_microbatch,
         )
 
-        STATS_BUFFERS.feed(layer_name, tensor_name, options, original_tensor, iteration, skip_reduction)
+        STATS_BUFFERS.feed(
+            layer_name, tensor_name, options, original_tensor, iteration, skip_reduction
+        )
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=look_at_tensor_before_process: {tensor_name}",

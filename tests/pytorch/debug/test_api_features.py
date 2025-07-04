@@ -366,12 +366,12 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
             from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 
             return STATS_BUFFERS.log_stats()
-        
+
         quantizer = Float8Quantizer(
             scale=torch.full([1], 1.0).cuda(),
             amax=torch.full([1], 1.0).cuda(),
             fp8_dtype=tex.DType.kFloat8E4M3,
-        )   
+        )
 
         def fp8_tensor(t):
             return quantizer(t.cuda())

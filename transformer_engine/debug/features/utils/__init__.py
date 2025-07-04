@@ -14,7 +14,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 def get_reduction_params(tensor_name: str, tp_group: torch.distributed.ProcessGroup):
     """
-        Returns the statistics reduction parameters for the tensor.
+    Returns the statistics reduction parameters for the tensor.
     """
     skip_reduction = False
     reduction_group = debug_api.get_tensor_reduction_group()

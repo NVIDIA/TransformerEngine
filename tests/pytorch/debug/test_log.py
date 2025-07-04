@@ -105,6 +105,7 @@ def test_log_quantized(feature_dirs):
             for stat in stats:
                 assert stat in output, f"Stat {stat} not found in output"
 
+
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
@@ -113,6 +114,7 @@ fp8_recipes = [
 ]
 
 LOG_QUANTIZED_CONFIG_2 = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(bare_stats))
+
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 def test_api_log_quantized(fp8_recipe, feature_dirs):
@@ -167,7 +169,7 @@ def test_api_log_quantized(fp8_recipe, feature_dirs):
             output = None
             with open(stat_file_path, "r") as f:
                 output = f.read()
-            
+
             for line in output.split("\n"):
                 if "undeflows%" in line:
                     underflows = float(line.split("value=")[1])
@@ -175,7 +177,9 @@ def test_api_log_quantized(fp8_recipe, feature_dirs):
                     assert underflows == pytest.approx(expected_underflows.cpu())
                 if "mse" in line:
                     mse = float(line.split("value=")[1])
-                    expected_mse = torch.nn.functional.mse_loss(dequantized_tensor, tensor, reduction="mean")
+                    expected_mse = torch.nn.functional.mse_loss(
+                        dequantized_tensor, tensor, reduction="mean"
+                    )
                     assert mse == pytest.approx(expected_mse.cpu(), abs=1e-6)
                 if "scale_inv_min" in line:
                     scale_inv_min = float(line.split("value=")[1])
@@ -185,6 +189,5 @@ def test_api_log_quantized(fp8_recipe, feature_dirs):
                     overflows = float(line.split("value=")[1])
                     expected_overflows = (abs(dequantized_tensor) > abs(tensor)).sum()
                     assert overflows == pytest.approx(expected_overflows.cpu())
-            
 
             debug_api.end_debug()
