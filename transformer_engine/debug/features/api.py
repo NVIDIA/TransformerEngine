@@ -235,7 +235,7 @@ class TEDefaultFeatures:
         """
         This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
 
-                
+
         The feature is invoked if *inspect_tensor_enabled* returns `True`. It can be used to obtain information on the high precision tensor. For example, it is run by the `LogTensorStats` feature.
 
         Parameters
@@ -273,7 +273,7 @@ class TEDefaultFeatures:
         """
         This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
 
-                
+
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
