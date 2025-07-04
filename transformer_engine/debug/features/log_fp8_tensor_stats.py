@@ -164,10 +164,13 @@ class LogFp8TensorStats(BaseLogTensorStats):
             return True
 
         if (
-            recipe_from_stat in ["mxfp8", "fp8_block_scaling", "fp8_current_scaling"]
+            recipe_from_stat in ["fp8_block_scaling", "fp8_current_scaling"]
             and torch.cuda.get_device_capability()[0] < 9
         ):
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
+
+        if recipe_from_stat == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
+            raise ValueError(f"Stat {stat} needs Blackwell or later GPU.")
 
         supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "mse"]
         if stat_without_recipe not in supported_stats:

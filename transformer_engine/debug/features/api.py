@@ -306,11 +306,16 @@ class TEDefaultFeatures:
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: torch.Tensor,
-        quantized_tensor_rowwise: Optional[torch.Tensor] = None,
-        quantized_tensor_columnwise: Optional[torch.Tensor] = None,
+        quantized_tensor_rowwise: Optional[Union[torch.Tensor, QuantizedTensor]] = None,
+        quantized_tensor_columnwise: Optional[Union[torch.Tensor, QuantizedTensor]] = None,
         quantizer: Optional[Quantizer] = None,
     ) -> None:
         """
+        Similar to *inspect_tensor* and *inspect_tensor_postquantize*. It is run always once per tensor.
+        It allows to inspect both quantized and high precision tensors.
+        The feature LogFp8TensorStats uses this call to collect FP8 statistics after the quantization.
+
+        If tensor and the transpose are quantized differently
 
         This call is used mainly to collect statistics of the tensor and quantized tensor. It is called
         by the TE only if *inspect_tensor_all_enabled* returns `True`.
@@ -331,12 +336,16 @@ class TEDefaultFeatures:
             This is not reduction group from debug_api.
         original_tensor: torch.Tensor
             original tensor in high precision,
-        quantized_tensor_rowwise: Optional[torch.Tensor]
-            quantized tensor in rowwise format,
-        quantized_tensor_columnwise: Optional[torch.Tensor]
-            quantized tensor in columnwise format,
+        quantized_tensor_rowwise: Optional[Union[torch.Tensor, QuantizedTensor]]
+            quantized tensor in rowwise format. If the tensor is not quantized, then it is `None`.
+            If quantized tensor is instance of `QuantizedTensor` class - for example Float8Tensor or MXFP8Tensor,
+            it contains data in rowwise format, possibly containg also data in columnwise format.
+        quantized_tensor_columnwise: Optional[Union[torch.Tensor, QuantizedTensor]]
+            quantized tensor in columnwise format. If the tensor is not quantized, then it is `None`.
+            If quantized tensor is instance of `QuantizedTensor` class - for example Float8Tensor or MXFP8Tensor,
+            it contains data in columnwise format, possibly containg also data in rowwise format.
         quantizer: Optional[Quantizer]
-            quantizer used to quantize the tensor,
+            quantizer used to quantize the tensor. If the tensor is not quantized, then it is `None`.
 
         Returns
         -------

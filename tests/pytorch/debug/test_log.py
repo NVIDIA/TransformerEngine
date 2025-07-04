@@ -29,6 +29,7 @@ log:
 
 
 def test_log_quantized(feature_dirs):
+    # Simple test - log all possible quantized stats and check that they are present in the log stats file.
     recipes = [
         "fp8_delayed_scaling",
         "fp8_current_scaling",
@@ -49,10 +50,13 @@ def test_log_quantized(feature_dirs):
         for stat in bare_stats:
             for columnwise_postfix in ["", "_columnwise"]:
                 if (
-                    recipe in ["fp8_current_scaling", "fp8_block_scaling", "mxfp8"]
+                    recipe in ["fp8_current_scaling", "fp8_block_scaling"]
                     and torch.cuda.get_device_capability()[0] < 9
                 ):
-                    # hopper in needed for current-scaling, block-scaling and mxfp8
+                    # hopper in needed for current-scaling and block-scaling
+                    continue
+                if recipe == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
+                    # mxfp8 is only supported on blackwell and above
                     continue
                 stats.append(f"{recipe}_{stat}{columnwise_postfix}")
 
@@ -88,8 +92,6 @@ def test_log_quantized(feature_dirs):
                 output = f.read()
 
             assert len(output) > 0, "Output is empty"
-
-            print(f"output: {output}")
 
             for stat in stats:
                 assert stat in output, f"Stat {stat} not found in output"
