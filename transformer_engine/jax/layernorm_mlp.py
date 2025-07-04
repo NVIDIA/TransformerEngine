@@ -491,7 +491,7 @@ def _layernorm_mlp_bwd_rule(
             if casted_grad_rhs.data_layout == "T"
             else dgrad_2[-1]
         )
-        dgrad_2 = dgrad_2[1]
+        dgrad_2 = dgrad_2[0]
     else:
         dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 

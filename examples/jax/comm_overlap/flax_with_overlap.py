@@ -44,10 +44,10 @@ assert jax.local_device_count() == 1, (
 
 # Parse script arguments
 _supported_layers = (DenseGeneral, LayerNormDenseGeneral, LayerNormMLP)
-TE_LAYER_MAP = dict((layer.__name__.lower(), layer) for layer in _supported_layers)
+_layer_map = dict((layer.__name__.lower(), layer) for layer in _supported_layers)
 def _te_flax_layer(layer_name):
-    assert isinstance(layer_name, str) and layer_name.lower() in TE_LAYER_MAP
-    return TE_LAYER_MAP[layer_name.lower()]
+    assert isinstance(layer_name, str) and layer_name.lower() in _layer_map
+    return _layer_map[layer_name.lower()]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=2)
@@ -60,7 +60,7 @@ parser.add_argument("--activation-size", type=int, default=53248)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
 parser.add_argument("--layer-type", type=_te_flax_layer, default=DenseGeneral,
-                    choices=TE_LAYER_MAP.keys())
+                    choices=_supported_layers)
 parser.add_argument("--fp8-recipe", type=str.lower, default="none",
                     choices=["none", "current", "delayed", "mxfp8"])
 parser.add_argument("--check-result", action="store_true")

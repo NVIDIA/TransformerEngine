@@ -527,7 +527,7 @@ class CommOverlapHelper:
     def _get_bulk_overlap_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
         assert self.tp_resource in aux_in_specs, (
             "CommOverlapHelper: Auxiliary input for bulk all-gather overlap is not sharded "
-            f"over the tensor-parallel mesh resource {self.tp_resource} in any dimension."
+            f"over the tensor-parallel mesh resource '{self.tp_resource}' in any dimension."
         )
 
         aux_out_specs = (None, )
@@ -558,7 +558,7 @@ class CommOverlapHelper:
             )
 
         # GEMM is independent of communication so specs are as if there is no overlap
-        operand_specs, output_specs, xla_reduce_info = self._get_specs_no_overlap(
+        operand_specs, output_specs, xla_reduce_info = self._get_no_overlap_rules(
             lhs_specs, rhs_specs, aux_in_specs, dimension_numbers
         )
 
@@ -900,11 +900,10 @@ class CommOverlapHelperSet:
             dgrad_overlap = None
 
             if self.fprop.is_all_gather() and not self.fprop.output_all_gathered_lhs:
-                # FPROP AG->GEMM and DGRAD BULK-AG for LHS if all-gathered LHS is not saved
-                # from FPROP
+                # FPROP AG->GEMM and DGRAD GEMM->RS
                 dgrad_overlap = CommOverlapHelper(
-                    method=tex.CommOverlapMethod.BULK,
-                    comm_type=tex.CommOverlapType.AG,
+                    method=tex.CommOverlapMethod.RING_EXCHANGE,
+                    comm_type=tex.CommOverlapType.RS,
                     buffer_shape=self.fprop.buffer_shape,
                     buffer_dtype=self.fprop.buffer_dtype,
                     tp_size=self.fprop.tp_size,

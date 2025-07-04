@@ -51,10 +51,10 @@ assert jax.local_device_count() == 1, (
 
 # Parse script arguments
 _supported_prims = (dense, layernorm_dense, layernorm_mlp)
-TE_PRIM_MAP = dict((prim.__name__.lower(), prim) for prim in _supported_prims)
+_prim_map = dict((prim.__name__.lower(), prim) for prim in _supported_prims)
 def _te_layer_prim(prim_name):
-    assert isinstance(prim_name, str) and prim_name.lower() in TE_PRIM_MAP
-    return TE_PRIM_MAP[prim_name.lower()]
+    assert isinstance(prim_name, str) and prim_name.lower() in _prim_map
+    return _prim_map[prim_name.lower()]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
@@ -67,8 +67,7 @@ parser.add_argument("--hidden-size", type=int, default=16384)
 parser.add_argument("--activation-size", type=int, default=53248)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
-parser.add_argument("--layer-type", type=_te_layer_prim, default=dense,
-                    choices=TE_PRIM_MAP.keys())
+parser.add_argument("--layer-type", type=_te_layer_prim, default=dense, choices=_supported_prims)
 parser.add_argument("--fp8-recipe", type=str.lower, default="none",
                     choices=["none", "current", "delayed", "mxfp8"])
 parser.add_argument("--check-result", action="store_true")
