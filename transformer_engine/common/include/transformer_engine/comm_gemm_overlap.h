@@ -26,18 +26,9 @@ namespace transformer_engine {
  */
 bool ubuf_built_with_mpi();
 
-enum class CommOverlapType : int64_t {
-  NONE = 0,
-  RS = 1,
-  AG = 2
-};
+enum class CommOverlapType : int64_t { NONE = 0, RS = 1, AG = 2 };
 
-enum class CommOverlapMethod : int64_t {
-  NONE = 0,
-  BULK = 1,
-  PIPELINE = 2,
-  RING_EXCHANGE = 3
-};
+enum class CommOverlapMethod : int64_t { NONE = 0, BULK = 1, PIPELINE = 2, RING_EXCHANGE = 3 };
 
 enum class CommOverlapAlgo : int64_t {
   NO_OVERLAP = 0,
@@ -98,10 +89,9 @@ class CommOverlapCore {
                   int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
                   bool use_ce, bool atomic_gemm);
 
-
   virtual ~CommOverlapCore();
 
-  void* get_ubuf_dptr() { return _ubuf.dptr(); }
+  void *get_ubuf_dptr() { return _ubuf.dptr(); }
 
   void set_ubuf_scale_inv(float *scale_inv) {
     _ubuf_scale_inv = scale_inv;
@@ -118,8 +108,6 @@ class CommOverlapCore {
 
   TensorWrapper get_buffer_chunk_like(const TensorWrapper &source, size_t offset,
                                       const std::vector<size_t> &shape);
-
-
 
   int get_tp_size() { return _tp_size; }
 

@@ -239,7 +239,7 @@ def _layernorm_dense_fwd_rule(
     casted_ln_out_for_bwd = casted_ln_out.get_tensor(TensorUsage.LHS_TRANS)
     ln_out_transposed_dims = (
         *tuple(range(casted_ln_out_for_bwd.flatten_axis, casted_ln_out_for_bwd.ndim)),
-        *tuple(range(casted_ln_out_for_bwd.flatten_axis))
+        *tuple(range(casted_ln_out_for_bwd.flatten_axis)),
     )
     if comm_overlaps.fprop.output_all_gathered_lhs:
         casted_ln_out_for_bwd.data = (
@@ -327,8 +327,8 @@ def _layernorm_dense_bwd_rule(
         comm_overlaps.fprop.get_logical_output_axes(
             dot_input_axes,
             kernel_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
-        )
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+        ),
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim

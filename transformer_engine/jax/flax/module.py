@@ -167,9 +167,7 @@ def _generate_comm_overlap_meta(
     if method == tex.CommOverlapMethod.NONE:
         return CommOverlapHelperSet()
 
-    tp_resource = config.pop(
-        "tp_resource", global_mesh_resource().tp_resource
-    )
+    tp_resource = config.pop("tp_resource", global_mesh_resource().tp_resource)
 
     input_sp_dim = list(nn.logical_to_mesh_axes(input_axes)).index(tp_resource)
     logical_sp_axis = config.pop("logical_sp_axis", input_axes[input_sp_dim])
@@ -182,8 +180,7 @@ def _generate_comm_overlap_meta(
     _ = config.pop("comm_type")
 
     buffer_shape = config.pop(
-        "buffer_shape",
-        (*input_shape[:-1], param_shape[-1]) if row_parallel else input_shape
+        "buffer_shape", (*input_shape[:-1], param_shape[-1]) if row_parallel else input_shape
     )
 
     return CommOverlapHelperSet(
@@ -197,6 +194,7 @@ def _generate_comm_overlap_meta(
             **config,
         )
     )
+
 
 class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     r"""
@@ -221,7 +219,9 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     softmax_type: SoftmaxType = SoftmaxType.SCALED
 
     @nn.compact
-    def __call__(self, inputs: jnp.ndarray, mask: jnp.ndarray = None, bias: jnp.ndarray = None) -> jnp.ndarray:
+    def __call__(
+        self, inputs: jnp.ndarray, mask: jnp.ndarray = None, bias: jnp.ndarray = None
+    ) -> jnp.ndarray:
         batch = inputs.shape[0]
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
@@ -562,7 +562,7 @@ class DenseGeneral(TransformerEngineBase):
         contract_ind = tuple(range(0, len(axis)))
 
         if not self.enable_comm_overlap:
-            self.comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+            self.comm_overlap_config.update({"method": tex.CommOverlapMethod.NONE})
         y = dense(
             inputs,
             kernel,
@@ -577,7 +577,7 @@ class DenseGeneral(TransformerEngineBase):
                 self.kernel_axes,
                 self.comm_overlap_method,
             ),
-            batch_first=not self.transpose_batch_sequence
+            batch_first=not self.transpose_batch_sequence,
         )
 
         if self.enable_low_rank_adaptation:
@@ -846,7 +846,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         # All-Gather is the only supported collective to overlap in LayerNormDenseGeneral
         if not self.enable_comm_overlap:
-            self.comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+            self.comm_overlap_config.update({"method": tex.CommOverlapMethod.NONE})
         comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
             self.layernorm_input_axes,
@@ -868,7 +868,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 kernel_axes=self.kernel_axes,
                 batch_first=not self.transpose_batch_sequence,
                 quantizer_set=quantizer_set,
-                comm_overlaps=comm_overlaps
+                comm_overlaps=comm_overlaps,
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
@@ -1086,8 +1086,12 @@ class LayerNormMLP(TransformerEngineBase):
     enable_comm_overlap: bool = False
     enable_dot_1_comm_overlap: bool = False
     enable_dot_2_comm_overlap: bool = False
-    dot_1_comm_overlap_config: dict = field(default_factory=dict)  # pylint: disable=invalid-field-call
-    dot_2_comm_overlap_config: dict = field(default_factory=dict)  # pylint: disable=invalid-field-call
+    dot_1_comm_overlap_config: dict = field(
+        default_factory=dict
+    )  # pylint: disable=invalid-field-call
+    dot_2_comm_overlap_config: dict = field(
+        default_factory=dict
+    )  # pylint: disable=invalid-field-call
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -1278,9 +1282,8 @@ class LayerNormMLP(TransformerEngineBase):
         ffn1_ckpt_name = "ffn1"
         ffn2_ckpt_name = "ffn2"
 
-
         if not self.enable_dot_1_comm_overlap:
-            self.dot_1_comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+            self.dot_1_comm_overlap_config.update({"method": tex.CommOverlapMethod.NONE})
         ffn1_comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
             self.layernorm_input_axes,
@@ -1290,7 +1293,7 @@ class LayerNormMLP(TransformerEngineBase):
         )
 
         if not self.enable_dot_2_comm_overlap:
-            self.dot_2_comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+            self.dot_2_comm_overlap_config.update({"method": tex.CommOverlapMethod.NONE})
         ffn2_comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
             self.dot_2_input_axes,

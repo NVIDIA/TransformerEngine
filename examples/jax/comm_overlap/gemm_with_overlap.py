@@ -123,7 +123,7 @@ lhs_data = jax.random.normal(key1, lhs_shape, dtype=dtype)
 rhs_data = jax.random.normal(key2, rhs_shape, dtype=dtype)
 lhs = jax.device_put(lhs_data, input_sharding)
 rhs = jax.device_put(rhs_data, weight_sharding)
-dimension_numbers = (((-1, ), (0, )), ((0, ), ()))
+dimension_numbers = (((-1,), (0,)), ((0,), ()))
 
 # Name of comm+GEMM overlap layer
 overlap_method = tex.CommOverlapMethod.RING_EXCHANGE
@@ -156,13 +156,15 @@ if myrank == 0:
         flush=True,
     )
 
+
 @jax.jit
 def _gemm_wrapper(x, y):
     return partial(
         gemm,
-        dimension_numbers=(((-1, ), (0, )), ((0, ), ())),
+        dimension_numbers=(((-1,), (0,)), ((0,), ())),
         comm_overlap=overlap_helper,
     )(x, y)
+
 
 with te.sharding.global_shard_guard(mesh_resource):
     output = _gemm_wrapper(lhs, rhs)

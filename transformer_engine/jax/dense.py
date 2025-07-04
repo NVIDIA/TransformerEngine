@@ -61,15 +61,31 @@ def dense(
             output += jnp.reshape(bias, bias_new_shape)
     else:
         output = _dense(
-            x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, comm_overlaps,
-            quantizer_set
+            x,
+            kernel,
+            bias,
+            contracting_dims,
+            input_axes,
+            kernel_axes,
+            batch_first,
+            comm_overlaps,
+            quantizer_set,
         )
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
-def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, comm_overlaps,
-           quantizer_set):
+def _dense(
+    x,
+    kernel,
+    bias,
+    contracting_dims,
+    input_axes,
+    kernel_axes,
+    batch_first,
+    comm_overlaps,
+    quantizer_set,
+):
     """Internal implementation of dense layer transformation with custom VJP.
 
     This function implements the core dense layer transformation logic with support
@@ -90,15 +106,29 @@ def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_fir
         Transformed output tensor
     """
     output, _ = _dense_fwd_rule(
-        x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, comm_overlaps,
-        quantizer_set
+        x,
+        kernel,
+        bias,
+        contracting_dims,
+        input_axes,
+        kernel_axes,
+        batch_first,
+        comm_overlaps,
+        quantizer_set,
     )
     return output
 
 
 def _dense_fwd_rule(
-    x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, comm_overlaps,
-    quantizer_set
+    x,
+    kernel,
+    bias,
+    contracting_dims,
+    input_axes,
+    kernel_axes,
+    batch_first,
+    comm_overlaps,
+    quantizer_set,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -204,8 +234,8 @@ def _dense_bwd_rule(
     casted_grad = with_sharding_constraint_by_logical_axes(
         casted_grad,
         comm_overlaps.fprop.get_logical_output_axes(
-            input_axes, kernel_axes, (contracting_dims, ((x_bdim, ), ()))
-        )
+            input_axes, kernel_axes, (contracting_dims, ((x_bdim,), ()))
+        ),
     )
 
     # If casted_x has transposed data-layout, we need to untranspose it here, and then transpose
@@ -259,8 +289,10 @@ def _dense_bwd_rule(
     elif comm_overlaps.dgrad.is_all_gather() and comm_overlaps.dgrad.output_all_gathered_lhs:
         # GRAD was all-gathered for DGRAD and a copy of the gathered GRAD is in the auxiliary output
         casted_grad_rhs.data = (
-            dgrad[-1].transpose(*range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
-                                *range(casted_grad_rhs.flatten_axis))
+            dgrad[-1].transpose(
+                *range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
+                *range(casted_grad_rhs.flatten_axis),
+            )
             if casted_grad_rhs.data_layout == "T"
             else dgrad[-1]
         )

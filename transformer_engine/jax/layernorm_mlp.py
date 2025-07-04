@@ -316,8 +316,8 @@ def _layernorm_mlp_fwd_rule(
         ffn1_comm_overlaps.fprop.get_logical_output_axes(
             dot_1_input_axes,
             kernel_1_axes,
-            ((x_contracting_dims, k_contracting_dims), ((x_bdim,), ()))
-        )
+            ((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
+        ),
     )
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
@@ -447,8 +447,8 @@ def _layernorm_mlp_bwd_rule(
         ffn2_comm_overlaps.fprop.get_logical_output_axes(
             dot_2_input_axes,
             kernel_2_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
-        )
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+        ),
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -482,8 +482,10 @@ def _layernorm_mlp_bwd_rule(
     casted_grad_rhs = casted_grad.get_tensor(usage=TensorUsage.RHS)
     if ffn2_comm_overlaps.dgrad.is_enabled:
         casted_grad_rhs.data = (
-            dgrad_2[-1].transpose(*range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
-                                  *range(casted_grad_rhs.flatten_axis))
+            dgrad_2[-1].transpose(
+                *range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
+                *range(casted_grad_rhs.flatten_axis)
+            )
             if casted_grad_rhs.data_layout == "T"
             else dgrad_2[-1]
         )
@@ -512,8 +514,8 @@ def _layernorm_mlp_bwd_rule(
         ffn1_comm_overlaps.fprop.get_logical_output_axes(
             dot_1_input_axes,
             kernel_1_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
-        )
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+        ),
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -534,7 +536,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_1_aux_in = None
     ln_out_transposed_dims = (
         *tuple(range(casted_ln_out.flatten_axis, casted_ln_out.ndim)),
-        *tuple(range(casted_ln_out.flatten_axis))
+        *tuple(range(casted_ln_out.flatten_axis)),
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
     if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_all_gathered_lhs:

@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "../extensions.h"
-
 #include "common/util/pybind_helper.h"
 namespace transformer_engine {
 namespace jax {
@@ -121,5 +120,3 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE);
 }
-
-

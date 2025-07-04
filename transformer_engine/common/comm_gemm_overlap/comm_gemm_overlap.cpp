@@ -145,7 +145,6 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   }
 }
 
-
 CommOverlapCore::~CommOverlapCore() {
   cudaEventDestroy(_stop_comm);
   cudaEventDestroy(_start_comm);
@@ -746,7 +745,6 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
 }
-
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
   cudaEventDestroy(_stop_recv);

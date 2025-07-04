@@ -38,16 +38,19 @@ myrank = MPI.COMM_WORLD.Get_rank()
 numranks = MPI.COMM_WORLD.Get_size()
 jax.clear_caches()
 jax.distributed.initialize(cluster_detection_method="mpi4py")
-assert jax.local_device_count() == 1, (
-    f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
-)
+assert (
+    jax.local_device_count() == 1
+), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
 # Parse script arguments
 _supported_layers = (DenseGeneral, LayerNormDenseGeneral, LayerNormMLP)
 _layer_map = dict((layer.__name__.lower(), layer) for layer in _supported_layers)
+
+
 def _te_flax_layer(layer_name):
     assert isinstance(layer_name, str) and layer_name.lower() in _layer_map
     return _layer_map[layer_name.lower()]
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=2)
@@ -59,10 +62,12 @@ parser.add_argument("--hidden-size", type=int, default=16384)
 parser.add_argument("--activation-size", type=int, default=53248)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
-parser.add_argument("--layer-type", type=_te_flax_layer, default=DenseGeneral,
-                    choices=_supported_layers)
-parser.add_argument("--fp8-recipe", type=str.lower, default="none",
-                    choices=["none", "current", "delayed", "mxfp8"])
+parser.add_argument(
+    "--layer-type", type=_te_flax_layer, default=DenseGeneral, choices=_supported_layers
+)
+parser.add_argument(
+    "--fp8-recipe", type=str.lower, default="none", choices=["none", "current", "delayed", "mxfp8"]
+)
 parser.add_argument("--check-result", action="store_true")
 parser.add_argument("--seed", type=int, default=42)
 args = parser.parse_args()
@@ -80,35 +85,31 @@ match args.fp8_recipe:
         fp8_recipe = None
 
 # Single GPU evaluation
-layer_kwargs = { "use_bias" : True }
+layer_kwargs = {"use_bias": True}
 match args.layer_type:
     case DenseGeneral:
-        layer_kwargs.update({"features" : args.hidden_size, "name" : "proj"})
+        layer_kwargs.update({"features": args.hidden_size, "name": "proj"})
     case LayerNormDenseGeneral:
         layer_kwargs.update(
-            {
-                "features" : 3 * args.hidden_size,
-                "return_layernorm_output" : False,
-                "name" : "qkv"
-            }
+            {"features": 3 * args.hidden_size, "return_layernorm_output": False, "name": "qkv"}
         )
     case LayerNormMLP:
         layer_kwargs.update(
             {
-                "intermediate_dim" : args.activation_size,
-                "return_layernorm_output" : False,
-                "name" : "mlp"
+                "intermediate_dim": args.activation_size,
+                "return_layernorm_output": False,
+                "name": "mlp",
             }
         )
 
 rng = jax.random.PRNGKey(args.seed)
 rng, params_rng = jax.random_split(rng)
-init_rngs = {"params" : params_rng}
+init_rngs = {"params": params_rng}
 
 dtype = jnp.bfloat16
 input_shape = (args.seq_length, args.hidden_size)
 if not args.no_batch:
-    input_shape = (args.batch_size, ) + input_shape
+    input_shape = (args.batch_size,) + input_shape
 x = jnp.random.normal(rng, input_shape, dtype=jnp.bfloat16)
 
 with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
@@ -127,56 +128,58 @@ mesh_resource = MeshResource(
     tp_resource=DEVICE_TP_AXIS,
 )
 
-INPUT_AXES = (SEQLEN_TP_AXES if args.layer_type != DenseGeneral else SEQLEN_AXES,
-              HIDDEN_AXES if args.layer_type != DenseGeneral else HIDDEN_TP_AXES)
+INPUT_AXES = (
+    SEQLEN_TP_AXES if args.layer_type != DenseGeneral else SEQLEN_AXES,
+    HIDDEN_AXES if args.layer_type != DenseGeneral else HIDDEN_TP_AXES,
+)
 INTERMEDIATE_AXES = (SEQLEN_AXES, HIDDEN_TP_AXES)
 if not args.no_batch:
-    INPUT_AXES = (BATCH_AXES, ) + INPUT_AXES
-    INTERMEDIATE_AXES = (BATCH_AXES, ) + INTERMEDIATE_AXES
+    INPUT_AXES = (BATCH_AXES,) + INPUT_AXES
+    INTERMEDIATE_AXES = (BATCH_AXES,) + INTERMEDIATE_AXES
 
-LN_SCALE_AXES = LN_BIAS_AXES = (W_NO_SHARD_AXES, )
+LN_SCALE_AXES = LN_BIAS_AXES = (W_NO_SHARD_AXES,)
 
 KERNEL_AXES_ROW_PARALLEL = (W_TP_AXES, W_FSDP_AXES)
-BIAS_AXES_ROW_PARALLEL = (W_NO_SHARD_AXES, )
+BIAS_AXES_ROW_PARALLEL = (W_NO_SHARD_AXES,)
 KERNEL_AXES_COL_PARALLEL = (W_FSDP_AXES, W_TP_AXES)
-BIAS_AXES_COL_PARALLEL = (W_TP_AXES, )
+BIAS_AXES_COL_PARALLEL = (W_TP_AXES,)
 if args.layer_type == LayerNormMLP:
     KERNEL_AXES_COL_PARALLEL = (W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES)
     BIAS_AXES_COL_PARALLEL = (W_JOINED_AXES, W_NO_SHARD_AXES)
 
 # Multi GPU evaluation
-layer_kwargs.update({"enable_comm_overlap" : True})
+layer_kwargs.update({"enable_comm_overlap": True})
 if args.layer_type in (DenseGeneral, LayerNormDenseGeneral):
     layer_kwargs.update(
         {
-            "kernel_axes" : KERNEL_AXES_COL_PARALLEL,
-            "bias_axes" : BIAS_AXES_COL_PARALLEL,
-            "comm_overlap_config" : {"method" : tex.CommOverlapMethod.RING_EXCHANGE},
+            "kernel_axes": KERNEL_AXES_COL_PARALLEL,
+            "bias_axes": BIAS_AXES_COL_PARALLEL,
+            "comm_overlap_config": {"method": tex.CommOverlapMethod.RING_EXCHANGE},
         }
     )
     if args.layer_type == LayerNormDenseGeneral:
         layer_kwargs.update(
             {
-                "layernorm_input_axes" : INPUT_AXES,
-                "scale_axes" : LN_SCALE_AXES,
-                "ln_bias_axes" : LN_BIAS_AXES,
-                "dot_input_axes" : INPUT_AXES,
+                "layernorm_input_axes": INPUT_AXES,
+                "scale_axes": LN_SCALE_AXES,
+                "ln_bias_axes": LN_BIAS_AXES,
+                "dot_input_axes": INPUT_AXES,
             }
         )
 else:
     layer_kwargs.update(
         {
-            "layernorm_input_axes" : INPUT_AXES,
-            "scale_axes" : LN_SCALE_AXES,
-            "ln_bias_axes" : LN_BIAS_AXES,
-            "dot_1_input_axes" : INPUT_AXES,
-            "kernel_1_axes" : KERNEL_AXES_COL_PARALLEL,
-            "bias_axes_1" : BIAS_AXES_COL_PARALLEL,
-            "dot_2_input_axes" : INTERMEDIATE_AXES,
-            "kernel_2_axes" : KERNEL_AXES_ROW_PARALLEL,
-            "bias_axes_2" : BIAS_AXES_ROW_PARALLEL,
-            "dot_1_comm_overlap_config" : {"method" : tex.CommOverlapMethod.RING_EXCHANGE},
-            "dot_2_comm_overlap_config" : {"method" : tex.CommOverlapMethod.RING_EXCHANGE},
+            "layernorm_input_axes": INPUT_AXES,
+            "scale_axes": LN_SCALE_AXES,
+            "ln_bias_axes": LN_BIAS_AXES,
+            "dot_1_input_axes": INPUT_AXES,
+            "kernel_1_axes": KERNEL_AXES_COL_PARALLEL,
+            "bias_axes_1": BIAS_AXES_COL_PARALLEL,
+            "dot_2_input_axes": INTERMEDIATE_AXES,
+            "kernel_2_axes": KERNEL_AXES_ROW_PARALLEL,
+            "bias_axes_2": BIAS_AXES_ROW_PARALLEL,
+            "dot_1_comm_overlap_config": {"method": tex.CommOverlapMethod.RING_EXCHANGE},
+            "dot_2_comm_overlap_config": {"method": tex.CommOverlapMethod.RING_EXCHANGE},
         }
     )
 
@@ -195,10 +198,14 @@ axis_rules = nn_partitioning.axis_rules(
         (W_TP_AXES, DEVICE_TP_AXIS),
     )
 )
-with mesh, axis_rules, te.fp8_autocast(
-    enabled=fp8_recipe is not None,
-    fp8_recipe=fp8_recipe,
-    mesh_resource=mesh_resource,
+with (
+    mesh,
+    axis_rules,
+    te.fp8_autocast(
+        enabled=fp8_recipe is not None,
+        fp8_recipe=fp8_recipe,
+        mesh_resource=mesh_resource,
+    ),
 ):
     model_sharded = partial(args.layer_type, **layer_kwargs)
     params_sharded = model_sharded.init(init_rngs, x, deterministic=True)

@@ -174,9 +174,10 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
                                    (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-  void* out_ptr =
+  void *out_ptr =
       (comm_type == CommOverlapType::RS && comm_overlap_method != CommOverlapMethod::BULK)
-      ? comm_overlaps[comm_overlap_id]->get_ubuf_dptr() : output->untyped_data();
+          ? comm_overlaps[comm_overlap_id]->get_ubuf_dptr()
+          : output->untyped_data();
   auto out_ = TensorWrapper(out_ptr, out_shape, out_dtype);
 
   // Bias input to forward pass or bias gradient output from backward pass
@@ -220,13 +221,13 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   if (comm_type == CommOverlapType::NONE) {
     NVTE_CHECK(out_.numel() == output->element_count(),
-             "cuBLAS GEMM output buffer size is incorrect, expected ",
-             out_.numel(), " elements ", to_string_like(out_shape), " but got ",
-             output->element_count(), " elements ", to_string_like(output->dimensions()));
+               "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
+               to_string_like(out_shape), " but got ", output->element_count(), " elements ",
+               to_string_like(output->dimensions()));
 
     nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_.data(),
-                    rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
-                    use_split_accumulator, num_math_sm, stream);
+                     rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
+                     use_split_accumulator, num_math_sm, stream);
   } else {
     auto executor = comm_overlaps[comm_overlap_id];
     auto tp_size = executor->get_tp_size();
@@ -235,8 +236,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       auto aux_out_dims = aux_out->dimensions();
       std::vector<size_t> aux_out_shape = {0};
       auto aux_out_dtype = convert_ffi_datatype_to_te_dtype(aux_out->element_type());
-      if ((comm_type == CommOverlapType::AG && aux_out->element_count() > 0)
-          || comm_type == CommOverlapType::RS) {
+      if ((comm_type == CommOverlapType::AG && aux_out->element_count() > 0) ||
+          comm_type == CommOverlapType::RS) {
         std::vector<size_t> aux_out_shape = {
             product(aux_out_dims, 0, aux_axis_boundary),
             product(aux_out_dims, aux_axis_boundary, aux_out_dims.size())};
@@ -280,8 +281,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       // Launch GEMM+RS
       executor->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                                 workspace_, grad, false, use_split_accumulator, rs_out_,
-                                 stream);
+                                 workspace_, grad, false, use_split_accumulator, rs_out_, stream);
     } else if (comm_type == CommOverlapType::AG) {
       // Prepare the auxiliary buffer for all-gathered LHS
       std::vector<size_t> aux_out_shape = {0};
@@ -302,8 +302,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                                 workspace_, grad, false, use_split_accumulator, aux_out_,
-                                 stream);
+                                 workspace_, grad, false, use_split_accumulator, aux_out_, stream);
     } else {
       NVTE_ERROR("cuBLAS GEMM w/ comm. overlap invoked with invalid collective type (",
                  static_cast<int64_t>(comm_type), ")");
