@@ -4,23 +4,23 @@
 
 """LogFp8TensorStats Feature support for nvidia-dlframework-inspect"""
 
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
+from contextlib import contextmanager
 
 import torch
-
+from transformer_engine.debug.features.utils import get_reduction_params
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.pytorch.tensor import Quantizer
+from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
@@ -151,7 +151,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         """Returns True if stat is supported, raises ValueError otherwise."""
         if stat.endswith("_columnwise"):
             stat = stat[: -len("_columnwise")]
-        recipe_from_stat, _ = self.get_recipe_from_stat(stat)
+        recipe_from_stat, _ = self.get_recipe_from_stat(stat, default_recipe=current_recipe)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
         if current_recipe == "" and recipe_from_stat == "":
@@ -166,7 +166,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
             return True
 
         if (
-            recipe_from_stat in ["fp8_block_scaling", "fp8_current_scaling"]
+            recipe_from_stat in ["fp8_block_scaling"]
             and torch.cuda.get_device_capability()[0] < 9
         ):
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
@@ -182,17 +182,65 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
         return True
 
-    def get_recipe_from_stat(self, stat: str):
+    def get_recipe_from_stat(self, stat: str, default_recipe: str = ""):
         """Returns the recipe name from the stat string."""
         columnwise_stat = stat.endswith("_columnwise")
         for recipe_name in ALL_RECIPE_NAMES:
             if recipe_name in stat:
                 return recipe_name, columnwise_stat
-        return "", False
+        return default_recipe, columnwise_stat
+    
+    @contextmanager
+    def update_aux_dict(
+        self, 
+        aux_dict: Dict, 
+        recipe_name: str, 
+        quantized_tensor: QuantizedTensor, 
+        quantizer: Quantizer, 
+        original_tensor: torch.Tensor,
+        recipes_in_stats: List[Tuple[str, bool]],
+    ):
+        """
+            Updates the aux_dict with the quantized tensor for each recipe provided in recipes_in_stats.
+            It allows to compute stats for different recipes in the same iteration,
+            without recomputing the quantized tensor for each recipe for each stat.
+            Also updates usage of the quantized tensor with rowwise and columnwise usage.
+            Yields the aux_dict.
+            Needs to clean after usage, because it possibly change the usage of the quantized tensor.
+        """
+        fp8_dtype = None
+        if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
+            assert isinstance(
+                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
+            )
+            fp8_dtype = quantizer.dtype
+
+        aux_dict = {
+            recipe_name: quantized_tensor,
+        }
+
+        old_rowwise_usage = quantizer.rowwise_usage
+        old_columnwise_usage = quantizer.columnwise_usage
+        for cur_recipe_name, cur_columnwise_stat in recipes_in_stats:
+            if recipe_name is not cur_recipe_name:
+                quantizer = _get_new_quantizer(cur_recipe_name, fp8_dtype)
+                aux_dict[cur_recipe_name] = quantizer(original_tensor)
+            elif isinstance(quantized_tensor, QuantizedTensor):
+                quantized_tensor.update_usage(rowwise_usage=True)
+                if cur_columnwise_stat:
+                    quantized_tensor.update_usage(columnwise_usage=True)
+                aux_dict[''] = quantized_tensor
+        try:
+            yield aux_dict
+        finally:
+            if isinstance(quantized_tensor, QuantizedTensor):
+                quantized_tensor.update_usage(rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage)
+
+
 
     @api_method
     def inspect_tensor_all_enabled(
-        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
+        self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
         # check whether logging should happen in this iteration
@@ -207,15 +255,18 @@ class LogFp8TensorStats(BaseLogTensorStats):
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: torch.Tensor,
-        quantized_tensor_rowwise: Optional[torch.Tensor] = None,
-        quantized_tensor_columnwise: Optional[torch.Tensor] = None,
+        quantized_tensor_rowwise: Optional[torch.Tensor | QuantizedTensor] = None,
+        quantized_tensor_columnwise: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
         """
         assert quantized_tensor_rowwise is quantized_tensor_columnwise
+        assert quantizer is not None, f"[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
+
         quantized_tensor = quantized_tensor_rowwise
+        assert isinstance(quantized_tensor, QuantizedTensor), f"[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized tensor must be a QuantizedTensor."
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
@@ -228,14 +279,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
             "fp8",
         )
 
-        skip_reduction = False
-        reduction_group = debug_api.get_tensor_reduction_group()
-        reduce_within_microbatch = tensor_name != "weight"
-        if tensor_name == "weight":
-            if TEDebugState.weight_tensor_tp_group_reduce:
-                reduction_group = tp_group
-            else:
-                skip_reduction = True
+        skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(tensor_name, tp_group)
 
         STATS_BUFFERS.try_add_buffer(
             layer_name=layer_name,
@@ -247,46 +291,27 @@ class LogFp8TensorStats(BaseLogTensorStats):
         )
 
         recipes_in_stats = [
-            self.get_recipe_from_stat(stat)
+            self.get_recipe_from_stat(stat, default_recipe=recipe_name)
             for stat in config["stats"]
-            if self.get_recipe_from_stat(stat) != ""
         ]
 
-        fp8_dtype = None
-        if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
-            assert isinstance(
-                quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
+        with self.update_aux_dict(
+            aux_dict={},
+            recipe_name=recipe_name,
+            quantized_tensor=quantized_tensor,
+            quantizer=quantizer,
+            original_tensor=original_tensor,
+            recipes_in_stats=recipes_in_stats,
+        ) as aux_dict:
+            STATS_BUFFERS.feed(
+                layer_name,
+                tensor_name,
+                options,
+                original_tensor,
+                iteration,
+                skip_reduction,
+                aux_dict=aux_dict,
             )
-            fp8_dtype = quantizer.dtype
-
-        aux_dict = {
-            recipe_name: quantized_tensor,
-        }
-
-        old_rowwise_usage = quantizer.rowwise_usage if quantizer is not None else None
-        old_columnwise_usage = quantizer.columnwise_usage if quantizer is not None else None
-        for cur_recipe_name, cur_columnwise_stat in recipes_in_stats:
-            if recipe_name is not cur_recipe_name:
-                quantizer = _get_new_quantizer(cur_recipe_name, fp8_dtype)
-                aux_dict[cur_recipe_name] = quantizer(original_tensor)
-            else:
-                quantized_tensor.update_usage(rowwise_usage=True)
-                if cur_columnwise_stat:
-                    quantized_tensor.update_usage(columnwise_usage=True)
-
-        STATS_BUFFERS.feed(
-            layer_name,
-            tensor_name,
-            options,
-            original_tensor,
-            iteration,
-            skip_reduction,
-            aux_dict=aux_dict,
-        )
-
-        quantized_tensor.update_usage(
-            rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage
-        )
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",

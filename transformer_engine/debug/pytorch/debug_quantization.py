@@ -145,7 +145,6 @@ class DebugQuantizer(Quantizer):
             layer_name=self.layer_name,
             tensor_name=self.tensor_name,
             iteration=self.iteration,
-            gemm=self.columnwise_gemm_name,
         )
 
         return (

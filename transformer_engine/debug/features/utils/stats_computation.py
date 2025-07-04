@@ -192,8 +192,8 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     data_tensor_idx = 1 if columnwise else 0
 
     # Stat names
-    stat_num = f"{recipe_name}_underflows_num{columnwise_suffix}"
-    stat_pct = f"{recipe_name}_underflows%{columnwise_suffix}"
+    stat_num = f"{recipe_name}{'_' if recipe_name != '' else ''}underflows_num{columnwise_suffix}"
+    stat_pct = f"{recipe_name}{'_' if recipe_name != '' else ''}underflows%{columnwise_suffix}"
 
     stats_to_num[stat_num] = len(stats_to_num)
     stats_to_num[stat_pct] = len(stats_to_num)
@@ -229,8 +229,8 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
         scale_inv_attr = "_columnwise_scale_inv" if columnwise else "_rowwise_scale_inv"
 
     # Prepare stat names.
-    stat_name_min = f"{recipe_name}_scale_inv_min{columnwise_suffix}"
-    stat_name_max = f"{recipe_name}_scale_inv_max{columnwise_suffix}"
+    stat_name_min = f"{recipe_name}{'_' if recipe_name != '' else ''}scale_inv_min{columnwise_suffix}"
+    stat_name_max = f"{recipe_name}{'_' if recipe_name != '' else ''}scale_inv_max{columnwise_suffix}"
 
     # Assign indices in `stats_to_num` (order matters — keep insertion order deterministic).
     stats_to_num[stat_name_min] = len(stats_to_num)
@@ -254,8 +254,8 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
     """Register mse and total_square_error stats for the recipe."""
     columnwise_suffix = "_columnwise" if columnwise else ""
 
-    stat_mse = f"{recipe_name}_mse{columnwise_suffix}"
-    stat_err = f"{recipe_name}_total_square_error{columnwise_suffix}"
+    stat_mse = f"{recipe_name}{'_' if recipe_name != '' else ''}mse{columnwise_suffix}"
+    stat_err = f"{recipe_name}{'_' if recipe_name != '' else ''}total_square_error{columnwise_suffix}"
 
     stats_to_num[stat_mse] = len(stats_to_num)
     stats_to_num[stat_err] = len(stats_to_num)
@@ -276,6 +276,7 @@ def add_mse_stats(recipe_name: str, columnwise: bool = False):
 
 for _columnwise in [True, False]:
     for _recipe_name in [
+        "", # default recipe
         "fp8_delayed_scaling",
         "mxfp8",
         "fp8_current_scaling",
