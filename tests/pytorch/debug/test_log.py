@@ -21,7 +21,7 @@ log:
       stats: [
         {stats}
       ]
-      tensors: [activation, gradient, weight]
+      tensors: [activation, gradient, weight, output]
       freq: 2
       start_step: 0
       end_step: 10
@@ -70,9 +70,12 @@ def test_log_quantized(feature_dirs):
 
             model = te.Linear(128, 128, params_dtype=torch.bfloat16)
 
+            inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
+            inp[0, 0] = 1000
+
             for i in range(10):
                 with te.fp8_autocast():
-                    output = model(torch.randn(128, 128, dtype=torch.bfloat16).cuda())
+                    output = model(inp)
                 loss = output.sum()
                 loss.backward()
                 debug_api.step()
@@ -88,6 +91,8 @@ def test_log_quantized(feature_dirs):
                 output = f.read()
 
             assert len(output) > 0, "Output is empty"
+
+            print(output)
 
             for stat in stats:
                 assert stat in output, f"Stat {stat} not found in output"
