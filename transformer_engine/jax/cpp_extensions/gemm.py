@@ -605,6 +605,7 @@ class CommOverlapHelper:
             rhs_specs[i] for i in range(rhs_ndim) if i not in rhs_cdims
         )
         out_specs = (*lhs_non_cspecs_gathered, *rhs_non_cspecs)
+        self._set_gather_dim(lhs_specs.index(lhs_lspec))
 
         # Bias and Pre-GeLU sharding is based on GEMM output
         bias_specs = out_specs[len(lhs_non_cspecs_gathered) : ]
@@ -614,9 +615,8 @@ class CommOverlapHelper:
         aux_out_specs = (None, )
         if self.output_all_gathered_lhs:
             # Auxiliary output is the same as the LHS spec, except the gathered dimension unsharded
-            self._set_gather_dim(lhs_specs.index(lhs_lspec))
             aux_out_specs = list(lhs_specs).copy()
-            aux_out_specs[lhs_specs.index(lhs_lspec)] = None
+            aux_out_specs[self.gather_dim] = None
 
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs, aux_in_specs),
@@ -700,10 +700,10 @@ class CommOverlapHelper:
         }
         return impl_map[self.comm_type](lhs_specs, rhs_specs, aux_in_specs, dimension_numbers)
 
-    def get_logical_grad_axes(self, lhs_axes, rhs_axes, dimension_numbers):
+    def get_logical_output_axes(self, lhs_axes, rhs_axes, dimension_numbers):
         """
-        Combine LHS and RHS operand logical axis names in the forward pass into the gradient's
-        logical axes in the backward pass.
+        Compute the logical axis names for the GEMM output axes based on LHS and RHS operands'
+        logical axis names.
         """
         if not lhs_axes or not rhs_axes:
             assert not lhs_axes and not rhs_axes, (
@@ -731,16 +731,16 @@ class CommOverlapHelper:
             rhs_axes[i] for i in range(rhs_ndim) if i not in rhs_cdims
         )
 
-        grad_axes = (*lhs_batch_axes, *lhs_leading_axes, *rhs_non_contracting_axes)
+        out_axes = (*lhs_batch_axes, *lhs_leading_axes, *rhs_non_contracting_axes)
         if self.is_enabled and not self.is_bulk():
             if self.is_all_gather():
-                grad_axes = (
+                out_axes = (
                     *lhs_batch_axes,
                     *[None for _ in range(len(lhs_leading_axes))],
                     *rhs_non_contracting_axes,
                 )
             elif self.is_reduce_scatter():
-                grad_axes = (
+                out_axes = (
                     *lhs_batch_axes,
                     self.logical_sp_axis,
                     *[None for _ in range(len(lhs_leading_axes) - 1)],
@@ -777,13 +777,13 @@ class CommOverlapHelper:
                 and lhs_lspec == rhs_lspec
             ):
                 # Trailing dimension is not scattered (i.e. not doing jax.lax.psum_scatter)
-                grad_axes = (
+                out_axes = (
                     *lhs_batch_axes,
                     *lhs_leading_axes,
                     *[None for _ in range(len(rhs_non_contracting_axes))]
                 )
 
-        return grad_axes
+        return out_axes
 
 
 @dataclass(frozen=True)

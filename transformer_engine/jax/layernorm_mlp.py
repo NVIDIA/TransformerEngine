@@ -37,7 +37,7 @@ def layernorm_mlp(
     beta: jnp.ndarray,
     kernels: List[jnp.ndarray],
     biases: List[jnp.ndarray],
-    norm_type: str,
+    norm_type: str = "layernorm",
     zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
     norm_input_axes: Tuple[str, ...] = None,
@@ -259,8 +259,6 @@ def _layernorm_mlp_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
-    del kernel_2_axes
-
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
     # x should be in shape of (batch..., hidden)
@@ -299,6 +297,7 @@ def _layernorm_mlp_fwd_rule(
     casted_kernel_1 = tex.quantize(
         kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
     )
+    casted_kernel_1 = with_sharding_constraint_by_logical_axes(casted_kernel_1, kernel_1_axes)
 
     # NN GEMM
     # (batch..., sequence, hidden_in) x (hidden_in, hidden_out)
@@ -312,17 +311,14 @@ def _layernorm_mlp_fwd_rule(
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
         comm_overlap=ffn1_comm_overlaps.fprop,
     )
-
-    if (
-        not ffn1_comm_overlaps.fprop.is_enabled
-        and dot_1_input_axes is not None
-        and kernel_1_axes is not None
-    ):
-        dot_1_output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
+    dot_1_output = with_sharding_constraint_by_logical_axes(
+        dot_1_output,
+        ffn1_comm_overlaps.fprop.get_logical_output_axes(
+            dot_1_input_axes,
+            kernel_1_axes,
+            ((x_contracting_dims, k_contracting_dims), ((x_bdim,), ()))
         )
-        dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
+    )
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
         bias_1_shape = bias_1.shape
@@ -336,12 +332,12 @@ def _layernorm_mlp_fwd_rule(
         dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
     )
 
-    if not ffn2_comm_overlaps.fprop.is_enabled:
-        casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
+    casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
     casted_kernel_2 = tex.quantize(
         kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
     )
+    casted_kernel_2 = with_sharding_constraint_by_logical_axes(casted_kernel_2, kernel_2_axes)
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
@@ -448,7 +444,7 @@ def _layernorm_mlp_bwd_rule(
     )
     casted_grad = with_sharding_constraint_by_logical_axes(
         casted_grad,
-        ffn1_comm_overlaps.fprop.get_logical_grad_axes(
+        ffn2_comm_overlaps.fprop.get_logical_output_axes(
             dot_2_input_axes,
             kernel_2_axes,
             ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
@@ -492,8 +488,6 @@ def _layernorm_mlp_bwd_rule(
             else dgrad_2[-1]
         )
         dgrad_2 = dgrad_2[0]
-    else:
-        dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
     wgrad_2 = tex.gemm(
         casted_act_out,
@@ -501,6 +495,8 @@ def _layernorm_mlp_bwd_rule(
         dimension_numbers=((x_contracting_dims, g_contracting_dims), ((x_bdim,), (x_bdim,))),
         comm_overlap=ffn2_comm_overlaps.wgrad,
     )
+
+    dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
     wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
     casted_dact_out, dbias_1 = tex.quantize_dact_dbias(
@@ -513,7 +509,7 @@ def _layernorm_mlp_bwd_rule(
     )
     casted_dact_out = with_sharding_constraint_by_logical_axes(
         casted_dact_out,
-        ffn1_comm_overlaps.fprop.get_logical_grad_axes(
+        ffn1_comm_overlaps.fprop.get_logical_output_axes(
             dot_1_input_axes,
             kernel_1_axes,
             ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
@@ -540,6 +536,7 @@ def _layernorm_mlp_bwd_rule(
         *tuple(range(casted_ln_out.flatten_axis, casted_ln_out.ndim)),
         *tuple(range(casted_ln_out.flatten_axis))
     )
+    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
     if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_all_gathered_lhs:
         dgrad_1_aux_in = (
             casted_ln_out.data.transpose(ln_out_transposed_dims)

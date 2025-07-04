@@ -150,7 +150,7 @@ def _eval_layer_serial(layer_type_, x_, gamma_, beta_, kernel_1_, bias_1_, kerne
         layer_args = (x_, kernel_1_, gamma_, beta_, bias_1_)
 
     elif layer_type_ is layernorm_mlp:
-        layer_args = (x_, gamma_, beta_, kernel_1_, bias_1_, kernel_2_, bias_2_)
+        layer_args = (x_, gamma_, beta_, (kernel_1_, kernel_2_), (bias_1_, bias_2_))
 
     return jnp.mean(layer_type_(*layer_args, **layer_kwargs))
 
@@ -183,7 +183,7 @@ if myrank == 0:
 # Logical axes
 INPUT_AXES = (SEQLEN_AXES if args.layer_type is dense else SEQLEN_TP_AXES,
               HIDDEN_TP_AXES if args.layer_type is dense else HIDDEN_AXES)
-INTERMEDIATE_AXES = (JOINED_AXES, HIDDEN_TP_AXES)
+INTERMEDIATE_AXES = (SEQLEN_AXES, HIDDEN_TP_AXES)
 if not args.no_batch:
     INPUT_AXES = (BATCH_AXES, ) + INPUT_AXES
     INTERMEDIATE_AXES = (BATCH_AXES, ) + INTERMEDIATE_AXES
@@ -191,7 +191,7 @@ if not args.no_batch:
 LN_SCALE_AXES = LN_BIAS_AXES = (W_NO_SHARD_AXES, )
 
 KERNEL_AXES_ROW_PARALLEL = (W_TP_AXES, W_FSDP_AXES)
-BIAS_AXES_ROW_PARALLEL = (W_NO_SHARD_AXES, )
+BIAS_AXES_ROW_PARALLEL = (W_FSDP_AXES, )
 KERNEL_AXES_COL_PARALLEL = (W_FSDP_AXES, W_TP_AXES)
 BIAS_AXES_COL_PARALLEL = (W_TP_AXES, )
 if args.layer_type is layernorm_mlp:
@@ -237,7 +237,7 @@ def _eval_layer_sharded(
         }
 
     elif layer_type_ is layernorm_mlp:
-        layer_args = (x_, gamma_, beta_, kernel_1_, bias_1_, kernel_2_, bias_2_)
+        layer_args = (x_, gamma_, beta_, (kernel_1_, kernel_2_), (bias_1_, bias_2_))
         layer_kwargs = {
             "norm_input_axes" : INPUT_AXES,
             "dot_1_input_axes" : INPUT_AXES,
@@ -323,7 +323,7 @@ with mesh, global_shard_guard(mesh_resource), te.fp8_autocast(
     )
 
     output_sharded, grads_sharded = value_and_grad_sharded(
-        x, gamma, beta, kernel_1, kernel_2, bias_1, bias_2
+        x, gamma, beta, kernel_1, bias_1, kernel_2, bias_2
     )
 
 if args.check_result:

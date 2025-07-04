@@ -324,7 +324,7 @@ def _layernorm_dense_bwd_rule(
     )
     casted_grad = with_sharding_constraint_by_logical_axes(
         casted_grad,
-        comm_overlaps.fprop.get_logical_grad_axes(
+        comm_overlaps.fprop.get_logical_output_axes(
             dot_input_axes,
             kernel_axes,
             ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
@@ -343,17 +343,18 @@ def _layernorm_dense_bwd_rule(
     # If casted_ln_out has transposed data-layout, we need to untranspose it here, and then
     # transpose it back after the bulk-AG. This should ideally never be necessary if the data
     # layouts are handled correctly in the tensor usages.
+    dgrad_aux_in = None
     casted_ln_out_transposed_axes = (
         *tuple(range(casted_ln_out.flatten_axis, casted_ln_out.ndim)),
         *tuple(range(casted_ln_out.flatten_axis)),
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
-    if (
-        comm_overlaps.dgrad.is_bulk()
-        and not comm_overlaps.fprop.output_all_gathered_lhs
-        and casted_ln_out.data_layout == "T"
-    ):
-        casted_ln_out.data = jnp.transpose(casted_ln_out.data, casted_ln_out_transposed_axes)
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
+        dgrad_aux_in = (
+            casted_ln_out.data.transpose(casted_ln_out_transposed_axes)
+            if casted_ln_out.data_layout == "T"
+            else casted_ln_out.data
+        )
 
     # NT GEMM
     dgrad = tex.gemm(
@@ -361,7 +362,7 @@ def _layernorm_dense_bwd_rule(
         casted_kernel,
         dimension_numbers=((g_constracting_dim, k_constracting_dim), ((x_bdim,), ())),
         comm_overlap=comm_overlaps.dgrad,
-        aux_in=casted_ln_out.data,
+        aux_in=dgrad_aux_in,
     )
 
     g_constracting_dim = x_constracting_dim = tuple(
