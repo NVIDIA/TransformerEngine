@@ -11,6 +11,8 @@ from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import RecipeState
 import pytest
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import contextlib
+import os
 
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -50,7 +52,7 @@ bare_stats = [
     "mse",
 ]
 
-stats = []
+all_stats = []
 
 for r in recipes:
     for stat in bare_stats:
@@ -61,49 +63,68 @@ for r in recipes:
             ):
                 # hopper in needed for current-scaling, block-scaling and mxfp8
                 continue
-            stats.append(f"{r}_{stat}{columnwise_postfix}")
+            all_stats.append(f"{r}_{stat}{columnwise_postfix}")
 
-stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
-
-LOG_QUANTIZED_CONFIG = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(stats))
+all_stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
 
 
-def test_log_quantized(feature_dirs):
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_file.write(LOG_QUANTIZED_CONFIG)
-            temp_file.flush()
-            temp_file_path = temp_file.name
-            debug_api.initialize(
-                config_file=temp_file_path, feature_dirs=feature_dirs, log_dir=temp_dir
-            )
 
-            model = te.Linear(128, 128, params_dtype=torch.bfloat16)
+@contextlib.contextmanager
+def debug_session(config_str: str, feature_dirs):
+    """
+    Helper context manager that
+    1. writes the YAML `config_str` to a temporary file,
+    2. starts a debug session, and
+    3. yields the directory that contains the statistics log.
 
-            inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
-            inp[0, 0] = 1000
+    The session is closed automatically – even on exceptions – so every test
+    stays concise and leak-free.
+    """
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as cfg_file, \
+         tempfile.TemporaryDirectory() as log_dir:
+        cfg_file.write(config_str)
+        cfg_file.flush()
 
-            for i in range(10):
-                with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
-                    output = model(inp)
-                loss = output.sum()
-                loss.backward()
-                debug_api.step()
-
+        debug_api.initialize(
+            config_file=cfg_file.name,
+            feature_dirs=feature_dirs,
+            log_dir=log_dir,
+        )
+        try:
+            yield log_dir
+        finally:
             debug_api.end_debug()
 
-            stat_file_path = (
-                temp_dir + "/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log"
-            )
 
-            output = None
-            with open(stat_file_path, "r") as f:
-                output = f.read()
+def read_log(log_dir: str) -> str:
+    """Return the content of the statistics log produced by `debug_session`."""
+    stat_path = os.path.join(
+        log_dir,
+        "nvdlfw_inspect_statistics_logs",
+        "nvdlfw_inspect_globalrank-0.log",
+    )
+    with open(stat_path, "r") as f:
+        return f.read()
 
-            assert len(output) > 0, "Output is empty"
 
-            for stat in stats:
-                assert stat in output, f"Stat {stat} not found in output"
+def test_sanity(feature_dirs):
+    log_all_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(all_stats))
+    with debug_session(log_all_stats_config, feature_dirs) as log_dir:
+        model = te.Linear(128, 128, params_dtype=torch.bfloat16)
+        inp = torch.zeros(128, 128, dtype=torch.bfloat16).cuda()
+
+        for _ in range(10):
+            with te.fp8_autocast(fp8_recipe=recipe.DelayedScaling()):
+                output = model(inp)
+            loss = output.sum()
+            loss.backward()
+            debug_api.step()
+
+        output = read_log(log_dir)
+
+    assert output, "Output is empty"
+    for stat in all_stats:
+        assert stat in output, f"Stat {stat} not found in output"
 
 
 fp8_recipes = [
@@ -113,11 +134,10 @@ fp8_recipes = [
     recipe.Float8BlockScaling(),
 ]
 
-LOG_QUANTIZED_CONFIG_2 = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(bare_stats))
 
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
-def test_api_log_quantized(fp8_recipe, feature_dirs):
+def test_numerics(fp8_recipe, feature_dirs):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if not mxfp8_available and fp8_recipe == recipe.MXFP8BlockScaling():
@@ -125,69 +145,47 @@ def test_api_log_quantized(fp8_recipe, feature_dirs):
     if not fp8_block_scaling_available and fp8_recipe == recipe.Float8BlockScaling():
         pytest.skip(reason_for_no_fp8_block_scaling)
 
-    # Test output of each stat with API, not layers.
+    log_only_bare_stats_config = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(bare_stats))
 
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
-        temp_file.write(LOG_QUANTIZED_CONFIG_2)
-        temp_file.flush()
-        temp_file_path = temp_file.name
-        with tempfile.TemporaryDirectory() as temp_dir:
-            debug_api.initialize(
-                config_file=temp_file_path, feature_dirs=feature_dirs, log_dir=temp_dir
+    with debug_session(log_only_bare_stats_config, feature_dirs) as log_dir:
+        recipe_state = RecipeState.create(
+            fp8_recipe,
+            mode="forward",
+            num_quantizers=3,
+        )
+
+        tensor = torch.zeros(1024, 1024).cuda()
+        tensor[0, :] = 1000
+        quantizer = recipe_state.make_quantizers()[0]
+        quantized_tensor = quantizer(tensor)
+
+        debug_api.transformer_engine.inspect_tensor_all(
+            layer_name="layer_name",
+            tensor_name="activation",
+            iteration=0,
+            tp_group=None,
+            original_tensor=tensor,
+            quantizer=quantizer,
+            quantized_tensor_rowwise=quantized_tensor,
+            quantized_tensor_columnwise=quantized_tensor,
+        )
+        debug_api.step()
+
+        dequantized_tensor = quantized_tensor.dequantize()
+        output = read_log(log_dir)
+
+    for line in output.splitlines():
+        if "underflows%" in line:
+            underflows = float(line.split("value=")[1])
+            expected = (dequantized_tensor == 0).sum() / dequantized_tensor.numel() * 100
+            assert underflows == pytest.approx(expected.cpu(), abs=1e-4)
+        if "mse" in line:
+            mse = float(line.split("value=")[1])
+            expected = torch.nn.functional.mse_loss(
+                dequantized_tensor, tensor, reduction="mean"
             )
-
-            recipe_state = RecipeState.create(
-                fp8_recipe,
-                mode="forward",
-                num_quantizers=3,
-            )
-
-            tensor = torch.zeros(1024, 1024).cuda()
-            tensor[0, :] = 1000
-            quantizer = recipe_state.make_quantizers()[0]
-            quantized_tensor = quantizer(tensor)
-
-            debug_api.transformer_engine.inspect_tensor_all(
-                layer_name="layer_name",
-                tensor_name="activation",
-                iteration=0,
-                tp_group=None,
-                original_tensor=tensor,
-                quantizer=quantizer,
-                quantized_tensor_rowwise=quantized_tensor,
-                quantized_tensor_columnwise=quantized_tensor,
-            )
-            debug_api.step()
-
-            # read stats
-            stat_file_path = (
-                temp_dir + "/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log"
-            )
-
-            dequantized_tensor = quantized_tensor.dequantize()
-
-            output = None
-            with open(stat_file_path, "r") as f:
-                output = f.read()
-
-            for line in output.split("\n"):
-                if "undeflows%" in line:
-                    underflows = float(line.split("value=")[1])
-                    expected_underflows = (dequantized_tensor == 0).sum()
-                    assert underflows == pytest.approx(expected_underflows.cpu())
-                if "mse" in line:
-                    mse = float(line.split("value=")[1])
-                    expected_mse = torch.nn.functional.mse_loss(
-                        dequantized_tensor, tensor, reduction="mean"
-                    )
-                    assert mse == pytest.approx(expected_mse.cpu(), abs=1e-6)
-                if "scale_inv_min" in line:
-                    scale_inv_min = float(line.split("value=")[1])
-                if "scale_inv_max" in line:
-                    scale_inv_max = float(line.split("value=")[1])
-                if "overflows%" in line:
-                    overflows = float(line.split("value=")[1])
-                    expected_overflows = (abs(dequantized_tensor) > abs(tensor)).sum()
-                    assert overflows == pytest.approx(expected_overflows.cpu())
-
-            debug_api.end_debug()
+            assert mse == pytest.approx(expected.cpu(), abs=1e-6)
+        if "overflows%" in line:
+            overflows = float(line.split("value=")[1])
+            expected = (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
+            assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
