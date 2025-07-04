@@ -927,6 +927,15 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   const bool do_gelu = pre_gelu_out.numel() > 0;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
+  // Check B copy sizing
+  if (B_copy.numel() > 0) {
+    NVTE_CHECK(B_copy.numel() == _ubuf.numel(), "Expected all-gathered B copy buffer with ",
+               _ubuf.numel(), " elements but got ", B_copy.numel());
+    NVTE_CHECK(B_copy.element_size() == _ubuf.element_size(),
+               "Expected all-gathered B copy buffer with ", _ubuf.element_size() * 8,
+               "-bit data type but got ", B_copy.element_size() * 8, "-bit");
+  }
+
   NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _start_compute, 0));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, _start_compute, 0));
@@ -995,12 +1004,6 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
         NVTE_CHECK_CUDA(
             cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
-      } else if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
-                                        _stream_send[0]));
       }
     }
   } else {
@@ -1048,14 +1051,14 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
         NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], _stop_recv, 0));
         NVTE_CHECK_CUDA(
             cudaStreamWaitEvent(_stream_compute[(i + 1) % _stream_compute.size()], _stop_recv, 0));
-      } else if (B_copy.numel() > 0) {
-        assert(B_copy.numel() == _ubufs[_tp_id].numel());
-        assert(B_copy.element_size() == _ubufs[_tp_id].element_size());
-        NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_tp_id].dptr(),
-                                        _ubufs[_tp_id].bytes(), cudaMemcpyDeviceToDevice,
-                                        _stream_send[0]));
       }
     }
+  }
+
+  // Copy all-gathered B from communication buffer into auxiliary output
+  if (B_copy.numel() > 0) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubuf.dptr(), _ubuf.bytes(),
+                                    cudaMemcpyDeviceToDevice, _stream_send[0]));
   }
 
   _ub_comm->sms = ori_sms;

@@ -922,6 +922,7 @@ class CommOverlapHelperSet:
                     tp_size=self.fprop.tp_size,
                     logical_tp_axis=self.fprop.logical_tp_axis,
                     logical_sp_axis=self.fprop.logical_sp_axis,
+                    output_all_gathered_lhs=True,
                 )
 
             else:
