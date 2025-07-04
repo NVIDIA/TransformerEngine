@@ -191,6 +191,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         routing_map: torch.Tensor,
         num_out_tokens: int,
         probs: torch.Tensor,
+        pad_offsets: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -201,6 +202,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
         assert routing_map.is_cuda, "TransformerEngine needs CUDA."
         if probs is not None:
             assert probs.is_cuda, "TransformerEngine needs CUDA."
+        if pad_offsets is not None:
+            assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
 
         assert inp.size(0) == routing_map.size(0), "Permute not possible"
         num_tokens, hidden_size = inp.size()
@@ -255,6 +258,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
             num_out_tokens,
             hidden_size,
             scale_hidden_dim,
+            pad_offsets,
         )
 
         if fp8:
@@ -296,6 +300,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
+        ctx.pad_offsets = pad_offsets
         return output, row_id_map, permuted_probs
 
     @staticmethod
@@ -307,7 +312,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
-            return permuted_act_grad, None, None, ctx.probs
+            return permuted_act_grad, None, None, ctx.probs, None
 
         act_grad = None
         probs_grad = None
@@ -324,10 +329,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 ctx.num_tokens,
                 ctx.num_experts,
                 ctx.hidden_size,
+                ctx.pad_offsets,
             )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
-        return act_grad, None, None, probs_grad
+        return act_grad, None, None, probs_grad, None
 
 
 class _moe_unpermute_mask_map(torch.autograd.Function):
@@ -340,6 +346,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         row_id_map: torch.Tensor,
         merging_probs: Optional[torch.Tensor],
         restore_shape: Optional[torch.Size],
+        pad_offsets: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -358,6 +365,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         # Device check
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
+        if pad_offsets is not None:
+            assert pad_offsets.is_cuda, "TransformerEngine needs CUDA."
 
         assert not isinstance(
             inp, QuantizedTensor
@@ -370,6 +379,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             num_tokens,
             num_experts,
             hidden_size,
+            pad_offsets,
         )
 
         if with_probs:
@@ -381,13 +391,14 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         ctx.num_permuted_tokens = inp.size(0)
         ctx.hidden_size = hidden_size
         ctx.with_probs = with_probs
+        ctx.pad_offsets = pad_offsets
         return unpermuted_output
 
     @staticmethod
     def backward(ctx, unpermuted_act_grad):
         # pylint: disable=missing-function-docstring
         if not unpermuted_act_grad.numel():
-            return unpermuted_act_grad, None, ctx.merging_probs, None
+            return unpermuted_act_grad, None, ctx.merging_probs, None, None
 
         act_grad = None
         probs_grad = None
@@ -458,6 +469,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     ctx.num_permuted_tokens,
                     ctx.hidden_size,
                     scale_hidden_dim,
+                    ctx.pad_offsets,
                 )
 
             if fp8:
@@ -497,7 +509,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
-        return act_grad, None, probs_grad, None
+        return act_grad, None, probs_grad, None, None
 
 
 def moe_permute(
@@ -537,7 +549,7 @@ def moe_permute(
     if map_type == "index":
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None)
+        output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None, None)
         return output, row_id_map
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
@@ -570,10 +582,62 @@ def moe_permute_with_probs(
         By default, set to '-1', meaning no tokens are dropped.
     """
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-        inp, routing_map, num_out_tokens, probs
+        inp, routing_map, num_out_tokens, probs, None
     )
     return output, permuted_probs, row_id_map
 
+
+def moe_permute_and_pad_with_probs(
+    inp: torch.Tensor,
+    probs: torch.Tensor,
+    routing_map: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    align_size: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Permute the tokens and probs based on the routing_map.
+    Token with the same index will be grouped together.
+    Tokens with the same designated expert will be grouped together.
+    The routing_map indicates which experts were selected by each token.
+
+    Parameters
+    ----------
+    inp: torch.Tensor
+        Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
+    probs: torch.Tensor
+        The tensor of probabilities corresponding to the permuted tokens and is
+        of shape [num_tokens, num_experts]. It will be permuted with the tokens
+        according to the routing_map.
+    routing_map: torch.Tensor
+        The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
+        The values in it: 1 means the token is routed to this expert and 0 means not.
+    tokens_per_expert : torch.Tensor
+        Tensor of shape `[num_experts]` containing actual token counts per expert.
+    align_size : int
+        the alignment size for the input tensor.
+    """
+    assert (
+        tokens_per_expert is not None
+    ), "tokens_per_expert must be provided to the fused permute padding function."
+
+    # Calculate aligned token counts per expert
+    target_tokens_per_expert = (
+        torch.ceil(tokens_per_expert / align_size) * align_size
+    ).long()
+
+    if torch.equal(tokens_per_expert, target_tokens_per_expert):
+        pad_offsets = None
+    else:
+        # Compute padding requirements
+        pad_lengths = target_tokens_per_expert - tokens_per_expert
+        cum_pad = torch.cumsum(pad_lengths, dim=0)
+        pad_offsets = torch.cat([torch.zeros(1, dtype=torch.int32), cum_pad[:-1]])
+        pad_offsets = pad_offsets.cuda()
+
+    output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
+        inp, routing_map, target_tokens_per_expert.sum().item(), probs, pad_offsets
+    )
+    return output, permuted_probs, row_id_map, pad_offsets, target_tokens_per_expert
 
 def moe_unpermute(
     inp: torch.Tensor,
@@ -582,6 +646,7 @@ def moe_unpermute(
     restore_shape: Optional[torch.Size] = None,
     map_type: str = "mask",
     probs: Optional[torch.Tensor] = None,
+    pad_offsets: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -605,6 +670,11 @@ def moe_unpermute(
         Options are: 'mask', 'index'.
     probs: torch.Tensor, default = None
         Renamed to merging_probs. Keep for backward compatibility.
+    pad_offsets: torch.Tensor, default = None
+        The tensor of cumulative padding offsets per expert, used to remove padding added during permutation.
+        This should be the fourth output tensor of `moe_permute_and_pad_with_probs`.
+        Required when unpermuting outputs from padded permutation.
+
     """
     if probs is not None:
         if merging_probs is not None:
@@ -616,7 +686,7 @@ def moe_unpermute(
     if map_type == "index":
         return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
-        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
+        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape, pad_offsets)
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 

@@ -117,6 +117,7 @@ def _permute_kernel(
     scale_ptr,
     permuted_probs_ptr,
     permuted_scale_ptr,
+    pad_offsets_ptr,
     # sizes
     num_tokens,
     num_experts,
@@ -137,6 +138,7 @@ def _permute_kernel(
     # metas
     PERMUTE_PROBS: tl.constexpr,
     PERMUTE_SCALE: tl.constexpr,
+    FUSION_PAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -153,6 +155,9 @@ def _permute_kernel(
         for expert_idx in range(num_experts):
             dst_row = tl.load(row_id_map_ptr + expert_idx * num_tokens + pid)
             if dst_row != -1:
+                if FUSION_PAD:
+                    pad_off = tl.load(pad_offsets_ptr + expert_idx)
+                    dst_row = dst_row + pad_off
                 output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
                 tl.store(output_ptr + output_off, inp, mask=mask)
                 if PERMUTE_SCALE:
@@ -195,18 +200,31 @@ def permute_with_mask_map(
     num_out_tokens: int,
     hidden_size: int,
     scale_hidden_dim: int,
+    pad_offsets: Union[torch.Tensor, None],
 ):
     # pylint: disable=missing-function-docstring
-    output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if pad_offsets is not None:
+        output = torch.zeros((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+
     if probs is not None:
-        permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        if pad_offsets is not None:
+            permuted_probs = torch.zeros((num_out_tokens,), dtype=probs.dtype, device="cuda")
+        else:
+            permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device="cuda")
     else:
         permuted_probs = None
 
     if scale is not None:
-        permuted_scale = torch.empty(
-            (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
-        )
+        if pad_offsets is not None:
+            permuted_scale = torch.zeros(
+                (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
+            )
+        else:
+            permuted_scale = torch.empty(
+                (num_out_tokens, scale_hidden_dim), dtype=scale.dtype, device="cuda"
+            )
     else:
         permuted_scale = None
 
@@ -219,6 +237,7 @@ def permute_with_mask_map(
         scale,
         permuted_probs,
         permuted_scale,
+        pad_offsets,
         num_tokens,
         num_experts,
         hidden_size,
@@ -236,6 +255,7 @@ def permute_with_mask_map(
         permuted_scale.stride(1) if permuted_scale is not None else None,
         PERMUTE_PROBS=probs is not None,
         PERMUTE_SCALE=scale is not None,
+        FUSION_PAD=pad_offsets is not None,
     )
     return output, permuted_scale, permuted_probs
 
@@ -249,6 +269,7 @@ def _unpermute_kernel(
     merging_probs_ptr,
     permuted_probs_ptr,
     unpermuted_probs_ptr,
+    pad_offsets_ptr,
     # sizes
     num_tokens,
     num_experts,
@@ -266,6 +287,7 @@ def _unpermute_kernel(
     # metas
     WITH_MERGING_PROBS: tl.constexpr,
     PERMUTE_PROBS: tl.constexpr,
+    FUSION_UNPAD: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     data_type = input_ptr.dtype.element_ty
@@ -280,6 +302,9 @@ def _unpermute_kernel(
         for expert_idx in range(num_experts):
             src_row = tl.load(row_id_map_ptr + expert_idx * num_tokens + pid)
             if src_row != -1:
+                if FUSION_UNPAD:
+                    pad_off = tl.load(pad_offsets_ptr + expert_idx)
+                    src_row = src_row + pad_off
                 input_off = src_row * stride_input_token + current_offset * stride_input_hidden
                 inp = tl.load(input_ptr + input_off, mask=mask)
                 inp = inp.to(compute_type)
@@ -331,6 +356,7 @@ def unpermute_with_mask_map(
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
+    pad_offsets: Union[torch.Tensor, None],
 ):
     # pylint: disable=missing-function-docstring
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
@@ -348,6 +374,7 @@ def unpermute_with_mask_map(
         merging_probs,
         permuted_probs,
         unpermuted_probs,
+        pad_offsets,
         num_tokens,
         num_experts,
         hidden_size,
@@ -362,6 +389,7 @@ def unpermute_with_mask_map(
         unpermuted_probs.stride(1) if unpermuted_probs is not None else None,
         WITH_MERGING_PROBS=merging_probs is not None,
         PERMUTE_PROBS=permuted_probs is not None,
+        FUSION_UNPAD=pad_offsets is not None,
     )
     return output, unpermuted_probs
 
