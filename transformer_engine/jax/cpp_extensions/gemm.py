@@ -35,7 +35,13 @@ from ..quantize import (
     remove_padding_from_scale_inv,
 )
 from .misc import get_padded_spec, jax_dtype_to_te_dtype
-from ..sharding import global_mesh_resource
+from ..sharding import (
+    global_mesh_resource,
+    get_mesh_axis_size,
+    generate_pspec,
+    W_TP_AXES,
+    SEQLEN_TP_AXES,
+)
 
 
 __all__ = [
@@ -162,18 +168,20 @@ class CommOverlapHelper:
     the GemmPrimitive.
     """
     # Core init arguments
-    method: tex.CommOverlapMethod = field(default=tex.CommOverlapMethod.NONE)
     comm_type: tex.CommOverlapType = field(default=tex.CommOverlapType.NONE)
+    method: tex.CommOverlapMethod = field(default=tex.CommOverlapMethod.NONE)
     buffer_shape: Sequence[int] = field(default=None)
     buffer_dtype: jnp.dtype = field(default=jnp.bfloat16)
-    tp_size: int = field(default=None)
+    tp_size: int = field(
+        default_factory=lambda:get_mesh_axis_size(global_mesh_resource().tp_resource)
+    )
 
     # Userbuffers bootstrap kwargs
     num_splits: int = field(default=None, kw_only=True)
     num_max_streams: int = field(default=3, kw_only=True)
     comm_cga_size: int = field(default=None, kw_only=True)
-    gemm_priority: int = field(default=None, kw_only=True)
-    comm_priority: int = field(default=None, kw_only=True)
+    gemm_priority: int = field(default=CUDA_STREAM_PRIORITY_LOWEST, kw_only=True)
+    comm_priority: int = field(default=CUDA_STREAM_PRIORITY_HIGHEST, kw_only=True)
     num_comm_sm: int = field(default=None, kw_only=True)
     set_sm_margin: bool = field(default=None, kw_only=True)
     use_ce: bool = field(default=None, kw_only=True)
@@ -182,14 +190,15 @@ class CommOverlapHelper:
     aggregate_ag: bool = field(default=False, kw_only=True)
 
     # Other kwargs not passed to Userbuffers
-    tp_resource: str = field(default=None, kw_only=True)
-    sp_resource: str = field(default=None, kw_only=True)
+    tp_resource: str = field(default_factory=lambda:global_mesh_resource().tp_resource)
+    logical_tp_axis: str = field(default=W_TP_AXES, kw_only=True)
+    logical_sp_axis: str = field(default=SEQLEN_TP_AXES, kw_only=True)
     output_all_gathered_lhs: bool = field(default=False, kw_only=True)
     flatten_axis: int = field(default=-1, kw_only=True)
 
     # Internal attributes
-    is_enabled: bool = field(default=False, init=False, compare=True)
-    unique_id: int = field(default=None, init=False, compare=False)
+    is_enabled: bool = field(default=False, init=False)
+    unique_id: int = field(default=-1, init=False, compare=False)
     sharded_impl: bool = field(default=False, init=False, compare=False)
     gather_dim: int = field(default=-2, init=False, compare=False)
     scatter_dim: int = field(default=-2, init=False, compare=False)
@@ -202,25 +211,38 @@ class CommOverlapHelper:
                 CUDA_STREAM_PRIORITY_LOWEST,
                 CUDA_STREAM_PRIORITY_HIGHEST,
             ) = tex.get_stream_priority_range()
+        if self.gemm_priority is None:
+            object.__setattr__(self, "gemm_priority", CUDA_STREAM_PRIORITY_LOWEST)
+        if self.comm_priority is None:
+            object.__setattr__(self, "comm_priority", CUDA_STREAM_PRIORITY_HIGHEST)
 
-        object.__setattr__(self, "is_enabled", self.method != tex.CommOverlapMethod.NONE)
-        if self.is_enabled:
-            assert self.buffer_shape is not None, (
-                f"CommOverlapHelper: {self.buffer_shape} is not a valid buffer shape."
-            )
-            assert self.comm_type != tex.CommOverlapType.NONE, (
+        if self.method != tex.CommOverlapMethod.NONE or self.comm_type != tex.CommOverlapType.NONE:
+            assert self.method != tex.CommOverlapMethod.NONE, (
                 f"CommOverlapHelper: {self.comm_type} is not a valid collective type for "
                 f"{self.method}."
             )
+            assert self.comm_type != tex.CommOverlapType.NONE, (
+                f"CommOverlapHelper: {self.method} is not a valid overlap method for "
+                f"{self.comm_type}."
+            )
+            assert self.buffer_shape is not None and len(self.buffer_shape) >= 2, (
+                f"CommOverlapHelper: {self.buffer_shape} is not a valid buffer shape."
+            )
+            assert self.tp_resource is not None, (
+                "CommOverlapHelper: Communication + GEMM overlap requires a valid TP resource. "
+                "This must either be specified via the `tp_resource=` keyword, or "
+                "`CommOverlapHelper` needs to be initialized under a "
+                "`te.sharding.global_shard_guard()` using a `te.sharding.MeshResource()` with a "
+                "valid tensor-parallel mesh axis name."
+            )
             assert self.tp_size % 2 == 0, (
-                "CommOverlapHelper: Tensor-parallel axis size must be divisible by 2, got "
-                f"{self.tp_size}."
+                f"CommOverlapHelper: Tensor-parallel axis of {self.tp_size} is not divisible by 2."
             )
             if not self.is_bulk() and not self.is_p2p():
                 # Pipelined overlap is only for reduce-scatter
-                assert self.comm_type != tex.CommOverlapType.AG, (
-                    f"CommOverlapHelper: {self.comm_type} is not a valid collective type for "
-                    f"{self.method}."
+                assert not self.is_all_gather(), (
+                    f"CommOverlapHelper: {self.method} is not a valid overlap method for "
+                    f"{self.comm_type}."
                 )
 
             # Collapse buffer shape to 2D
@@ -251,20 +273,11 @@ class CommOverlapHelper:
                 object.__setattr__(self, "set_sm_margin", not self.is_p2p())
             if self.use_ce is None:
                 object.__setattr__(self, "use_ce", self.is_p2p())
-            if self.gemm_priority is None:
-                object.__setattr__(self, "gemm_priority", CUDA_STREAM_PRIORITY_LOWEST)
-            if self.comm_priority is None:
-                object.__setattr__(self, "comm_priority", CUDA_STREAM_PRIORITY_HIGHEST)
-
-            # Update mesh resources for tensor- and sequence-parallel dimensions
-            if self.tp_resource is None:
-                object.__setattr__(self, "tp_resource", global_mesh_resource().tp_resource)
-            if self.sp_resource is None:
-                object.__setattr__(self, "sp_resource", global_mesh_resource().cp_resource)
 
             # Allocate the communication buffer
             args, kwargs = self.get_bootstrap_args_kwargs()
             object.__setattr__(self, "unique_id", tex.create_comm_overlap_buffer(*args, **kwargs))
+            object.__setattr__(self, "is_enabled", True)
 
     def _set_sharded_impl(self, value):
         assert isinstance(value, bool)
@@ -512,13 +525,13 @@ class CommOverlapHelper:
         )
 
     def _get_bulk_overlap_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-        assert self.sp_resource in aux_in_specs, (
+        assert self.tp_resource in aux_in_specs, (
             "CommOverlapHelper: Auxiliary input for bulk all-gather overlap is not sharded "
-            f"over the sequence-parallel mesh resource {self.sp_resource} in any dimension."
+            f"over the tensor-parallel mesh resource {self.tp_resource} in any dimension."
         )
 
         aux_out_specs = (None, )
-        bulk_comm_dim = aux_in_specs.index(self.sp_resource)
+        bulk_comm_dim = aux_in_specs.index(self.tp_resource)
         aux_in_specs_batch = aux_in_specs[ : bulk_comm_dim]
         aux_in_specs_tail = aux_in_specs[bulk_comm_dim + 1: ]
         if self.is_all_gather():
@@ -540,7 +553,7 @@ class CommOverlapHelper:
             self._set_scatter_dim(bulk_comm_dim)
             aux_out_specs = (
                 *aux_in_specs_batch,
-                self.sp_resource,
+                self.tp_resource,
                 *[None for _ in range(len(aux_in_specs_tail))],
             )
 
@@ -566,16 +579,16 @@ class CommOverlapHelper:
         (lhs_lspec, _), _ = self._check_operand_specs(
             lhs_specs, rhs_specs, ((lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims))
         )
-        assert lhs_lspec == self.sp_resource, (
+        assert lhs_lspec == self.tp_resource, (
             "CommOverlapHelper: Non-batch leading dimension of the LHS operand for AG->GEMM "
-            f"overlap must be sharded over the sequence-parallel mesh resource {self.sp_resource}, "
+            f"overlap must be sharded over the tensor-parallel mesh resource {self.tp_resource}, "
             f"but got {lhs_lspec} sharding instead."
         )
 
         # AG->GEMM overlap: Require non-batched contracting dimensions to be unsharded (e.g. FSDP)
         # LHS: (B, M, None)
-        # RHS: (N, None)
-        # OUT: (B, M, None) --(UB-AG)-> (B, None, None) x (N, None)^T = (B, None, N)
+        # RHS: (None, N)
+        # OUT: (B, M, None) --(AG)-> (B, None, None) x (None, N) = (B, None, N)
         lhs_specs = tuple(
             None if i in lhs_cdims and i not in lhs_bdims else lhs_specs[i] for i in range(lhs_ndim)
         )
@@ -614,8 +627,11 @@ class CommOverlapHelper:
     def _get_reduce_scatter_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
         contracting_dims, batch_dims = dimension_numbers
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-        lhs_cdims, rhs_cdims, lhs_bdims, rhs_bdims = map(
-            sanitize_dims, 2 * [lhs_ndim, rhs_ndim], contracting_dims + batch_dims
+        lhs_cdims, rhs_cdims = map(
+            sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims
+        )
+        lhs_bdims, rhs_bdims = map(
+            sanitize_dims, (lhs_ndim, rhs_ndim), batch_dims
         )
 
         (_, lhs_cspec), (_, rhs_cspec) = self._check_operand_specs(
@@ -628,9 +644,9 @@ class CommOverlapHelper:
         )
 
         # GEMM->RS overlap: Require non-contracting non-batch dimensions to be unsharded (e.g. FSDP)
-        # LHS: (B, M, K) --(XLA-AG)-> (B, None, K)
-        # RHS: (N, K) --(XLA-AG)-> (None, K)
-        # OUT: (B, None, K) x (B, None, K) = (B, None, None) --(UB-RS)-> (B, M, None)
+        # LHS: (B, None, K)
+        # RHS: (K, None)
+        # OUT: (B, None, K) x (K, None) = (B, None, None) --(UB-RS)-> (B, M, None)
         lhs_specs = tuple(
             None if i not in lhs_bdims + lhs_cdims else lhs_specs[i] for i in range(lhs_ndim)
         )
@@ -640,24 +656,25 @@ class CommOverlapHelper:
 
         # GEMM output is the internal communication buffer, but we will use the XLA output buffer
         # as the final reduce-scattered output so we shard it accordingly here.
-        lhs_specs_scattered = list(lhs_specs).copy()
-        for i in range(lhs_ndim):
-            if i not in lhs_bdims:
-                # Update only the first non-batch leading dimension to the TP resource
-                lhs_specs_scattered[i] = self.tp_resource
-                break
-        lhs_non_cspecs_scattered = tuple(
-            lhs_specs_scattered[i] for i in range(lhs_ndim) if i not in lhs_cdims
+        lhs_bspecs = tuple(
+            lhs_specs[i] for i in range(lhs_ndim) if i in lhs_bdims and i not in lhs_cdims
+        )
+        lhs_lspecs = tuple(
+            lhs_specs[i] for i in range(lhs_ndim) if i not in lhs_bdims + lhs_cdims
         )
         rhs_non_cspecs = tuple(
             rhs_specs[i] for i in range(rhs_ndim) if i not in rhs_cdims
         )
-        out_specs = (*lhs_non_cspecs_scattered, *rhs_non_cspecs)
+        out_specs = (
+            *lhs_bspecs,
+            self.tp_resource,
+            *[None for _ in range(len(lhs_lspecs) - 1)],
+            *rhs_non_cspecs
+        )
         self._set_scatter_dim(out_specs.index(self.tp_resource))
 
-
         # Bias and Pre-GeLU sharding is based on GEMM output
-        bias_specs = out_specs[len(lhs_non_cspecs_scattered) : ]
+        bias_specs = out_specs[len(lhs_bspecs) + len(lhs_lspecs) : ]
         gelu_specs = out_specs
 
         return (
@@ -683,6 +700,91 @@ class CommOverlapHelper:
         }
         return impl_map[self.comm_type](lhs_specs, rhs_specs, aux_in_specs, dimension_numbers)
 
+    def get_logical_grad_axes(self, lhs_axes, rhs_axes, dimension_numbers):
+        """
+        Combine LHS and RHS operand logical axis names in the forward pass into the gradient's
+        logical axes in the backward pass.
+        """
+        if not lhs_axes or not rhs_axes:
+            assert not lhs_axes and not rhs_axes, (
+                "CommOverlapHelper: Logical axes must either be defined or not defined for both "
+                "forward operands."
+            )
+            return None
+
+        contracting_dims, batch_dims = dimension_numbers
+        lhs_ndim, rhs_ndim = map(len, (lhs_axes, rhs_axes))
+        lhs_cdims, rhs_cdims = map(
+            sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims
+        )
+        lhs_bdims, rhs_bdims = map(
+            sanitize_dims, (lhs_ndim, rhs_ndim), batch_dims
+        )
+
+        lhs_batch_axes = tuple(
+            lhs_axes[i] for i in range(lhs_ndim) if i in lhs_bdims and i not in lhs_cdims
+        )
+        lhs_leading_axes = tuple(
+            lhs_axes[i] for i in range(lhs_ndim) if i not in lhs_bdims + lhs_cdims
+        )
+        rhs_non_contracting_axes = tuple(
+            rhs_axes[i] for i in range(rhs_ndim) if i not in rhs_cdims
+        )
+
+        grad_axes = (*lhs_batch_axes, *lhs_leading_axes, *rhs_non_contracting_axes)
+        if self.is_enabled and not self.is_bulk():
+            if self.is_all_gather():
+                grad_axes = (
+                    *lhs_batch_axes,
+                    *[None for _ in range(len(lhs_leading_axes))],
+                    *rhs_non_contracting_axes,
+                )
+            elif self.is_reduce_scatter():
+                grad_axes = (
+                    *lhs_batch_axes,
+                    self.logical_sp_axis,
+                    *[None for _ in range(len(lhs_leading_axes) - 1)],
+                    *[None for _ in range(len(rhs_non_contracting_axes))],
+                )
+        else:
+            # Generate grad axes without any communication overlap
+            lhs_specs = generate_pspec(lhs_axes)
+            lhs_lspec = tuple(
+                lhs_specs[i] for i in range(lhs_ndim)
+                if i not in lhs_bdims + lhs_cdims and lhs_specs[i] is not None
+            )
+            lhs_lspec = None if len(lhs_lspec) == 0 else lhs_lspec[0]
+            lhs_cspec = tuple(
+                lhs_specs[i] for i in lhs_cdims if i not in lhs_bdims and lhs_specs[i] is not None
+            )
+            lhs_cspec = None if len(lhs_cspec) == 0 else lhs_cspec[0]
+
+            rhs_specs = generate_pspec(rhs_axes)
+            rhs_lspec = tuple(
+                rhs_specs[i] for i in range(rhs_ndim)
+                if i not in rhs_bdims + rhs_cdims and rhs_specs[i] is not None
+            )
+            rhs_lspec = None if len(rhs_lspec) == 0 else rhs_lspec[0]
+            rhs_cspec = tuple(
+                rhs_specs[i] for i in rhs_cdims if i not in rhs_bdims and rhs_specs[i] is not None
+            )
+            rhs_cspec = None if len(rhs_cspec) == 0 else rhs_cspec[0]
+
+            if not (
+                lhs_cspec is not None
+                and lhs_cspec == rhs_cspec
+                and lhs_lspec is not None
+                and lhs_lspec == rhs_lspec
+            ):
+                # Trailing dimension is not scattered (i.e. not doing jax.lax.psum_scatter)
+                grad_axes = (
+                    *lhs_batch_axes,
+                    *lhs_leading_axes,
+                    *[None for _ in range(len(rhs_non_contracting_axes))]
+                )
+
+        return grad_axes
+
 
 @dataclass(frozen=True)
 class CommOverlapHelperSet:
@@ -695,147 +797,162 @@ class CommOverlapHelperSet:
     wgrad: CommOverlapHelper = field(default=None)
 
     def _sanity_check(self):
-        if not self.fprop.is_enabled:
-            assert self.dgrad is None or not self.dgrad.is_enabled, (
-                "CommOverlapHelperSet: Comm+GEMM overlap for DGRAD requires comm+GEMM overlap "
-                "for FPROP to be enabled first."
-            )
-            assert self.wgrad is None or not self.wgrad.is_enabled, (
-                "CommOverlapHelperSet: Comm+GEMM overlap for WGRAD requires comm+GEMM overlap "
-                "for FPROP to be enabled first."
+        # Require any argument that exists to be a `CommOverlapHelper` instance
+        for overlap, name in zip((self.fprop, self.dgrad, self.wgrad), ("fprop", "dgrad", "wgrad")):
+            if overlap is not None:
+                assert isinstance(overlap, CommOverlapHelper), (
+                    f"CommOverlapHelperSet: Expected `{name}` to be a {CommOverlapHelper} but got "
+                    f"{type(overlap)} instead."
+                )
+
+        # If FPROP overlap is not defined or not enabled, require DGRAD and WGRAD to also not be
+        # be defined or not enabled
+        if self.fprop is None or not self.fprop.is_enabled:
+            assert (
+                (self.dgrad is None or not self.dgrad.is_enabled)
+                and (self.wgrad is None or not self.wgrad.is_enabled)
+            ), (
+                "CommOverlapHelperSet: Cannot do communication overlap for DGRAD and/or WGRAD when "
+                "there is no communication overlap for FPROP."
             )
             return
 
         assert not self.fprop.is_bulk(), (
-            "CommOverlapHelperSet: Comm+GEMM overlap for FPROP does not support bulk collectives."
+            "CommOverlapHelperSet: Cannot overlap bulk collectives with FPROP."
         )
 
         if self.fprop.is_all_gather():
-            if self.dgrad is not None:
-                if self.fprop.output_all_gathered_lhs:
-                    assert not self.dgrad.is_enabled, (
-                        "CommOverlapHelperSet: AG->GEMM FPROP does not have a corresponding DGRAD "
-                        "overlap when it is configured to return a copy of the all-gathered LHS "
-                        "operand as the auxiliary output."
+            if self.dgrad is not None and self.dgrad.is_enabled:
+                if self.dgrad.is_bulk() and self.dgrad.is_all_gather():
+                    assert not self.fprop.output_all_gathered_lhs, (
+                        "CommOverlapHelperSet: AG->GEMM FPROP does not support BULK-AG overlap for "
+                        "DGRAD when the all-gathered LHS is already saved in the forward pass."
                     )
-
-                elif self.dgrad.is_enabled:
                     assert (
-                        (self.dgrad.is_bulk() and self.dgrad.is_all_gather())
-                        or (not self.dgrad_is_bulk() and self.dgrad.is_reduce_scatter())
-                    ), (
-                        "CommOverlapHelperSet: AG->GEMM FPROP requires DGRAD overlap to be either "
-                        "BULK-AG or GEMM->RS."
-                    )
-
-            if self.wgrad is not None:
-                if (
-                    self.dgrad is not None
-                    and self.dgrad.is_enabled
-                    and self.dgrad.is_bulk()  # not checking all-gather because we enforced it above
-                ):
-                    assert (
-                        self.wgrad.is_enabled
+                        self.wgrad is not None
+                        and self.wgrad.is_enabled
                         and self.wgrad.is_bulk()
                         and self.wgrad.is_reduce_scatter()
                     ), (
-                        "CommOverlapHelperSet: AG->GEMM FPROP with BULK-AG DGRAD requires "
-                        "WGRAD to overlap with BULK-RS."
+                        "CommOverlapHelperSet: AG->GEMM FPROP with BULK-AG overlap for DGRAD "
+                        "requires BULK-RS overlap for WGRAD."
                     )
+
+                elif not self.dgrad.is_bulk() and self.dgrad.is_reduce_scatter():
+                    assert self.wgrad is None or not self.wgrad.is_enabled, (
+                        "CommOverlapHelperSet: AG->GEMM FPROP with GEMM->RS DGRAD does not support "
+                        "communication overlap for WGRAD."
+                    )
+
                 else:
-                    assert not self.wgrad.is_enabled, (
-                        "CommOverlapHelperSet: AG->GEMM FPROP does not have a corresponding WGRAD "
-                        "overlap when DGRAD does not overlap with BULK-AG."
+                    raise AssertionError(
+                        "CommOverlapHelperSet: AG->GEMM FPROP requires communication overlap for "
+                        "DGRAD to be either BULK-AG or GEMM->RS."
                     )
+            else:
+                assert self.wgrad is None or not self.wgrad.is_enabled, (
+                    "CommOverlapHelperSet: AG->GEMM FPROP with no communication overlap for DGRAD"
+                    "does not support communication overlap for WGRAD."
+                )
 
         elif self.fprop.is_reduce_scatter():
             if self.dgrad is not None and self.dgrad.is_enabled:
                 assert not self.dgrad.is_bulk() and self.dgrad.is_all_gather(), (
-                    "CommOverlapHelperSet: GEMM->RS overlap in FPROP requires DGRAD overlap to "
-                    "be AG->GEMM."
+                    "CommOverlapHelperSet: GEMM->RS FPROP requires communication overlap for DGRAD "
+                    "to be AG->GEMM."
                 )
 
-            if self.wgrad is not None:
-                assert not self.wgrad.is_enabled, (
-                    "CommOverlapHelperSet: GEMM->RS overlap in FPROP does not have a "
-                    "corresponding WGRAD overlap."
-                )
+            assert self.wgrad is None or not self.wgrad.is_enabled, (
+                "CommOverlapHelperSet: GEMM->RS FPROP does not support communication overlap "
+                "for WGRAD."
+            )
+
+        else:
+            raise RuntimeError(
+                "CommOverlapHelperSet: Internal TE error, unrecognized collective type "
+                f"{self.fprop.comm_type} in communication overlap for FPROP."
+            )
 
     def __post_init__(self):
-        if self.fprop is None:
-            object.__setattr__(self, "fprop", CommOverlapHelper())
-            object.__setattr__(self, "dgrad", CommOverlapHelper())
-            object.__setattr__(self, "wgrad", CommOverlapHelper())
-
         self._sanity_check()
 
-        if self.fprop.is_enabled:
-            # FWD/BWD paths with overlap:
-            #
-            # 1. AG->GEMM: (B, M, None) --(LHS AG)-> (B, None, None) x (None, N) = (B, None, N)
-            #    DGRAD + Bulk-AG: (B, None, N) x (None, N)^T = (B, None, None)
-            #                     (B, M, None) --(LHS bulk-AG)-> (B, None, None)
-            #    WGRAD + Bulk-RS: (B, None, None)^T x (B, None, N) = (None, N)
-            #                     (B, None, None) --(DGRAD bulk RS)-> (B, M, None)
-            #
-            # 2. GEMM->RS in FPROP: (B, None, K) x (K, None) = (B, None, None) --(RS)-> (B, M, None)
-            #    AG->DGRAD: (B, M, None) --(GRAD AG)-> (B, None, None) x (K, None)^T = (B, None, K)
-            #    WGRAD w/ AG-GRAD from DGRAD: (B, None, K)^T x (B, None, None) = (K, None)
+        if self.fprop is None:
+            object.__setattr__(self, "fprop", CommOverlapHelper())
 
-            if self.dgrad is None:
-                if self.fprop.is_all_gather() and self.fprop.output_all_gathered_lhs:
-                    # If the AG->GEMM FPROP already saved the all-gathered LHS in the autograd
-                    # context, we don't need to overlap a BULK-AG for it with DGRAD.
-                    object.__setattr__(self, "dgrad", CommOverlapHelper())
+        # Column-parallel layers: QKV projection and MLP FFN1
+        #   FPROP with AG->GEMM:
+        #     LHS:(B, M, None)--(AG)->(B, None, None) x RHS:(None, N) = OUT:(B, None, N)
+        #   DGRAD w/ BULK-AG for LHS:
+        #     GRAD:(B, None, N) x RHS:(None, N)^T = DGRAD:(B, None, None)
+        #     LHS:(B, M, None)--(BULK-AG)->(B, None, None)
+        #   WGRAD w/ BULK-RS for DGRAD:
+        #     LHS:(B, None, None)^T x GRAD:(B, None, N) = WGRAD:(None, N)
+        #     DGRAD:(B, None, None)--(BULK-RS)->(B, M, None)
+        #
+        # Row-parallel layers: Post-attention projection and MLP FFN2
+        #   FPROP with GEMM->RS:
+        #     LHS:(B, None, K) x RHS:(K, None) = (B, None, None)--(RS)->(B, M, None)
+        #   DGRAD with AG->GEMM (all-gathered GRAD saved for WGRAD):
+        #     GRAD:(B, M, None)--(AG)->(B, None, None) x RHS:(K, None)^T = (B, None, K)
+        #   WGRAD with NO OVERLAP:
+        #     LHS:(B, None, K)^T x GRAD:(B, None, None) = (K, None)
+        if self.dgrad is None:
+            dgrad_overlap = None
 
-                else:
-                    # Otherwise, AG->GEMM FPROP needs BULK-AG DGRAD, and GEMM->RS FPROP needs
-                    # AG->GEMM DGRAD w/ all-gathered gradient returned as auxiliary output to be
-                    # re-used in WGRAD.
-                    object.__setattr__(
-                        self,
-                        "dgrad",
-                        CommOverlapHelper(
-                            method=(
-                                tex.CommOverlapMethod.BULK
-                                if self.fprop.is_all_gather()
-                                else tex.CommOverlapMethod.RING_EXCHANGE
-                            ),
-                            comm_type=tex.CommOverlapType.AG,
-                            buffer_shape=self.fprop.buffer_shape,
-                            buffer_dtype=self.fprop.buffer_dtype,
-                            tp_size=self.fprop.tp_size,
-                            tp_resource=self.fprop.tp_resource,
-                            sp_resource=self.fprop.sp_resource,
-                            output_all_gathered_lhs=self.fprop.is_reduce_scatter(),
-                        )
-                    )
+            if self.fprop.is_all_gather() and not self.fprop.output_all_gathered_lhs:
+                # FPROP AG->GEMM and DGRAD BULK-AG for LHS if all-gathered LHS is not saved
+                # from FPROP
+                dgrad_overlap = CommOverlapHelper(
+                    method=tex.CommOverlapMethod.BULK,
+                    comm_type=tex.CommOverlapType.AG,
+                    buffer_shape=self.fprop.buffer_shape,
+                    buffer_dtype=self.fprop.buffer_dtype,
+                    tp_size=self.fprop.tp_size,
+                    logical_tp_axis=self.fprop.logical_tp_axis,
+                    logical_sp_axis=self.fprop.logical_sp_axis,
+                )
 
-            if self.wgrad is None:
-                if (
-                    self.fprop.is_all_gather()
-                    and self.dgrad.is_enabled
-                    and self.dgrad.is_bulk()
-                    and self.dgrad.is_all_gather()
-                ):
-                    # If FPROP does AG->GEMM and DGRAD does BULK-AG, WGRAD needs to do a BULK-RS
-                    object.__setattr__(
-                        self,
-                        "wgrad",
-                        CommOverlapHelper(
-                            method=tex.CommOverlapMethod.BULK,
-                            comm_type=tex.CommOverlapType.RS,
-                            buffer_shape=self.fprop.buffer_shape,
-                            buffer_dtype=self.fprop.buffer_dtype,
-                            tp_size=self.fprop.tp_size,
-                            tp_resource=self.fprop.tp_resource,
-                            sp_resource=self.fprop.sp_resource,
-                        )
-                    )
+            elif self.fprop.is_reduce_scatter():
+                # FPROP GEMM->RS and DGRAD AG->GEMM
+                dgrad_overlap = CommOverlapHelper(
+                    method=tex.CommOverlapMethod.RING_EXCHANGE,
+                    comm_type=tex.CommOverlapType.AG,
+                    buffer_shape=self.fprop.buffer_shape,
+                    buffer_dtype=self.fprop.buffer_dtype,
+                    tp_size=self.fprop.tp_size,
+                    logical_tp_axis=self.fprop.logical_tp_axis,
+                    logical_sp_axis=self.fprop.logical_sp_axis,
+                )
 
-                else:
-                    # Otherwise, WGRAD does not support comm+GEMM overlap
-                    object.__setattr__(self, "wgrad", CommOverlapHelper())
+            else:
+                dgrad_overlap = CommOverlapHelper()
+
+            object.__setattr__(self, "dgrad", dgrad_overlap)
+
+        if self.wgrad is None:
+            wgrad_overlap = self.wgrad
+
+            if (
+                self.fprop.is_all_gather()
+                and self.dgrad.is_enabled
+                and self.dgrad.is_bulk()
+                and self.dgrad.is_all_gather()
+            ):
+                # FPROP AG->GEMM, DGRAD BULK-AG for LHS and WGRAD BULK-RS for DGRAD
+                wgrad_overlap = CommOverlapHelper(
+                    method=tex.CommOverlapMethod.BULK,
+                    comm_type=tex.CommOverlapType.RS,
+                    buffer_shape=self.fprop.buffer_shape,
+                    buffer_dtype=self.fprop.buffer_dtype,
+                    tp_size=self.fprop.tp_size,
+                    logical_tp_axis=self.fprop.logical_tp_axis,
+                    logical_sp_axis=self.fprop.logical_sp_axis,
+                )
+
+            else:
+                wgrad_overlap = CommOverlapHelper()
+
+            object.__setattr__(self, "wgrad", wgrad_overlap)
 
 
 class GemmPrimitive(BasePrimitive):

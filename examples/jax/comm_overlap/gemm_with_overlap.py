@@ -63,7 +63,6 @@ batched = not args.no_batch
 fsdp = not args.no_fsdp
 input_specs = [None] * len(lhs_shape)
 weight_specs = [None] * len(rhs_shape)
-weight_no_fsdp = weight_specs.copy()
 if batched:
     lhs_shape = [args.batch_size] + lhs_shape
     if fsdp:
@@ -74,11 +73,9 @@ if batched:
         if args.comm_type == "AG":
             input_specs = [("dp", "zp"), "tp", None]
             weight_specs = ["zp", "tp"]
-            weight_no_fsdp = [None, "tp"]
         elif args.comm_type == "RS":
             input_specs = [("dp", "zp"), None, "tp"]
             weight_specs = ["tp", "zp"]
-            weight_no_fsdp = ["tp", None]
     else:
         mesh_shape = {"dp": args.dp_size, "tp": args.tp_size}
         mesh_resource = te.MeshResource(
@@ -92,7 +89,6 @@ if batched:
         elif args.comm_type == "RS":
             input_specs = ["dp", None, "tp"]
             weight_specs = ["tp", None]
-        weight_no_fsdp = weight_specs
 else:
     if fsdp:
         mesh_shape = {"zp": args.fsdp_size, "tp": args.tp_size}
@@ -103,7 +99,6 @@ else:
         elif args.comm_type == "RS":
             input_specs = [None, "tp"]
             weight_specs = ["tp", "zp"]
-        weight_no_fsdp = ["tp", None]
     else:
         mesh_shape = {"tp": args.tp_size}
         mesh_resource = te.MeshResource(tp_resource="tp", cp_resource="cp")
@@ -113,7 +108,6 @@ else:
         elif args.comm_type == "RS":
             input_specs = [None, "tp"]
             weight_specs = ["tp", None]
-        weight_no_fsdp = weight_specs
 
 # Mesh setup and sharding definitions
 devices = mesh_utils.create_device_mesh((args.num_gpus,), devices=jax.devices()[: args.num_gpus])
@@ -121,7 +115,6 @@ mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_sh
 no_sharding = NamedSharding(mesh, PartitionSpec(None))
 input_sharding = NamedSharding(mesh, PartitionSpec(*input_specs))
 weight_sharding = NamedSharding(mesh, PartitionSpec(*weight_specs))
-weight_no_fsdp_sharding = NamedSharding(mesh, PartitionSpec(*weight_no_fsdp))
 
 # Operand initialization
 key = jax.random.PRNGKey(0)
@@ -170,8 +163,6 @@ def _gemm_wrapper(x, y):
         dimension_numbers=(((-1, ), (0, )), ((0, ), ())),
         comm_overlap=overlap_helper,
     )(x, y)
-
-rhs_no_fsdp = jax.lax.with_sharding_constraint(rhs, weight_no_fsdp_sharding)
 
 with te.sharding.global_shard_guard(mesh_resource):
     output = _gemm_wrapper(lhs, rhs)

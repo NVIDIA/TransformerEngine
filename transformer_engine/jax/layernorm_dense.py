@@ -322,6 +322,14 @@ def _layernorm_dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
+    casted_grad = with_sharding_constraint_by_logical_axes(
+        casted_grad,
+        comm_overlaps.fprop.get_logical_grad_axes(
+            dot_input_axes,
+            kernel_axes,
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
+        )
+    )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
     g_constracting_dim = tuple(
@@ -340,7 +348,7 @@ def _layernorm_dense_bwd_rule(
         *tuple(range(casted_ln_out.flatten_axis, casted_ln_out.ndim)),
         *tuple(range(casted_ln_out.flatten_axis)),
     )
-    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_gathered_lhs:
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
         dgrad_aux_in = (
             casted_ln_out.data.transpose(dgrad_aux_transposed_axes)
             if casted_ln_out.data_layout == "T"
@@ -362,7 +370,7 @@ def _layernorm_dense_bwd_rule(
 
     # TN GEMM
     casted_grad_rhs = casted_grad.get_tensor(usage=TensorUsage.RHS)
-    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_gathered_lhs:
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
         # LHS was bulk all-gathered during DGRAD and returned as auxiliary input
         casted_ln_out.data = (
             dgrad[-1].transpose(dgrad_aux_transposed_axes)

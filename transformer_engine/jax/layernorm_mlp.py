@@ -443,11 +443,16 @@ def _layernorm_mlp_bwd_rule(
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
-    # Since the sharding of outputs should be the same as dot_1's input
-    grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
-
     casted_grad, dbias_2 = tex.quantize_dbias(
         grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
+    )
+    casted_grad = with_sharding_constraint_by_logical_axes(
+        casted_grad,
+        ffn1_comm_overlaps.fprop.get_logical_grad_axes(
+            dot_2_input_axes,
+            kernel_2_axes,
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
+        )
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -506,6 +511,14 @@ def _layernorm_mlp_bwd_rule(
         quantizer=ffn2_quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
+    casted_dact_out = with_sharding_constraint_by_logical_axes(
+        casted_dact_out,
+        ffn1_comm_overlaps.fprop.get_logical_grad_axes(
+            dot_1_input_axes,
+            kernel_1_axes,
+            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim, ), ()))
+        )
+    )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
     dact_out_ndim = casted_dact_out.get_tensor(TensorUsage.LHS).data.ndim
@@ -527,7 +540,7 @@ def _layernorm_mlp_bwd_rule(
         *tuple(range(casted_ln_out.flatten_axis, casted_ln_out.ndim)),
         *tuple(range(casted_ln_out.flatten_axis))
     )
-    if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_gathered_lhs:
+    if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_all_gathered_lhs:
         dgrad_1_aux_in = (
             casted_ln_out.data.transpose(ln_out_transposed_dims)
             if casted_ln_out.data_layout == "T"
@@ -543,7 +556,7 @@ def _layernorm_mlp_bwd_rule(
         aux_in=dgrad_1_aux_in,
     )
 
-    if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_gathered_lhs:
+    if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_all_gathered_lhs:
         casted_ln_out.data = (
             dgrad_1[-1].transpose(ln_out_transposed_dims)
             if casted_ln_out.data_layout == "T"

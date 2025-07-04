@@ -201,6 +201,12 @@ def _dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
+    casted_grad = with_sharding_constraint_by_logical_axes(
+        casted_grad,
+        comm_overlaps.fprop.get_logical_grad_axes(
+            input_axes, kernel_axes, (contracting_dims, ((x_bdim, ), ()))
+        )
+    )
 
     # If casted_x has transposed data-layout, we need to untranspose it here, and then transpose
     # it back after the bulk-AG. This should ideally never be necessary if the data layouts are
@@ -210,7 +216,7 @@ def _dense_bwd_rule(
         *tuple(range(casted_x_lhs.flatten_axis, casted_x_lhs.ndim)),
         *tuple(range(casted_x_lhs.flatten_axis)),
     )
-    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_gathered_lhs:
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
         dgrad_aux_in = (
             casted_x_lhs.data.transpose(dgrad_aux_transposed_axes)
             if casted_x_lhs.data_layout == "T"
@@ -241,7 +247,7 @@ def _dense_bwd_rule(
     )
 
     casted_grad_rhs = casted_grad.get_tensor(usage=TensorUsage.RHS)
-    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_gathered_lhs:
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
         # LHS was bulk all-gathered during DGRAD and returned as auxiliary input
         casted_x_lhs.data = (
             dgrad[-1].transpose(dgrad_aux_transposed_axes)
@@ -250,7 +256,7 @@ def _dense_bwd_rule(
         )
         # DGRAD output will need to be bulk reduce-scattered during WGRAD
         dgrad = dgrad[0]
-    elif comm_overlaps.dgrad.is_all_gather() and comm_overlaps.dgrad.output_gathered_lhs:
+    elif comm_overlaps.dgrad.is_all_gather() and comm_overlaps.dgrad.output_all_gathered_lhs:
         # GRAD was all-gathered for DGRAD and a copy of the gathered GRAD is in the auxiliary output
         casted_grad_rhs.data = (
             dgrad[-1].transpose(*range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
@@ -258,7 +264,7 @@ def _dense_bwd_rule(
             if casted_grad_rhs.data_layout == "T"
             else dgrad[-1]
         )
-        dgrad = dgrad[1]
+        dgrad = dgrad[0]
 
     wgrad = tex.gemm(
         casted_x_lhs,

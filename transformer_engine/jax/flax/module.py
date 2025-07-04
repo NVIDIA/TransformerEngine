@@ -599,7 +599,8 @@ class DenseGeneral(TransformerEngineBase):
                 kernel_partitioning,
                 enabled=self.enable_comm_overlap,
                 config=self.comm_overlap_config,
-            )
+            ),
+            batch_first=not self.transpose_batch_sequence
         )
 
         if self.enable_low_rank_adaptation:
@@ -888,8 +889,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 layernorm_input_axes=self.layernorm_input_axes,
                 dot_input_axes=self.dot_input_axes,
                 kernel_axes=self.kernel_axes,
+                batch_first=not self.transpose_batch_sequence,
                 quantizer_set=quantizer_set,
-                comm_overlaps=comm_overlaps,
+                comm_overlaps=comm_overlaps
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
@@ -899,6 +901,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 contracting_dims=(axis, contract_ind),
                 input_axes=self.dot_input_axes,
                 kernel_axes=self.kernel_axes,
+                batch_first=not self.transpose_batch_sequence,
                 quantizer_set=quantizer_set,
                 comm_overlaps=comm_overlaps,
             )
@@ -1336,6 +1339,7 @@ class LayerNormMLP(TransformerEngineBase):
                 ffn1_ckpt_name=ffn1_ckpt_name,
                 ffn2_ckpt_name=ffn2_ckpt_name,
                 activation_type=normalized_acts,
+                batch_first=not self.transpose_batch_sequence,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
                 ffn1_comm_overlaps=ffn1_comm_overlaps,
                 ffn2_comm_overlaps=ffn2_comm_overlaps,
@@ -1356,6 +1360,7 @@ class LayerNormMLP(TransformerEngineBase):
                     layernorm_input_axes=self.layernorm_input_axes,
                     dot_input_axes=self.dot_1_input_axes,
                     kernel_axes=self.kernel_axes_1,
+                    batch_first=not self.transpose_batch_sequence,
                     quantizer_set=ffn1_quantizer_set,
                     comm_overlaps=ffn1_comm_overlaps,
                 )
@@ -1367,6 +1372,7 @@ class LayerNormMLP(TransformerEngineBase):
                     contracting_dims=(axis, contract_ind),
                     input_axes=self.dot_1_input_axes,
                     kernel_axes=self.kernel_axes_1,
+                    batch_first=not self.transpose_batch_sequence,
                     quantizer_set=ffn1_quantizer_set,
                     comm_overlaps=ffn1_comm_overlaps,
                 )
