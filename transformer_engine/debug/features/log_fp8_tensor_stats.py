@@ -284,9 +284,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
             aux_dict=aux_dict,
         )
 
-        quantizer.update_usage(
-            rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage
-        )
+        quantized_tensor.update_usage(rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage)
+    
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",

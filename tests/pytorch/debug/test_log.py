@@ -91,8 +91,6 @@ def test_log_quantized(feature_dirs):
                 output = f.read()
 
             assert len(output) > 0, "Output is empty"
-
-            print(output)
-
+            
             for stat in stats:
                 assert stat in output, f"Stat {stat} not found in output"
