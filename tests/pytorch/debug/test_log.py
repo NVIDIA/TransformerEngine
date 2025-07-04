@@ -68,7 +68,6 @@ for r in recipes:
 all_stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
 
 
-
 @contextlib.contextmanager
 def debug_session(config_str: str, feature_dirs):
     """
@@ -80,8 +79,9 @@ def debug_session(config_str: str, feature_dirs):
     The session is closed automatically – even on exceptions – so every test
     stays concise and leak-free.
     """
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as cfg_file, \
-         tempfile.TemporaryDirectory() as log_dir:
+    with tempfile.NamedTemporaryFile(
+        mode="w", delete=False
+    ) as cfg_file, tempfile.TemporaryDirectory() as log_dir:
         cfg_file.write(config_str)
         cfg_file.flush()
 
@@ -135,7 +135,6 @@ fp8_recipes = [
 ]
 
 
-
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 def test_numerics(fp8_recipe, feature_dirs):
     if not fp8_available:
@@ -181,11 +180,11 @@ def test_numerics(fp8_recipe, feature_dirs):
             assert underflows == pytest.approx(expected.cpu(), abs=1e-4)
         if "mse" in line:
             mse = float(line.split("value=")[1])
-            expected = torch.nn.functional.mse_loss(
-                dequantized_tensor, tensor, reduction="mean"
-            )
+            expected = torch.nn.functional.mse_loss(dequantized_tensor, tensor, reduction="mean")
             assert mse == pytest.approx(expected.cpu(), abs=1e-6)
         if "overflows%" in line:
             overflows = float(line.split("value=")[1])
-            expected = (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
+            expected = (
+                (abs(dequantized_tensor) > abs(tensor)).sum() / dequantized_tensor.numel() * 100
+            )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)

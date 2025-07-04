@@ -109,10 +109,10 @@ class LogTensorStats(BaseLogTensorStats):
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: Union[torch.Tensor, QuantizedTensor],
         quantizer: Quantizer,  # pylint: disable=unused-argument
-        quantized_tensor_rowwise: Union[ # pylint: disable=unused-argument
+        quantized_tensor_rowwise: Union[  # pylint: disable=unused-argument
             Float8Tensor, MXFP8Tensor
         ],
-        quantized_tensor_columnwise: Union[ # pylint: disable=unused-argument
+        quantized_tensor_columnwise: Union[  # pylint: disable=unused-argument
             Float8Tensor, MXFP8Tensor
         ],
     ):
