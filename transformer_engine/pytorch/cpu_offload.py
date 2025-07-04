@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from .tensor.quantized_tensor import QuantizedTensorBase
-
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -20,6 +20,9 @@ CPUOffloadEnabled = False
 
 def mark_activation_offload(*tensors):
     """Set the type of the offloading needed for a tensor."""
+    if TEDebugState.debug_enabled:
+        raise RuntimeError("CPU offload is not supported in debug mode.")
+
     for tensor in tensors:
         if tensor is None:
             continue
