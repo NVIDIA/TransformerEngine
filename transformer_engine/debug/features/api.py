@@ -233,6 +233,9 @@ class TEDefaultFeatures:
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
         """
+        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+
+                
         The feature is invoked if *inspect_tensor_enabled* returns `True`. It can be used to obtain information on the high precision tensor. For example, it is run by the `LogTensorStats` feature.
 
         Parameters
@@ -268,6 +271,9 @@ class TEDefaultFeatures:
         rowwise: bool,
     ) -> None:
         """
+        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+
+                
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
@@ -305,6 +311,9 @@ class TEDefaultFeatures:
         quantizer: Optional[Quantizer] = None,
     ) -> None:
         """
+
+        This call is used mainly to collect statistics of the tensor and quantized tensor. It is called
+        by the TE only if *inspect_tensor_all_enabled* returns `True`.
 
 
         Parameters
@@ -348,6 +357,8 @@ class TEDefaultFeatures:
 
         Parameters
         ----------
+        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+
 
         config: Dict
             dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
@@ -373,6 +384,8 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> bool:
         """
+        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
