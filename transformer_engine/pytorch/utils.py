@@ -7,7 +7,7 @@ from __future__ import annotations
 import functools
 import math
 import os
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
@@ -625,3 +625,111 @@ if torch_version() >= (2, 4, 0):
     gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
 else:
     gpu_autocast_ctx = torch.cuda.amp.autocast
+
+
+_torch_dtype_to_np_typestr_dict = {
+    torch.float16: "<f2",
+    torch.float32: "<f4",
+    torch.int64: "<i8",
+    torch.int32: "<i4",
+    torch.int8: "|i1",
+    torch.float8_e4m3fn: "|i1",
+    torch.qint8: "|u1",
+    torch.bool: "|b1",
+    torch.bfloat16: "<f2",
+}
+
+
+class _WeakRefTensor:
+    """
+    A wrapper wraps raw data pointer to a tensor-like object. Could be compatibale with openai triton kernel and be converted to `torch.Tensor` with zero-copy overhead.
+    """
+
+    def __init__(
+        self,
+        data_ptr: int,
+        dtype: torch.dtype,
+        shape: Sequence[int],
+    ):
+        self._data_ptr = data_ptr
+        self.dtype = dtype
+        self.shape = shape
+
+    def data_ptr(self):
+        """Data pointer of the tensor."""
+        return self._data_ptr
+
+    @property
+    def dtype(self):
+        """Dtype of the tensor."""
+        return self._dtype
+
+    @property
+    def shape(self):
+        """Shape of the tensor."""
+        return getattr(self, "_shape", None)
+
+    @dtype.setter
+    def dtype(self, dtype: torch.dtype):
+        self._dtype = dtype
+
+    @shape.setter
+    def shape(self, shape: Sequence[int]):
+        self._shape = tuple(int(i) for i in shape)
+
+    def numel(self):
+        """Number of elements in the tensor."""
+        return np.prod(self.shape)
+
+    @property
+    def __cuda_array_interface__(self):
+        return {
+            "shape": self.shape,
+            "typestr": self.torch_dtype_to_np_typestr(),
+            "data": (self.data_ptr() if self.numel() > 0 else 0, False),
+            "version": 3,
+        }
+
+    def torch_dtype_to_np_typestr(self):
+        """Convert PyTorch dtype to numpy typestr."""
+        ret = _torch_dtype_to_np_typestr_dict.get(self.dtype)
+        assert ret is not None, f"Unsupported dtype: {self.dtype}"
+        return ret
+
+
+def make_weak_ref(x):
+    """
+    This function is to make a weak reference to the input so that the memory can be released.
+    """
+
+    def convert_to_torch_tensor(tensor: Union[_WeakRefTensor, torch.Tensor]) -> torch.Tensor:
+        """
+        This function is to convert the `_WeakRefTensor` to torch.Tensor.
+        """
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+
+        old_ptr = tensor.data_ptr()
+        new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
+        new_ptr = new_tensor.data_ptr()
+        if old_ptr != new_ptr:
+            raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
+        return new_tensor
+
+    if isinstance(x, torch.Tensor):
+        return (
+            convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
+            if x.is_cuda
+            else x
+        )
+    if isinstance(x, tuple):
+        return tuple(make_weak_ref(i) for i in x)
+    if isinstance(x, list):
+        return [make_weak_ref(i) for i in x]
+    if isinstance(x, dict):
+        return {k: make_weak_ref(v) for k, v in x.items()}
+    if isinstance(x, (int, float, bool)):
+        return x
+    if x is None:
+        return None
+    raise TypeError(f"Invalid type {type(x)} to make weak ref")
