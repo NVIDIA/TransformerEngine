@@ -352,7 +352,10 @@ def _test_permutation_index_map(
         )
         if with_probs:
             torch.testing.assert_close(
-                probs.grad.float(), te_probs.grad.float(), msg=f"Mismatch in te_unpermute bwd", **tols
+                probs.grad.float(),
+                te_probs.grad.float(),
+                msg=f"Mismatch in te_unpermute bwd",
+                **tols,
             )
 
     if not pytorch_permute_fwd_input.numel():
@@ -566,7 +569,10 @@ def _test_permutation_mask_map(
         )
         if with_probs:
             torch.testing.assert_close(
-                probs.grad.float(), te_probs.grad.float(), msg=f"Mismatch in te_unpermute bwd", **tols
+                probs.grad.float(),
+                te_probs.grad.float(),
+                msg=f"Mismatch in te_unpermute bwd",
+                **tols,
             )
 
     if not pytorch_permute_fwd_input.numel():
@@ -1428,10 +1434,14 @@ def test_permutation_single_case():
     )
 
 
-def benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size):
-    torch.cuda.nvtx.range_push(f'{num_tokens}-{num_expert}-{hidden_size}-{topK}-{ep_size}-{tp_size}')
+def benchmark_single_case(
+    te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size
+):
+    torch.cuda.nvtx.range_push(
+        f"{num_tokens}-{num_expert}-{hidden_size}-{topK}-{ep_size}-{tp_size}"
+    )
 
-    torch.cuda.nvtx.range_push('permutation_index_map_with_probs')
+    torch.cuda.nvtx.range_push("permutation_index_map_with_probs")
     _test_permutation_index_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
@@ -1444,7 +1454,7 @@ def benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, n
     )
     torch.cuda.nvtx.range_pop()
 
-    torch.cuda.nvtx.range_push('permutation_mask_map_with_probs')
+    torch.cuda.nvtx.range_push("permutation_mask_map_with_probs")
     _test_permutation_mask_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
@@ -1457,7 +1467,7 @@ def benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, n
     )
     torch.cuda.nvtx.range_pop()
 
-    torch.cuda.nvtx.range_push('permutation_mask_map_without_probs')
+    torch.cuda.nvtx.range_push("permutation_mask_map_without_probs")
     _test_permutation_mask_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
@@ -1470,7 +1480,7 @@ def benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, n
     )
     torch.cuda.nvtx.range_pop()
 
-    torch.cuda.nvtx.range_push('permutation_mask_map_alongside_probs')
+    torch.cuda.nvtx.range_push("permutation_mask_map_alongside_probs")
     _test_permutation_mask_map_alongside_probs(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
@@ -1500,16 +1510,20 @@ def benchmark_multiple_cases():
     hidden_size = 7168
     topK = 8
     num_out_tokens = num_tokens * topK
-    benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size)
+    benchmark_single_case(
+        te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size
+    )
 
     ep_size = 8
     tp_size = 1
-    num_tokens = 8192*2
+    num_tokens = 8192 * 2
     num_expert = 128
     hidden_size = 4096
     topK = 6
     num_out_tokens = num_tokens * topK
-    benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size)
+    benchmark_single_case(
+        te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size
+    )
 
     ep_size = 64
     tp_size = 2
@@ -1518,7 +1532,9 @@ def benchmark_multiple_cases():
     hidden_size = 7168
     topK = 1
     num_out_tokens = num_tokens * topK
-    benchmark_single_case(te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size)
+    benchmark_single_case(
+        te_dtype, num_tokens, num_expert, hidden_size, topK, num_out_tokens, ep_size, tp_size
+    )
 
 
 if __name__ == "__main__":

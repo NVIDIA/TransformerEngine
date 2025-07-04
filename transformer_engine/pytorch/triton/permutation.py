@@ -17,6 +17,7 @@ from triton.language.standard import _log2
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698
 
+
 @triton.jit
 def _compare_and_swap(x, indices, flip, i: tl.constexpr, n_dims: tl.constexpr):
     n_outer: tl.constexpr = x.numel >> n_dims
@@ -54,11 +55,11 @@ def _compare_and_swap(x, indices, flip, i: tl.constexpr, n_dims: tl.constexpr):
 def _bitonic_merge(x, indices, stage: tl.constexpr, order: tl.constexpr, n_dims: tl.constexpr):
     n_outer: tl.constexpr = x.numel >> n_dims
     tl.static_assert(stage <= n_dims)
-    '''
+    """
     order_type 0 == ascending
     order_type 1 == descending
     order_type 2 == alternating
-    '''
+    """
     if order == 2:
         shape: tl.constexpr = [n_outer * (2 ** (n_dims - 1 - stage)), 2, 2**stage]
         flip = tl.reshape(tl.broadcast_to(tl.arange(0, 2)[None, :, None], shape), x.shape)
@@ -129,7 +130,9 @@ def _row_id_map_pass_2_kernel(
     chunk_idx = pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n
     offset = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     row_id_within_token_block = tl.load(
-        row_id_map_ptr + pid_m * stride_row_id_map_expert + offset * stride_row_id_map_token, mask=(offset < num_tokens), other=0
+        row_id_map_ptr + pid_m * stride_row_id_map_expert + offset * stride_row_id_map_token,
+        mask=(offset < num_tokens),
+        other=0,
     )
 
     workspace_off = tl.arange(0, WORKSPACE_LOAD_WIDTH)
@@ -161,13 +164,30 @@ def _row_id_map_pass_3_kernel(
     pid = tl.program_id(0)
     n_dims: tl.constexpr = _log2(LOAD_SIZE)
     off = tl.arange(0, LOAD_SIZE)
-    row_id_map = tl.load(row_id_map_ptr + pid * stride_row_id_map_token + stride_row_id_map_expert * off, mask=off < num_experts, other=-1)
+    row_id_map = tl.load(
+        row_id_map_ptr + pid * stride_row_id_map_token + stride_row_id_map_expert * off,
+        mask=off < num_experts,
+        other=-1,
+    )
     n_routed = tl.sum(tl.where(row_id_map != -1, 1, 0))
     indices = off
     sorted_map, indices = _argsort(row_id_map, indices, n_dims=n_dims)
-    tl.store(row_id_map_ptr + pid * stride_row_id_map_token + off * stride_row_id_map_expert, sorted_map, mask=off < n_routed)
-    tl.store(row_id_map_ptr + pid * stride_row_id_map_token + (num_experts + off) * stride_row_id_map_expert, indices, mask=off < n_routed)
-    tl.store(row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert, n_routed)
+    tl.store(
+        row_id_map_ptr + pid * stride_row_id_map_token + off * stride_row_id_map_expert,
+        sorted_map,
+        mask=off < n_routed,
+    )
+    tl.store(
+        row_id_map_ptr
+        + pid * stride_row_id_map_token
+        + (num_experts + off) * stride_row_id_map_expert,
+        indices,
+        mask=off < n_routed,
+    )
+    tl.store(
+        row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert,
+        n_routed,
+    )
 
 
 def make_row_id_map(
@@ -310,18 +330,27 @@ def _permute_kernel(
         mask_scale = cur_off < scale_hidden_dim
         scale_off = pid_t * stride_scale_token + cur_off * stride_scale_hidden
         scale = tl.load(scale_ptr + scale_off, mask=mask_scale)
-    n_routed = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert)
+    n_routed = tl.load(
+        row_id_map_ptr
+        + pid_t * stride_row_id_map_token
+        + num_experts * 2 * stride_row_id_map_expert
+    )
     for idx in tl.range(n_routed):
-        dst_row = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert)
+        dst_row = tl.load(
+            row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
+        )
         output_off = dst_row * stride_output_token + cur_off * stride_output_hidden
         if PERMUTE_SCALE:
             permuted_scale_off = (
-                dst_row * stride_permuted_scale_token
-                + cur_off * stride_permuted_scale_hidden
+                dst_row * stride_permuted_scale_token + cur_off * stride_permuted_scale_hidden
             )
             tl.store(permuted_scale_ptr + permuted_scale_off, scale, mask=mask_scale)
         if PERMUTE_PROBS:
-            expert_idx = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + (num_experts + idx) * stride_row_id_map_expert)
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
             prob_off = pid_t * stride_probs_token + expert_idx * stride_probs_expert
             prob = tl.load(probs_ptr + prob_off)
             if pid_h == 0:
@@ -477,16 +506,28 @@ def _unpermute_kernel(
                 pid_t * stride_unpermuted_probs_token
                 + stride_unpermuted_probs_expert * map_load_off
             )
-            tl.store(unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts)
+            tl.store(
+                unpermuted_probs_ptr + unpermuted_prob_off, 0.0, mask=map_load_off < num_experts
+            )
     accumulator = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
-    n_routed = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert)
+    n_routed = tl.load(
+        row_id_map_ptr
+        + pid_t * stride_row_id_map_token
+        + num_experts * 2 * stride_row_id_map_expert
+    )
     for idx in tl.range(n_routed):
-        src_row = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert)
+        src_row = tl.load(
+            row_id_map_ptr + pid_t * stride_row_id_map_token + idx * stride_row_id_map_expert
+        )
         input_off = src_row * stride_input_token + current_offset * stride_input_hidden
         inp = tl.load(input_ptr + input_off, mask=mask)
         inp = inp.to(compute_type)
         if WITH_MERGING_PROBS:
-            expert_idx = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + (num_experts + idx) * stride_row_id_map_expert)
+            expert_idx = tl.load(
+                row_id_map_ptr
+                + pid_t * stride_row_id_map_token
+                + (num_experts + idx) * stride_row_id_map_expert
+            )
             merging_prob_off = (
                 pid_t * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
             )
@@ -495,7 +536,11 @@ def _unpermute_kernel(
         accumulator += inp
         if PERMUTE_PROBS:
             if pid_h == 0:
-                expert_idx = tl.load(row_id_map_ptr + pid_t * stride_row_id_map_token + (num_experts + idx) * stride_row_id_map_expert)
+                expert_idx = tl.load(
+                    row_id_map_ptr
+                    + pid_t * stride_row_id_map_token
+                    + (num_experts + idx) * stride_row_id_map_expert
+                )
                 unpermuted_prob_off = (
                     pid_t * stride_unpermuted_probs_token
                     + expert_idx * stride_unpermuted_probs_expert
@@ -625,22 +670,28 @@ def _unpermute_bwd_with_merging_probs_kernel(
     pid = tl.program_id(0)
     map_load_off = tl.arange(0, PROBS_LOAD_WIDTH)
     token_probs_grad_off = (
-        pid * stride_merging_probs_grad_token
-        + stride_merging_probs_grad_expert * map_load_off
+        pid * stride_merging_probs_grad_token + stride_merging_probs_grad_expert * map_load_off
     )
     tl.store(merging_probs_grad_ptr + token_probs_grad_off, 0.0, mask=map_load_off < num_experts)
-    n_routed = tl.load(row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert)
+    n_routed = tl.load(
+        row_id_map_ptr + pid * stride_row_id_map_token + num_experts * 2 * stride_row_id_map_expert
+    )
     for idx in tl.range(n_routed):
-        dst_row = tl.load(row_id_map_ptr + pid * stride_row_id_map_token + idx * stride_row_id_map_expert)
-        expert_idx = tl.load(row_id_map_ptr + pid * stride_row_id_map_token + (num_experts + idx) * stride_row_id_map_expert)
+        dst_row = tl.load(
+            row_id_map_ptr + pid * stride_row_id_map_token + idx * stride_row_id_map_expert
+        )
+        expert_idx = tl.load(
+            row_id_map_ptr
+            + pid * stride_row_id_map_token
+            + (num_experts + idx) * stride_row_id_map_expert
+        )
         prob_grad_accum = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
         current_start = 0
         while current_start < hidden_size:
             current_offset = current_start + tl.arange(0, BLOCK_SIZE)
             mask = current_offset < hidden_size
             input_off = (
-                pid * stride_fwd_output_grad_token
-                + current_offset * stride_fwd_output_grad_hidden
+                pid * stride_fwd_output_grad_token + current_offset * stride_fwd_output_grad_hidden
             )
             inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
             inp = inp.to(compute_type)
@@ -664,8 +715,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
             current_start += BLOCK_SIZE
         probs_grad = tl.sum(prob_grad_accum).to(merging_probs_grad_ptr.dtype.element_ty)
         probs_grad_off = (
-            pid * stride_merging_probs_grad_token
-            + expert_idx * stride_merging_probs_grad_expert
+            pid * stride_merging_probs_grad_token + expert_idx * stride_merging_probs_grad_expert
         )
         tl.store(merging_probs_grad_ptr + probs_grad_off, probs_grad)
 
@@ -855,7 +905,7 @@ def _sort_chunks_by_map_kernel(
     else:
         src_row = tl.load(row_id_map_ptr + pid_t)
         dst_row = pid_t
-    current_offset = pid_h * BLOCK_SIZE  + tl.arange(0, BLOCK_SIZE)
+    current_offset = pid_h * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = current_offset < hidden_size
     input_offsets = src_row * stride_input_token + current_offset * stride_input_hidden
     output_offsets = dst_row * stride_output_token + current_offset * stride_output_hidden
