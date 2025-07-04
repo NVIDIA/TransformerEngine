@@ -55,21 +55,21 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """
-    Logs statistics of FP8-quantised tensors to help diagnose convergence problems.
-
-    Statistics are identified by the pattern "<recipe>_<stat>" with optional "_columnwise" suffix (e.g.
-    "delayed_scaling_underflows%" or "mxfp8_scale_inv_min_columnwise").
-    One can provide "<stat>" only, then the current training recipe is used.
-
-    Stats for delayed-scaling cannnot be collected if delayed-scaling is not the current training recipe.
-
-    During delayed-scaling training you may wish to track
+    Logs statistics of quantized tensors. 
+    
+    Supports computing statistics for current recipe, but also
+    allows to see what would happend if different recipes were used for these tensors in current iteration.
+    For example, during delayed-scaling training you may wish to track
     "current_scaling_underflows%" to measure the accuracy of the current scaling
     factors; note that this requires an extra cast and therefore adds overhead.
     Using a logging frequency (`freq`) greater than 1 is recommended in this case.
     Computing the stats matching the training recipe does not require an extra cast.
 
-    For FP8 the fp8 dtype of precision from log is the same as the fp8 dtype from the original recipe.
+    Statistics are identified by the pattern `<recipe>_<stat>` with optional `_columnwise` suffix (e.g.
+    `delayed_scaling_underflows%` or `mxfp8_scale_inv_min_columnwise`).
+    One can provide `<stat>` only, then the current training recipe is used.
+
+    Stats for delayed-scaling cannot be collected if delayed-scaling is not the current training recipe.
 
     In distributed runs each rank first computes its local statistics; the values
     are gathered the next time `debug_api.step()` is called.  Remember to call
@@ -88,13 +88,12 @@ class LogFp8TensorStats(BaseLogTensorStats):
     ----------
 
         stats: List[str]
-            Each stat is a string of the form "<recipe>_<stat>", with an optional "_columnwise" suffix (i.e., "<recipe>_<stat>_columnwise").
-            If only "<recipe>" is omitted, the current training recipe is used.
-            If "_columnwise" is provided, then stat is computed on columnwise(transpose) version of the tensor,
+            Each stat is a string of the form `<recipe>_<stat>`, with an optional `_columnwise` suffix (i.e., `<recipe>_<stat>_columnwise`).
+            If only `<recipe>` is omitted, the current training recipe is used.
+            If `_columnwise` is provided, then stat is computed on columnwise(transpose) version of the tensor,
             which can be numerically different from rowwise (non-transpose) tensors for mxfp8 and fp8_block_scaling.
             For fp8_delayed_scaling and fp8_current_scaling, the columnwise tensors are
             simply the transpose of the rowwise tensors with the same scaling factors.
-
 
             recipes:
                 - fp8_delayed_scaling,
@@ -104,8 +103,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
             stats:
                 - underflows% - percentage of non-zero elements of tensor clipped to 0 after quantization,
-                - overflows% - percentage of elements of tensor that were clipped to the max/min value of the FP8 range,
-                    - supported only for fp8_delayed_scaling
+                - overflows% - percentage of elements of tensor that were clipped to the max/min value of the FP8 range - supported only for fp8_delayed_scaling,
                 - scale_inv_min - minimum of the inverse of the scaling factors,
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
