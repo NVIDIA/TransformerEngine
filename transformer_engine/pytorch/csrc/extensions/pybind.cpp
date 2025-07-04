@@ -258,6 +258,32 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_rope_backward", &transformer_engine::pytorch::fused_rope_backward,
         "Fused Apply RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
+  // fused router
+  m.def("fused_topk_with_score_function_fwd",
+        &transformer_engine::pytorch::fused_topk_with_score_function_fwd, py::arg("logits"),
+        py::arg("topk"), py::arg("use_pre_softmax"), py::arg("num_groups"), py::arg("group_topk"),
+        py::arg("scaling_factor"), py::arg("score_function"), py::arg("expert_bias"),
+        "Fused topk softmax fwd");
+  m.def("fused_topk_with_score_function_bwd",
+        &transformer_engine::pytorch::fused_topk_with_score_function_bwd, py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("routing_map"), py::arg("intermediate_output"),
+        py::arg("grad_probs"), py::arg("topk"), py::arg("use_pre_softmax"),
+        py::arg("scaling_factor"), py::arg("score_function"), "Fused topk softmax bwd");
+  m.def("fused_score_for_moe_aux_loss_fwd",
+        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_fwd, py::arg("logits"),
+        py::arg("topk"), py::arg("score_function"), "Fused topk softmax fwd");
+  m.def("fused_score_for_moe_aux_loss_bwd",
+        &transformer_engine::pytorch::fused_score_for_moe_aux_loss_bwd, py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("intermediate_output"), py::arg("grad_scores"),
+        py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
+  m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
+        py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
+        py::arg("num_tokens"), py::arg("num_experts"), py::arg("topk"), py::arg("coeff"),
+        "Fused aux loss fwd");
+  m.def("fused_moe_aux_loss_bwd", &transformer_engine::pytorch::fused_moe_aux_loss_bwd,
+        py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_tokens"),
+        py::arg("num_experts"), py::arg("grad_aux_loss"), "Fused aux loss bwd");
+
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
