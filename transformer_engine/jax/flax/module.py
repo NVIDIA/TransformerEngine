@@ -34,7 +34,10 @@ from ..cpp_extensions import (
     CommOverlapHelperSet,
 )
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
-from ..sharding import get_non_contracting_logical_axes, get_padded_spec
+from ..sharding import (
+    get_non_contracting_logical_axes,
+    global_mesh_resource,
+)
 
 import transformer_engine_jax as tex
 
@@ -153,76 +156,47 @@ def _apply_low_rank_adaptation(x, axis, features, lora_a_kernel, lora_b_kernel, 
     return output
 
 
-def _generate_comm_overlap_metas(
-    inputs_shape: Sequence[int],
+def _generate_comm_overlap_meta(
+    input_shape: Sequence[int],
+    input_axes: Sequence[str],
     param_shape: Sequence[int],
-    param_partitioning: nn.LogicallyPartitioned,
-    enabled: bool = True,
-    config: dict = {},
+    param_axes: Sequence[str],
+    config: dict,
 ):
-    if not enabled:
+    method = config.pop("method", tex.CommOverlapMethod.RING_EXCHANGE)
+    if method == tex.CommOverlapMethod.NONE:
         return CommOverlapHelperSet()
 
-    param_sharding = param_partitioning.get_sharding()
-    param_specs = get_padded_spec(param_sharding.spec, len(param_shape))
-    column_parallel = param_specs[-1] is not None
-    row_parallel = any(spec is not None for spec in param_specs[:-1])
+    tp_resource = config.pop(
+        "tp_resource", global_mesh_resource().tp_resource
+    )
 
-    comm_type = config.pop("comm_type", None)
-    if row_parallel and column_parallel:
-        assert comm_type is not None, (
-            "Collective type for communication overlap must be explicitly set via "
-            "`comm_overlap_config={'comm_type' : ... }` when module parameters are "
-            "sharded in both contracting and non-contracting dimensions "
-            "(e.g. FSDP+TP sharding)."
-        )
-        row_parallel = comm_type == tex.CommOverlapType.RS
-        column_parallel = comm_type == tex.CommOverlapType.AG
+    input_sp_dim = list(nn.logical_to_mesh_axes(input_axes)).index(tp_resource)
+    logical_sp_axis = config.pop("logical_sp_axis", input_axes[input_sp_dim])
 
-    mesh = param_sharding.mesh
-    buffer_shape = inputs_shape
-    tp_size = 1
-    tp_resource = None
-    if row_parallel:
-        contracting_specs = tuple(spec for spec in param_specs[:-1] if spec is not None)
-        assert len(contracting_specs) == 1, (
-            "Module parameter cannot have more than one sharded contracting dimension "
-            "GEMM->RS overlap is enabled."
-        )
-        tp_resource = contracting_specs[0]
-        tp_size = mesh.shape[mesh.axis_names.index(tp_resource)]
-        comm_type = tex.CommOverlapType.RS
-        buffer_shape = (*inputs_shape[:-1], param_shape[-1])
+    param_tp_dim = list(nn.logical_to_mesh_axes(param_axes)).index(tp_resource)
+    logical_tp_axis = config.pop("logical_tp_axis", param_axes[param_tp_dim])
 
-    elif column_parallel:
-        tp_resource = param_specs[-1]
-        assert tp_resource is not None, (
-            "Module parameter must be sharded in the non-contracting dimension when "
-            "AG->GEMM overlap is enabled."
-        )
-        tp_size = mesh.shape[mesh.axis_names.index(tp_resource)]
-        comm_type = tex.CommOverlapType.AG
+    row_parallel = param_tp_dim == 0
+    comm_type = tex.CommOverlapType.RS if row_parallel else tex.CommOverlapType.AG
+    _ = config.pop("comm_type")
 
-    else:
-        raise AssertionError("")
+    buffer_shape = config.pop(
+        "buffer_shape",
+        (*input_shape[:-1], param_shape[-1]) if row_parallel else input_shape
+    )
 
-    method = config.pop("method", tex.CommOverlapMethod.RING_EXCHANGE)
-    buffer_shape = config.pop("buffer_shape", buffer_shape)
-    buffer_dtype = config.pop("buffer_dtype", jnp.bfloat16)
-    tp_size = config.pop("tp_size", tp_size)
-    tp_resource = config.pop("tp_resource", tp_resource)
     return CommOverlapHelperSet(
         fprop=CommOverlapHelper(
-            method=method,
             comm_type=comm_type,
+            method=method,
             buffer_shape=buffer_shape,
-            buffer_dtype=buffer_dtype,
-            tp_size=tp_size,
             tp_resource=tp_resource,
+            logical_tp_axis=logical_tp_axis,
+            logical_sp_axis=logical_sp_axis,
             **config,
         )
     )
-
 
 class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
     r"""
@@ -586,6 +560,9 @@ class DenseGeneral(TransformerEngineBase):
 
         quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
+
+        if not self.enable_comm_overlap:
+            self.comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
         y = dense(
             inputs,
             kernel,
@@ -593,12 +570,12 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
-            comm_overlaps=_generate_comm_overlap_metas(
+            comm_overlaps=_generate_comm_overlap_meta(
                 inputs.shape,
-                kernel_shape,
-                kernel_partitioning,
-                enabled=self.enable_comm_overlap,
-                config=self.comm_overlap_config,
+                self.input_axes,
+                kernel.shape,
+                self.kernel_axes,
+                self.comm_overlap_method,
             ),
             batch_first=not self.transpose_batch_sequence
         )
@@ -867,15 +844,15 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        if self.enable_comm_overlap:
-            # All-Gather is the only supported collective to overlap in LayerNormDenseGeneral
-            self.comm_overlap_config.update({"comm_type" : tex.CommOverlapType.AG})
-        comm_overlaps = _generate_comm_overlap_metas(
+        # All-Gather is the only supported collective to overlap in LayerNormDenseGeneral
+        if not self.enable_comm_overlap:
+            self.comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+        comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
+            self.layernorm_input_axes,
             kernel_shape,
-            kernel_partitioning,
-            enabled=self.enable_comm_overlap,
-            config=self.comm_overlap_config,
+            self.kernel_axes,
+            self.comm_overlap_config,
         )
         if fuse_layernorm:
             z = layernorm_dense(
@@ -1301,25 +1278,25 @@ class LayerNormMLP(TransformerEngineBase):
         ffn1_ckpt_name = "ffn1"
         ffn2_ckpt_name = "ffn2"
 
-        if self.enable_dot_1_comm_overlap:
-            # All-Gather is the only supported collective to overlap with the 1st dot
-            self.dot_1_comm_overlap_config.update({"comm_type" : tex.CommOverlapType.AG})
-        ffn1_comm_overlaps = _generate_comm_overlap_metas(
+
+        if not self.enable_dot_1_comm_overlap:
+            self.dot_1_comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+        ffn1_comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
-            kernel_1_each_shape,
-            kernel_1_partitioning,
-            enabled=self.enable_dot_1_comm_overlap,
-            config=self.enable_dot_1_comm_overlap,
+            self.layernorm_input_axes,
+            kernel_1.shape,
+            self.kernel_axes_1,
+            self.dot_1_comm_overlap_config,
         )
-        if self.enable_dot_2_comm_overlap:
-            # Reduce-Scatter is the only supported collective to overlap with the 2nd dot
-            self.dot_2_comm_overlap_config.update({"comm_type" : tex.CommOverlapType.RS})
-        ffn2_comm_overlaps = _generate_comm_overlap_metas(
+
+        if not self.enable_dot_2_comm_overlap:
+            self.dot_2_comm_overlap_config.update({"method" : tex.CommOverlapMethod.NONE})
+        ffn2_comm_overlaps = _generate_comm_overlap_meta(
             inputs.shape,
-            kernel_2_shape,
-            kernel_2_partitioning,
-            enabled=self.enable_dot_2_comm_overlap,
-            config=self.enable_dot_2_comm_overlap,
+            self.dot_2_input_axes,
+            kernel_2.shape,
+            self.kernel_axes_2,
+            self.dot_2_comm_overlap_config,
         )
         if use_fused_layernorm_mlp:
             out = layernorm_mlp(
