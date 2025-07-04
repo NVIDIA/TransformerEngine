@@ -663,9 +663,9 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            if weight is not None and not is_quantized_tensor(weight):
+            if isinstance(weight, torch.Tensor):
                 dtype = weight.dtype
-            elif not is_quantized_tensor(grad_output):
+            elif isinstance(grad_output, torch.Tensor):
                 dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
