@@ -8,8 +8,11 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_PYBIND_HELPER_H_
 
 #include <pybind11/pybind11.h>
+#include <transformer_engine/activation.h>
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
+#include <transformer_engine/multi_stream.h>
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include "cuda_runtime.h"
@@ -17,12 +20,25 @@
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \
   pybind11::enum_<transformer_engine::DType>(m, "DType", pybind11::module_local())                 \
       .value("kByte", transformer_engine::DType::kByte)                                            \
+      .value("kInt64", transformer_engine::DType::kInt64)                                          \
       .value("kInt32", transformer_engine::DType::kInt32)                                          \
       .value("kFloat32", transformer_engine::DType::kFloat32)                                      \
       .value("kFloat16", transformer_engine::DType::kFloat16)                                      \
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
-      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2);                               \
+      .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
+      .value("kFloat8E8M0", transformer_engine::DType::kFloat8E8M0);                               \
+  pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())       \
+      .value("GELU", NVTE_Activation_Type::GELU)                                                   \
+      .value("GEGLU", NVTE_Activation_Type::GEGLU)                                                 \
+      .value("SILU", NVTE_Activation_Type::SILU)                                                   \
+      .value("SWIGLU", NVTE_Activation_Type::SWIGLU)                                               \
+      .value("RELU", NVTE_Activation_Type::RELU)                                                   \
+      .value("REGLU", NVTE_Activation_Type::REGLU)                                                 \
+      .value("QGELU", NVTE_Activation_Type::QGELU)                                                 \
+      .value("QGEGLU", NVTE_Activation_Type::QGEGLU)                                               \
+      .value("SRELU", NVTE_Activation_Type::SRELU)                                                 \
+      .value("SREGLU", NVTE_Activation_Type::SREGLU);                                              \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \
@@ -75,16 +91,27 @@
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                         \
+  pybind11::enum_<NVTE_Norm_Type>(m, "NVTE_Norm_Type", pybind11::module_local())                   \
+      .value("LayerNorm", NVTE_Norm_Type::LayerNorm)                                               \
+      .value("RMSNorm", NVTE_Norm_Type::RMSNorm);                                                  \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
       .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
+      .value("NONE", transformer_engine::CommOverlapType::NONE)                                    \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \
       .value("AG", transformer_engine::CommOverlapType::AG);                                       \
+  pybind11::enum_<transformer_engine::CommOverlapMethod>(m, "CommOverlapMethod",                   \
+                                                         pybind11::module_local())                 \
+      .value("NONE", transformer_engine::CommOverlapMethod::NONE)                                  \
+      .value("BULK", transformer_engine::CommOverlapMethod::BULK)                                  \
+      .value("PIPELINE", transformer_engine::CommOverlapMethod::PIPELINE)                          \
+      .value("RING_EXCHANGE", transformer_engine::CommOverlapMethod::RING_EXCHANGE);               \
   pybind11::enum_<transformer_engine::CommOverlapAlgo>(m, "CommOverlapAlgo",                       \
                                                        pybind11::module_local())                   \
+      .value("NO_OVERLAP", transformer_engine::CommOverlapAlgo::NO_OVERLAP)                        \
       .value("BULK_OVERLAP_AG", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_AG)              \
       .value("BULK_OVERLAP_RS", transformer_engine::CommOverlapAlgo::BULK_OVERLAP_RS)              \
       .value("SPLIT_PIPELINED_AG_P2P",                                                             \
@@ -95,30 +122,31 @@
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
       .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
-  py::class_<transformer_engine::CommOverlapCore,                                                  \
-             std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
-                                                                   pybind11::module_local())       \
-      .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
-           py::call_guard<py::gil_scoped_release>())                                               \
+  pybind11::class_<transformer_engine::CommOverlapCore,                                            \
+                   std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",     \
+                                                                         pybind11::module_local()) \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapCore(); }),             \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
-           py::call_guard<py::gil_scoped_release>())                                               \
+           pybind11::call_guard<pybind11::gil_scoped_release>())                                   \
       .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapBase,                                                  \
-             std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
-             transformer_engine::CommOverlapCore>(m, "CommOverlapBase", pybind11::module_local())  \
-      .def(py::init([]() { return new transformer_engine::CommOverlapBase(); }),                   \
-           py::call_guard<py::gil_scoped_release>());                                              \
-  py::class_<transformer_engine::CommOverlapP2PBase,                                               \
-             std::shared_ptr<transformer_engine::CommOverlapP2PBase>,                              \
-             transformer_engine::CommOverlapCore>(m, "CommOverlapP2PBase",                         \
-                                                  pybind11::module_local())                        \
-      .def(py::init([]() { return new transformer_engine::CommOverlapP2PBase(); }),                \
-           py::call_guard<py::gil_scoped_release>());                                              \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
+  pybind11::class_<transformer_engine::CommOverlapBase,                                            \
+                   std::shared_ptr<transformer_engine::CommOverlapBase>,                           \
+                   transformer_engine::CommOverlapCore>(m, "CommOverlapBase",                      \
+                                                        pybind11::module_local())                  \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapBase(); }),             \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
+  pybind11::class_<transformer_engine::CommOverlapP2PBase,                                         \
+                   std::shared_ptr<transformer_engine::CommOverlapP2PBase>,                        \
+                   transformer_engine::CommOverlapCore>(m, "CommOverlapP2PBase",                   \
+                                                        pybind11::module_local())                  \
+      .def(pybind11::init([]() { return new transformer_engine::CommOverlapP2PBase(); }),          \
+           pybind11::call_guard<pybind11::gil_scoped_release>());                                  \
   m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,                \
-        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                      \
+        pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);    \
   m.def(                                                                                           \
       "get_stream_priority_range",                                                                 \
       [](int device_id = -1) {                                                                     \
@@ -126,8 +154,14 @@
         transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);           \
         return std::make_pair(low_pri, high_pri);                                                  \
       },                                                                                           \
-      py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
+      pybind11::call_guard<pybind11::gil_scoped_release>(), pybind11::arg("device_id") = -1);      \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
-        py::call_guard<py::gil_scoped_release>());
+        pybind11::call_guard<pybind11::gil_scoped_release>());                                     \
+  m.def("get_qkv_format", &nvte_get_qkv_format,                                                    \
+        pybind11::call_guard<pybind11::gil_scoped_release>());                                     \
+  m.def("get_num_compute_streams", &nvte_get_num_compute_streams,                                  \
+        pybind11::call_guard<pybind11::gil_scoped_release>());                                     \
+  m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported,                        \
+        pybind11::call_guard<pybind11::gil_scoped_release>());
 
 #endif

@@ -25,6 +25,7 @@ from common import (
     assert_params_sufficiently_sharded,
 )
 import transformer_engine.jax as te
+import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
@@ -465,8 +466,8 @@ class TestEncoder(unittest.TestCase):
     is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     def setUp(self):
-        """Run 3 epochs for testing"""
-        self.args = encoder_parser(["--epochs", "3"])
+        """Run 5 epochs for testing"""
+        self.args = encoder_parser(["--epochs", "5"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
@@ -516,6 +517,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
@@ -523,6 +527,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         self.args.enable_shardy = True
@@ -532,6 +539,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    @unittest.skipIf(
+        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
+    )
     def test_te_delayed_scaling_fp8_with_sp_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8 + SP"""
         self.args.enable_shardy = True
