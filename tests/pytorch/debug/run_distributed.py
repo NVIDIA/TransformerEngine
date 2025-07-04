@@ -345,9 +345,11 @@ def test_log_distributed(parallel_mode, gather_weight, **kwargs):
             )
     set_weight_tensor_tp_group_reduce(True)  # reset
 
+
 @run_debug_test
 def sanity_test_log_quantized_stats(parallel_mode, gather_weight, **kwargs):
     from test_log import LOG_QUANTIZED_CONFIG
+
     kwargs["config_file"].write(LOG_QUANTIZED_CONFIG)
     kwargs["config_file"].flush()
     _init_debug(kwargs["config_file"].name, kwargs["log_dir"], FEATURE_DIRS)

@@ -44,7 +44,9 @@ def _get_new_quantizer(recipe_name, fp8_dtype):
     if recipe_name == "fp8_block_scaling":
         return Float8BlockQuantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_current_scaling":
-        return Float8CurrentScalingQuantizer(fp8_dtype=fp8_dtype, device=torch.device("cuda"), rowwise=True, columnwise=True)
+        return Float8CurrentScalingQuantizer(
+            fp8_dtype=fp8_dtype, device=torch.device("cuda"), rowwise=True, columnwise=True
+        )
     if recipe_name == "mxfp8":
         return MXFP8Quantizer(fp8_dtype=fp8_dtype, rowwise=True, columnwise=True)
     if recipe_name == "fp8_delayed_scaling":
@@ -148,7 +150,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def check_if_stat_is_supported(self, stat: str, current_recipe: str):
         """Returns True if stat is supported, raises ValueError otherwise."""
         if stat.endswith("_columnwise"):
-            stat = stat[:-len("_columnwise")]
+            stat = stat[: -len("_columnwise")]
         recipe_from_stat, _ = self.get_recipe_from_stat(stat)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
 
@@ -260,7 +262,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         aux_dict = {
             recipe_name: quantized_tensor,
         }
-        
+
         old_rowwise_usage = quantizer.rowwise_usage if quantizer is not None else None
         old_columnwise_usage = quantizer.columnwise_usage if quantizer is not None else None
         for cur_recipe_name, cur_columnwise_stat in recipes_in_stats:
@@ -282,8 +284,9 @@ class LogFp8TensorStats(BaseLogTensorStats):
             aux_dict=aux_dict,
         )
 
-        quantizer.update_usage(rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage)
-    
+        quantizer.update_usage(
+            rowwise_usage=old_rowwise_usage, columnwise_usage=old_columnwise_usage
+        )
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",

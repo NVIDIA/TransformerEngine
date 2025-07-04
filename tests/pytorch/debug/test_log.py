@@ -27,34 +27,38 @@ log:
       end_step: 10
 """
 recipes = [
-  "fp8_delayed_scaling",
-  "fp8_current_scaling",
-  "fp8_block_scaling",
-  #"mxfp8",
+    "fp8_delayed_scaling",
+    "fp8_current_scaling",
+    "fp8_block_scaling",
+    # "mxfp8",
 ]
 
 bare_stats = [
-  "underflows%",
-  "scale_inv_min",
-  "scale_inv_max",
-  "mse",
+    "underflows%",
+    "scale_inv_min",
+    "scale_inv_max",
+    "mse",
 ]
 
 stats = []
 
 for recipe in recipes:
-  for stat in bare_stats:
-    for columnwise_postfix in ["", "_columnwise"]:
-      if recipe in ["fp8_current_scaling", "fp8_block_scaling", "mxfp8"] and torch.cuda.get_device_capability()[0] < 9:
-        # hopper in needed for current-scaling, block-scaling and mxfp8
-        continue
-      stats.append(f"{recipe}_{stat}{columnwise_postfix}")
+    for stat in bare_stats:
+        for columnwise_postfix in ["", "_columnwise"]:
+            if (
+                recipe in ["fp8_current_scaling", "fp8_block_scaling", "mxfp8"]
+                and torch.cuda.get_device_capability()[0] < 9
+            ):
+                # hopper in needed for current-scaling, block-scaling and mxfp8
+                continue
+            stats.append(f"{recipe}_{stat}{columnwise_postfix}")
 
-stats.append("fp8_delayed_scaling_overflows%") # only delayed-scaling supports overflows%
+stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
 
 LOG_QUANTIZED_CONFIG = LOG_QUANTIZED_CONFIG_BASE.format(stats=", ".join(stats))
 
-def test_log_quantized(feature_dirs):    
+
+def test_log_quantized(feature_dirs):
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file.write(LOG_QUANTIZED_CONFIG)
