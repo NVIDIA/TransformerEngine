@@ -17,7 +17,7 @@ def install_requirements() -> List[str]:
     reqs = ["torch>=2.1", "einops"]
     reqs.append(
         "nvdlfw-inspect @"
-        " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+        " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.2#egg=nvdlfw-inspect"
     )
     return reqs
 

@@ -62,6 +62,13 @@ class TEDebugState:
         """Sets weight tensor reduction mode."""
         cls.weight_tensor_tp_group_reduce = enabled
 
+    @classmethod
+    def get_iteration(cls):
+        """Returns the current iteration."""
+        import nvdlfw_inspect.api as debug_api
+
+        return debug_api.DEBUG_MANAGER._trainer_iteration_count
+
 
 def set_weight_tensor_tp_group_reduce(enabled):
     """Sets weight tensor reduction mode."""
