@@ -17,7 +17,6 @@ from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params
 
@@ -110,12 +109,12 @@ class LogTensorStats(BaseLogTensorStats):
         tp_group: torch.distributed.ProcessGroup,
         original_tensor: Union[torch.Tensor, QuantizedTensor],
         quantizer: Quantizer,  # pylint: disable=unused-argument
-        quantized_tensor_rowwise: Union[
+        quantized_tensor_rowwise: Union[ # pylint: disable=unused-argument
             Float8Tensor, MXFP8Tensor
-        ],  # pylint: disable=unused-argument
-        quantized_tensor_columnwise: Union[
+        ],
+        quantized_tensor_columnwise: Union[ # pylint: disable=unused-argument
             Float8Tensor, MXFP8Tensor
-        ],  # pylint: disable=unused-argument
+        ],
     ):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 

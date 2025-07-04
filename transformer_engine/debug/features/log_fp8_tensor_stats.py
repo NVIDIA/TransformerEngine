@@ -8,8 +8,9 @@ from typing import Dict, Optional, List, Tuple
 from contextlib import contextmanager
 
 import torch
-from transformer_engine.debug.features.utils import get_reduction_params
 import nvdlfw_inspect.api as debug_api
+
+
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
@@ -21,6 +22,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.debug.features.utils import get_reduction_params
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
@@ -262,12 +264,12 @@ class LogFp8TensorStats(BaseLogTensorStats):
         assert quantized_tensor_rowwise is quantized_tensor_columnwise
         assert (
             quantizer is not None
-        ), f"[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
+        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
         quantized_tensor = quantized_tensor_rowwise
         assert isinstance(
             quantized_tensor, QuantizedTensor
-        ), f"[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized tensor must be a QuantizedTensor."
+        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
