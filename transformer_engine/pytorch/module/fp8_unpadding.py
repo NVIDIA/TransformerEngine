@@ -87,10 +87,7 @@ class Fp8Unpadding(torch.nn.Module):
         super().__init__()
 
         self.num_gemms = num_gemms
-        if align_size is None:
-            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
-        else:
-            self.align_size = align_size
+        self.align_size = align_size
 
     @no_torch_dynamo()
     def forward(
@@ -110,6 +107,8 @@ class Fp8Unpadding(torch.nn.Module):
         """
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
+        if self.align_size is None:
+            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
 
         # FP8 padding calculate
         padded_m_splits = [
