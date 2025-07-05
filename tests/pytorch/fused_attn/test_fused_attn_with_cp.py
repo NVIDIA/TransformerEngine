@@ -32,6 +32,18 @@ model_configs_flash_attn = {
     "cp_2_3": ModelConfig(
         2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)
     ),  # GQA
+    "cp_3_0": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_1": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_2": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0), head_dim_v=64
+    ),  # MLA
+    "cp_3_3": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512), head_dim_v=64
+    ),  # MLA
 }
 
 
