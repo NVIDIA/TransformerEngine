@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...fp8 import FP8GlobalStateManager
+from ...fp8 import FP8GlobalStateManager, Recipe
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -303,8 +303,12 @@ class BasicLinear(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(
+        self,
+        *,
+        recipe: Optional[Recipe],
+    ) -> None:
+        super().pre_first_forward(recipe=recipe)
 
         # Initialize weights if needed
         weight = self.weight
@@ -313,23 +317,17 @@ class BasicLinear(BasicOperation):
             weight = self.weight
 
         # Configure quantizers
-        if FP8GlobalStateManager.is_fp8_enabled():
+        if recipe is not None:
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
 
             # Specify required tensor formats
-            is_grad_enabled = torch.is_grad_enabled()
-            weight_requires_grad = is_grad_enabled and weight.requires_grad
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             input_quantizer.internal = True
             weight_quantizer.internal = True
             grad_output_quantizer.internal = True
 
             # Recipe-specific configuration
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
             if recipe.float8_current_scaling():
                 if any(
                     not isinstance(q, Float8CurrentScalingQuantizer)
