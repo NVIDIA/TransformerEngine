@@ -53,7 +53,10 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         *args,
         **kwargs,
     ):
-        instance = super().__new__(cls, *args, **kwargs)
+        if cls is Float8BlockwiseQTensorBase:
+            instance = object.__new__(cls)
+        else:
+            instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer
