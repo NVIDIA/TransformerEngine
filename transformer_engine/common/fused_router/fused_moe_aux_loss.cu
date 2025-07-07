@@ -19,7 +19,6 @@ namespace transformer_engine {
 // Using Double to hanld all the calculations
 using CompType = double;
 
-
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                                   const IndexType* tokens_per_expert,
@@ -176,7 +175,8 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
 
   // Update the max cluster size based on the device
   cudaOccupancyMaxPotentialClusterSize(
-      &cluster_size, reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config);
+      &cluster_size,
+      reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config);
 
   cudaLaunchAttribute attribute[1];
   attribute[0].id = cudaLaunchAttributeClusterDimension;

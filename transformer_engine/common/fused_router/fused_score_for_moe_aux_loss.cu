@@ -109,7 +109,8 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
       if (topk > 1) {
         auto sum_logits = warp_reduce_on_shmem(local_logits, num_experts, sum, lane_id);
         for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-          local_logits[i] = static_cast<DataType>(static_cast<double>(local_logits[i]) / (static_cast<double>(sum_logits) + epsilon));
+          local_logits[i] = static_cast<DataType>(static_cast<double>(local_logits[i]) /
+                                                  (static_cast<double>(sum_logits) + epsilon));
         }
       }
       __syncwarp();
@@ -239,9 +240,11 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
       auto sum_Output_x_Grad = warp_reduce_on_shmem(local_comp_buf, num_experts, sum, lane_id);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_grad[i] = static_cast<double>(local_grad[i]) / (static_cast<double>(sum_fwd_input) + epsilon) -
-                        static_cast<double>(sum_Output_x_Grad) /
-                            ((static_cast<double>(sum_fwd_input) + epsilon) * (static_cast<double>(sum_fwd_input) + epsilon));
+        local_grad[i] =
+            static_cast<double>(local_grad[i]) / (static_cast<double>(sum_fwd_input) + epsilon) -
+            static_cast<double>(sum_Output_x_Grad) /
+                ((static_cast<double>(sum_fwd_input) + epsilon) *
+                 (static_cast<double>(sum_fwd_input) + epsilon));
       }
     }
     __syncwarp();

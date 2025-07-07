@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """
-Fused functions used in the MoE router 
+Fused functions used in the MoE router
 """
 import torch
 import transformer_engine_torch as tex
