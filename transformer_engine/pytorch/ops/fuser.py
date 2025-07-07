@@ -395,7 +395,8 @@ class OperationFuser:
 
         # Initialization before forward pass
         if self._is_first_forward:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+            recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
             for op in self._basic_ops:
                 op.pre_first_forward(recipe=recipe)
             self._is_first_forward = False

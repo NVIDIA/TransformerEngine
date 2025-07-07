@@ -191,7 +191,7 @@ class Sequential(torch.nn.Module):
 
         # Get current global state
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8_enabled else None
         global_state = (fp8_enabled, type(fp8_recipe))
 
         # Reset module groups is global state changed
