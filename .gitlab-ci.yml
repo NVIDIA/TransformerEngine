@@ -48,7 +48,7 @@ variables:
       value: 1
     BUILD_ARM64:
       description: Enable ARM64 builds and tests
-      value: 0
+      value: 1
     RUN_L0_TESTS:
       description: Run L0 tests automatically (otherwise run tests manually)
       value: 1
