@@ -138,9 +138,12 @@ def with_sharding_constraint_by_logical_axes(
     try:
         # Check if Flax logical axis rules are available, if so use them
         import flax
+
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
-            return flax.linen.with_logical_constraint(x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT)
+            return flax.linen.with_logical_constraint(
+                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT
+            )
     except ImportError:
         pass
 
