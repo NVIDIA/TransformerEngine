@@ -84,7 +84,7 @@ class TestLoadCheckpoint:
         """Path to directory with checkpoint files"""
 
         # Check environment variable
-        path = os.getenv("TE_TEST_CHECKPOINT_ARTIFACT_PATH")
+        path = os.getenv("NVTE_TEST_CHECKPOINT_ARTIFACT_PATH")
         if path:
             return pathlib.Path(path).resolve()
 
