@@ -11,7 +11,6 @@ from transformer_engine.pytorch.optimizers import MultiTensorApply
 
 from references.quantize_scale_calc import scale_from_amax_tensor
 
-
 input_size_pairs = [
     (7777 * 77, 555 * 555),
     (777, 555),

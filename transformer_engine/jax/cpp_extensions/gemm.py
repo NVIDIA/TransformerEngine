@@ -27,7 +27,6 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
 )
 
-
 __all__ = ["gemm", "grouped_gemm"]
 
 

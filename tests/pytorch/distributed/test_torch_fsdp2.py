@@ -11,7 +11,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 import torch
 
-
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 NUM_PROCS: int = torch.cuda.device_count()

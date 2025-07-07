@@ -34,7 +34,6 @@ from transformer_engine.jax.sharding import (
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.quantize import QuantizerFactory
 
-
 is_fp8_supported, reason = is_fp8_available()
 is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 

@@ -106,7 +106,7 @@ class Linear(FusedOperation):
             "size": out_features,
             "device": device,
             "dtype": dtype,
-            "tensor_parallel": (tensor_parallel_mode is not None),
+            "tensor_parallel": tensor_parallel_mode is not None,
             "tensor_parallel_group": tensor_parallel_group,
         }
         if tensor_parallel_mode == "row":

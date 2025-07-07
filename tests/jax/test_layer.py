@@ -204,7 +204,7 @@ ATTRS = [
     },
     # attrs20
     {
-        _KEY_OF_MLP_ACTIVATIONS: (("relu", "relu")),
+        _KEY_OF_MLP_ACTIVATIONS: ("relu", "relu"),
     },
     # attrs21
     {

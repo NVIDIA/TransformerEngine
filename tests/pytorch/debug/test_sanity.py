@@ -19,7 +19,8 @@ model_keys = ["linear", "layernorm_linear", "layernorm_mlp", "mha_attention", "t
 
 configs = {
     "": "",
-    "log": """log:
+    "log": (
+        """log:
   layers:
     layer_types: [linear]
   enabled:
@@ -37,8 +38,10 @@ configs = {
       stats: [underflows, overflows]
       start_step : 0
       end_step: 1
-""",
-    "fake_quant": """
+"""
+    ),
+    "fake_quant": (
+        """
 fake_quant_config:
   enabled: True
   layers:
@@ -48,7 +51,8 @@ fake_quant_config:
       enabled: True
       gemms: [fprop, dgrad, wgrad]
       quant_format: FP8E5M2
-""",
+"""
+    ),
 }
 
 

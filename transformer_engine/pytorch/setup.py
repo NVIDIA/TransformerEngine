@@ -33,7 +33,6 @@ from build_tools.utils import copy_common_headers
 from build_tools.te_version import te_version
 from build_tools.pytorch import setup_pytorch_extension, install_requirements, test_requirements
 
-
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)
 

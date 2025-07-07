@@ -18,7 +18,6 @@ import sys
 import sysconfig
 from typing import Optional
 
-
 _logger = logging.getLogger(__name__)
 
 

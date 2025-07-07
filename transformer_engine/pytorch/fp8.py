@@ -27,7 +27,6 @@ from .constants import dist_group_type
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
 
-
 __all__ = ["fp8_autocast", "fp8_model_init"]
 
 

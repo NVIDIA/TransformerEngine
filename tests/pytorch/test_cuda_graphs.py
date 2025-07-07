@@ -24,7 +24,6 @@ from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
 
-
 # Check if FP8 is supported.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (

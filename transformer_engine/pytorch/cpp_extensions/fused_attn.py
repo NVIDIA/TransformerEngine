@@ -16,7 +16,6 @@ from transformer_engine_torch import (
 )
 from ..tensor.quantized_tensor import Quantizer
 
-
 __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",

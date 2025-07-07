@@ -103,8 +103,8 @@ void launch_general_(LaunchParams<ForwardKernelParams> &launch_params,
                                OTYPE, CTYPE, ...)                                                               \
   namespace {                                                                                                   \
   void                                                                                                          \
-      norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(  \
-          LaunchParams<NORM_STAGE##KernelParams> &launch_params, const bool configure_params) {                 \
+  norm_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(      \
+      LaunchParams<NORM_STAGE##KernelParams> &launch_params, const bool configure_params) {                     \
     launch_##LAUNCH_TYPE##_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, __VA_ARGS__>(                    \
         launch_params, configure_params);                                                                       \
   }                                                                                                             \
