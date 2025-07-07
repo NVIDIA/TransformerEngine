@@ -555,7 +555,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                       const __grid_constant__ CUtensorMap tensor_map_output_colwise,
                       e8m0_t *const scales_rowwise_e8m0, e8m0_t *const scales_colwise_e8m0,
                       fp8e4m3 *const scales_rowwise_e4m3, fp8e4m3 *const scales_colwise_e4m3,
-                      const float *noop, float *const amax_ptr, const float global_prev_amax,
+                      const float *noop, float *const amax_ptr, const float *const nvfp4_second_stage_scale_ptr,
                       const size_t rows, const size_t cols,
                       const size_t scale_stride_rowwise, const size_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -650,8 +650,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const bool is_master_thread = (threadIdx.x == 0);
 
   // Compute a global encoding/decoding scaling factor for all S_dec_b 
-  const float S_enc = __fdiv_rn(6.0f * 448.0f, global_prev_amax);
-  // const float S_enc_p = __fdiv_rn(448.0f, global_prev_amax);
+  const float S_enc = (nvfp4_second_stage_scale_ptr == nullptr)
+                      ? 1.0f
+                      : __frcp_rn(*nvfp4_second_stage_scale_ptr);
 
   float thread_amax = 0.0f;
 
@@ -1716,11 +1717,7 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
-  
-  float global_prev_amax = 6.0f * 448.0f;
-  if (amax_ptr != nullptr) {
-    cudaMemcpy(&global_prev_amax, amax_ptr, sizeof(float), cudaMemcpyDeviceToHost);
-  }
+  const float *const nvfp4_second_stage_scale_ptr = reinterpret_cast<const float *>(output->scale.dptr);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input.dtype(), IType,
       // TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
@@ -1774,7 +1771,7 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
                     tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
                     scales_rowwise_e8m0_ptr, scales_colwise_e8m0_ptr,
                     scales_rowwise_e4m3_ptr, scales_colwise_e4m3_ptr,
-                    noop_ptr, amax_ptr, global_prev_amax,
+                    noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
                     rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
             // case ScalingType::COLWISE:
@@ -1789,7 +1786,7 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
             //         tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
             //         scales_rowwise_e8m0_ptr, scales_colwise_e8m0_ptr,
             //         scales_rowwise_e4m3_ptr, scales_colwise_e4m3_ptr,
-            //         noop_ptr, amax_ptr, global_prev_amax,
+            //         noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
             //         rows, cols, scale_stride_rowwise, scale_stride_colwise);
             //   break;
             // case ScalingType::BIDIMENSIONAL:
@@ -1804,7 +1801,7 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
             //         tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
             //         scales_rowwise_e8m0_ptr, scales_colwise_e8m0_ptr,
             //         scales_rowwise_e4m3_ptr, scales_colwise_e4m3_ptr,
-            //         noop_ptr, amax_ptr, global_prev_amax,
+            //         noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
             //         rows, cols, scale_stride_rowwise, scale_stride_colwise);
             //   break;
           }

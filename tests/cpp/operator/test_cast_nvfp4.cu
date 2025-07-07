@@ -42,7 +42,7 @@ void compute_ref(const bool rowwise,
                  fp8e8m0* scales_colwise_mxfp8,
                  fp8e4m3* scales_rowwise_nvfp4,
                  fp8e4m3* scales_colwise_nvfp4,
-                 const float global_prev_amax,
+                 const float nvfp4_second_stage_scale,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
@@ -54,7 +54,7 @@ void compute_ref(const bool rowwise,
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b 
-    const float S_enc = 6.0f * 448.0f / global_prev_amax;
+    const float S_enc = 1.0f / nvfp4_second_stage_scale;
 
     #pragma omp parallel proc_bind(spread)
     {
@@ -279,14 +279,13 @@ void performTest_x1(float (*OP)(const float),
 
     Tensor output("output", shape, otype, rowwise, colwise, NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
 
-    const float global_prev_amax = 6.0f * 448.0f;
-
     std::unique_ptr<OutputType[]> ref_output_mxfp8 = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<fp4e2m1x2[]> ref_output_nvfp4 = std::make_unique<fp4e2m1x2[]>(rows * cols / 2);
     std::unique_ptr<fp8e8m0[]> ref_scales_mxfp8 = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
     std::unique_ptr<fp8e4m3[]> ref_scales_nvfp4 = std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
 
     fillCase<EncodingType>(&input, fill_case);
+    setRandomScale(&output);
 
     auto nvte_quantize_operation = &nvte_quantize;
     if (OP == &gelu)       { nvte_quantize_operation = &nvte_gelu; }
@@ -313,7 +312,7 @@ void performTest_x1(float (*OP)(const float),
                                        ref_scales_mxfp8.get(),
                                        ref_scales_nvfp4.get(),
                                        ref_scales_nvfp4.get(),
-                                       global_prev_amax,
+                                       output.scale(),
                                        rows,
                                        cols,
                                        scales_stride,

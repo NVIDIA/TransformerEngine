@@ -344,6 +344,12 @@ Tensor::Tensor(const std::string& name,
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
       }
     } else {
+      // Used for NVFP4 second stage scaling
+      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+      cudaMemset(scale, 0, sizeof(float));
+      scale_cpu_data_ = std::make_shared<float>(0);
+      tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+
       auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape, tensor_.scaling_mode());
       auto rowwise_scale_size = rowwise_scale_meta.bytes();
       auto columnwise_scale_size = colwise_scale_meta.bytes();
@@ -385,7 +391,8 @@ void Tensor::to_cpu() const {
                cudaMemcpyDeviceToHost);
   }
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+        || (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING)) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(amax_cpu_data_.get(),
                   tensor_.amax(),
@@ -427,7 +434,8 @@ void Tensor::from_cpu() const {
                cudaMemcpyHostToDevice);
   }
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+        || (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING)) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
       }
@@ -452,7 +460,8 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+        || (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING)) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }
