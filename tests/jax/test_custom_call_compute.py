@@ -78,7 +78,9 @@ def is_shape_supported_by_mxfp8(input_shape):
         return False
 
 
-def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor, precise_comparison: bool = True):
+def assert_bitwise_scaled_tensors(
+    a: ScaledTensor, b: ScaledTensor, precise_comparison: bool = True
+):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
         if not precise_comparison:
             assert_allclose(a.dequantize(), b.dequantize(), dtype=a.data.dtype)
@@ -98,8 +100,12 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor, precise_comp
         assert_allclose(a.data, b.data)
 
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
-        assert_bitwise_scaled_tensors(a.rowwise_tensor, b.rowwise_tensor, precise_comparison=precise_comparison)
-        assert_bitwise_scaled_tensors(a.colwise_tensor, b.colwise_tensor, precise_comparison=precise_comparison)
+        assert_bitwise_scaled_tensors(
+            a.rowwise_tensor, b.rowwise_tensor, precise_comparison=precise_comparison
+        )
+        assert_bitwise_scaled_tensors(
+            a.colwise_tensor, b.colwise_tensor, precise_comparison=precise_comparison
+        )
     else:
         pytest.fail("Unsupported input types")
 
@@ -756,15 +762,23 @@ class TestFusedQuantize:
 
         if is_casted_output:
             # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation
-            precise_comparison = not (in_dtype != jnp.float32 and scaling_mode.is_1d_block_scaling())
-            assert_bitwise_scaled_tensors(te_output, jax_output, precise_comparison=precise_comparison)
+            precise_comparison = not (
+                in_dtype != jnp.float32 and scaling_mode.is_1d_block_scaling()
+            )
+            assert_bitwise_scaled_tensors(
+                te_output, jax_output, precise_comparison=precise_comparison
+            )
         else:
             assert_allclose(te_output, jax_output)
 
         if is_dbias:
             # TE kernels cast the intermediate results to the input dtype which reduces precision compared to the JAX implementation, for dbias this typically only affects bfloat16.
-            precise_comparison = not (in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling())
-            assert_allclose(te_dbias, jax_dbias, dtype=in_dtype if precise_comparison else out_dtype)
+            precise_comparison = not (
+                in_dtype == jnp.bfloat16 and scaling_mode.is_1d_block_scaling()
+            )
+            assert_allclose(
+                te_dbias, jax_dbias, dtype=in_dtype if precise_comparison else out_dtype
+            )
 
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
