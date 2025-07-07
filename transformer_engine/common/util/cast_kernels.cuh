@@ -774,10 +774,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
-      // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
+      // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
       Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
 
-      // 1. Read/Compute elements. Find MXFP8-block AMAX
+      // 1. Read/Compute elements. Find NVFP4-block AMAX
       if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
         #pragma unroll
@@ -915,31 +915,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       for (int w = 0; w < WAVES; ++w) {
         Vec<fp4e2m1x4, PACK_SIZE / 4> out;    // Vec<fp4e2m1x4, PACK_SIZE / 4> out;
         #pragma unroll
-        // for (int e = 0; e < PACK_SIZE / 4; ++e) {
-        //   fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
-        //   if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-        //     // in01 = in_IType[w].data.elt[2 * e];
-        //     // in23 = in_IType[w].data.elt[2 * e + 1];
-        //     IType4& in = *reinterpret_cast<IType4*>(&in_IType[w].data.elt[2 * e]);
-        //     ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
-        //   }
-        //   // else if constexpr (IS_CACHED_ACT_OP) {
-        //   //   // in01.x = in_cached[w].data.elt[4 * e];
-        //   //   // in01.y = in_cached[w].data.elt[4 * e + 1];
-        //   //   // in23.x = in_cached[w].data.elt[4 * e + 2];
-        //   //   // in23.y = in_cached[w].data.elt[4 * e + 3];
-        //   //   IType4& in = *reinterpret_cast<IType4*>(&in_cached[w].data.elt[4 * e]);
-        //   //   ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
-        //   // } else {
-        //   //   const int j = w * PACK_SIZE + 4 * e;
-        //   //   // in01.x = in_compute_rowwise[j];
-        //   //   // in01.y = in_compute_rowwise[j + 1];
-        //   //   // in23.x = in_compute_rowwise[j + 2];
-        //   //   // in23.y = in_compute_rowwise[j + 3];
-        //   //   IType4& in = *reinterpret_cast<IType4*>(&in_compute_rowwise[j]);
-        //   //   ptx::mul_cvt_4x(out_quad, in, block_scale_inverse);
-        //   // }
-        // }
         for (int e = 0; e < PACK_SIZE / 4; ++e) {
           IType2 in01;
           IType2 in23;
@@ -1007,7 +982,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_X_rowwise = scales_block_offset_X_rowwise;
   const int scale_idx_global = scales_offset_Y_rowwise * scale_stride_rowwise + scales_offset_X_rowwise;
   const int scale_idx_shmem = threadIdx.x * SCALING_FACTORS_PER_CHUNK_ROW;
-  if ((scales_offset_Y_rowwise < rows) && (scales_offset_X_rowwise < cols / SCALE_DIM_X)) {
+  if ((threadIdx.x < CHUNK_DIM_Y) && (scales_offset_Y_rowwise < rows) && (scales_offset_X_rowwise < (cols / SCALE_DIM_X))) {
     using ScalesVec_t = Vec<fp8e4m3, SCALING_FACTORS_PER_CHUNK_ROW>;
     const ScalesVec_t& scales = *reinterpret_cast<ScalesVec_t*>(&out_rowwise_scales_sh[scale_idx_shmem]);
     scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
