@@ -48,7 +48,7 @@ variables:
       value: 1
     BUILD_ARM64:
       description: Enable ARM64 builds and tests
-      value: 1
+      value: 0
     RUN_L0_TESTS:
       description: Run L0 tests automatically (otherwise run tests manually)
       value: 1
@@ -580,6 +580,8 @@ jax-py3-stage-arm64:
     - if: $FRAMEWORK == "pytorch" && $BUILD_PYTORCH == "0"
       when: never
     - if: $FRAMEWORK == "jax" && $BUILD_JAX == "0"
+      when: never
+    - if: $BUILD_AMD64 == "0" || $BUILD_ARM64 == "0"
       when: never
     - if: $IMAGE_BUILD_STAGE == "qa" && $CI_COMMIT_BRANCH !~ /^test_release_v.*$/
       when: never
