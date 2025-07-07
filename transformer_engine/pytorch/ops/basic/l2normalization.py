@@ -9,8 +9,8 @@ from typing import Optional
 
 import torch
 
-from ...tensor import QuantizedTensor
 from ...utils import clear_tensor_data
+from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...jit import (
     l2normalization_fused,
@@ -19,6 +19,7 @@ from ...jit import (
     set_jit_fusion_options,
     warmup_jit_l2normalization_all_dtypes,
 )
+from ...tensor import Quantizer
 
 
 class L2Normalization(BasicOperation):
@@ -73,14 +74,12 @@ class L2Normalization(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         # Use input directly - torch.compile can handle multi-dimensional tensors
-        x = input_
-
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
+        x = maybe_dequantize(input_)
 
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
@@ -98,7 +97,7 @@ class L2Normalization(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rsqrt_norm)
-            ctx.has_prev_op = prev_op is not None
+            ctx.has_prev_op = not is_first_op
 
         return y
 
@@ -111,10 +110,7 @@ class L2Normalization(BasicOperation):
         # Saved tensors from forward pass
         x, rsqrt_norm = ctx.saved_tensors
 
-        dy = grad_output
-
-        if isinstance(dy, QuantizedTensor):
-            dy = dy.dequantize()
+        dy = maybe_dequantize(grad_output)
 
         # Compute L2 norm backward pass using fused implementation
         dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)

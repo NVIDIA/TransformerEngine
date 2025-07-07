@@ -2,26 +2,16 @@
 #
 # See LICENSE for license information.
 
-import functools
-import itertools
-import os
-import random
-import tempfile
-from string import Template
-
 import pytest
 import torch
 
 import nvdlfw_inspect.api as debug_api
-import transformer_engine.debug
 import transformer_engine.pytorch as te
-import transformer_engine_torch as tex
-from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.fp8 import _default_sf_compute
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 from test_numerics import create_config_file
+
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 B, S, H, D = 64, 64, 64, 64
 
@@ -104,4 +94,6 @@ def _run_test(model_key, fp8, config, feature_dirs, config_file, log_dir):
 @pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("config_key", configs.keys())
 def test_sanity_debug(model_key, fp8, config_key, feature_dirs):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     _run_test(model_key, fp8, configs[config_key], feature_dirs)

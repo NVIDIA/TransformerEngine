@@ -20,10 +20,11 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
+from ...tensor.quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
+from .._common import maybe_dequantize, is_quantized_tensor
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -279,7 +280,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Cast grad output tensor dtype if needed
         dy_local = grad_output
         if with_quantized_compute:
-            if not isinstance(dy_local, QuantizedTensorBase):
+            if not is_quantized_tensor(dy_local):
                 with_columnwise = weight_requires_grad
                 if (
                     with_columnwise
@@ -293,24 +294,18 @@ class UserbuffersBackwardLinear(FusedOperation):
                 )
                 dy_local = grad_output_quantizer(dy_local)
         else:
-            if isinstance(dy_local, QuantizedTensorBase):
-                dy_local = dy_local.dequantize(dtype=dtype)
-            elif dy_local.dtype != dtype:
-                dy_local = dy_local.to(dtype=dtype)
+            dy_local = maybe_dequantize(dy_local, dtype)
 
         # Cast weight tensor dtype if needed
         if weight is None:
             raise ValueError("Weight tensor is required to compute input grad")
         w = weight
         if with_quantized_compute:
-            if not isinstance(w, QuantizedTensorBase):
+            if not is_quantized_tensor(w):
                 weight_quantizer.set_usage(columnwise=True)
                 w = weight_quantizer(w)
         else:
-            if isinstance(w, QuantizedTensorBase):
-                w = w.dequantize(dtype=dtype)
-            elif w.dtype != dtype:
-                w = w.to(dtype=dtype)
+            w = maybe_dequantize(w, dtype)
 
         # Cast input tensor dtype if needed
         x_local = None
@@ -319,14 +314,11 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise ValueError("Input tensor is required to compute weight grad")
             x_local = input
             if with_quantized_compute:
-                if not isinstance(x_local, QuantizedTensorBase):
+                if not is_quantized_tensor(x_local):
                     input_quantizer.set_usage(columnwise=True)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensorBase):
-                    x_local = x_local.dequantize(dtype=dtype)
-                elif x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
 
         # dgrad GEMM
         dx_local = None
@@ -433,7 +425,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise RuntimeError(
                     "wgrad GEMM requires grad output tensor, which has not been initialized"
                 )
-            if isinstance(dy, QuantizedTensorBase):
+            if is_quantized_tensor(dy):
                 dy.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Initialize input tensor
@@ -443,7 +435,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 raise RuntimeError(
                     "wgrad GEMM requires input tensor, which has not been initialized"
                 )
-            if isinstance(x, QuantizedTensorBase):
+            if is_quantized_tensor(x):
                 x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Check grad weight tensor
@@ -516,6 +508,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
+            if hasattr(linear_op.weight, "__fsdp_param__"):
+                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
+
             if not hasattr(linear_op.weight, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "

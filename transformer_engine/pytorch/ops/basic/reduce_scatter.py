@@ -10,8 +10,9 @@ from typing import Optional
 import torch
 
 from ...distributed import gather_along_first_dim
-from ...tensor import QuantizedTensor
+from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
+from ...tensor import Quantizer
 
 
 class ReduceScatter(BasicOperation):
@@ -39,8 +40,9 @@ class ReduceScatter(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Trivial case
@@ -59,10 +61,7 @@ class ReduceScatter(BasicOperation):
         output_dims[0] //= self.process_group_size
 
         # Check input tensor
-        x = input_
-        if isinstance(x, QuantizedTensor):
-            x = x.dequantize()
-        x = x.contiguous()
+        x = maybe_dequantize(input_.contiguous())
 
         # Perform reduce-scatter
         y = torch.empty(output_dims, dtype=x.dtype, device=x.device)

@@ -20,13 +20,13 @@ from ...module.base import (
     get_workspace,
     _2X_ACC_FPROP,
 )
-from ...tensor.quantized_tensor import QuantizedTensorBase, Quantizer
+from ...tensor.quantized_tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ...utils import canonicalize_device, canonicalize_dtype
+from .._common import maybe_dequantize, is_quantized_tensor
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
-    BasicOperation,
     FusedOperation,
     FusibleOperation,
     OperationContext,
@@ -206,7 +206,7 @@ class UserbuffersForwardLinear(FusedOperation):
         x = None
         if with_ub_all_gather:
             if input_quantizer is not None:
-                if not isinstance(x_local, QuantizedTensorBase):
+                if not is_quantized_tensor(x_local):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
@@ -222,26 +222,20 @@ class UserbuffersForwardLinear(FusedOperation):
             )
         else:
             if with_quantized_compute:
-                if not isinstance(x_local, QuantizedTensorBase):
+                if not is_quantized_tensor(x_local):
                     input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
                     x_local = input_quantizer(x_local)
             else:
-                if isinstance(x_local, QuantizedTensorBase):
-                    x_local = x_local.dequantize(dtype=dtype)
-                if x_local.dtype != dtype:
-                    x_local = x_local.to(dtype=dtype)
+                x_local = maybe_dequantize(x_local, dtype)
             x = x_local
 
         # Initialize weight tensor
         w = weight
-        w_is_quantized = isinstance(w, QuantizedTensorBase)
-        if with_quantized_compute and not w_is_quantized:
+        if not with_quantized_compute:
+            w = maybe_dequantize(w, dtype)
+        elif with_quantized_compute and not is_quantized_tensor(w):
             weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
             w = weight_quantizer(w)
-        elif not with_quantized_compute and w_is_quantized:
-            w = w.dequantize()
-        if not with_quantized_compute and w.dtype != dtype:
-            w = w.to(dtype=dtype)
 
         # Construct output tensor if needed
         reduce_scatter_output = None
@@ -271,18 +265,14 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if w is not weight and with_quantized_compute and isinstance(w, QuantizedTensorBase):
+            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
 
         # Prepare input tensor for backward pass
         if weight_requires_grad:
-            if x_local is input:
-                # PyTorch autograd produces esoteric errors if we
-                # cache input tensor directly.
-                x_local = x_local.detach()
-            if with_quantized_compute and isinstance(x_local, QuantizedTensorBase):
+            if with_quantized_compute and is_quantized_tensor(x_local):
                 if not (isinstance(x_local, Float8TensorBase) and with_ub_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -299,8 +289,9 @@ class UserbuffersForwardLinear(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -318,7 +309,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise ValueError("Bias operation forward does not expect keyword arguments")
 
         # Check which grads are required
-        input_requires_grad = linear_op_ctx.requires_grad and input_.requires_grad
+        input_requires_grad = linear_op_ctx.requires_grad
         weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
 
         # Quantization metadata
@@ -336,9 +327,7 @@ class UserbuffersForwardLinear(FusedOperation):
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_quantizers("backward") > 0 and recipe.delayed():
-                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+            grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
         dtype = None
@@ -381,7 +370,7 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_requires_grad
         linear_op_ctx.weight_requires_grad = weight_requires_grad
-        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
+        linear_op_ctx.has_prev_op = not is_first_op
 
         return output, [() for _ in range(len(self.basic_ops))]
 
