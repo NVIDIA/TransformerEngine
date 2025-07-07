@@ -212,7 +212,7 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
     int pos_offset = token_offset_cur_warp * num_experts;
     // Clear the logits_grad in global mem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      grad_logits[pos_offset + i] = 0;
+      grad_logits[pos_offset + i] = 0.0f;
     }
     // Load the dgrad/output_from_fwd to shmem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {

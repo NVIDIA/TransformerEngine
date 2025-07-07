@@ -72,7 +72,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     int pos_offset = token_offset_cur_warp * num_experts;
     // Clear the probs/routing_map (num_experts)
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      probs[pos_offset + i] = 0;
+      probs[pos_offset + i] = 0.0f;
       routing_map[pos_offset + i] = false;
       if (score_function == 1) {
         intermediate_output[pos_offset + i] = -std::numeric_limits<DataType>::infinity();
@@ -154,7 +154,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         __syncwarp();
         // Compute the group score
         if (lane_id == 0) {
-          DataType tmp = 0;
+          DataType tmp = 0.0f;
           for (int j = 0; j < topk / group_topk; j++) {
             tmp = tmp + topk_scores[j];
           }

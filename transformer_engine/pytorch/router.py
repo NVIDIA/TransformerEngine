@@ -47,7 +47,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         return probs, routing_map
 
     @staticmethod
-    def backward(ctx, grad_probs, grad_routing_map):
+    def backward(ctx, grad_probs, _):
         # pylint: disable=missing-function-docstring
         routing_map, intermediate_output = ctx.saved_tensors
         grad_logits = tex.fused_topk_with_score_function_bwd(
@@ -137,7 +137,7 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         return routing_map, scores
 
     @staticmethod
-    def backward(ctx, grad_routing_map, grad_scores):
+    def backward(ctx, _, grad_scores):
         # pylint: disable=missing-function-docstring
         intermediate_output = ctx.saved_tensors[0]
         grad_logits = tex.fused_score_for_moe_aux_loss_bwd(
