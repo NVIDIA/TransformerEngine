@@ -523,7 +523,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {}, # {"block_size_rowwise": 32, "block_size_colwise": 32},
+            {},  # {"block_size_rowwise": 32, "block_size_colwise": 32},
         )
 
 
@@ -624,9 +624,7 @@ class ScalingMode(Enum):
         Returns:
             The Shardy rules for the scaling mode
         """
-        return self._get_impl().get_shardy_sharding_rules(
-            input_rank, unique_var, flatten_axis
-        )
+        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
 
     def get_grouped_scale_shape_2x(
         self, data_shape, n_groups, group_axis, is_padded=True, flatten_axis=-1

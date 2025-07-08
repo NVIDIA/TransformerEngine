@@ -499,15 +499,15 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         colwise_scale_inv = scale_rules.colwise_rule
 
         out = x_axes
-        colwise_out = (prefix + "out_colwise", )
+        colwise_out = (prefix + "out_colwise",)
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes
 
-        dbias = x_axes[flatten_axis:] if is_dbias else (prefix + "dbias", )
-        amax = (prefix + "amax", )
+        dbias = x_axes[flatten_axis:] if is_dbias else (prefix + "dbias",)
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (x_axes, ("…1",)),

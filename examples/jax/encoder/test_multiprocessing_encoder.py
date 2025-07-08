@@ -658,8 +658,9 @@ class TestEncoder(unittest.TestCase):
     @unittest.skipIf(
         not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
     )
-    @unittest.skipIf(tex.gemm_uses_jax_dot(),
-                     "`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+    @unittest.skipIf(
+        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
+    )
     def test_te_mxfp8_shardy(self):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling", enable_shardy=True)

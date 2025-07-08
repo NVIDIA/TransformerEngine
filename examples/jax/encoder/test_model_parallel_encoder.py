@@ -543,8 +543,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.43 and actual[1] > 0.8
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    @unittest.skipIf(tex.gemm_uses_jax_dot(),
-                     "`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+    @unittest.skipIf(
+        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
+    )
     def test_te_mxfp8_shardy(self):
         """Test Transformer Engine with MXFP8"""
         self.args.enable_shardy = True
@@ -554,8 +555,9 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.43 and actual[1] > 0.8
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
-    @unittest.skipIf(tex.gemm_uses_jax_dot(),
-                     "`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+    @unittest.skipIf(
+        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
+    )
     def test_te_mxfp8_with_sp_shardy(self):
         """Test Transformer Engine with MXFP8 + SP"""
         self.args.enable_shardy = True

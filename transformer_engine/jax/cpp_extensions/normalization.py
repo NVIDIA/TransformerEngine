@@ -594,9 +594,9 @@ class NormFwdPrimitive(BasePrimitive):
         x_axes = scale_rules.input_spec
 
         out = x_axes
-        colwise_out = out if is_2x else (prefix + "out_colwise", )
+        colwise_out = out if is_2x else (prefix + "out_colwise",)
         rsigma = x_axes[:-1]
-        mu = (prefix + "mu", ) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        mu = (prefix + "mu",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
         amax = (prefix + "amax",)
 
         return SdyShardingRule(

@@ -420,12 +420,12 @@ class ActLuPrimitive(BasePrimitive):
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             x_rank - 1, unique_var=prefix + "x", flatten_axis=-2
         )
-        x_axes = scale_rules.input_spec + (prefix + f"x{x_rank - 1}", )
+        x_axes = scale_rules.input_spec + (prefix + f"x{x_rank - 1}",)
         out = (*x_axes[:-2], x_axes[-1])
         scale_inv = scale_rules.rowwise_rule
 
-        colwise_out = (prefix + "out_colwise", )
-        colwise_scale_inv = (prefix + "scale_inv_colwise", )
+        colwise_out = (prefix + "out_colwise",)
+        colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
             colwise_scale_inv = scale_rules.colwise_rule
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
@@ -436,12 +436,12 @@ class ActLuPrimitive(BasePrimitive):
                 colwise_out = out
 
         # amax is always a unit tensor.
-        amax = (prefix + "amax", )
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (
                 x_axes,
-                ("…1", ),
+                ("…1",),
             ),
             (out, colwise_out, scale_inv, colwise_scale_inv, amax),
         )
@@ -895,18 +895,18 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         x_axes = scale_rules.input_spec
         dz_axes = (*x_axes[:-2], x_axes[-1])
         out = x_axes
-        colwise_out = (prefix + "out_colwise", )
+        colwise_out = (prefix + "out_colwise",)
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
             else:
                 colwise_out = out
 
-        dbias = x_axes[-2:] if is_dbias else (prefix + "dbias", )
-        amax = (prefix + "amax", )
+        dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
-            (dz_axes, x_axes, ("…2", )),
+            (dz_axes, x_axes, ("…2",)),
             (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
         )
 

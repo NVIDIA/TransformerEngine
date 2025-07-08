@@ -215,16 +215,13 @@ class GemmPrimitive(BasePrimitive):
             f"{rhs_batch_dims}."
         )
         if len(lhs_batch_dims) == 0:
-            assert len(rhs_batch_dims) == 0, (
-                "cuBLAS GEMM RHS operand cannot be batched if LHS operand is not batched."
-            )
-        elif len(rhs_batch_dims) != 0:
             assert (
-                all(bdim in lhs_contracting_dims for bdim in lhs_batch_dims)
-                and all(bdim in rhs_contracting_dims for bdim in rhs_batch_dims)
-            ), (
-                "cuBLAS GEMM batched dimensions must be contracting when both operands are batched."
-            )
+                len(rhs_batch_dims) == 0
+            ), "cuBLAS GEMM RHS operand cannot be batched if LHS operand is not batched."
+        elif len(rhs_batch_dims) != 0:
+            assert all(bdim in lhs_contracting_dims for bdim in lhs_batch_dims) and all(
+                bdim in rhs_contracting_dims for bdim in rhs_batch_dims
+            ), "cuBLAS GEMM batched dimensions must be contracting when both operands are batched."
 
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
@@ -838,22 +835,22 @@ class GemmPrimitive(BasePrimitive):
             (lhs_cdims, rhs_cdims),
             (lhs_bdims, rhs_bdims),
         )
-        lhs_scale_specs = ("…1", )
-        rhs_scale_specs = ("…2", )
+        lhs_scale_specs = ("…1",)
+        rhs_scale_specs = ("…2",)
         if scaling_mode.is_1d_block_scaling():
             # Shardy rules for MXFP8 scales cannot be related to the operands because of the
             # global-unpadding and local-padding workflow. This can potentially insert expensive
             # re-shards in the partition call later if the scales are not already sharded correctly.
             lhs_scale_specs, rhs_scale_specs = map(
-                lambda specs : tuple(spec.replace(prefix, prefix + "scale_inv_") for spec in specs),
-                (lhs_specs, rhs_specs)
+                lambda specs: tuple(spec.replace(prefix, prefix + "scale_inv_") for spec in specs),
+                (lhs_specs, rhs_specs),
             )
 
         lhs_non_cspec = tuple(lhs_specs[i] for i in range(operand_ndims[0]) if i not in lhs_cdims)
         rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
         out_spec = (*lhs_non_cspec, *rhs_non_cspec)
-        bias_spec = rhs_non_cspec if fuse_bias else ("…4", )
-        gelu_spec = out_spec if fuse_gelu else ("…5", )
+        bias_spec = rhs_non_cspec if fuse_bias else ("…4",)
+        gelu_spec = out_spec if fuse_gelu else ("…5",)
 
         return SdyShardingRule(
             operand_mappings=(
@@ -870,6 +867,7 @@ class GemmPrimitive(BasePrimitive):
                 gelu_spec,
             ),
         )
+
 
 register_primitive(GemmPrimitive)
 

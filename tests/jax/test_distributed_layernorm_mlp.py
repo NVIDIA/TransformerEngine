@@ -286,7 +286,14 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm,
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        with_jax_gemm,
     ):
         if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
             pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
