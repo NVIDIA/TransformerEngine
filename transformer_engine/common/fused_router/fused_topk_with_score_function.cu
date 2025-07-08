@@ -126,7 +126,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     // Expert bias is only used at the sigmoid case
     if (expert_bias && score_function == 0) {
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        scores[i] = static_cast<DataType>(static_cast<double>(scores[i]) + static_cast<double>(expert_bias[i]));
+        scores[i] = static_cast<DataType>(static_cast<double>(scores[i]) +
+                                          static_cast<double>(expert_bias[i]));
       }
     }
     __syncwarp();
