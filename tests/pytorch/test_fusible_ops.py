@@ -152,7 +152,7 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
-class TestSequential:
+class TestSequentialContainer:
     """Tests for sequential container"""
 
     def test_modules(self) -> None:
@@ -2080,3 +2080,109 @@ class TestCheckpointing:
             torch.testing.assert_close(y_load, y_save, **tols)
         for x_load, x_save in zip(xs_load, xs_save):
             torch.testing.assert_close(x_load.grad, x_save.grad, **tols)
+
+
+class TestSequentialModules:
+    """Test for larger Sequentials with modules commonly used together"""
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_layernorm_mlp(
+        self,
+        *,
+        bias: bool,
+        normalization: str,
+        quantized_compute: bool,
+        quantized_weight: bool,
+        dtype: torch.dtype,
+        quantization: Optional[str],
+        device: torch.device = "cuda",
+        hidden_size: int = 32,
+        sequence_length: int = 512,
+        batch_size: int = 4,
+        ffn_hidden_size: int = 64,
+        layernorm_epsilon: float = 1e-5,
+    ) -> None:
+        """
+        LayerNorm/RMSNorm + Linear + GELU + Linear
+
+        Note that this test checks only if the module runs
+        as when chaining multiple modules it is hard to validate
+        numerical accuracy.
+        """
+
+        # Make input shape
+        in_shape = (sequence_length, batch_size, hidden_size)
+        ffn_shape = in_shape[:-1] + (ffn_hidden_size,)
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=ffn_shape, device=device)
+        quantization_needed = quantized_compute or quantized_weight
+        if quantization is None and quantization_needed:
+            pytest.skip("Quantization scheme is not specified")
+        if quantization is not None and not quantization_needed:
+            pytest.skip("Quantization scheme is not used")
+
+        # Random data
+        _, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        _, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Implementation with fusible operations
+        recipe = make_recipe(quantization)
+        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+            if normalization == "LayerNorm":
+                norm = te_ops.LayerNorm(
+                    hidden_size,
+                    eps=layernorm_epsilon,
+                    device=device,
+                    dtype=dtype,
+                )
+            else:
+                norm = te_ops.RMSNorm(
+                    hidden_size,
+                    eps=layernorm_epsilon,
+                    device=device,
+                    dtype=dtype,
+                )
+            ffn1 = te_ops.Linear(
+                hidden_size,
+                ffn_hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+            act = te_ops.GELU()
+            ffn2 = te_ops.Linear(
+                ffn_hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+        forward = te_ops.Sequential(norm, ffn1, act, ffn2)
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
