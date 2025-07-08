@@ -52,6 +52,10 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self.cache_quantized_input: bool = cache_quantized_input
 
     @abc.abstractmethod
+    def _is_gated(self) -> bool:
+        """Is this activation gated"""
+
+    @abc.abstractmethod
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         """Forward implementation
 
@@ -94,14 +98,14 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             quantizer = next_op_input_quantizer
 
         # Launch kernel
-        y = self._activation_forward_impl(
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check output tensor
-        if len(y.size()) != x.dim():
+        if self._is_gated() and x.dim() != 2:
+            y = self._activation_forward_impl(
+                x.view((-1, x.size(-1))),
+                quantizer,
+            )
             y = y.view(list(x.shape[:-1]) + [-1])
+        else:
+            y = self._activation_forward_impl(x, quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -138,15 +142,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             quantizer = ctx.prev_op_grad_input_quantizer
 
         # Launch kernel
-        dx = self._activation_backward_impl(
-            dy.view((-1, dy.size(-1))),
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check grad input tensor
-        if dx.size() != x.size():
-            dx = dx.view(x.size())
+        dx = self._activation_backward_impl(dy, x, quantizer)
 
         # Clear input tensor if possible
         clear_tensor_data(x)
@@ -167,6 +163,9 @@ class GELU(_ActivationOperation):
 
     """
 
+    def _is_gated(self) -> bool:
+        return False
+
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.gelu(*args, **kwargs)
 
@@ -182,6 +181,9 @@ class ReLU(_ActivationOperation):
        \text{ReLU}(x) = \max(x,0)
 
     """
+
+    def _is_gated(self) -> bool:
+        return False
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.relu(*args, **kwargs)
@@ -218,6 +220,9 @@ class GEGLU(_ActivationOperation):
 
     """
 
+    def _is_gated(self) -> bool:
+        return True
+
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.geglu(*args, **kwargs)
 
@@ -246,6 +251,9 @@ class ReGLU(_ActivationOperation):
     See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
 
     """
+
+    def _is_gated(self) -> bool:
+        return True
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.reglu(*args, **kwargs)
@@ -284,6 +292,9 @@ class SwiGLU(_ActivationOperation):
     and `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
 
     """
+
+    def _is_gated(self) -> bool:
+        return True
 
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.swiglu(*args, **kwargs)
