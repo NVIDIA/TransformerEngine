@@ -94,9 +94,10 @@ class ForwardLinearBiasAdd(FusedOperation):
             grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = linear_op.weight.dtype
 
         # Linear forward
         output = basic_op_extra_inputs[self._op_idxs["add"]][0]
@@ -104,6 +105,7 @@ class ForwardLinearBiasAdd(FusedOperation):
             input=input_,
             weight=linear_op.weight,
             bias=bias,
+            dtype=output.dtype,
             out=output,
             accumulate_into_out=True,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,

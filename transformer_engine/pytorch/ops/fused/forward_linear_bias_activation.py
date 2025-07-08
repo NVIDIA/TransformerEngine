@@ -101,9 +101,10 @@ class ForwardLinearBiasActivation(FusedOperation):
             grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = linear_op.weight.dtype
 
         # Linear forward
         output, x_local, w = BasicLinear._functional_forward(
