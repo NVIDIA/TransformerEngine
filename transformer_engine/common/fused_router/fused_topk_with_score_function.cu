@@ -126,7 +126,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     // Expert bias is only used at the sigmoid case
     if (expert_bias && score_function == 0) {
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        scores[i] += static_cast<DataType>(expert_bias[i]);
+        scores[i] = static_cast<DataType>(static_cast<double>(scores[i]) + static_cast<double>(expert_bias[i]));
       }
     }
     __syncwarp();
@@ -330,7 +330,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
     int pos_offset = token_offset_cur_warp * num_experts;
     // Clear the logits_grad in global mem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      grad_logits[pos_offset + i] = 0;
+      grad_logits[pos_offset + i] = 0.0f;
     }
     // Load the dgrad/output_from_fwd to shmem
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
