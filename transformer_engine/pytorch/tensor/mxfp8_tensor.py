@@ -165,6 +165,32 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
     """
 
+    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorBase with positional args,
+    # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
+    def __new__(
+        cls,
+        *args,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
+        columnwise_data: Optional[torch.Tensor],
+        columnwise_scale_inv: Optional[torch.Tensor],
+        fp8_dtype: TE_DType,
+        quantizer: Quantizer,
+        **kwargs,
+    ):
+        instance = super().__new__(
+            cls,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            quantizer,
+            *args,
+            **kwargs,
+        )
+        return instance
+
     def __repr__(self, *, tensor_contents=None):
         return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
 

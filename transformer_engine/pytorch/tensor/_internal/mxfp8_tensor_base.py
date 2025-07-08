@@ -66,13 +66,13 @@ class MXFP8TensorBase(QuantizedTensorBase):
 
     def __new__(
         cls,
-        *args,
         rowwise_data: Optional[torch.Tensor],
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
         quantizer: Optional[Quantizer] = None,
+        *args,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
