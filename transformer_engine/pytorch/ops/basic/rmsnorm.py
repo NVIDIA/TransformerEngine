@@ -24,6 +24,7 @@ from ...utils import (
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape, maybe_dequantize
 from ...export import is_in_onnx_export_mode
+from ...tensor import Quantizer
 
 
 class RMSNorm(BasicOperation):
@@ -150,8 +151,8 @@ class RMSNorm(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(self, *args, **kwargs) -> None:
+        super().pre_first_forward(*args, **kwargs)
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
@@ -159,8 +160,9 @@ class RMSNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         if is_in_onnx_export_mode():
             return self.op_onnx_forward(input_)
@@ -186,12 +188,9 @@ class RMSNorm(BasicOperation):
 
         # Check if output is quantized
         output_quantizer = None
-        if (
-            FP8GlobalStateManager.is_fp8_enabled()
-            and next_op is not None
-            and next_op.num_quantizers("forward") > 0
-        ):
-            output_quantizer = next_op.get_quantizer("forward", 0)
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            output_quantizer = next_op_input_quantizer
 
         # Compute RMSNorm
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
@@ -210,7 +209,7 @@ class RMSNorm(BasicOperation):
         if requires_grad:
             ctx.save_for_backward(x, rstdevs)
             ctx.dtype = dtype
-            ctx.has_prev_op = prev_op is not None
+            ctx.has_prev_op = not is_first_op
 
         # Reshape output tensor
         out = y.view(input_dims)

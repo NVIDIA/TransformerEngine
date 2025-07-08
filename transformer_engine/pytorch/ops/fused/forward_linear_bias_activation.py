@@ -13,11 +13,11 @@ import torch
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
 from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
     FusedOperation,
     FusibleOperation,
     OperationContext,
 )
+from ...tensor import Quantizer
 
 
 class ForwardLinearBiasActivation(FusedOperation):
@@ -59,8 +59,9 @@ class ForwardLinearBiasActivation(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -83,7 +84,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             raise NotImplementedError("Activations are not yet supported")
 
         # Check which grads are required
-        input_requires_grad = linear_op_ctx.requires_grad and input_.requires_grad
+        input_requires_grad = linear_op_ctx.requires_grad
         weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
 
         # FP8 metadata
@@ -96,13 +97,9 @@ class ForwardLinearBiasActivation(FusedOperation):
         if with_quantized_compute:
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
-            next_op = basic_op_next_ops[-1]
-            if next_op is not None and next_op.num_quantizers("forward") > 0:
-                output_quantizer = next_op.get_quantizer("forward", 0)
+            output_quantizer = next_op_input_quantizer
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_quantizers("backward") > 0:
-                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+            grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
         dtype = None
@@ -136,7 +133,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.dtype = dtype
         linear_op_ctx.input_requires_grad = input_requires_grad
         linear_op_ctx.weight_requires_grad = weight_requires_grad
-        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
+        linear_op_ctx.has_prev_op = not is_first_op
 
         return output, [() for _ in range(len(self.basic_ops))]
 
