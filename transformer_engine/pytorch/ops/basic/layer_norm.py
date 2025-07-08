@@ -167,8 +167,8 @@ class LayerNorm(BasicOperation):
         self.weight = weight
         self.bias = bias
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(self, *args, **kwargs) -> None:
+        super().pre_first_forward(*args, **kwargs)
         if self.weight.device.type == "meta" or self.bias.device.type == "meta":
             self.reset_parameters()
 
