@@ -175,7 +175,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
-        quantizer: Quantizer,
+        quantizer: Optional[Quantizer],
         **kwargs,
     ):
         instance = super().__new__(
@@ -328,6 +328,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
         shape: torch.shape,
+        quantizer: Quantizer,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
@@ -343,6 +344,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
             shape=shape,
+            quantizer=quantizer,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -357,6 +359,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 self._fp8_dtype,
                 self.dtype,
                 self.shape,
+                self._quantizer,
             ),
         )
 
