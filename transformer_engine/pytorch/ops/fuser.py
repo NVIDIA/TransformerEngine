@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -317,15 +317,19 @@ class OperationFuser:
     ----------
     ops: list of FusibleOperation
         Pipeline of operations
-    fuse_ops: bool, default = `True`
+    fuse_ops: bool
         Whether to attempt fusing operations
+    recipe: Recipe, optional
+        Quantization recipe to use when fusing and executing operations.
+        Note: certain fusions may depend on what kind of recipe is being used.
 
     """
 
     def __init__(
         self,
         ops: list[FusibleOperation],
-        fuse_ops: bool = True,
+        fuse_ops: bool,
+        recipe: Optional[Recipe],
     ) -> None:
 
         # Get list of basic operations
@@ -351,6 +355,7 @@ class OperationFuser:
         self._is_first_forward = True
 
         # Fuse ops if needed
+        self.recipe = recipe
         if fuse_ops:
             self.fuse_ops()
 
@@ -362,6 +367,7 @@ class OperationFuser:
     def _fuse_forward_ops(
         cls,
         ops: list[tuple[FusibleOperation, list[int]]],
+        recipe: Optional[Recipe],  # pylint: disable=unused-argument
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
         ops = fuse_userbuffers_forward_linear(ops)
@@ -373,6 +379,7 @@ class OperationFuser:
     def _fuse_backward_ops(
         cls,
         ops: list[tuple[FusibleOperation, list[int]]],
+        recipe: Optional[Recipe],  # pylint: disable=unused-argument
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
         ops = fuse_userbuffers_backward_linear(ops)
@@ -381,8 +388,8 @@ class OperationFuser:
 
     def fuse_ops(self) -> None:
         """Attempt to fuse operations"""
-        self._forward_ops = self._fuse_forward_ops(self._forward_ops)
-        self._backward_ops = self._fuse_backward_ops(self._backward_ops)
+        self._forward_ops = self._fuse_forward_ops(self._forward_ops, self.recipe)
+        self._backward_ops = self._fuse_backward_ops(self._backward_ops, self.recipe)
 
     def __call__(
         self,
@@ -398,10 +405,8 @@ class OperationFuser:
 
         # Initialization before forward pass
         if self._is_first_forward:
-            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-            recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
             for op in self._basic_ops:
-                op.pre_first_forward(recipe=recipe)
+                op.pre_first_forward(recipe=self.recipe)
             self._is_first_forward = False
 
         # Canonicalize op kwargs

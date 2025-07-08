@@ -518,7 +518,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -725,7 +727,9 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,
