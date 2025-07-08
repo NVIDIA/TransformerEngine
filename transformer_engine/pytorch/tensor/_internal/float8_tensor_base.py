@@ -143,6 +143,23 @@ class Float8TensorBase(QuantizedTensorBase):
         size = self._transpose.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
 
+    def view(self, shape: torch.Size):
+        # pylint: disable=missing-function-docstring
+        out_data = self._data.view(shape)
+        out_transpose = None if self._transpose_invalid else self._transpose
+        if out_transpose is not None:
+            out_transpose_shape = out_transpose.size()
+            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+                out_transpose = None
+
+        return Float8TensorBase(
+            data=out_data,
+            fp8_scale_inv=self._scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            data_transpose=out_transpose,
+            quantizer=self._quantizer,
+        )
+
     def __repr__(self):
         return (
             "Float8TensorBase("
