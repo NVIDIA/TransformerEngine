@@ -85,13 +85,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   const size_t mxfp8_scaling_sinv_alignment_padding = 256;
   auto workspace_size = workspace_total_size - workspace_alignment_padding;
   if (is_mxfp8_scaling) {
-    // For MXFP8 swizzled scale_inv buffers, each has 256B alignment padding.
-    workspace_size -= lhs_sinv_size + rhs_sinv_size + 2 * mxfp8_scaling_sinv_alignment_padding;
+    // For MXFP8 swizzled scale_inv buffers, only the first pointer needs to be with 256B alignment padding. Later pointers are guaranteed to be 256-aligned as the scale_inv shapes are padded by 128x4.
+    workspace_size -= (lhs_sinv_size + rhs_sinv_size + 2 * mxfp8_scaling_sinv_alignment_padding);
   } else if (is_tensor_scaling) {
-    // For tensor scaling, each matrix has a single scale value, but it needs to be aligned
-    // to 256 bytes for CUDA 12.9.1 and later.
+    // For tensor scaling, each matrix has a single scale value, and all scales need to be aligned
+    // by 16 bytes to meet the requirement of CUDA 12.9.1 and later.
     workspace_size -= tensor_scaling_sinv_aligment * (lhs_sinv_size + rhs_sinv_size);
   }
+  workspace_size = workspace_size / num_streams;
   auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
   swizzled_lhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_lhs_sinv_ptr);
   auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
