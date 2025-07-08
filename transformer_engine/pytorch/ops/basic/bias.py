@@ -17,6 +17,7 @@ from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
 )
+from ...tensor import Quantizer
 
 
 class Bias(BasicOperation):
@@ -111,8 +112,8 @@ class Bias(BasicOperation):
             bias = torch.nn.Parameter(bias)
         self.bias = bias
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(self, *args, **kwargs) -> None:
+        super().pre_first_forward(*args, **kwargs)
         if self.bias.device.type == "meta":
             self.reset_parameters()
 
@@ -120,8 +121,9 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         x = input_
         b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
