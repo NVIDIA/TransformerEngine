@@ -183,7 +183,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) &&
       (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
-      !requires_64bit_ragged_offset) {
+      !requires_64bit_ragged_offset &&
+      // 9.10.0: known bugs with SDPA FP8
+      (cudnn_runtime_version != 91000)) {
     if (cudnn_runtime_version >= 8900) {
       backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
     } else {
@@ -239,10 +241,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           // 9.9: any head_dim + Blackwell + fprop + non_paged + sq > 1
           (!is_training && sm_arch_ >= 100 && cudnn_runtime_version >= 90900 && max_seqlen_q > 1 &&
            layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD) ||
-          // 9.10: any head_dim + any arch + fprop + paged
-          // 9.10: any head_dim + any arch + fprop + non_paged + sq > 1
-          // 9.10: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
-          (!is_training && cudnn_runtime_version >= 91000 &&
+          // 9.10.2: any head_dim + any arch + fprop + paged
+          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq > 1
+          // 9.10.2: any head_dim + any arch + fprop + non_paged + sq = 1 + {no_mask, padding, BRCM, padding_BRCM}
+          (!is_training && cudnn_runtime_version >= 91002 &&
            (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD || max_seqlen_q > 1 ||
             (max_seqlen_q == 1 && attn_mask_type != NVTE_Mask_Type::NVTE_CAUSAL_MASK &&
              attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) ||
@@ -354,7 +356,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             max_seqlen_q <= max_seqlen_kv && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             dropout == 0.0)))) &&
         // check 64-bit ragged offset support
-        (supported_ragged_offset_size)) {
+        (supported_ragged_offset_size) &&
+        // 9.10.0/9.10.1: known bugs with SDPA F16
+        (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001)) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {

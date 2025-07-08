@@ -23,6 +23,9 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
     AttentionParams,
 )
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionLogging as attn_log,
+)
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -96,6 +99,7 @@ class ModelConfig:
         self.num_gqa_groups = num_gqa_groups
         self.head_dim_qk = head_dim_qk
         self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
+        self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = num_heads * head_dim_qk
         self.hidden_size_kv = num_gqa_groups * self.head_dim_v
         self.max_seqlen_q = max_seqlen_q
@@ -211,7 +215,9 @@ def _get_attention_backends(
         return available_backends, flash_attention_backend, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    with logging_context():
+    if attn_log._is_logging_setup is False:
+        attn_log.setup_logging()
+    with logging_context(highest_level=attn_log._log_level):
         for i in range(3):
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
             _attention_backends["backend_selection_requires_update"] = True
@@ -1554,18 +1560,20 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
-    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (
-        9,
-        7,
-        0,
-    ):
-        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
 
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    # Test backend availability
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout=qkv_format.replace("hd", "h3d"),
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # Skip if only unfused backend is supported
+    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
+
+    if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1591,11 +1599,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    if flash_attn_supported:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1768,23 +1772,24 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     #    if get_device_compute_capability() >= (10, 0):
     #        config.dropout_p = 0.1
 
-    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (
-        9,
-        7,
-        0,
-    ):
-        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
-    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
-        pytest.skip("qkv_layout not applicable for MQA/GQA")
-
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    # Test backend availability
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    # Skip if only unfused backend is supported
+    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
+        pytest.skip("Less than two backends to compare.")
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
+
+    if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1813,11 +1818,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if (
-        FlashAttentionUtils.v3_is_installed
-        and not is_training
-        and "padding" not in config.attn_mask_type
-    ):
+    if flash_attn_supported:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -2026,6 +2027,18 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     Both paths take F16 input and output. QKV layout is t3hd or bs3hd"""
 
     config = model_configs_fp8[model]
+
+    # Test backend availability
+    is_training = True
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout="t3hd" if cudnn_frontend_version == 0 else "bs3hd",
+        is_training=is_training,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if not (fused_attn_backends and unfused_attn_supported):
+        pytest.skip("Not enough backends to run this test with.")
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
     unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedAttention")
