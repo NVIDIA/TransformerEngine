@@ -115,6 +115,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Apply forward ops
         x = input_
         requires_grad = is_grad_enabled and x.requires_grad
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         extra_outputs = [None] * fuser._num_basic_ops
         for op, basic_op_idxs in fuser._forward_ops:
 
@@ -130,14 +131,14 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
             prev_op_idx = basic_op_idxs[0] - 1
-            prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx > 0 else None
+            prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_input_quantizer = None
-            if prev_op is not None:
+            if prev_op is not None and with_quantized_compute:
                 prev_op_grad_input_quantizer = prev_op.get_grad_input_quantizer()
             next_op_idx = basic_op_idxs[-1] + 1
             next_op = fuser._basic_ops[next_op_idx] if next_op_idx < fuser._num_basic_ops else None
             next_op_input_quantizer = None
-            if next_op is not None:
+            if next_op is not None and with_quantized_compute:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
             x, fused_op_extra_outputs = op.fuser_forward(
@@ -180,7 +181,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 ctx._saved_tensors_range = (range_start, range_end)
 
             # Save tensors for backward
-            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
             if with_quantized_compute:
                 tensors_to_save, tensor_objects = prepare_for_saving(*to_save)
                 func_ctx.save_for_backward(*tensors_to_save)
@@ -198,10 +198,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
             func_ctx.with_quantized_compute = with_quantized_compute
 
+        x.requires_grad_(requires_grad)
+
         if extra_outputs_flat:
             return x, *extra_outputs_flat
-
-        x.requires_grad_(requires_grad)
 
         return x
 

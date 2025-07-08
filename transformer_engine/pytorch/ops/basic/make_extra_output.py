@@ -78,4 +78,4 @@ class MakeExtraOutput(BasicOperation):
     ]:
         grad_input = basic_op_grad_extra_outputs[0][0]
         grad_input += grad_output
-        return grad_input, [], [()]
+        return grad_input, [()], [()]

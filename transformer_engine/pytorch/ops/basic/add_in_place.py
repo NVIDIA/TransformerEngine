@@ -78,4 +78,4 @@ class AddInPlace(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
-        return grad_output, [], [(grad_output,)]
+        return grad_output, [()], [(grad_output,)]

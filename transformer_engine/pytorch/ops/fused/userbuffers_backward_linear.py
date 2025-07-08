@@ -568,13 +568,13 @@ def fuse_userbuffers_backward_linear(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of the corresponding
+        Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
     ops: list of tuples
-        Updated forward pass operations
+        Updated backward pass operations
 
     """
 
