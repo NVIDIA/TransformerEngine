@@ -587,16 +587,17 @@ class NormFwdPrimitive(BasePrimitive):
             result_types,
         )
 
+        prefix = "NormFwdPrimitive_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var="NormFwdPrimitive_i", flatten_axis=-1
+            len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
 
-        out = x_axes[:-1] + ("k",)
-        colwise_out = out if is_2x else ("…4",)
+        out = x_axes
+        colwise_out = out if is_2x else (prefix + "out_colwise", )
         rsigma = x_axes[:-1]
-        mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
-        amax = ("…6",)
+        mu = (prefix + "mu", ) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (x_axes, ("…1",), ("…2",), ("…3",)),
@@ -609,7 +610,6 @@ class NormFwdPrimitive(BasePrimitive):
                 mu,
                 rsigma,
             ),
-            **scale_rules.factor_sizes,
         )
 
 

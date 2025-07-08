@@ -488,9 +488,10 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
     ):
         del out_dtype, scale_dtype, is_outer, mesh, result_types
 
+        prefix = "BaseDBiasQuantizePrimitive_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             len(value_types[0].shape),
-            unique_var="BaseDBiasQuantizePrimitive_i",
+            unique_var=prefix + "x",
             flatten_axis=flatten_axis,
         )
 
@@ -498,22 +499,19 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         colwise_scale_inv = scale_rules.colwise_rule
 
         out = x_axes
+        colwise_out = (prefix + "out_colwise", )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes
-        else:
-            colwise_out = ("j",)
-            colwise_scale_inv = ("k",)
 
-        dbias = x_axes[flatten_axis:] if is_dbias else ("l",)
-        amax = ("m",)
+        dbias = x_axes[flatten_axis:] if is_dbias else (prefix + "dbias", )
+        amax = (prefix + "amax", )
 
         return SdyShardingRule(
             (x_axes, ("…1",)),
             (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
-            **scale_rules.factor_sizes,
         )
 
 

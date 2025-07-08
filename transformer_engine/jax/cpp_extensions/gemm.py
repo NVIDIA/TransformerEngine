@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.sharding import NamedSharding, PartitionSpec
+from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax as tex
 from transformer_engine_jax import get_num_compute_streams
@@ -179,13 +180,52 @@ class GemmPrimitive(BasePrimitive):
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
 
+        def _dims_are_consecutive(dims):
+            if len(dims) <= 1:
+                return True
+            return sorted(dims) == list(range(min(dims), max(dims) + 1))
+
         # Sanity-check operand layouts and types
         operand_ndims = (lhs.ndim, rhs.ndim)
-        contracting_dims, _ = dimension_numbers
+        contracting_dims, batch_dims = dimension_numbers
+
         (
             lhs_contracting_dims,
             rhs_contracting_dims,
         ) = map(sanitize_dims, operand_ndims, contracting_dims)
+        assert _dims_are_consecutive(lhs_contracting_dims), (
+            "cuBLAS GEMM expected consecutive contracting dimensions for LHS operand, but got "
+            f"{lhs_contracting_dims}."
+        )
+        assert _dims_are_consecutive(rhs_contracting_dims), (
+            "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
+            f"{rhs_contracting_dims}."
+        )
+
+        (
+            lhs_batch_dims,
+            rhs_batch_dims,
+        ) = map(sanitize_dims, operand_ndims, batch_dims)
+        assert _dims_are_consecutive(lhs_batch_dims), (
+            "cuBLAS GEMM expected consecutive batch dimensions for LHS operand, but got "
+            f"{lhs_batch_dims}."
+        )
+        assert _dims_are_consecutive(rhs_batch_dims), (
+            "cuBLAS GEMM expected consecutive batch dimensions for RHS operand, but got "
+            f"{rhs_batch_dims}."
+        )
+        if len(lhs_batch_dims) == 0:
+            assert len(rhs_batch_dims) == 0, (
+                "cuBLAS GEMM RHS operand cannot be batched if LHS operand is not batched."
+            )
+        elif len(rhs_batch_dims) != 0:
+            assert (
+                all(bdim in lhs_contracting_dims for bdim in lhs_batch_dims)
+                and all(bdim in rhs_contracting_dims for bdim in rhs_batch_dims)
+            ), (
+                "cuBLAS GEMM batched dimensions must be contracting when both operands are batched."
+            )
+
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
             (lhs.shape, rhs.shape),
@@ -751,15 +791,85 @@ class GemmPrimitive(BasePrimitive):
         return mesh, _sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(*args, **kwargs):
-        del args, kwargs
-        raise NotImplementedError(
-            "TE cuBLAS GEMM custom op does not support the Shardy partitioner. You can disable the "
-            'custom op by setting `NVTE_JAX_CUSTOM_CALLS_RE="^(?!GemmPrimitive$).+$"` in the '
-            "environment, which will make GEMM operations in TE will execute with native "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` calls."
-        )
+    def shardy_sharding_rule(
+        out_dtype,
+        dimension_numbers,
+        lhs_quantized_colwise,
+        rhs_quantized_colwise,
+        scaling_mode,
+        fuse_bias,
+        fuse_gelu,
+        grad,
+        use_split_accumulator,
+        mesh,
+        operand_types,
+        result_types,
+    ):
+        del out_dtype, grad, use_split_accumulator, mesh, result_types
+        prefix = "GemmPrimitive_"
 
+        def _generate_operand_rules(name, ndim, cdims, bdims):
+            specs = []
+            ldims = tuple(i for i in range(ndim) if i not in bdims + cdims)
+            for i in range(ndim):
+                dim_name = None
+                if i in bdims:
+                    dim_idx = bdims.index(i) if len(bdims) > 1 else ""
+                    dim_name = f"b{dim_idx}"
+                elif i in cdims:
+                    dim_idx = cdims.index(i) if len(cdims) > 1 else ""
+                    dim_name = f"k{dim_idx}"
+                else:
+                    dim_idx = ldims.index(i) if len(ldims) > 1 else ""
+                    dim_name = f"{name}_l{dim_idx}"
+                specs.append(prefix + dim_name)
+            return specs
+
+        lhs, _, rhs, *_ = operand_types
+        operand_ndims = (len(lhs.shape), len(rhs.shape))
+        (lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims) = map(
+            lambda dims: map(sanitize_dims, operand_ndims, dims),
+            dimension_numbers,
+        )
+        lhs_specs, rhs_specs = map(
+            _generate_operand_rules,
+            ("lhs", "rhs"),
+            operand_ndims,
+            (lhs_cdims, rhs_cdims),
+            (lhs_bdims, rhs_bdims),
+        )
+        lhs_scale_specs = ("…1", )
+        rhs_scale_specs = ("…2", )
+        if scaling_mode.is_1d_block_scaling():
+            # Shardy rules for MXFP8 scales cannot be related to the operands because of the
+            # global-unpadding and local-padding workflow. This can potentially insert expensive
+            # re-shards in the partition call later if the scales are not already sharded correctly.
+            lhs_scale_specs, rhs_scale_specs = map(
+                lambda specs : tuple(spec.replace(prefix, prefix + "scale_inv_") for spec in specs),
+                (lhs_specs, rhs_specs)
+            )
+
+        lhs_non_cspec = tuple(lhs_specs[i] for i in range(operand_ndims[0]) if i not in lhs_cdims)
+        rhs_non_cspec = tuple(rhs_specs[i] for i in range(operand_ndims[1]) if i not in rhs_cdims)
+        out_spec = (*lhs_non_cspec, *rhs_non_cspec)
+        bias_spec = rhs_non_cspec if fuse_bias else ("…4", )
+        gelu_spec = out_spec if fuse_gelu else ("…5", )
+
+        return SdyShardingRule(
+            operand_mappings=(
+                lhs_specs,
+                lhs_scale_specs,
+                rhs_specs,
+                rhs_scale_specs,
+                bias_spec,
+                gelu_spec,
+            ),
+            result_mappings=(
+                out_spec,
+                bias_spec,
+                gelu_spec,
+            ),
+        )
 
 register_primitive(GemmPrimitive)
 

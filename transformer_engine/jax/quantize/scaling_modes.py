@@ -17,7 +17,7 @@ from functools import reduce, lru_cache
 import operator
 import numpy as np
 
-from jax.experimental.custom_partitioning import CompoundFactor
+from jax.experimental.custom_partitioning import BATCHING
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -252,8 +252,9 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
             The Shardy rules for the scaling mode
         """
         del flatten_axis
-        input_spec = tuple(f"x{i}" for i in range(input_rank))
-        return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
+        input_spec = tuple(f"{unique_var}{i}" for i in range(input_rank))
+        scale_var = BATCHING + unique_var + "_scale_inv"
+        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
 
 
 class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
@@ -488,31 +489,41 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        input_spec = [f"x{i}" for i in range(input_rank)]
+        del flatten_axis
+        input_spec = [f"{unique_var}{i}" for i in range(input_rank)]
+        rowwise = [f"{unique_var}scale_inv_rowwise{i}" for i in range(input_rank)]
+        colwise = [f"{unique_var}scale_inv_colwise{i}" for i in range(input_rank)]
 
-        # We have to use two different factors in the two CompoundFactors because of Shardy
-        # verifier requirements, even though they are the same.
-        rowwise_var = unique_var
-        colwise_var = f"{unique_var}_"
-        input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
-        input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
+        # TODO (Alp): Padding the scales breaks the size relationship in CompoundFactors.
+        #             Unfortunately, because Shardy rules are applied to the inner primitive, the
+        #             only way to preserve the relationship is to lower unpadded scales to the
+        #             underlying custom call and pad them in C++. Until that's implemented, the
+        #             Shardy rules for block scales have to be completely disconnected from the
+        #             Shardy rules for the tensor they belong to.
 
-        # The rowwise and colwise scale tensors should be sharded the same way as the input.
-        # However, we need to adjust the dimensions where the block scaling factor applies.
-        rowwise = input_spec.copy()
-        rowwise[-1] = rowwise_var
+        # # We have to use two different factors in the two CompoundFactors because of Shardy
+        # # verifier requirements, even though they are the same.
+        # rowwise_var = unique_var
+        # colwise_var = f"{unique_var}_"
+        # input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
+        # input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
 
-        colwise = input_spec.copy()
-        colwise[flatten_axis - 1] = colwise_var
+        # # The rowwise and colwise scale tensors should be sharded the same way as the input.
+        # # However, we need to adjust the dimensions where the block scaling factor applies.
+        # rowwise = input_spec.copy()
+        # rowwise[-1] = rowwise_var
 
-        # This implementation needs to be updated for different block dims.
-        assert self._block_dims == (1, 32)
+        # colwise = input_spec.copy()
+        # colwise[flatten_axis - 1] = colwise_var
+
+        # # This implementation needs to be updated for different block dims.
+        # assert self._block_dims == (1, 32)
 
         return QuantizeShardyRules(
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {"block_size_rowwise": 32, "block_size_colwise": 32},
+            {}, # {"block_size_rowwise": 32, "block_size_colwise": 32},
         )
 
 
@@ -613,7 +624,9 @@ class ScalingMode(Enum):
         Returns:
             The Shardy rules for the scaling mode
         """
-        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
+        return self._get_impl().get_shardy_sharding_rules(
+            input_rank, unique_var, flatten_axis
+        )
 
     def get_grouped_scale_shape_2x(
         self, data_shape, n_groups, group_axis, is_padded=True, flatten_axis=-1

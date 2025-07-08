@@ -607,7 +607,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         result = self.exec(False, None)
-        assert result[0] < 0.505 and result[1] > 0.755
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
@@ -615,7 +615,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling")
-        assert result[0] < 0.506 and result[1] > 0.753
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"
@@ -623,7 +623,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_current_scaling_fp8(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         result = self.exec(True, "Float8CurrentScaling")
-        assert result[0] < 0.507 and result[1] > 0.753
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(
         not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
@@ -631,40 +631,39 @@ class TestEncoder(unittest.TestCase):
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling")
-        assert result[0] < 0.505 and result[1] > 0.754
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
-    @unittest.skipIf(
-        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
-    )
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         result = self.exec(False, None, enable_shardy=True)
-        assert result[0] < 0.505 and result[1] > 0.755
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
     )
-    @unittest.skipIf(
-        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
-    )
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
-        assert result[0] < 0.506 and result[1] > 0.753
-
-    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+        assert result[0] < 0.43 and result[1] > 0.8
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"
     )
-    @unittest.skipIf(
-        not tex.gemm_uses_jax_dot(), "TE cuBLAS GEMM custom op does not support shardy"
-    )
     def test_te_current_scaling_fp8_shardy(self):
         """Test Transformer Engine with CurrentScaling FP8"""
         result = self.exec(True, "Float8CurrentScaling", enable_shardy=True)
-        assert result[0] < 0.507 and result[1] > 0.753
+        assert result[0] < 0.43 and result[1] > 0.8
+
+    @unittest.skipIf(
+        not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
+    )
+    @unittest.skipIf(tex.gemm_uses_jax_dot(),
+                     "`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+    def test_te_mxfp8_shardy(self):
+        """Test Transformer Engine with MXFP8"""
+        result = self.exec(True, "MXFP8BlockScaling", enable_shardy=True)
+        assert result[0] < 0.43 and result[1] > 0.8
 
 
 if __name__ == "__main__":

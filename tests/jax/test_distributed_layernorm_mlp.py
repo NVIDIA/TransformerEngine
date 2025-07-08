@@ -44,7 +44,6 @@ if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
-SUPPORTED_RECIPES_WITH_SHARDY = SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES
 
 DTYPES = [jnp.bfloat16, jnp.float16]
 INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
@@ -284,13 +283,13 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES_WITH_SHARDY)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm,
     ):
-        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
-        # native JAX FP8 dot_general. We don't test block scaling with Shardy because at the
-        # time of writing, it is not supported in JAX's scaled_matmul_stablehlo.
+        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
         self._test_layernorm_mlp_grad(
             mesh_config,
             activation_type,
@@ -299,7 +298,7 @@ class TestDistributedLayernormMLP:
             dtype,
             fp8_recipe=fp8_recipe,
             use_shardy=True,
-            with_jax_gemm=True,
+            with_jax_gemm=with_jax_gemm,
         )
 
     def _test_layernorm_mlp(
@@ -400,9 +399,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper(
-        "fp8_recipe", SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES
-    )
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
@@ -424,11 +421,10 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
     ):
-        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
-        # native JAX dot_general.
         self._test_layernorm_mlp(
             mesh_config,
             activation_type,
@@ -438,7 +434,7 @@ class TestDistributedLayernormMLP:
             use_fp8=False,
             fp8_recipe=None,
             use_shardy=True,
-            with_jax_gemm=True,
+            with_jax_gemm=with_jax_gemm,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -447,13 +443,13 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES_WITH_SHARDY)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
     ):
-        # TE cuBLAS GEMM custom op does not implement shardy rules so we test shardy only with
-        # native JAX FP8 dot_general. We don't test block scaling with Shardy because at the
-        # time of writing, it is not supported in JAX's scaled_matmul_stablehlo.
+        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
         self._test_layernorm_mlp(
             mesh_config,
             activation_type,
@@ -463,5 +459,5 @@ class TestDistributedLayernormMLP:
             use_fp8=True,
             fp8_recipe=fp8_recipe,
             use_shardy=True,
-            with_jax_gemm=True,
+            with_jax_gemm=with_jax_gemm,
         )
