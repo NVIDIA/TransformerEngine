@@ -49,7 +49,6 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 )
 
 
-
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
     assert mode in ["fwd_only", "fwd_bwd"]
     fp8_context = (
@@ -265,9 +264,11 @@ if __name__ == "__main__":
     for num_gemms in num_gemms_list:
         print(f"========== Benchmarking with num_gemms={num_gemms} ==========")
         for recipe_name in recipe_list:
-            assert recipe_name in ["bf16", "fp8_sub_channel", "mxfp8"], (
-                "Recipe must be one of bf16, fp8_sub_channel, or mxfp8"
-            )
+            assert recipe_name in [
+                "bf16",
+                "fp8_sub_channel",
+                "mxfp8",
+            ], "Recipe must be one of bf16, fp8_sub_channel, or mxfp8"
             if recipe_name == "mxfp8" and not mxfp8_available:
                 print(f"MXFP8 is not available, skipping {recipe_name}")
                 continue

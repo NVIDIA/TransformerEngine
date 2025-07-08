@@ -503,7 +503,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     size_t sinv0 = scale_shape[0];
     size_t sinv1 = scale_shape[1];
     columnwise_data = at::empty(torch_shape, opts);
-    columnwise_scale_inv = at::zeros({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts);
+    columnwise_scale_inv =
+        at::zeros({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts);
 
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(
@@ -532,7 +533,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 }
 
 std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& shape,
-                                                          bool columnwise) const {
+                                                    bool columnwise) const {
   size_t numel = 1;
   for (auto s : shape) {
     numel *= s;
@@ -561,6 +562,5 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   }
   return scale_shape;
 }
-
 
 }  // namespace transformer_engine::pytorch
