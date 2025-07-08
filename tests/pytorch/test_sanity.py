@@ -84,10 +84,10 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
     return torch.min(amax_history, dim=0).values
 
 
-def is_fp8_supported(ModelConfig):
-    if self.max_seqlen_q * self.batch_size % 16 or self.max_seqlen_q * self.batch_size % 16:
+def is_fp8_supported(config: ModelConfig):
+    if config.max_seqlen_q * config.batch_size % 16 or config.max_seqlen_q * config.batch_size % 16:
         return False
-    if self.hidden_size % 16 or self.hidden_size_kv % 16:
+    if config.hidden_size % 16 or config.hidden_size_kv % 16:
         return False
     return True
 

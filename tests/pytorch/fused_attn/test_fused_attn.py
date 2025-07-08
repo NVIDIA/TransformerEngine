@@ -99,7 +99,10 @@ class ModelConfig:
         self.num_gqa_groups = num_gqa_groups
         self.head_dim_qk = head_dim_qk
         self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
-        self.kv_channels = (self.head_dim_qk, self.head_dim_v)
+        if self.head_dim_qk == self.head_dim_v:
+            self.kv_channels = self.head_dim_qk
+        else:
+            self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = num_heads * head_dim_qk
         self.hidden_size_kv = num_gqa_groups * self.head_dim_v
         self.max_seqlen_q = max_seqlen_q
