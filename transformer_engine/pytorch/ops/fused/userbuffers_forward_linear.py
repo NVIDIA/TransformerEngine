@@ -292,10 +292,12 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op = self.basic_ops[idx]
         linear_op_ctx = basic_op_ctxs[idx]
         bias_op = None
+        bias_op_ctx = None
         bias = None
         if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
             bias_op = self.basic_ops[idx]
+            bias_op_ctx = basic_op_ctxs[idx]
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
@@ -364,6 +366,9 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_requires_grad
         linear_op_ctx.weight_requires_grad = weight_requires_grad
+        if bias_op is not None:
+            bias_op_ctx.with_quantized_compute = with_quantized_compute
+            bias_op_ctx.grad_output_quantizer = linear_op.get_grad_input_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
