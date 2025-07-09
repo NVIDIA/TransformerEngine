@@ -197,6 +197,16 @@ const std::string &include_directory(bool required) {
   return path;
 }
 
+int cudart_version() {
+  auto get_version = []() -> int {
+    int version;
+    NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&version));
+    return version;
+  };
+  static int version = get_version();
+  return version;
+}
+
 }  // namespace cuda
 
 }  // namespace transformer_engine
