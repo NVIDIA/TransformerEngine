@@ -100,6 +100,16 @@ bool has_mnnvl_fabric(int device_id) {
   }
   return false;
 #else
+  // Check run-time CUDA version
+  if (cuda::cudart_version() < 12040) {
+    if (getenv("NVTE_UBDEBUG")) {
+      printf(
+        "TransformerEngine does not support multi-node NVLINK "
+        "since it is not being run with CUDA version >= 12.4.\n");
+    }
+    return false;
+  }
+
   bool mnnvl_fabric_support = false;
   CUdevice dev;
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &dev, device_id);

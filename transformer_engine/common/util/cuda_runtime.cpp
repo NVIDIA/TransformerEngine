@@ -103,8 +103,11 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id)
 
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
-  // NOTE: This needs to be guarded at compile time because the
+  // NOTE: This needs to be guarded at compile-time and run-time because the
   //       CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED enum is not defined in earlier CUDA versions.
+  if (cudart_version() < 12010) {
+    return false;
+  }
   static std::vector<bool> cache(num_devices(), false);
   static std::vector<std::once_flag> flags(num_devices());
   if (device_id < 0) {
