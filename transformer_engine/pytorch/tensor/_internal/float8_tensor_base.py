@@ -145,16 +145,20 @@ class Float8TensorBase(QuantizedTensorBase):
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
-        data = self._data
-        if data is not None:
-            return Float8TensorBase(
-                data=data.view(shape),
-                fp8_scale_inv=self._scale_inv,
-                fp8_dtype=self._fp8_dtype,
-                data_transpose=None,
-                quantizer=self._quantizer,
-            )
-        raise RuntimeError("No data available to view")
+        out_data = self._data.view(shape)
+        out_transpose = None if self._transpose_invalid else self._transpose
+        if out_transpose is not None:
+            out_transpose_shape = out_transpose.size()
+            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+                out_transpose = None
+
+        return Float8TensorBase(
+            data=out_data,
+            fp8_scale_inv=self._scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            data_transpose=out_transpose,
+            quantizer=self._quantizer,
+        )
 
     def __repr__(self):
         return (
