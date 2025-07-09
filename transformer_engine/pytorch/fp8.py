@@ -46,6 +46,8 @@ def check_fp8_support() -> Tuple[bool, str]:
 
 def check_mxfp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
+    if get_device_compute_capability() >= (12, 0):
+        return False, "MXFP8 is not supported on 12.0+ architectures yet."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
@@ -64,7 +66,7 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
-    if get_device_compute_capability() >= (10, 0):  # blackwell and above
+    if check_mxfp8_support()[0]:
         return MXFP8BlockScaling()
     return DelayedScaling()
 
