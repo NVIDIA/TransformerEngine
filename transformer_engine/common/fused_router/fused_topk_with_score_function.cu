@@ -475,10 +475,10 @@ void nvte_fused_topk_with_score_function_forward(
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
   fused_topk_with_score_function_forward(
-      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, static_cast<bool>(use_pre_softmax), num_groups,
-      group_topk, scaling_factor, score_function, *convertNVTETensorCheck(expert_bias),
-      *convertNVTETensorCheck(probs), *convertNVTETensorCheck(routing_map),
-      *convertNVTETensorCheck(intermediate_output), stream);
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk,
+      static_cast<bool>(use_pre_softmax), num_groups, group_topk, scaling_factor, score_function,
+      *convertNVTETensorCheck(expert_bias), *convertNVTETensorCheck(probs),
+      *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output), stream);
 }
 
 void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
@@ -491,6 +491,7 @@ void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
   using namespace transformer_engine;
   fused_topk_with_score_function_backward(
       *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output),
-      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk, static_cast<bool>(use_pre_softmax),
-      scaling_factor, score_function, *convertNVTETensorCheck(grad_logits), stream);
+      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk,
+      static_cast<bool>(use_pre_softmax), scaling_factor, score_function,
+      *convertNVTETensorCheck(grad_logits), stream);
 }
