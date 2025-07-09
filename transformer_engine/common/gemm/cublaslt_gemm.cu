@@ -22,24 +22,6 @@
 
 namespace {
 
-cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
-  using namespace transformer_engine;
-  switch (t) {
-    case DType::kFloat16:
-      return CUDA_R_16F;
-    case DType::kFloat32:
-      return CUDA_R_32F;
-    case DType::kBFloat16:
-      return CUDA_R_16BF;
-    case DType::kFloat8E4M3:
-      return CUDA_R_8F_E4M3;
-    case DType::kFloat8E5M2:
-      return CUDA_R_8F_E5M2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
-
 uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
   uint32_t alignment = 256;
