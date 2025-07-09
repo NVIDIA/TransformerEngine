@@ -1,18 +1,14 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
-
 import random
 import contextlib
 import pytest
 import torch
 from typing import Optional
-from transformer_engine.pytorch.cpu_offload import  _CPUOffloadBackend
-from transformer_engine.pytorch.cpu_offload import CPUOffload, get_cpu_offload_context
+from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, OffloadSynchronizer
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
+
 EPSILON = 0.1
 
 # Disable garbage collection to tests if there are reference cycles.
@@ -85,7 +81,7 @@ class Utils:
         return ["high precision", "fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling", "mxfp8"]
 
     @staticmethod
-    def create_tensor(recipe_name: str, requires_grad: bool = False):
+    def create_tensor(recipe_name: str, requires_grad: bool = False) -> torch.Tensor:
         shape = (Utils._B, Utils._S, Utils._D)
         tensor = torch.randn(shape, device="cuda")
         if recipe_name == "high precision":
@@ -156,188 +152,101 @@ class Utils:
         # This is a simple check to catch memory leaks.
         assert Utils.get_cuda_memory_mb() < 100, f"Memory leak: {Utils.get_cuda_memory_mb()} MB"
 
-class AddOneLayer(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return x + 1
-
-class TestsBackend:
-    @pytest.mark.parametrize("reuse_gpu_buffers", [True, False])
+class TestsOffloadSynchronizer:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_general(self, reuse_gpu_buffers, random_num_tensors, recipe_name):
+    def test_general(self, random_num_tensors, recipe_name):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
-        if reuse_gpu_buffers and random_num_tensors:
-            pytest.skip("Cannot have random number of tensors and reuse_gpu_buffers at the same time.")
-        backend = _CPUOffloadBackend(
-            reuse_gpu_buffers=reuse_gpu_buffers, 
-        )
         NUM_LAYERS = 10
         NUM_ITERATIONS = 10
+        
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=NUM_LAYERS,
+            num_offloaded_layers=NUM_LAYERS - 1,
+        )
+
 
         for _ in range(NUM_ITERATIONS):
             original_tensors = []
-            tensors_cpu = []
+            tensors_ids = []
             layer_ids = []
 
             for i in range(NUM_LAYERS):
                 NUM_LAYER_TENSORS = random.randint(1, 10) if random_num_tensors else 1
                 layer_tensors = []
-                layer_tensors_cpu = []
-                backend.start_offloaded_layer_fwd()
+                layer_tensors_ids = []
+                layer_id = offload_synchronizer.fwd_step()
                 for _ in range(NUM_LAYER_TENSORS):
                     tensor = Utils.create_tensor(recipe_name)
                     layer_tensors.append(tensor)
-                    if random.randint(0, 1) == 0:
-                        backend.mark_can_start_offload(tensor)
-                    tensor_cpu = backend.offload(tensor)
+                    tensor_id = offload_synchronizer.push_tensor(tensor)
                     assert tensor.device.type == "cuda"
-                    assert tensor_cpu.device.type == "cpu"
-                    layer_tensors_cpu.append(tensor_cpu)
-                layer_id = backend.end_offloaded_layer_fwd()
+                    layer_tensors_ids.append(tensor_id)
                 layer_ids.append(layer_id)
-                tensors_cpu.append(layer_tensors_cpu)
+                tensors_ids.append(layer_tensors_ids)
                 original_tensors.append(layer_tensors)
-            backend.finish_fwd()
-            backend.start_bwd_reloading()
             for i in range(NUM_LAYERS - 1, -1, -1):
-                backend.start_offloaded_layer_bwd(layer_ids[i])
-                for j in range(len(tensors_cpu[i])):
-                    tensor_gpu = backend.reload(tensors_cpu[i][j])
+                offload_synchronizer.bwd_step(layer_ids[i])
+                for j in range(len(tensors_ids[i])):
+                    tensor_gpu = offload_synchronizer.pop_tensor(tensors_ids[i][j])
                     assert tensor_gpu.device.type == "cuda"
                     assert tensor_gpu.shape == original_tensors[i][j].shape
                     assert tensor_gpu.dtype == original_tensors[i][j].dtype
                     torch.testing.assert_close(tensor_gpu, original_tensors[i][j])
-                backend.end_offloaded_layer_bwd()
+            offload_synchronizer.finish_part_of_bwd()
         torch.cuda.synchronize()
+
     
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     def test_memory(self, recipe_name):
-        Utils.skip_if_recipe_not_supported(recipe_name)
-        #reset max memory allocated
-        init_cuda_memory = Utils.get_cuda_memory_mb()
-        x = Utils.create_tensor(recipe_name)
-        x_size = Utils.get_tensor_size_mb(x)
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + x_size, 0.1)
-
         torch.cuda.synchronize()
-        backend = _CPUOffloadBackend()
-        backend.start_offloaded_layer_fwd()
-        x1_cpu = backend.offload(x)
-        del x
-        num1 = backend.end_offloaded_layer_fwd()
-
-        torch.cuda.synchronize()
-
-        # Memory is not released yet.
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + x_size, 0.1)
-
-        backend.start_offloaded_layer_fwd()
-        # Next offloaded layer, memory should be released.
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
-
-        x = Utils.create_tensor(recipe_name)
-        x2_cpu = backend.offload(x)
-        del x
-        num2 = backend.end_offloaded_layer_fwd()
-
-        backend.start_offloaded_layer_fwd()
-        x = Utils.create_tensor(recipe_name)
-        x3_cpu = backend.offload(x)
-        del x
-        num3 = backend.end_offloaded_layer_fwd()
-
-        backend.finish_fwd()
-        torch.cuda.reset_max_memory_allocated()
-
-        backend.start_bwd_reloading()
-        torch.cuda.synchronize()
-        
-        backend.start_offloaded_layer_bwd(num3)
-        backend.reload(x3_cpu)
-        backend.end_offloaded_layer_bwd()
-
-        torch.cuda.synchronize()
-
-        backend.start_offloaded_layer_bwd(num2)
-        backend.reload(x2_cpu)
-        backend.end_offloaded_layer_bwd()
-
-        torch.cuda.synchronize()
-
-        backend.start_offloaded_layer_bwd(num1)
-        backend.reload(x1_cpu)
-        backend.end_offloaded_layer_bwd()
-
-
-        torch.cuda.synchronize()
-        # Third copy is released.
-        assert Utils.get_max_cuda_memory_mb() < init_cuda_memory + 2 * x_size + 0.1
-
-    def test_mark_can_start_offload(self):
-        """
-        Check that calling `mark_can_start_offload` lets the backend overlap the
-        D2H copy with computation.  The runtime with the mark should therefore
-        be strictly smaller than without it.
-        """
-        torch.cuda.synchronize()
-        tensor = torch.randn((128, 512, 512), device="cuda")
-
-        def _timed_run(use_mark: bool) -> float:
-            """Run a single forward pass and return its wall-clock time (ms)."""
-            def _run():
-                backend = _CPUOffloadBackend()
-                backend.start_offloaded_layer_fwd()
-                if use_mark:
-                    backend.mark_can_start_offload(tensor)
-
-                # Simulate compute that should overlap with the offload copy.
-                Utils.long_job()
-
-                backend.offload(tensor)
-                backend.end_offloaded_layer_fwd()
-                backend.finish_fwd()
-                backend.start_bwd_reloading()
-
-                # Make sure all CUDA work is finished before timing stops.
-                torch.cuda.current_stream().synchronize()
-                torch.cuda.synchronize()
-
-            return Utils.measure_time(_run)
-
-        # Warm-up
-        _timed_run(False)
-        time_without_mark = _timed_run(False)
-        time_with_mark = _timed_run(True)
-        print(f"time_without_mark: {time_without_mark} ms, "
-              f"time_with_mark: {time_with_mark} ms")
-        assert time_with_mark < time_without_mark
-
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_multiple_tensor_offload(self, recipe_name):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
-        init_cpu_memory = Utils.get_cpu_memory_mb()
-        init_cuda_memory = Utils.get_cuda_memory_mb()
-        backend = _CPUOffloadBackend()
-        backend.start_offloaded_layer_fwd()
-        x1 = Utils.create_tensor(recipe_name)
-        x_size = Utils.get_tensor_size_mb(x1)
-        backend.offload(x1)
-        backend.offload(x1)
-        backend.offload(x1)
-        # Only one copy of tensor on cpu is allocated.
-        assert Utils.get_cpu_memory_mb() == pytest.approx(init_cpu_memory + 1 * x_size, 0.1)
-        del x1
-        backend.end_offloaded_layer_fwd()
-        backend.finish_fwd()
+        NUM_LAYERS = 10
 
+        torch.cuda.reset_peak_memory_stats()
+
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=NUM_LAYERS,
+            num_offloaded_layers=NUM_LAYERS - 1,
+        )
+
+        init_cuda_memory = Utils.get_cuda_memory_mb()
+
+        tensor_ids = []
+
+        torch.cuda.synchronize()
+        for _ in range(NUM_LAYERS):
+            offload_synchronizer.fwd_step()
+            # print max memory allocated
+            tensor = Utils.create_tensor(recipe_name)
+            tensor_size = Utils.get_tensor_size_mb(tensor)
+            tensor_id = offload_synchronizer.push_tensor(tensor)
+            assert tensor.device.type == "cuda"
+            tensor_ids.append(tensor_id)
+            del tensor, tensor_id
+        torch.cuda.synchronize()
+
+        if recipe_name == "high precision":
+            assert Utils.get_max_cuda_memory_mb() == pytest.approx(init_cuda_memory + tensor_size, 0.1)
+        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + tensor_size, 0.1)
+        
+        for i in range(NUM_LAYERS - 1, -1, -1):
+            offload_synchronizer.bwd_step(i)
+            tensor_gpu = offload_synchronizer.pop_tensor(tensor_ids[i])
+            assert tensor_gpu.device.type == "cuda"
+            del tensor_gpu, tensor_ids[i]
+        offload_synchronizer.finish_part_of_bwd()
+        
+        del tensor_ids
+        torch.cuda.synchronize()
+
+        if recipe_name == "high precision":
+            assert Utils.get_max_cuda_memory_mb() == pytest.approx(init_cuda_memory + tensor_size, 0.1)
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
     
-    @pytest.mark.parametrize("job_forward", [True, False])
+    @pytest.mark.parametrize("job_forward", [True, False])  
     @pytest.mark.parametrize("job_backward", [True, False])
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     def test_overlap(self, job_forward, job_backward, recipe_name):
@@ -347,28 +256,27 @@ class TestsBackend:
             pytest.skip("")
         NUM_LAYERS = 10
         def _run(job_forward, job_backward, offloads):
-            backend = _CPUOffloadBackend()
+            offload_synchronizer = OffloadSynchronizer(
+                num_layers=NUM_LAYERS,
+                num_offloaded_layers=NUM_LAYERS - 1,
+            )
             offloaded_tensors = []
             layer_ids = []
             for _ in range(NUM_LAYERS):
-                backend.start_offloaded_layer_fwd()
+                layer_id = offload_synchronizer.fwd_step()
+                layer_ids.append(layer_id)
                 if offloads:
-                    offloaded_tensors.append(backend.offload(Utils.create_tensor(recipe_name)))
+                    offloaded_tensors.append(offload_synchronizer.push_tensor(Utils.create_tensor(recipe_name)))
                 else:
                     offloaded_tensors.append(Utils.create_tensor(recipe_name))
                 if job_forward:
                     Utils.long_job()
-                layer_id = backend.end_offloaded_layer_fwd()
-                layer_ids.append(layer_id)
-            backend.finish_fwd()
-            backend.start_bwd_reloading()
             for i in range(NUM_LAYERS - 1, -1, -1):
-                backend.start_offloaded_layer_bwd(layer_ids[i])
+                offload_synchronizer.bwd_step(layer_ids[i])
                 if offloads:
-                    backend.reload(offloaded_tensors[i])
+                    offload_synchronizer.pop_tensor(offloaded_tensors[i])
                 if job_backward:
                     Utils.long_job()
-                backend.end_offloaded_layer_bwd()
             torch.cuda.synchronize()
         
         def _measure_time(job_forward, job_backward, offloads):
@@ -386,133 +294,226 @@ class TestsBackend:
 
         assert time_offload_only + time_selected_jobs > time_offload_and_selected_jobs + EPSILON
 
+    def test_offload_base_tensor(self):
+        Utils.memory_leak_check()
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=2,
+            num_offloaded_layers=1,
+        )
+        init_cuda_memory = Utils.get_cuda_memory_mb()
+        x = Utils.create_tensor("high precision")
+        x_size = Utils.get_tensor_size_mb(x)
+        x_1 = x[::2]
+        x_2 = x[1::2]
 
-class TestTEAPI:
-    @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
+        offload_synchronizer.fwd_step()
+        x1_id = offload_synchronizer.push_tensor(x_1, offload_base_tensor=True)
+        x2_id = offload_synchronizer.push_tensor(x_2, offload_base_tensor=True)
+        del x_1, x_2
+        offload_synchronizer.fwd_step()
+
+        assert offload_synchronizer.get_offloaded_total_size_mb() == pytest.approx(x_size, 0.1)
+
+        offload_synchronizer.bwd_step(0)
+        x_1 = offload_synchronizer.pop_tensor(x1_id)
+        x_2 = offload_synchronizer.pop_tensor(x2_id)
+        assert x_1.device.type == "cuda"
+        assert x_2.device.type == "cuda"
+
+        assert torch.allclose(x_1, x[::2])
+        assert torch.allclose(x_2, x[1::2])
+        del x
+
+        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + x_size, 0.1)
+    
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_offload_one_layer(self, layer_type, recipe_name):
+    def test_multiple_tensor_offload(self, recipe_name):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
-        torch.cuda.synchronize()
-        cpu_offload = CPUOffload()
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
-        layer = Utils.create_layer(layer_type)
-        last_layer = AddOneLayer()
-        inp = Utils.create_tensor("high precision")
+        init_cpu_memory = Utils.get_cpu_memory_mb()
+        init_cuda_memory = Utils.get_cuda_memory_mb()
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=2,
+            num_offloaded_layers=1,
+        )
+        x1 = Utils.create_tensor(recipe_name)
+        x_size = Utils.get_tensor_size_mb(x1)
+        offload_synchronizer.fwd_step()
+        offload_synchronizer.push_tensor(x1)
+        offload_synchronizer.push_tensor(x1)
+        offload_synchronizer.push_tensor(x1)
+        offload_synchronizer.fwd_step()
+        # Only one copy of tensor on cpu is allocated.
+        assert Utils.get_cpu_memory_mb() == pytest.approx(init_cpu_memory + 1 * x_size, 0.1)
+        del x1
+        offload_synchronizer.bwd_step(1)
+        offload_synchronizer.bwd_step(0)
+        offload_synchronizer.finish_part_of_bwd()
 
+        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+    
+    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
+    def test_offload_start_synchronization(self, recipe_name):
+        Utils.memory_leak_check()
+        Utils.skip_if_recipe_not_supported(recipe_name)
+        NUM_ITERATIONS = 10
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=2,
+            num_offloaded_layers=1,
+        )
+        x = Utils.create_tensor(recipe_name)
+
+
+        def job_first():
+            for _ in range(NUM_ITERATIONS):
+                Utils.long_job()
+                offload_synchronizer.fwd_step()
+                offload_synchronizer.push_tensor(x)
+                offload_synchronizer.fwd_step()
+
+            
+                offload_synchronizer.bwd_step(1)
+                offload_synchronizer.bwd_step(0)
+                offload_synchronizer.finish_part_of_bwd()
+                torch.cuda.synchronize()
+        
+        def offload_first():
+            for _ in range(NUM_ITERATIONS):
+                offload_synchronizer.fwd_step()
+                offload_synchronizer.push_tensor(x)
+                Utils.long_job()
+                offload_synchronizer.fwd_step()
+
+            
+                offload_synchronizer.bwd_step(1)
+                offload_synchronizer.bwd_step(0)
+                offload_synchronizer.finish_part_of_bwd()
+                torch.cuda.synchronize()
+
+        def only_job():
+            for _ in range(NUM_ITERATIONS):
+                Utils.long_job()
+                torch.cuda.synchronize()
+        
+        def only_offload():
+            for _ in range(NUM_ITERATIONS):
+                offload_synchronizer.fwd_step()
+                offload_synchronizer.push_tensor(x)
+                offload_synchronizer.fwd_step()
+                offload_synchronizer.bwd_step(1)
+                offload_synchronizer.bwd_step(0)
+                offload_synchronizer.finish_part_of_bwd()
+                torch.cuda.synchronize()
+        
+        # measure time of offload_first
+        time_offload_first = Utils.measure_time(offload_first)
+        time_job_first = Utils.measure_time(job_first)
+        time_only_offload = Utils.measure_time(only_offload)
+        time_only_job = Utils.measure_time(only_job)
+
+        print(f"time_offload_first: {time_offload_first:.2f} ms, "
+              f"time_job_first: {time_job_first:.2f} ms, "
+              f"time_only_offload: {time_only_offload:.2f} ms, "
+              f"time_only_job: {time_only_job:.2f} ms")
+
+        assert time_offload_first < time_job_first
+    
+    
+    def test_synchronization_dict(self):
+        Utils.memory_leak_check()
+        NUM_LAYERS = 10
+
+        torch.cuda.reset_peak_memory_stats()
+
+        offload_synchronizer = OffloadSynchronizer(
+            num_layers=NUM_LAYERS,
+            synchronization_dict={
+                0: (True, 5, False, 2),
+                1: (True, 5, False, 2),
+                5: (False, 8, False, 7),
+                6: (False, 8, False, 7),
+            }
+        )
+
+        tensor_size = Utils.get_tensor_size_mb(Utils.create_tensor("high precision"))
+
+        init_cuda_memory = Utils.get_cuda_memory_mb()
+
+        tensor_ids = []
+
+        memory_before_fwd = []
+        memory_before_bwd: list[float | None] = [None] * NUM_LAYERS
+
+        torch.cuda.synchronize()
+        for _ in range(NUM_LAYERS):
+            memory_before_fwd.append(Utils.get_cuda_memory_mb())
+            tensor = Utils.create_tensor("high precision")
+            offload_synchronizer.fwd_step()
+            tensor_id = offload_synchronizer.push_tensor(tensor)
+            assert tensor.device.type == "cuda"
+            tensor_ids.append(tensor_id)
+            del tensor, tensor_id
+        torch.cuda.synchronize()
+
+        for i in range(NUM_LAYERS-1, -1, -1):
+            offload_synchronizer.bwd_step(i)
+            memory_before_bwd[i] = Utils.get_cuda_memory_mb()
+            del tensor_ids[i]
+        offload_synchronizer.finish_part_of_bwd()
+        torch.cuda.synchronize()
+
+        assert memory_before_fwd[5] == pytest.approx(init_cuda_memory + 5 * tensor_size, 0.1)
+
+        # layers 0 and 1 finish offloading before fwd of layer 5
+        assert memory_before_fwd[6] == pytest.approx(init_cuda_memory + 4 * tensor_size, 0.1)
+
+        # layers 0, 1 offloaded, layers 5, 6 not offloaded yet
+        assert memory_before_bwd[9] == pytest.approx(init_cuda_memory + (NUM_LAYERS - 2) * tensor_size, 0.1)
+
+        # 0, 1, 5, 6 offloaded, nothing started reloading yet
+        assert memory_before_bwd[8] == pytest.approx(init_cuda_memory + 5 * tensor_size, 0.1)
+
+        # 0, 1, offloaded, 5, 6 started reloading
+        assert memory_before_bwd[7] == pytest.approx(init_cuda_memory + 6 * tensor_size, 0.1)
+
+        # 2, 3 not offloaded
+        assert memory_before_bwd[3] == pytest.approx(init_cuda_memory + 2 * tensor_size, 0.1)
+
+        # 0, 1 reloading, 2 not offloaded
+        assert memory_before_bwd[2] == pytest.approx(init_cuda_memory + 3 * tensor_size, 0.1)
+        
+
+class TestTELayers:
+    @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
+    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
+    def test_sanity(self, layer_type, recipe_name):
+        Utils.memory_leak_check()
+        Utils.skip_if_recipe_not_supported(recipe_name)
+        init_cuda_memory = Utils.get_cuda_memory_mb()
+        OFFLOAD_LAYERS = 6
+        NUM_LAYERS = 10
+        offload_ctx, sync_function = get_cpu_offload_context(
+            enabled=True,
+            num_layers=OFFLOAD_LAYERS,
+            model_layers=NUM_LAYERS,
+        )
+        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        layers = [Utils.create_layer(layer_type) for _ in range(NUM_LAYERS)]
+        inp = Utils.create_tensor("high precision")
         m_splits = {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H} \
             if layer_type == "grouped_linear" else {}
-        
-        with recipe_ctx():
-            out = layer(inp, is_first_microbatch=True, **m_splits)
-            out = last_layer(out)
+        out = inp
+        for i in range(NUM_LAYERS):
+            with offload_ctx, recipe_ctx():
+                out = layers[i](out, is_first_microbatch=False, **m_splits)
+            out = sync_function(out)
         out.sum().backward()
-
-        # run with is_first_microbatch=True to cache the fp8 casts
-        del inp
-        init_cuda_memory = Utils.get_cuda_memory_mb()
-        inp = Utils.create_tensor("high precision")
-        with recipe_ctx():
-            out = layer(inp, is_first_microbatch=False, **m_splits)
-            out = last_layer(out)
-        del inp
-        activation_size = Utils.get_cuda_memory_mb() - init_cuda_memory
-        out.sum().backward()
-
-        init_cuda_memory = Utils.get_cuda_memory_mb()
-
-        # run layer with offload
-        layer_offload = cpu_offload(layer, offload_activations=True)
-        last_layer_offload = cpu_offload(last_layer, is_last_layer=True)
-        inp = Utils.create_tensor("high precision")
-        with recipe_ctx():
-            out = layer_offload(inp, is_first_microbatch=False, **m_splits)
-            out = last_layer_offload(out)
-        del inp
-        offloaded_size = cpu_offload.backend.get_offloaded_total_size_mb()
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
-        assert offloaded_size == pytest.approx(activation_size, 0.1)
-
-        out.sum().backward()
+        torch.cuda.synchronize()
+        del out, inp, layers
     
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_pipeline_parallel(self, layer_type, recipe_name):
-        Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported(recipe_name)
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
-        cpu_offload = CPUOffload()
-
-        layer1 = Utils.create_layer(layer_type)
-        layer2 = Utils.create_layer(layer_type)
-        layer3 = Utils.create_layer(layer_type)
-
-        def _run(inp):
-            m_splits = {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H} \
-                if layer_type == "grouped_linear" else {}
-            
-            with recipe_ctx():
-                out = layer1(inp, **m_splits)
-                out = layer2(out, **m_splits)
-                out = layer3(out, **m_splits)
-            return out.sum()
-    
-
-        def _run_offload(inp):
-            m_splits = {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H} \
-                if layer_type == "grouped_linear" else {}
-            layer1_offload = cpu_offload(layer1, offload_activations=True)
-            layer2_offload = cpu_offload(layer2, offload_activations=True)
-            layer3_offload = cpu_offload(layer3, is_last_layer=True)
-            with recipe_ctx():
-                out = layer1_offload(inp, **m_splits)
-                out = layer2_offload(out, **m_splits)
-                out = layer3_offload(out, **m_splits)
-            return out.sum()
-
-        inps = [Utils.create_tensor("high precision", requires_grad=True) for _ in range(3)]
-
-        outs = []
-        for i in range(3):
-            outs.append(_run(inps[i]))
-        for out in outs:
-            out.backward()
-        
-        inps_offload = [inps[i].clone().detach() for i in range(3)]
-        for i in range(3):
-            inps_offload[i] = inps_offload[i].requires_grad_()
-        # run with offload
-        outs_offload = []
-        for i in range(3):
-            outs_offload.append(_run_offload(inps_offload[i]))
-        for out in outs_offload:
-            out.backward()
-        
-        # check if inp grads are the same
-        if recipe_name == "high precision":
-            for i in range(3):
-                assert torch.allclose(inps[i].grad, inps_offload[i].grad)
-    
-    def test_fake_tensor(self):
-        Utils.memory_leak_check()
-        Utils.skip_if_recipe_not_supported("high precision")
-        layer = Utils.create_layer("linear")
-        cpu_offload = CPUOffload()
-        layer_offload = cpu_offload(layer)
-        layer_offload_2 = cpu_offload(layer)
-        layer_offload_3 = cpu_offload(layer, is_last_layer=True)
-        inp = Utils.create_tensor("high precision")
-        model = torch.nn.Sequential(layer_offload, layer_offload_2, layer_offload_3)
-        # torch compile model
-        model = torch.compile(model)
-        out = model(inp)
-        out.sum().backward()
-    
-
-class TestLegacyAPI:
-    @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_legacy_api(self, layer_type, recipe_name):
+    def test_memory(self, layer_type, recipe_name):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
         offload_ctx, sync_function = get_cpu_offload_context(
@@ -545,25 +546,63 @@ class TestLegacyAPI:
         out = sync_function(out)
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
         out.sum().backward()
-    
+
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
-    def test_sanity_legacy_api(self, layer_type, recipe_name):
+    def test_vpp_offloading_scenario(self, recipe_name, layer_type):
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
-        OFFLOAD_LAYERS = 6
-        NUM_LAYERS = 10
         offload_ctx, sync_function = get_cpu_offload_context(
             enabled=True,
-            num_layers=OFFLOAD_LAYERS,
-            model_layers=NUM_LAYERS,
+            model_layers=6,
+            offload_activations=True,
+            synchronization_dict={
+                0: (True, 1, False, 1),
+                2: (True, 3, False, 3),
+            }
         )
-        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
-        layers = [Utils.create_layer(layer_type) for _ in range(NUM_LAYERS)]
+        pp1_1 = Utils.create_layer(layer_type)
+        pp1_2 = Utils.create_layer(layer_type)
+        pp2_1 = Utils.create_layer(layer_type)
+        pp2_2 = Utils.create_layer(layer_type)
+        pp3_1 = Utils.create_layer(layer_type)
+        pp3_2 = Utils.create_layer(layer_type)
         inp = Utils.create_tensor("high precision")
+
+        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+
         m_splits = {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H} \
             if layer_type == "grouped_linear" else {}
-        for i in range(NUM_LAYERS):
-            with offload_ctx, recipe_ctx():
-                out = layers[i](inp, is_first_microbatch=False, **m_splits)
-        out = sync_function(out)
+
+        # 1 fwd
+        with offload_ctx, recipe_ctx():
+            pp1_1_out = pp1_1(inp, is_first_microbatch=True, **m_splits)
+        pp1_1_out = sync_function(pp1_1_out)
+        with offload_ctx, recipe_ctx():
+            pp1_2_out = pp1_2(pp1_1_out, is_first_microbatch=False, **m_splits)
+        
+        # 2 fwd
+        pp1_2_out = sync_function(pp1_2_out)
+        with offload_ctx, recipe_ctx():
+            pp2_1_out = pp2_1(inp, is_first_microbatch=True, **m_splits)
+        pp2_1_out = sync_function(pp2_1_out)
+        with offload_ctx, recipe_ctx():
+            pp2_2_out = pp2_2(pp2_1_out, is_first_microbatch=False, **m_splits)
+        pp2_2_out = sync_function(pp2_2_out)
+
+        # 1 bwd
+        pp1_2_out.sum().backward()
+
+        # 3 fwd
+        with offload_ctx, recipe_ctx():
+            pp3_1_out = pp3_1(inp, is_first_microbatch=True, **m_splits)
+        pp3_1_out = sync_function(pp3_1_out)
+        with offload_ctx, recipe_ctx():
+            pp3_2_out = pp3_2(pp3_1_out, is_first_microbatch=False, **m_splits)
+        pp3_2_out = sync_function(pp3_2_out)
+
+        # 2 bwd
+        pp2_2_out.sum().backward()
+
+        # 3 bwd
+        pp3_2_out.sum().backward()
