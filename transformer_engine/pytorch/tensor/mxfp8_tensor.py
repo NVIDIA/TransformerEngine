@@ -331,13 +331,12 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 if args[0]._rowwise_data is not None
                 else args[0]._columnwise_data.numel()
             )
-        elif func == torch.ops.aten.is_pinned.default:
+        if func == torch.ops.aten.is_pinned.default:
             if args[0]._rowwise_data is not None:
                 return args[0]._rowwise_data.is_pinned()
-            elif args[0]._columnwise_data is not None:
+            if args[0]._columnwise_data is not None:
                 return args[0]._columnwise_data.is_pinned()
-            else:
-                raise RuntimeError("Cannot check if pinned for MXFP8Tensor with no data.")
+            raise RuntimeError("Cannot check if pinned for MXFP8Tensor with no data.")
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 

@@ -118,7 +118,7 @@ class TensorGroupProcessor:
         MultiHeadAttention for interleavedq, k, v tensors.
         """
         aux["views"] = []
-        for tensor_id in range(len(tensor_group.tensor_list)):
+        for tensor_id in range(len(tensor_group.tensor_list)): # pylint: disable=consider-using-enumerate
             tensor = tensor_group.tensor_list[tensor_id]
             if getattr(tensor, "offload_base_tensor", False):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
@@ -290,7 +290,7 @@ class OffloadSynchronizer:
         Invoked before each layer forward.
         """
 
-        if self.current_fwd_layer == -1 or self.current_fwd_layer == self.num_layers - 1:
+        if self.current_fwd_layer in [-1, self.num_layers - 1]:
             # reset the offload synchronizer
             self.current_fwd_layer = -1
 
@@ -433,8 +433,7 @@ class OffloadSynchronizer:
             current_tensor_group.events.append(torch.cuda.Event())
             current_tensor_group.events[-1].record(torch.cuda.current_stream())
             return len(current_tensor_group.tensor_list) - 1
-        else:
-            return tensor
+        return tensor
 
     def pop_tensor(self, tensor_or_tensor_id: torch.Tensor | int) -> torch.Tensor:
         """
@@ -465,7 +464,7 @@ def get_cpu_offload_context(
     model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = False,
-    double_buffering: bool = False,
+    double_buffering: bool = False, # pylint: disable=unused-argument
     synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None,
     min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD,
 ):
@@ -570,6 +569,9 @@ def get_cpu_offload_context(
             OFFLOAD_SYNCHRONIZER = self.previous_offload_synchronizer
 
         def synchronization_function(self, tensor):
+            """
+            This function is used to catch the backward pass of the model.
+            """
             assert tensor.requires_grad is True
             assert self.current_layer is not None
             cur_layer = self.current_layer
@@ -593,5 +595,4 @@ def get_cpu_offload_context(
             cpu_offload_context,
             cpu_offload_context.synchronization_function,
         )
-    else:
-        return contextlib.nullcontext(), lambda x: x
+    return contextlib.nullcontext(), lambda x: x

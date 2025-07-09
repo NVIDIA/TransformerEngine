@@ -591,12 +591,11 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         if func == torch.ops.aten.is_pinned.default:
             if args[0]._data is not None:
                 return args[0]._data.is_pinned()
-            elif args[0]._transpose is not None:
+            if args[0]._transpose is not None:
                 return args[0]._transpose.is_pinned()
-            else:
-                raise RuntimeError(
-                    "Cannot check if pinned for Float8Tensor with no data and no transpose."
-                )
+            raise RuntimeError(
+                "Cannot check if pinned for Float8Tensor with no data and no transpose."
+            )
         if func == torch.ops.aten.copy_.default:
             dst, src = args[0], args[1]
             # Just copy FP8 attrs if copying between Float8Tensors
@@ -615,7 +614,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             return (
                 args[0]._data.numel() if args[0]._data is not None else args[0]._transpose.numel()
             )
-        elif func in _ops_to_preserve_subclass_in_fsdp2:
+        if func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(
                 f"A function call({func}) in {cls} may not return {cls} tensor as an output. It"

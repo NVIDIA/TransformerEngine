@@ -270,7 +270,6 @@ class _LayerNormMLP(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        start_offload_if_offload_enabled(ln_out)
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
@@ -440,7 +439,6 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 act_out = activation_func(fc1_out, fc2_input_quantizer)
 
-        start_offload_if_offload_enabled(fc1_out, act_out)
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
 
@@ -562,22 +560,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 rsigma,
             )
 
-            if fuse_wgrad_accumulation:
-                # This check is needed to ensure that main_grad is not created
-                # during the forward pass when using MCore FSDP as it creates
-                # the main_grad buffer lazily before backprop
-                if hasattr(fc1_weight, "__fsdp_param__") and hasattr(fc2_weight, "__fsdp_param__"):
-                    # MCore FSDP creates main_grad lazily before backward
-                    ctx.fc1_main_grad_func = (
-                        fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
-                    )
-                    ctx.fc2_main_grad_func = (
-                        fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
-                    )
-                else:
-                    ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
-                    ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
-
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
@@ -672,22 +654,6 @@ class _LayerNormMLP(torch.autograd.Function):
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
-
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            fc1_weight_main_grad = (
-                ctx.fc1_main_grad_func()
-                if fc1_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc1_weight_requires_grad
-                else None
-            )
-            fc2_weight_main_grad = (
-                ctx.fc2_main_grad_func()
-                if origin_fc2_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc2_weight_requires_grad
-                else None
-            )
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP

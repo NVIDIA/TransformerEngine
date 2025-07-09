@@ -1049,11 +1049,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
-        from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
-
-        if is_cpu_offload_enabled():
-            qkv_layout = "sbhd_sbhd_sbhd"
-
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
