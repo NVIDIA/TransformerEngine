@@ -35,8 +35,8 @@ from ..sharding import get_non_contracting_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-DType = NewType('DType', jnp.dtype)
-Array = NewType('Array', jnp.ndarray)
+DType = NewType("DType", jnp.dtype)
+Array = NewType("Array", jnp.ndarray)
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
