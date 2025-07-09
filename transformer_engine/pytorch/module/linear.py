@@ -96,7 +96,7 @@ class _Linear(torch.autograd.Function):
         grad_weight_quantizer: Optional[Quantizer],
         grad_output_quantizer: Optional[Quantizer],
         fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool, # pylint: disable=unused-argument
+        cpu_offloading: bool,  # pylint: disable=unused-argument
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -712,7 +712,9 @@ class _Linear(torch.autograd.Function):
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,

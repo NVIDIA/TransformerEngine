@@ -118,7 +118,9 @@ class TensorGroupProcessor:
         MultiHeadAttention for interleavedq, k, v tensors.
         """
         aux["views"] = []
-        for tensor_id in range(len(tensor_group.tensor_list)): # pylint: disable=consider-using-enumerate
+        for tensor_id in range(
+            len(tensor_group.tensor_list)
+        ):  # pylint: disable=consider-using-enumerate
             tensor = tensor_group.tensor_list[tensor_id]
             if getattr(tensor, "offload_base_tensor", False):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
@@ -464,7 +466,7 @@ def get_cpu_offload_context(
     model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = False,
-    double_buffering: bool = False, # pylint: disable=unused-argument
+    double_buffering: bool = False,  # pylint: disable=unused-argument
     synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None,
     min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD,
 ):

@@ -478,9 +478,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 return args[0]._rowwise_data.is_pinned()
             if args[0]._columnwise_data is not None:
                 return args[0]._columnwise_data.is_pinned()
-            raise RuntimeError(
-                    "Cannot check if pinned for Float8BlockwiseQTensor with no data."
-                )
+            raise RuntimeError("Cannot check if pinned for Float8BlockwiseQTensor with no data.")
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
