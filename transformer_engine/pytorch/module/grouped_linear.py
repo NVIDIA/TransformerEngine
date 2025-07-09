@@ -182,7 +182,7 @@ class _GroupedLinear(torch.autograd.Function):
                     input_quantizers[i].calibrate(inputmats[i])
                 for i in range(num_gemms):
                     weight_quantizers[i].calibrate(weights[i])
-        
+
         if cpu_offloading:
             mark_is_weight(*weights_fp8, *weights)
 

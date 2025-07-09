@@ -131,7 +131,7 @@ class Float8TensorBase(QuantizedTensorBase):
     def get_data_tensors(self):
         """Get this Tensor's data."""
         return self._data, self._transpose
-    
+
     def set_data_tensors(self, data: torch.Tensor, transpose: torch.Tensor):
         """Set this Tensor's data."""
         self._data = data

@@ -217,7 +217,6 @@ class _LayerNormMLP(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         start_offload_if_offload_enabled(inputmat)
-            
 
         tp_world_size = get_distributed_world_size(tp_group)
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
@@ -533,12 +532,19 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
-            
+
             if cpu_offloading:
                 mark_is_weight(
-                    ln_weight, ln_bias, fc1_weight_final, fc1_weight, \
-                        fc1_bias, fc2_weight_final, fc2_weight, fc2_bias)
-                
+                    ln_weight,
+                    ln_bias,
+                    fc1_weight_final,
+                    fc1_weight,
+                    fc1_bias,
+                    fc2_weight_final,
+                    fc2_weight,
+                    fc2_bias,
+                )
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,

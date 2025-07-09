@@ -612,7 +612,9 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                         dst._create_transpose()
                 return dst
         if func == torch.ops.aten.numel.default:
-            return args[0]._data.numel() if args[0]._data is not None else args[0]._transpose.numel()
+            return (
+                args[0]._data.numel() if args[0]._data is not None else args[0]._transpose.numel()
+            )
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

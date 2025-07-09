@@ -153,7 +153,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
-    
+
         start_offload_if_offload_enabled(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)

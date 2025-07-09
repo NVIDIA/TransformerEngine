@@ -66,7 +66,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import  is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -413,7 +413,7 @@ class _Linear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
 
-            #ctx.owns_input = saved_inputmat is not inp
+            # ctx.owns_input = saved_inputmat is not inp
             ctx.owns_input = False
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
@@ -992,7 +992,6 @@ class Linear(TransformerEngineBaseModule):
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
-
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.in_features = in_features

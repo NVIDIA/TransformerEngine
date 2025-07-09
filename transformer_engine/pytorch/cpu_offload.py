@@ -14,37 +14,43 @@ from torch.autograd.graph import saved_tensors_hooks
 
 __all__ = ["get_cpu_offload_context", "mark_is_weight", "start_offload_if_offload_enabled"]
 
-DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2 ** 20 # 1mb
+DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2**20  # 1mb
 OFFLOAD_SYNCHRONIZER = None
 
+
 def is_cpu_offload_enabled():
-    """ Returns True if CPU offload is enabled. """
+    """Returns True if CPU offload is enabled."""
     return OFFLOAD_SYNCHRONIZER is not None
 
+
 def mark_is_weight(*tensors: torch.Tensor):
-    """ Marks tensors as weights to prevent them from being offloaded. """
+    """Marks tensors as weights to prevent them from being offloaded."""
     for tensor in tensors:
         if tensor is not None:
             setattr(tensor, "is_weight", True)
 
+
 def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor: bool = False):
-    """ Starts offload tensor. It should be used it tensors are fully computed and ready to be offloaded. """
+    """Starts offload tensor. It should be used it tensors are fully computed and ready to be offloaded."""
     if not is_cpu_offload_enabled():
         return
     for tensor in tensors:
         if tensor is not None:
-            OFFLOAD_SYNCHRONIZER.push_tensor(tensor, offload_base_tensor) # type: ignore[attr-defined]
+            OFFLOAD_SYNCHRONIZER.push_tensor(tensor, offload_base_tensor)  # type: ignore[attr-defined]
+
 
 @dataclass
 class TensorGroup:
     """
     TensorGroup is a collection of tensors, events and auxiliary data.
     It is used multiple times in the CPU offload code.
-    
+
     """
+
     tensor_list: list[torch.Tensor] = field(default_factory=list)
     events: list[torch.cuda.Event] = field(default_factory=list)
     aux: Any = None
+
 
 class TensorGroupProcessor:
     """
@@ -57,13 +63,15 @@ class TensorGroupProcessor:
     """
 
     @staticmethod
-    def process_push_tensor(tensor: torch.Tensor, offload_base_tensor: bool = False) -> torch.Tensor:
+    def process_push_tensor(
+        tensor: torch.Tensor, offload_base_tensor: bool = False
+    ) -> torch.Tensor:
         """
         Public API call - for a single tensor, when this tensor is pushed to be offloaded.
         """
         if offload_base_tensor:
             # Tensor is marked as a view of a base tensor that needs to be offloaded,
-            # we process this in _switch_to_base_tensors and _switch_to_views in the 
+            # we process this in _switch_to_base_tensors and _switch_to_views in the
             # tensor_group_process_before_offload and tensor_group_process_after_reload.
             setattr(tensor, "offload_base_tensor", True)
         else:
@@ -76,7 +84,7 @@ class TensorGroupProcessor:
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
         return tensor
-    
+
     @staticmethod
     def tensor_group_process_before_offload(tensor_group: TensorGroup) -> tuple[TensorGroup, Any]:
         """
@@ -120,7 +128,7 @@ class TensorGroupProcessor:
             else:
                 aux["views"].append(None)
         return tensor_group
-        
+
     @staticmethod
     def _make_contiguous(tensor_group: TensorGroup) -> TensorGroup:
         """
@@ -128,7 +136,7 @@ class TensorGroupProcessor:
         """
         tensor_group.tensor_list = [tensor.contiguous() for tensor in tensor_group.tensor_list]
         return tensor_group
-    
+
     @staticmethod
     def _deduplicate_tensors(aux, tensor_group: TensorGroup) -> TensorGroup:
         """
@@ -153,7 +161,7 @@ class TensorGroupProcessor:
         tensor_group.tensor_list = dedup_tensors
         tensor_group.events = dedup_events
         return tensor_group
-    
+
     @staticmethod
     def _restore_tensor_duplicates(tensor_group: TensorGroup) -> TensorGroup:
         """
@@ -185,9 +193,13 @@ class OffloadSynchronizer:
     I decoupled the logic from the context manager for easier testing.
     """
 
-    def __init__(self, num_layers: int, num_offloaded_layers: int | None = None, 
-                       synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None,
-                       min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD):
+    def __init__(
+        self,
+        num_layers: int,
+        num_offloaded_layers: int | None = None,
+        synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None,
+        min_tensor_size_to_offload: int = DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD,
+    ):
         self.offload_stream: torch.cuda.Stream = torch.cuda.Stream()
         self.min_tensor_size_to_offload = min_tensor_size_to_offload
 
@@ -201,7 +213,6 @@ class OffloadSynchronizer:
         # and keep it in bwd_current_reloaded_tensor_group. It is alive until bwd of layer i is finished,
         # and is overriden by the next bwd or cleared by the next fwd.
         self.bwd_current_reloaded_tensor_group: TensorGroup | None = None
-
 
         self.current_fwd_layer = -1
         self.num_layers = num_layers
@@ -218,18 +229,19 @@ class OffloadSynchronizer:
         self.offload_layer_map: dict[int, bool] = {}
         # keys to dictionaries below are pairs of (is_forward: bool, num_layer: int)
         # (is_forward: bool, num_layer: int) -> list of layers that need to finish offload by this moment
-        self.finish_offload_map: defaultdict[tuple[bool, int], list[int]] = defaultdict(list) 
+        self.finish_offload_map: defaultdict[tuple[bool, int], list[int]] = defaultdict(list)
         # (is_forward: bool, num_layer: int) -> list of layers that need to start reload in this moment
-        self.start_reload_map: defaultdict[tuple[bool, int], list[int]] = defaultdict(list) 
-    
+        self.start_reload_map: defaultdict[tuple[bool, int], list[int]] = defaultdict(list)
+
         if num_offloaded_layers is not None:
             assert synchronization_dict is None
             self._default_offload_sync_init(num_offloaded_layers)
         else:
             self._process_offload_sync_dict(synchronization_dict)
 
-
-    def _process_offload_sync_dict(self, synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None):
+    def _process_offload_sync_dict(
+        self, synchronization_dict: dict[int, tuple[bool, int, bool, int]] | None = None
+    ):
         """
         Process synchronization dictionary into self.offload_layer_map, self.finish_offload_map and self.start_reload_map.
 
@@ -239,9 +251,8 @@ class OffloadSynchronizer:
         assert synchronization_dict is not None
         for layer_id in range(self.num_layers):
             if layer_id in synchronization_dict.keys():
-                offload_fwd, offload_num, reload_fwd, reload_num = \
-                    synchronization_dict[layer_id]
-    
+                offload_fwd, offload_num, reload_fwd, reload_num = synchronization_dict[layer_id]
+
                 self.offload_layer_map[layer_id] = True
                 self.finish_offload_map[offload_fwd, offload_num].append(layer_id)
                 self.start_reload_map[reload_fwd, reload_num].append(layer_id)
@@ -254,19 +265,23 @@ class OffloadSynchronizer:
         offload_layer_map, finish_offload_map and start_reload_map.
 
         The aim is to minimize memory usage by the end of the forward pass.
-        
+
         The optimal strategy for that is to offload layers 0, ..., num_offloaded_layers - 1.
         For layer i offload needs to finish before num_layers - num_offloaded_layers + i.
         For layer i reload needs to start after num_layers - num_offloaded_layers + i.
 
-        This ensures that - if all layers have memory footprint of T - then peak memory usage of saving activations is 
+        This ensures that - if all layers have memory footprint of T - then peak memory usage of saving activations is
         (num_layers - num_offloaded_layers) * T.
         """
         for layer_id in range(self.num_layers):
             if layer_id < num_offloaded_layers:
                 self.offload_layer_map[layer_id] = True
-                self.finish_offload_map[True, self.num_layers - num_offloaded_layers + layer_id].append(layer_id)
-                self.start_reload_map[False, self.num_layers - 1 - num_offloaded_layers + layer_id].append(layer_id)
+                self.finish_offload_map[
+                    True, self.num_layers - num_offloaded_layers + layer_id
+                ].append(layer_id)
+                self.start_reload_map[
+                    False, self.num_layers - 1 - num_offloaded_layers + layer_id
+                ].append(layer_id)
             else:
                 self.offload_layer_map[layer_id] = False
 
@@ -282,10 +297,11 @@ class OffloadSynchronizer:
         if self.offload_layer_map.get(self.current_fwd_layer, False):
             # start offloading
             self.cpu_tensor_groups[self.current_fwd_layer] = self._offload_group(
-                self.fwd_gpu_tensor_groups[self.current_fwd_layer])
+                self.fwd_gpu_tensor_groups[self.current_fwd_layer]
+            )
             self.finish_offload_events[self.current_fwd_layer] = torch.cuda.Event()
             self.finish_offload_events[self.current_fwd_layer].record(self.offload_stream)
-        
+
         self.current_fwd_layer += 1
         self._start_reloads_finish_offloads(self.current_fwd_layer, True)
         return self.current_fwd_layer
@@ -302,17 +318,21 @@ class OffloadSynchronizer:
 
         # finish reload of current layer if necessary
         if self.offload_layer_map[layer_num]:
-            assert layer_num in self.finish_reload_events, \
-                f"Layer {layer_num} is not reloaded before it is needed in backward. \
-                    Check if the synchronization dictionary is correct."
+            assert layer_num in self.finish_reload_events, (
+                f"Layer {layer_num} is not reloaded before it is needed in backward.               "
+                "      Check if the synchronization dictionary is correct."
+            )
 
-            torch.cuda.current_stream().wait_event(self.finish_reload_events[layer_num]) # type: ignore[arg-type]
+            torch.cuda.current_stream().wait_event(self.finish_reload_events[layer_num])  # type: ignore[arg-type]
             self.bwd_current_reloaded_tensor_group = self.bwd_gpu_tensor_groups[layer_num]
             del self.bwd_gpu_tensor_groups[layer_num]
             del self.cpu_tensor_groups[layer_num]
-            self.bwd_current_reloaded_tensor_group = TensorGroupProcessor.tensor_group_process_after_reload(
-                self.bwd_current_reloaded_tensor_group)
-    
+            self.bwd_current_reloaded_tensor_group = (
+                TensorGroupProcessor.tensor_group_process_after_reload(
+                    self.bwd_current_reloaded_tensor_group
+                )
+            )
+
     def finish_part_of_bwd(self):
         """
         We need to release memory of backward - this call does that.
@@ -332,10 +352,10 @@ class OffloadSynchronizer:
             self.bwd_gpu_tensor_groups[layer] = self._reload_group(self.cpu_tensor_groups[layer])
             self.finish_reload_events[layer] = torch.cuda.Event()
             self.finish_reload_events[layer].record(self.offload_stream)
-        
+
         # end offloading and release memory
         for layer in self.finish_offload_map[forward, layer_num]:
-            torch.cuda.current_stream().wait_event(self.finish_offload_events[layer]) # type: ignore[arg-type]
+            torch.cuda.current_stream().wait_event(self.finish_offload_events[layer])  # type: ignore[arg-type]
             del self.fwd_gpu_tensor_groups[layer]
             del self.finish_offload_events[layer]
 
@@ -366,7 +386,7 @@ class OffloadSynchronizer:
             # empty_like is defined also for QuantizedTensors, if it is defined on cpu,
             # then scaling factors are left on GPU to avoid unnecessary copy of small tensors.
             offloaded_tensor = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
-            self.offload_stream.wait_event(tensor_group.events[tensor_id]) # type: ignore[arg-type]
+            self.offload_stream.wait_event(tensor_group.events[tensor_id])  # type: ignore[arg-type]
 
             with torch.cuda.stream(self.offload_stream):
                 offloaded_tensor.copy_(tensor, non_blocking=True)
@@ -374,19 +394,20 @@ class OffloadSynchronizer:
         offloaded_tensor_group.aux = aux
         return offloaded_tensor_group
 
-    
     def _check_if_offload(self, t: torch.Tensor) -> bool:
         """
         Check if tensor needs to be offloaded.
         """
         return (
-            not isinstance(t, torch.nn.Parameter) and
-            not getattr(t, "is_weight", False) and
-            t.numel() >= self.min_tensor_size_to_offload and
-            not isinstance(t, torch._subclasses.FakeTensor)
+            not isinstance(t, torch.nn.Parameter)
+            and not getattr(t, "is_weight", False)
+            and t.numel() >= self.min_tensor_size_to_offload
+            and not isinstance(t, torch._subclasses.FakeTensor)
         )
 
-    def push_tensor(self, tensor: torch.Tensor, offload_base_tensor: bool = False) -> int | torch.Tensor:
+    def push_tensor(
+        self, tensor: torch.Tensor, offload_base_tensor: bool = False
+    ) -> int | torch.Tensor:
         """
         Push tensor to a group of tensors that will be offloaded.
         If offload_base_tensor is True, then tensor is a view of a base tensor that will be offloaded.
@@ -398,7 +419,7 @@ class OffloadSynchronizer:
         """
         if not self.offload_layer_map[self.current_fwd_layer]:
             return tensor
-        
+
         if self._check_if_offload(tensor):
             tensor = TensorGroupProcessor.process_push_tensor(tensor, offload_base_tensor)
 
@@ -419,14 +440,14 @@ class OffloadSynchronizer:
         """
         Pop tensor from a reloaded tensor group.
 
-        If tensor_or_tensor_id is tensor, it means that the tensor is not offloaded. Otherwise 
+        If tensor_or_tensor_id is tensor, it means that the tensor is not offloaded. Otherwise
         the reloaded tensor is returned.
         """
         if isinstance(tensor_or_tensor_id, torch.Tensor):
             return tensor_or_tensor_id
         assert self.bwd_current_reloaded_tensor_group is not None
         return self.bwd_current_reloaded_tensor_group.tensor_list[tensor_or_tensor_id]
-    
+
     def get_offloaded_total_size_mb(self) -> float:
         """
         Get total size of offloaded tensors in MB, used only for testing.
@@ -457,19 +478,19 @@ def get_cpu_offload_context(
     .. code-block:: python
 
         cpu_offload_context, sync_function = get_cpu_offload_context(...)
-        
+
         for _ in range(num_layers):
             with cpu_offload_context:
                 x = layers[i].forward(x)
             x = sync_function(x)
-    
+
     Synchronization:
 
     There are 2 ways of synchronization:
     - 1. By providing num_layers. In this case layers are offloaded/reloaded in optimal order to ensure that
          activation memory usage is equal to `(num_layers - num_offloaded_layers) * T`, where `T` is the memory footprint of a layer.
     - 2. By providing synchronization_dict. In this case layers are offloaded/reloaded in the order provided in the dictionary.
-         This dictionary have entries `i: (offload_fwd, offload_num, reload_fwd, reload_num)`, which means that 
+         This dictionary have entries `i: (offload_fwd, offload_num, reload_fwd, reload_num)`, which means that
          layer `i` will finish offload when `offload_num` layers begins its forward/backward pass (depending on `offload_fwd` being True/False respectively).
          Layer `i` will start reload when `reload_num` layers starts its forward/backward pass (depending on `reload_fwd` being True/False respectively).
          In this way offloading will work with pipeline parallelism - when backward are interleaved with forward, assuming that synchronization dictionary is correct.
@@ -518,12 +539,12 @@ def get_cpu_offload_context(
         # Weights offloading is deprecated but we maintain backward compatibility by doing nothing.
         if not offload_activations:
             return contextlib.nullcontext(), lambda x: x
-    
+
     offload_synchronizer = OffloadSynchronizer(
-        model_layers, 
-        num_layers if synchronization_dict is None else None, 
-        synchronization_dict, 
-        min_tensor_size_to_offload
+        model_layers,
+        num_layers if synchronization_dict is None else None,
+        synchronization_dict,
+        min_tensor_size_to_offload,
     )
 
     class _CpuOffloadContext(contextlib.ContextDecorator):
@@ -534,7 +555,8 @@ def get_cpu_offload_context(
 
         def __enter__(self):
             self._hooks_ctx = saved_tensors_hooks(
-                offload_synchronizer.push_tensor, offload_synchronizer.pop_tensor)
+                offload_synchronizer.push_tensor, offload_synchronizer.pop_tensor
+            )
             self._hooks_ctx.__enter__()
             global OFFLOAD_SYNCHRONIZER
             self.previous_offload_synchronizer = OFFLOAD_SYNCHRONIZER
@@ -553,7 +575,7 @@ def get_cpu_offload_context(
             cur_layer = self.current_layer
 
             def hook(_):
-                # offload_synchronizer.finish_part_of_bwd needs 
+                # offload_synchronizer.finish_part_of_bwd needs
                 # to be called after every backward pass - there may be
                 # more than one in pipeline parallelism.
                 torch.autograd.variable.Variable._execution_engine.queue_callback(

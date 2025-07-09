@@ -1117,7 +1117,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_stream=self.cp_stream,
                     cp_comm_type=self.cp_comm_type,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
-                    fp8_meta=self.fp8_meta, 
+                    fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,

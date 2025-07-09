@@ -31,7 +31,7 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     RMSNorm,
     LayerNorm,
-    CPUOffload
+    CPUOffload,
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
