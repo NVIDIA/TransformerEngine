@@ -682,15 +682,6 @@ class FlashAttention(torch.nn.Module):
                     use_flash_attn_3=use_flash_attn_3,
                 )
         else:
-            from transformer_engine.pytorch.cpu_offload import (
-                is_cpu_offload_enabled,
-                offload,
-            )
-
-            if is_cpu_offload_enabled():
-                offload(
-                    query_layer, key_layer, value_layer, cu_seqlens_q, cu_seqlens_kv
-                )
 
             with self.attention_dropout_ctx():
                 #       | API                     | use cases
@@ -1053,20 +1044,10 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
 
-        from transformer_engine.pytorch.cpu_offload import (
-            is_cpu_offload_enabled,
-            offload,
-        )
+        from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
 
         if is_cpu_offload_enabled():
-            if ctx.fp8:
-                tensor_list = fp8_tensors
-            else:
-                tensor_list = [q, k, v, out_save]
-
             qkv_layout = "sbhd_sbhd_sbhd"
-            offload(*tensor_list)
-            offload(*aux_ctx_tensors)
 
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8

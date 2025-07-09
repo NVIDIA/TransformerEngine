@@ -105,7 +105,6 @@ from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.distributed import checkpoint
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.cpu_offload import CPUOffload
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy

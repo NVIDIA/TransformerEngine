@@ -156,6 +156,11 @@ class TestsOffloadSynchronizer:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     def test_general(self, random_num_tensors, recipe_name):
+        """
+        Test general functionality of OffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
+        for each layer offload random number of random tensors.
+        Then do backward pass for each layer, and check if reloaded tensors are equal to original tensors.
+        """
         Utils.memory_leak_check()
         Utils.skip_if_recipe_not_supported(recipe_name)
         NUM_LAYERS = 10

@@ -482,13 +482,12 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             if self._transpose is not None
             else None
         )
-        new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
-        device = new_scale_inv.device
+        device = new_data.device if new_data is not None else new_transpose.device
         return Float8Tensor(
             shape=self.shape,
             dtype=self.dtype,
             data=new_data,
-            fp8_scale_inv=new_scale_inv,
+            fp8_scale_inv=self._scale_inv,
             fp8_dtype=self._fp8_dtype,
             data_transpose=new_transpose,
             quantizer=self._quantizer,
@@ -642,6 +641,8 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                     else:
                         dst._create_transpose()
                 return dst
+        if func == torch.ops.aten.numel.default:
+            return args[0]._data.numel() if args[0]._data is not None else args[0]._transpose.numel()
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
             warnings.warn(

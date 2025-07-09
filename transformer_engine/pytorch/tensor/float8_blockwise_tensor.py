@@ -389,25 +389,15 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             if self._columnwise_data is not None
             else None
         )
-        new_rowwise_scale_inv = (
-            torch.empty_like(self._rowwise_scale_inv, *args, **kwargs)
-            if self._rowwise_scale_inv is not None
-            else None
-        )
-        new_columnwise_scale_inv = (
-            torch.empty_like(self._columnwise_scale_inv, *args, **kwargs)
-            if self._columnwise_scale_inv is not None
-            else None
-        )
 
         return Float8BlockwiseQTensor(
             shape=self.shape,
             dtype=self.dtype,
             fp8_dtype=self._fp8_dtype,
             rowwise_data=new_rowwise_data,
-            rowwise_scale_inv=new_rowwise_scale_inv,
+            rowwise_scale_inv=self._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
-            columnwise_scale_inv=new_columnwise_scale_inv,
+            columnwise_scale_inv=self._columnwise_scale_inv,
             quantizer=self._quantizer,
             is_2D_scaled=self._is_2D_scaled,
             requires_grad=self.requires_grad,
@@ -457,6 +447,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 if dst._columnwise_scale_inv is not None:
                     dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv, *args[2:])
                 return dst
+        if func == torch.ops.aten.numel.default:
+            return args[0]._rowwise_data.numel() if args[0]._rowwise_data is not None else args[0]._columnwise_data.numel()
         elif func == torch.ops.aten.is_pinned.default:
             if args[0]._rowwise_data is not None:
                 return args[0]._rowwise_data.is_pinned()

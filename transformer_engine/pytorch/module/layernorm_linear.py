@@ -66,7 +66,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..cpu_offload import is_cpu_offload_enabled, mark_can_start_offload
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled
 
 from ..cpp_extensions import (
     general_gemm,
@@ -152,7 +152,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
     
-        mark_can_start_offload(inputmat)
+        start_offload_if_offload_enabled(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag_fprop = (
@@ -212,7 +212,7 @@ class _LayerNormLinear(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        mark_can_start_offload(ln_out)
+        start_offload_if_offload_enabled(ln_out)
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out

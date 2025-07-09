@@ -67,7 +67,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_can_start_offload, mark_is_weight
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -224,7 +224,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
-        mark_can_start_offload(inputmat)
+        start_offload_if_offload_enabled(inputmat)
             
 
         # for fp8 DelayedScaling: layernorm output = FP8
@@ -278,7 +278,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        mark_can_start_offload(ln_out)
+        start_offload_if_offload_enabled(ln_out)
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
@@ -434,7 +434,7 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 act_out = activation_func(fc1_out, fc2_input_quantizer)
 
-        mark_can_start_offload(fc1_out, act_out)
+        start_offload_if_offload_enabled(fc1_out, act_out)
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
 

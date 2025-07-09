@@ -12,7 +12,7 @@ from typing import Any
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
-__all__ = ["get_cpu_offload_context", "mark_is_weight", "start_offload"]
+__all__ = ["get_cpu_offload_context", "mark_is_weight", "start_offload_if_offload_enabled"]
 
 DEFAULT_MIN_TENSOR_SIZE_TO_OFFLOAD = 2 ** 20 # 1mb
 OFFLOAD_SYNCHRONIZER = None
@@ -27,9 +27,10 @@ def mark_is_weight(*tensors: torch.Tensor):
         if tensor is not None:
             setattr(tensor, "is_weight", True)
 
-def start_offload(*tensors: torch.Tensor, offload_base_tensor: bool = False):
+def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor: bool = False):
     """ Starts offload tensor. It should be used it tensors are fully computed and ready to be offloaded. """
-    assert is_cpu_offload_enabled()
+    if not is_cpu_offload_enabled():
+        return
     for tensor in tensors:
         if tensor is not None:
             OFFLOAD_SYNCHRONIZER.push_tensor(tensor, offload_base_tensor) # type: ignore[attr-defined]
@@ -274,10 +275,6 @@ class OffloadSynchronizer:
         Invoked before each layer forward.
         """
 
-        # release memory for bwd of previous layer
-        # this is used in pp, when forwards and backwards are interleaved.
-        self.bwd_current_reloaded_tensor_group = None
-
         if self.current_fwd_layer == -1 or self.current_fwd_layer == self.num_layers - 1:
             # reset the offload synchronizer
             self.current_fwd_layer = -1
@@ -317,6 +314,11 @@ class OffloadSynchronizer:
                 self.bwd_current_reloaded_tensor_group)
     
     def finish_part_of_bwd(self):
+        """
+        We need to release memory of backward - this call does that.
+        It needs to be invoked after every backward pass - there may be
+        more than one in pipeline parallelism.
+        """
         self.bwd_current_reloaded_tensor_group = None
 
     def _start_reloads_finish_offloads(self, layer_num: int, forward: bool):
@@ -551,6 +553,9 @@ def get_cpu_offload_context(
             cur_layer = self.current_layer
 
             def hook(_):
+                # offload_synchronizer.finish_part_of_bwd needs 
+                # to be called after every backward pass - there may be
+                # more than one in pipeline parallelism.
                 torch.autograd.variable.Variable._execution_engine.queue_callback(
                     offload_synchronizer.finish_part_of_bwd
                 )

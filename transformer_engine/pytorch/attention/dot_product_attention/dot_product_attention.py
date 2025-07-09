@@ -1123,14 +1123,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                 )
 
-            from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
-
-            if is_cpu_offload_enabled():
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
-                )
-
             if use_unfused_attention:
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
