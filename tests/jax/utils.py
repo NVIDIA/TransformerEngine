@@ -7,7 +7,7 @@ import os
 import functools
 import math
 import operator
-from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
+from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional, NewType
 from contextlib import contextmanager
 
 import jax
@@ -21,7 +21,6 @@ from jax import random as jax_random
 import pytest
 
 from transformer_engine.jax.attention import (
-    AttnMaskType,
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
@@ -29,11 +28,12 @@ from transformer_engine.jax.quantize.helper import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-Array = Any
+DType = NewType('DType', jnp.dtype)
+Array = NewType('Array', jnp.ndarray)
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
-Initializer = Callable[[PRNGKey, Shape, jnp.dtype], Array]
+Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 # Enables verbose printing of tensor numerics for debug.
 NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
@@ -160,7 +160,7 @@ class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = True
     dropout_rate: float = 0.0
-    dtype: jnp.dtype = jnp.float32
+    dtype: DType = jnp.float32
     float32_logits: bool = False
     """Computes dot-product attention given query, key, and value.
 
@@ -283,7 +283,7 @@ class DenseGeneral(nn.Module):
 
     features: Union[Iterable[int], int]
     axis: Union[Iterable[int], int] = -1
-    dtype: jnp.dtype = jnp.float32
+    dtype: DType = jnp.float32
     kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
@@ -525,7 +525,7 @@ class MultiHeadAttention(nn.Module):
     num_gqa_groups: int | None = None
     head_dim: int = 64
     transpose_batch_sequence: bool = True
-    dtype: jnp.dtype = jnp.float32
+    dtype: DType = jnp.float32
     dropout_rate: float = 0.0
     kernel_init: Initializer = None
     float32_logits: bool = False  # computes logits in float32 for stability.
@@ -1424,7 +1424,7 @@ def assert_allclose(
     desired: Array,
     rtol: Optional[float] = None,
     atol: Optional[float] = None,
-    dtype: Optional[Union[jnp.dtype, TEDType, np.dtype, str]] = None,
+    dtype: Optional[Union[DType, TEDType, np.dtype, str]] = None,
     **kwargs,
 ) -> None:
     """Check if two tensors are close.
@@ -1484,7 +1484,7 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 
 
 def dtype_tols(
-    dtype: Union[jnp.dtype, TEDType, np.dtype],
+    dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
     rtol: Optional[float] = None,
     atol: Optional[float] = None,
@@ -1519,7 +1519,7 @@ def dtype_tols(
             TEDType.kFloat8E5M2: jnp.float8_e5m2,
         }[dtype]
     elif isinstance(dtype, np.dtype):
-        dtype = jnp.dtype(dtype)
+        dtype = DType(dtype)
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):

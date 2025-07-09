@@ -9,6 +9,7 @@ architectures. It supports various normalization types, quantization, and
 distributed training through sharding constraints.
 """
 
+import warnings
 from functools import partial
 from typing import Tuple
 
@@ -23,6 +24,16 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
+
+
+LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED = False
+
+
+def _issue_batch_first_warning(msg):
+    global LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED
+    if not LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED:
+        warnings.warn(msg, UserWarning)
+        LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED = True
 
 
 def layernorm_dense(
@@ -188,6 +199,13 @@ def _layernorm_dense_fwd_rule(
 
     x_bdim = None
     if x.ndim > 2:
+        if not batch_first:
+            _issue_batch_first_warning(
+                "TE/JAX `layernorm_dense()` fused-layer implementation does not officially "
+                "support sequence-first inputs and may produce incorrect results when "
+                "`batch_first=False` or `transpose_batch_sequence=True`. Use sequence-first "
+                "inputs at your own discretion."
+            )
         x_bdim = 0 if batch_first else x.ndim - 2
 
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)

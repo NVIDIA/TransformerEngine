@@ -13,6 +13,7 @@ The implementation supports various normalization types, activation functions,
 quantization, and distributed training through sharding constraints.
 """
 
+import warnings
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
 
@@ -29,6 +30,16 @@ from .quantize import (
     TensorUsage,
 )
 from .sharding import get_non_contracting_logical_axes
+
+
+LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED = False
+
+
+def _issue_batch_first_warning(msg):
+    global LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED
+    if not LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED:
+        warnings.warn(msg, UserWarning)
+        LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED = True
 
 
 def layernorm_mlp(
@@ -263,6 +274,13 @@ def _layernorm_mlp_fwd_rule(
 
     x_bdim = None
     if x.ndim > 2:
+        if not batch_first:
+            _issue_batch_first_warning(
+                "TE/JAX `layernorm_mlp()` fused-layer implementation does not officially "
+                "support sequence-first inputs and may produce incorrect results when "
+                "`batch_first=False` or `transpose_batch_sequence=True`. Use sequence-first "
+                "inputs at your own discretion."
+            )
         x_bdim = 0 if batch_first else x.ndim - 2
 
     use_bias_1 = bias_1 is not None

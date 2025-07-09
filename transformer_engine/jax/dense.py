@@ -8,7 +8,7 @@ architectures, including support for quantization and automatic differentiation.
 It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
 """
-
+import warnings
 from typing import Tuple, Sequence
 from functools import partial
 import jax
@@ -21,6 +21,16 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
+
+
+DENSE_BATCH_FIRST_WARNING_ISSUED = False
+
+
+def _issue_batch_first_warning(msg):
+    global DENSE_BATCH_FIRST_WARNING_ISSUED
+    if not DENSE_BATCH_FIRST_WARNING_ISSUED:
+        warnings.warn(msg, UserWarning)
+        DENSE_BATCH_FIRST_WARNING_ISSUED = True
 
 
 def dense(
@@ -118,6 +128,12 @@ def _dense_fwd_rule(
     if x.ndim >= num_cdims + 2:
         # Assume X is batched if it has at least +2 dimensions more than the number of contracting
         # dimensions.
+        if not batch_first:
+            _issue_batch_first_warning(
+                "TE/JAX `dense()` layer implementation does not officially support sequence-first "
+                "inputs and may produce incorrect results when `batch_first=False`. Use "
+                "sequence-first inputs at your own discretion.",
+            )
         x_bdim = 0 if batch_first else x.ndim - num_cdims - 1
 
     flatten_axis_x = -len(x_contracting_dims)
