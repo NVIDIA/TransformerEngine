@@ -13,6 +13,7 @@ from utils import (
     assert_tree_like_allclose,
     is_devices_enough,
     pytest_parametrize_wrapper,
+    use_jax_gemm,
 )
 
 from transformer_engine.common import recipe
@@ -72,15 +73,6 @@ def generate_fsdp_and_tp_configs():
             [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
     return configs
-
-
-def use_jax_fp8_gemm(enabled=False):
-    import os
-
-    if enabled:
-        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
-    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
-        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 class TestDistributedLayernormMLP:
@@ -165,7 +157,6 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -178,53 +169,56 @@ class TestDistributedLayernormMLP:
             self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
         )
 
-        # Single GPU
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-            single_jitter = jax.jit(
-                value_and_grad_func,
-                static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
-            )
-            single_fwd, single_grads = single_jitter(*inputs, *static_inputs)
+        with use_jax_gemm(enabled=with_jax_gemm):
+            # Single GPU
+            with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+                single_jitter = jax.jit(
+                    value_and_grad_func,
+                    static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
+                )
+                single_fwd, single_grads = single_jitter(*inputs, *static_inputs)
 
-        # Multi GPUs
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
-            k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
-            k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
-            k1_ = jax.device_put(k1, k1_sharding)
-            k2_ = jax.device_put(k2, k2_sharding)
-            if use_bias:
-                b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
-                b1_ = jax.device_put(b1, b1_sharding)
-            else:
-                b1_sharding = b1_ = None
-            multi_inputs = [*inputs[:2], k1_, k2_, b1_, *inputs[5:]]
+            # Multi GPUs
+            devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
+            mesh = Mesh(devices, mesh_axes)
+            with mesh, fp8_autocast(
+                enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+            ):
+                k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
+                k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
+                k1_ = jax.device_put(k1, k1_sharding)
+                k2_ = jax.device_put(k2, k2_sharding)
+                if use_bias:
+                    b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
+                    b1_ = jax.device_put(b1, b1_sharding)
+                else:
+                    b1_sharding = b1_ = None
+                multi_inputs = [*inputs[:2], k1_, k2_, b1_, *inputs[5:]]
 
-            # Position ref for sharding pspec lists
-            #   x, gamma, k1, k2, b1,
-            #   b2
-            in_shardings = (
-                None,
-                None,
-                k1_sharding,
-                k2_sharding,
-                b1_sharding,
-                None,
-            )
-            out_shardings = (
-                None,
-                (None, None, k1_sharding, k2_sharding, b1_sharding, None),
-            )
+                # Position ref for sharding pspec lists
+                #   x, gamma, k1, k2, b1,
+                #   b2
+                in_shardings = (
+                    None,
+                    None,
+                    k1_sharding,
+                    k2_sharding,
+                    b1_sharding,
+                    None,
+                )
+                out_shardings = (
+                    None,
+                    (None, None, k1_sharding, k2_sharding, b1_sharding, None),
+                )
 
-            multi_jitter = jax.jit(
-                value_and_grad_func,
-                in_shardings=in_shardings,
-                out_shardings=out_shardings,
-                static_argnums=range(len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1),
-            )  # +1 for multi_gpus
+                multi_jitter = jax.jit(
+                    value_and_grad_func,
+                    in_shardings=in_shardings,
+                    out_shardings=out_shardings,
+                    static_argnums=range(len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1),
+                )  # +1 for multi_gpus
 
-            multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
+                multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
 
         fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
         bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
@@ -320,7 +314,6 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
-        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
@@ -331,48 +324,49 @@ class TestDistributedLayernormMLP:
         x = jax.random.normal(subkeys[0], (batch, seqlen, hidden_in), dtype)
         init_rngs = {"params": subkeys[1]}
 
-        # Single GPUs
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-            ln_mlp_single = LayerNormMLP(
-                layernorm_type=layernorm_type,
-                transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
-                intermediate_dim=INTERMEDIATE,
-                activations=activation_type,
-                use_bias=use_bias,
-            )
-            params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
-            mlp_out_single, ln_out_single = ln_mlp_single.apply(
-                params_single, x, deterministic=True
-            )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            # Single GPUs
+            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+                ln_mlp_single = LayerNormMLP(
+                    layernorm_type=layernorm_type,
+                    transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
+                    intermediate_dim=INTERMEDIATE,
+                    activations=activation_type,
+                    use_bias=use_bias,
+                )
+                params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
+                mlp_out_single, ln_out_single = ln_mlp_single.apply(
+                    params_single, x, deterministic=True
+                )
 
-        # Multi GPUs
-        device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(
-            enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
-        ):
-            ln_mlp_sharded = LayerNormMLP(
-                layernorm_type=layernorm_type,
-                transpose_batch_sequence=False,
-                intermediate_dim=INTERMEDIATE,
-                activations=activation_type,
-                scale_axes=LN_SCALE_AXES,
-                ln_bias_axes=LN_BIAS_AXES,
-                kernel_axes_1=KERNEL_1_AXES,
-                kernel_axes_2=KERNEL_2_AXES,
-                use_bias=use_bias,
-                bias_axes_1=BIAS_1_AXES,
-                bias_axes_2=BIAS_2_AXES,
-                layernorm_input_axes=LAYERNORM_INPUT_AXES,
-                dot_1_input_axes=DOT_1_INPUT_AXES,
-                dot_2_input_axes=DOT_2_INPUT_AXES,
-                name="mlp",
-            )
-            params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
-            mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
-                params_sharded, x, deterministic=True
-            )
+            # Multi GPUs
+            device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
+            devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
+            mesh = Mesh(devices, mesh_axes)
+            with mesh, fp8_autocast(
+                enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+            ):
+                ln_mlp_sharded = LayerNormMLP(
+                    layernorm_type=layernorm_type,
+                    transpose_batch_sequence=False,
+                    intermediate_dim=INTERMEDIATE,
+                    activations=activation_type,
+                    scale_axes=LN_SCALE_AXES,
+                    ln_bias_axes=LN_BIAS_AXES,
+                    kernel_axes_1=KERNEL_1_AXES,
+                    kernel_axes_2=KERNEL_2_AXES,
+                    use_bias=use_bias,
+                    bias_axes_1=BIAS_1_AXES,
+                    bias_axes_2=BIAS_2_AXES,
+                    layernorm_input_axes=LAYERNORM_INPUT_AXES,
+                    dot_1_input_axes=DOT_1_INPUT_AXES,
+                    dot_2_input_axes=DOT_2_INPUT_AXES,
+                    name="mlp",
+                )
+                params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
+                mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
+                    params_sharded, x, deterministic=True
+                )
 
         # Make sure params values are the same
         assert_tree_like_allclose(params_sharded["params"], params_single["params"])

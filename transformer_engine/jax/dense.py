@@ -53,7 +53,7 @@ def dense(
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
-        output = tex.gemm(x, kernel, dimension_numbers=(contracting_dims, ((), ())))
+        output = tex.gemm(x, kernel, contracting_dims=contracting_dims)
         if bias is not None:
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
             output += jnp.reshape(bias, bias_new_shape)
@@ -79,7 +79,7 @@ def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_fir
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
-        batch_first: Assume that X is batched in the first dimension.
+        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
 
     Returns:
         Transformed output tensor
@@ -141,7 +141,8 @@ def _dense_fwd_rule(
     output = tex.gemm(
         casted_x.get_tensor(usage=TensorUsage.LHS),
         casted_kernel.get_tensor(usage=TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
+        contracting_dims=(x_contracting_dims, k_contracting_dims),
+        batched_dims=((x_bdim,), ()),
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
     )
@@ -206,7 +207,8 @@ def _dense_bwd_rule(
     dgrad = tex.gemm(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,
-        dimension_numbers=((g_contracting_dim, k_contracting_dim), ((x_bdim,), ())),
+        contracting_dims=(g_contracting_dim, k_contracting_dim),
+        batched_dims=((x_bdim,), ()),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
@@ -219,7 +221,8 @@ def _dense_bwd_rule(
     wgrad = tex.gemm(
         casted_x_lhs,
         casted_grad.get_tensor(usage=TensorUsage.RHS),
-        dimension_numbers=((x_contracting_dim, g_contracting_dim), ((x_bdim,), (x_bdim,))),
+        contracting_dims=(x_contracting_dim, g_contracting_dim),
+        batched_dims=((x_bdim,), (x_bdim,)),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 

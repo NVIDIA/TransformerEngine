@@ -13,6 +13,7 @@ import operator
 from utils import (
     assert_allclose,
     pytest_parametrize_wrapper,
+    use_jax_gemm,
 )
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
@@ -917,8 +918,6 @@ class TestDense:
         ):
             pytest.skip("Float8E5M2 is not recommended for MXFP8 GEMM.")
 
-        _use_jax_fp8_gemm(enabled=with_jax_gemm)
-
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode,
@@ -926,15 +925,16 @@ class TestDense:
             bwd_dtype=jnp.float8_e5m2,
             is_2x2x=False,
         )
-        primitive_out = tex.gemm(
-            x,
-            w,
-            dimension_numbers=(contracting_dims, ((), ())),
-            lhs_quantizer=quantizer_set.x if x_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad,
-            rhs_quantizer=(
-                quantizer_set.kernel if w_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad
-            ),
-        )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            primitive_out = tex.gemm(
+                x,
+                w,
+                dimension_numbers=(contracting_dims, ((), ())),
+                lhs_quantizer=quantizer_set.x if x_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad,
+                rhs_quantizer=(
+                    quantizer_set.kernel if w_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad
+                ),
+            )
         ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.float8_e4m3fn)
@@ -969,8 +969,6 @@ class TestDense:
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_dense_grad_fp8(self, m, n, k, scaling_mode, with_jax_gemm):
-        _use_jax_fp8_gemm(enabled=with_jax_gemm)
-
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
@@ -999,10 +997,11 @@ class TestDense:
         )
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
-        for _ in range(n_iterations):
-            primitive_out, (primitive_x_grad, primitive_w_grad, primitive_bias_grad) = (
-                value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
-            )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            for _ in range(n_iterations):
+                primitive_out, (primitive_x_grad, primitive_w_grad, primitive_bias_grad) = (
+                    value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
+                )
 
         ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(
             x, w, bias, data_layout
@@ -1042,8 +1041,6 @@ class TestFusedDense:
         """
         Test layernorm_dense VJP Rule
         """
-        _use_jax_fp8_gemm(enabled=with_jax_gemm)
-
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1098,13 +1095,14 @@ class TestFusedDense:
         )
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
-        for _ in range(n_iterations):
-            prim_out, (
-                prim_x_grad,
-                prim_w_grad,
-                prim_gamma_grad,
-                prim_beta_grad,
-            ) = value_n_grad_prim_func(x, w, gamma, beta)
+        with use_jax_gemm(enabled=with_jax_gemm):
+            for _ in range(n_iterations):
+                prim_out, (
+                    prim_x_grad,
+                    prim_w_grad,
+                    prim_gamma_grad,
+                    prim_beta_grad,
+                ) = value_n_grad_prim_func(x, w, gamma, beta)
 
         assert_allclose(prim_out, ref_out, dtype=jnp.float8_e4m3fn)
         assert_allclose(prim_x_grad, ref_x_grad, dtype=jnp.float8_e5m2)
@@ -1126,8 +1124,6 @@ class TestFusedDense:
         """
         Test layernorm_mlp VJP Rule
         """
-        _use_jax_fp8_gemm(enabled=with_jax_gemm)
-
         # zero_centered_gamma is already tested in TestNorm
         zero_centered_gamma = False
         eps = 1e-6
@@ -1202,15 +1198,16 @@ class TestFusedDense:
         value_n_grad_ref_func = value_and_grad(ref_func, range(6))
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
-        for _ in range(n_iterations):
-            prim_out, (
-                prim_x_grad,
-                prim_gamma_grad,
-                prim_kernel_1_grad,
-                prim_kernel_2_grad,
-                prim_bias_1_grad,
-                prim_bias_2_grad,
-            ) = value_n_grad_prim_func(x, gamma, kernel_1, kernel_2, bias_1, bias_2)
+        with use_jax_gemm(enabled=with_jax_gemm):
+            for _ in range(n_iterations):
+                prim_out, (
+                    prim_x_grad,
+                    prim_gamma_grad,
+                    prim_kernel_1_grad,
+                    prim_kernel_2_grad,
+                    prim_bias_1_grad,
+                    prim_bias_2_grad,
+                ) = value_n_grad_prim_func(x, gamma, kernel_1, kernel_2, bias_1, bias_2)
 
         ref_out, (
             ref_x_grad,

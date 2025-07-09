@@ -3,11 +3,12 @@
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
 
+import os
 import functools
 import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
-import os
+from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
@@ -28,7 +29,6 @@ from transformer_engine.jax.quantize.helper import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-DType = jnp.dtype
 Array = Any
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
@@ -160,7 +160,7 @@ class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = True
     dropout_rate: float = 0.0
-    dtype: DType = jnp.float32
+    dtype: jnp.dtype =  jnp.float32
     float32_logits: bool = False
     """Computes dot-product attention given query, key, and value.
 
@@ -283,7 +283,7 @@ class DenseGeneral(nn.Module):
 
     features: Union[Iterable[int], int]
     axis: Union[Iterable[int], int] = -1
-    dtype: DType = jnp.float32
+    dtype: jnp.dtype =  jnp.float32
     kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
@@ -525,7 +525,7 @@ class MultiHeadAttention(nn.Module):
     num_gqa_groups: int | None = None
     head_dim: int = 64
     transpose_batch_sequence: bool = True
-    dtype: DType = jnp.float32
+    dtype: jnp.dtype =  jnp.float32
     dropout_rate: float = 0.0
     kernel_init: Initializer = None
     float32_logits: bool = False  # computes logits in float32 for stability.
@@ -1424,7 +1424,7 @@ def assert_allclose(
     desired: Array,
     rtol: Optional[float] = None,
     atol: Optional[float] = None,
-    dtype: Optional[Union[DType, TEDType, np.dtype, str]] = None,
+    dtype: Optional[Union[jnp.dtype, TEDType, np.dtype, str]] = None,
     **kwargs,
 ) -> None:
     """Check if two tensors are close.
@@ -1484,7 +1484,7 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 
 
 def dtype_tols(
-    dtype: Union[DType, TEDType, np.dtype],
+    dtype: Union[jnp.dtype, TEDType, np.dtype],
     reference_value: float = 1.0,
     rtol: Optional[float] = None,
     atol: Optional[float] = None,
@@ -1600,3 +1600,15 @@ def print_debug_tensor_stats(prefix, tensor, hist=False):
             fmt = fmt + "\n  {}\n  {}"
 
         jax.debug.print(fmt, *args)
+
+
+@contextmanager
+def use_jax_gemm(enabled=False):
+    orig_custom_calls = os.environ.get("NVTE_JAX_CUSTOM_CALLS_RE", None)
+    try:
+        if enabled:
+            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+        yield
+    finally:
+        if enabled and orig_custom_calls is not None:
+            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = orig_custom_calls
