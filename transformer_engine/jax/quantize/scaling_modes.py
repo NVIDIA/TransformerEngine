@@ -494,7 +494,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         rowwise = [f"{unique_var}scale_inv_rowwise{i}" for i in range(input_rank)]
         colwise = [f"{unique_var}scale_inv_colwise{i}" for i in range(input_rank)]
 
-        # TODO (Alp): Padding the scales breaks the size relationship in CompoundFactors.
+        # NOTE (Alp): Padding the scales breaks the size relationship in CompoundFactors.
         #             Unfortunately, because Shardy rules are applied to the inner primitive, the
         #             only way to preserve the relationship is to lower unpadded scales to the
         #             underlying custom call and pad them in C++. Until that's implemented, the

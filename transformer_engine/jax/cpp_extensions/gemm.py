@@ -802,7 +802,9 @@ class GemmPrimitive(BasePrimitive):
         operand_types,
         result_types,
     ):
-        del out_dtype, grad, use_split_accumulator, mesh, result_types
+        del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype, grad, use_split_accumulator
+        del mesh, result_types
+
         prefix = "GemmPrimitive_"
 
         def _generate_operand_rules(name, ndim, cdims, bdims):
