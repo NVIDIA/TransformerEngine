@@ -231,6 +231,24 @@ struct FPx4 {
   T x4;
 };
 
+template <typename T>
+struct Type2x {};
+
+template <>
+struct Type2x<float> {
+  using type = float2;
+};
+
+template <>
+struct Type2x<bf16> {
+  using type = __nv_bfloat162;
+};
+
+template <>
+struct Type2x<fp16> {
+  using type = __half2;
+};
+
 using floatx2 = FPx2<float>;
 using bf16x2 = FPx2<bf16>;
 using fp16x2 = FPx2<fp16>;

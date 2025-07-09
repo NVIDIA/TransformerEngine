@@ -533,7 +533,7 @@ namespace nvfp4_kernel {
 
 using namespace ptx;
 
-constexpr size_t SCALE_DIM_Y = 32;
+constexpr size_t SCALE_DIM_Y = 16;
 constexpr size_t SCALE_DIM_X = 16;
 
 constexpr size_t BUFFS_NUM = 2;
@@ -545,6 +545,17 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 8 = 128 / 16
+
+
+// Compute per-block E4M3 encoding/decoding scaling factor
+__device__ __forceinline__ fp8e4m3
+compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
+  constexpr float rcp_6f = 1.0f / 6.0f;
+  // const float S_dec_b = block_amax * rcp_6f;
+  // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
+  // return S_dec_b_fp8;
+  return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
+} 
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING,
@@ -566,7 +577,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
 
-  // constexpr float rcp_6 = 1.0f / 6.0f;
   if constexpr (!COMPUTE_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
@@ -591,24 +601,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int block_offset_X = blockIdx.x * CHUNK_DIM_X;
   const int scales_block_offset_Y_rowwise = blockIdx.y * CHUNK_DIM_Y;
   const int scales_block_offset_X_rowwise = blockIdx.x * CHUNK_DIM_X / SCALE_DIM_X;
-  // const int scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
-  // const int scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
+  const int scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
+  const int scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
 
   const int tid_Y_rowwise = threadIdx.x / THREADS_X;
   const int tid_X_rowwise = threadIdx.x % THREADS_X;
-  // const int tid_Y_colwise = 0;
-  // const int tid_X_colwise = threadIdx.x;
+  const int tid_Y_colwise = 0;
+  const int tid_X_colwise = threadIdx.x;
 
   const int thread_offset_Y_rowwise = tid_Y_rowwise;
   const int thread_offset_X_rowwise = tid_X_rowwise * SCALE_DIM_X;
-  // const int thread_offset_Y_colwise = tid_Y_colwise;
-  // const int thread_offset_X_colwise = tid_X_colwise;
+  const int thread_offset_Y_colwise = tid_Y_colwise;
+  const int thread_offset_X_colwise = tid_X_colwise;    // Each thread processes two adjacent elements
 
   const int row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
-  // const int row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
-  // const int col_base_colwise = block_offset_X + thread_offset_X_colwise;
+  const int row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
+  const int col_base_colwise = block_offset_X + thread_offset_X_colwise;
 
-  // const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
+  const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
   // const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
   // const int scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
@@ -652,7 +662,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Compute a global encoding/decoding scaling factor for all S_dec_b 
   const float S_enc = (nvfp4_second_stage_scale_ptr == nullptr)
                       ? 1.0f
-                      : __frcp_rn(*nvfp4_second_stage_scale_ptr);
+                      : 1.0f / (*nvfp4_second_stage_scale_ptr);
 
   float thread_amax = 0.0f;
 
@@ -692,81 +702,101 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     ptx::mbarrier_wait_parity(&mbar[stage], 0);
 
     float block_amax = 0.0f;
-//     if constexpr (COLWISE_SCALING) {
-//       const int shmem_offset_base_colwise = buff * BUFF_IN_DIM + tid_X_colwise;
-//       block_amax = 0.0f;
-//       float in_compute_colwise[BUFF_DIM_Y];
-//       IType in_colwise_IType[BUFF_DIM_Y];
+    if constexpr (COLWISE_SCALING) {
+      const int shmem_offset_base_colwise_in = buff * BUFF_IN_DIM + tid_X_colwise;
+      const int shmem_offset_base_colwise_out = buff * BUFF_OUT_DIM + tid_X_colwise / 2;
+      block_amax = 0.0f;
+      float in_compute_colwise[SCALE_DIM_Y];
+      IType in_colwise_IType[SCALE_DIM_Y];
 
-//       // 1. Read/Compute elements. Find MXFP8-block AMAX
-//       if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-//         IType block_amax_f16 = static_cast<IType>(0.0f);
-//         #pragma unroll
-//         for (int i = 0; i < BUFF_DIM_Y; ++i) {
-//           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-//           in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-//           block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
-//         }
-//         block_amax = static_cast<float>(block_amax_f16);
-//       } else {
-//         #pragma unroll
-//         for (int i = 0; i < BUFF_DIM_Y; ++i) {
-//           const int shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+      // 1. Read/Compute elements. Find MXFP8-block AMAX
+      if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+        IType block_amax_f16 = static_cast<IType>(0.0f);
+        #pragma unroll
+        for (int i = 0; i < SCALE_DIM_Y; ++i) {
+          const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+          block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+        }
+        block_amax = static_cast<float>(block_amax_f16);
+      } else {
+        #pragma unroll
+        for (int i = 0; i < SCALE_DIM_Y; ++i) {
+          const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
 
-//           float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
-//           if constexpr (COMPUTE_ACTIVATIONS) {
-//             elt = OP(elt, {});
-//           }
-//           // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-//           if constexpr (!std::is_same_v<IType, float>) {
-//             elt = static_cast<float>(static_cast<IType>(elt));
-//           }
-//           // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
-//           if constexpr (IS_CACHED_ACT_OP) {
-//             cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
-//           }
+          float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+          if constexpr (COMPUTE_ACTIVATIONS) {
+            elt = OP(elt, {});
+          }
+          // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+          if constexpr (!std::is_same_v<IType, float>) {
+            elt = static_cast<float>(static_cast<IType>(elt));
+          }
+          // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
+          if constexpr (IS_CACHED_ACT_OP) {
+            cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+          }
 
-//           if constexpr (COMPUTE_ACTIVATIONS) {
-//             const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
-//             const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
-//             if (!out_of_bounds) {
-//               block_amax = fmaxf(block_amax, fabsf(elt));
-//             }
-//           } else {
-//             // If no activation, elt is 0 so we can safely do this
-//             block_amax = fmaxf(block_amax, fabsf(elt));
-//           }
-//           in_compute_colwise[i] = elt;
-//         }
-//       }
+          if constexpr (COMPUTE_ACTIVATIONS) {
+            const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
+            const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
+            if (!out_of_bounds) {
+              block_amax = fmaxf(block_amax, fabsf(elt));
+            }
+          } else {
+            // If no activation, elt is 0 so we can safely do this
+            block_amax = fmaxf(block_amax, fabsf(elt));
+          }
+          in_compute_colwise[i] = elt;
+        }
+      }
 
-//       // 2. Compute E8M0 scaling factor
-//       const e8m0_t biased_exponent =
-//           ptx::float_to_e8m0(block_amax * Quantized_Limits<OType>::max_norm_rcp);
+      // 2. Compute E4M3 scaling factor
+      const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
 
-//       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
-//       const int global_scales_offset_X = scales_offset_X_colwise;
-//       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-//       scales_colwise[scale_idx] = biased_exponent;
+      // // Store the scaling factor
+      // const int stage_scales_offset_Y = tid_Y_rowwise + stage_offset_Y;
+      // const int stage_scales_offset_X = tid_X_rowwise;
+      // const int scale_idx = stage_scales_offset_Y * THREADS_X + stage_scales_offset_X;
+      // out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
 
-//       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-//       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+      // Compute "correct" per-block encoding scaling factor
+      const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
 
-// // 3. Scale elements
-//       #pragma unroll
-//       for (int i = 0; i < SCALE_DIM_Y; ++i) {
-//         float in;
-//         if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-//           in = static_cast<float>(in_colwise_IType[i]);
-//         } else {
-//           in = in_compute_colwise[i];
-//         }
-//         const float scaled_out = in * block_scale_inverse;
+      // 3. Scale elements
+      #pragma unroll
+      for (int i = 0; i < SCALE_DIM_Y; ++i) {
+        float in;
+        if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          in = static_cast<float>(in_colwise_IType[i]);
+        } else {
+          in = in_compute_colwise[i];
+        }
+        const float scaled_out = in * block_scale_inverse;
 
-//         const int shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-//         out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
-//       }
-//     }
+        const int shmem_offset_elt = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+        // Reuse the cache buffer to then read two adjacent elements at once by a single thread
+        // and them to convert them into FP4
+        in_sh[shmem_offset_elt] = static_cast<IType>(scaled_out);
+      }
+
+      // Only half of all threads process elements (two elements per thread)
+      // By taking only even-index threads, we don't need to synchronize them in the entire block,
+      // as the data they have written at earlier step are already synchronized on the warp level.
+      // TODO: check the performance impact, if half of all warps are used with __syncthreads(),
+      // instead of all warps (and half of all threads are idle)    
+      if (threadIdx.x % 2 == 0) {
+        #pragma unroll
+        for (int i = 0; i < SCALE_DIM_Y; ++i) { 
+          const int shmem_offset_elt_in = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+          const int shmem_offset_elt_out = shmem_offset_base_colwise_out + i * BUFF_OUT_DIM_X;
+          // Read two adjacent elements from the cache buffer and convert them into FP4
+          using Type2 = typename Type2x<IType>::type;
+          const fp4e2m1x2 elt_pair_fp4(*reinterpret_cast<Type2*>(&in_sh[shmem_offset_elt_in]));
+          out_colwise_data_sh[shmem_offset_elt_out] = elt_pair_fp4;
+        }
+      }
+    }
 
     if constexpr (ROWWISE_SCALING) {
       const int shmem_offset_base_rowwise_in = buff * BUFF_IN_DIM + thread_offset_Y_rowwise * BUFF_IN_DIM_X;
@@ -874,16 +904,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       // 2. Compute E4M3 scaling factor
-      // Compute per-block encoding/decoding scaling factor
-      const float S_dec_b = block_amax / 6.0f;
-
-      // Scale & Store per-block decoding scaling factor
-      const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
-
-      // const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
-      // const int stage_scales_offset_X = scales_offset_X_rowwise;
-      // const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      // scales_rowwise_e4m3[scale_idx] = S_dec_b_fp8;
+      const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
 
       const int stage_scales_offset_Y = tid_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = tid_X_rowwise;
@@ -891,27 +912,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
 
       // Compute "correct" per-block encoding scaling factor
-      // const float S_enc_b_fp8 = S_enc / static_cast<float>(S_dec_b_fp8);
-      const float S_enc_b_fp8 = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));
-      const float block_scale_inverse = S_enc_b_fp8;
-
-      // const ptx::floatx2 block_scale_inverse_2x = {S_enc_b_fp8, S_enc_b_fp8};
-
-      // At the moment, ONLY the Rowwise NVFP4 is supported
-      // if constexpr (SCALE_DIM_X == 32) {
-      //   // TODO: Choose MXFP8 or NVFP4 scaling depending on the provided value of SCALE_DIM_X
-      //   const e8m0_t biased_exponent = ptx::float_to_e8m0(block_amax * Quantized_Limits<OType>::max_norm_rcp);
-      //   const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
-      //   const int stage_scales_offset_X = scales_offset_X_rowwise;
-      //   const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      //   scales_rowwise[scale_idx] = biased_exponent;
-
-      //   const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-      //   const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-      // }
+      const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
 
       // 3. Scale elements
-
       #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         Vec<fp4e2m1x4, PACK_SIZE / 4> out;    // Vec<fp4e2m1x4, PACK_SIZE / 4> out;
@@ -965,9 +968,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             global_offset_Y, reinterpret_cast<uint64_t *>(&out_rowwise_data_sh[buff_offset]));
       }
       if constexpr (COLWISE_SCALING) {
-        // ptx::cp_async_bulk_tensor_2d_shared_to_global(
-        //     reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X &&&,
-        //     global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
+        ptx::cp_async_bulk_tensor_2d_shared_to_global(
+            reinterpret_cast<const uint64_t *>(&tensor_map_output_colwise), global_offset_X,
+            global_offset_Y, reinterpret_cast<uint64_t *>(&out_colwise_data_sh[buff_offset]));
       }
 
       // Create a "bulk async-group" out of the previous bulk copy operation.
@@ -977,16 +980,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   // Vectorized store of scaling factors.
   // Each thread stores multiple scaling factors in one store instruction.
-  // Number of scaling factors = CHUNK_DIM_X / SCALE_DIM_X
-  constexpr int SCALING_FACTORS_PER_CHUNK_ROW = CHUNK_DIM_X / SCALE_DIM_X;
-  const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + threadIdx.x;
-  const int scales_offset_X_rowwise = scales_block_offset_X_rowwise;
-  const int scale_idx_global = scales_offset_Y_rowwise * scale_stride_rowwise + scales_offset_X_rowwise;
-  const int scale_idx_shmem = threadIdx.x * SCALING_FACTORS_PER_CHUNK_ROW;
-  if ((threadIdx.x < CHUNK_DIM_Y) && (scales_offset_Y_rowwise < rows) && (scales_offset_X_rowwise < (cols / SCALE_DIM_X))) {
-    using ScalesVec_t = Vec<fp8e4m3, SCALING_FACTORS_PER_CHUNK_ROW>;
-    const ScalesVec_t& scales = *reinterpret_cast<ScalesVec_t*>(&out_rowwise_scales_sh[scale_idx_shmem]);
-    scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
+  if constexpr (ROWWISE_SCALING) {
+    // Number of scaling factors = CHUNK_DIM_X / SCALE_DIM_X
+    constexpr int SCALING_FACTORS_PER_CHUNK_ROW = CHUNK_DIM_X / SCALE_DIM_X;
+    const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + threadIdx.x;
+    const int scales_offset_X_rowwise = scales_block_offset_X_rowwise;
+    const int scale_idx_global = scales_offset_Y_rowwise * scale_stride_rowwise + scales_offset_X_rowwise;
+    const int scale_idx_shmem = threadIdx.x * SCALING_FACTORS_PER_CHUNK_ROW;
+    if ((threadIdx.x < CHUNK_DIM_Y) && (scales_offset_Y_rowwise < rows) && (scales_offset_X_rowwise < (cols / SCALE_DIM_X))) {
+      using ScalesVec_t = Vec<fp8e4m3, SCALING_FACTORS_PER_CHUNK_ROW>;
+      const ScalesVec_t& scales = *reinterpret_cast<ScalesVec_t*>(&out_rowwise_scales_sh[scale_idx_shmem]);
+      scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
+    }
+  }
+
+  if constexpr (COLWISE_SCALING) {
+    // TODO: 
   }
 
   float chunk_amax = 0.0f;
@@ -1734,10 +1743,10 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
                                  BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
           }
 
-          // if (use_colwise_scaling) {
-          //   create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
-          //                        BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(OType));
-          // }
+          if (use_colwise_scaling) {
+            create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
+                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
+          }
           
           constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
           constexpr size_t buff_elems_total = nvfp4_kernel::BUFFS_NUM * buff_elems;
@@ -1774,21 +1783,21 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
                     noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
                     rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
-            // case ScalingType::COLWISE:
-            //   cudaFuncSetAttribute(
-            //       cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
-            //                         CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-            //       cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+            case ScalingType::COLWISE:
+              cudaFuncSetAttribute(
+                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
+                                    CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-            //   cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
-            //                     CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-            //       <<<grid, block_size, dshmem_size, stream>>>(
-            //         tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
-            //         scales_rowwise_e8m0_ptr, scales_colwise_e8m0_ptr,
-            //         scales_rowwise_e4m3_ptr, scales_colwise_e4m3_ptr,
-            //         noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
-            //         rows, cols, scale_stride_rowwise, scale_stride_colwise);
-            //   break;
+              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
+                                CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
+                  <<<grid, block_size, dshmem_size, stream>>>(
+                    tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
+                    scales_rowwise_e8m0_ptr, scales_colwise_e8m0_ptr,
+                    scales_rowwise_e4m3_ptr, scales_colwise_e4m3_ptr,
+                    noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
+                    rows, cols, scale_stride_rowwise, scale_stride_colwise);
+              break;
             // case ScalingType::BIDIMENSIONAL:
             //   cudaFuncSetAttribute(
             //       cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true, true,

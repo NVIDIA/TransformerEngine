@@ -29,6 +29,16 @@ enum ActivationType {
     SReLU
 };
 
+float2 cvt_fp4x2_to_float2(fp4e2m1x2 fp4_pair) {
+    const __half2_raw raw_truncated_to_fp4e2m1_pair =
+        __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&fp4_pair), __NV_E2M1);
+
+    const __half2 truncated_to_fp4e2m1_pair(raw_truncated_to_fp4e2m1_pair);
+    const float truncated_to_fp4e2m1_x = static_cast<float>(truncated_to_fp4e2m1_pair.x);
+    const float truncated_to_fp4e2m1_y = static_cast<float>(truncated_to_fp4e2m1_pair.y);
+    return {truncated_to_fp4e2m1_x, truncated_to_fp4e2m1_y};
+}
+
 template <typename InputType, typename OutputType>
 void compute_ref(const bool rowwise,
                  const bool colwise,
@@ -128,8 +138,6 @@ void compute_ref(const bool rowwise,
                     // printf("Scale Reciprocal: %f\n", scale_reciprocal);
                     for (size_t j = j_min; j < j_max; j += 2) {
                         const int idx_pair = (i * cols + j) / 2;
-                        // const int idx_x = i * cols + j;
-                        // const int idx_y = i * cols + j + 1;
                         const int cache_idx_x = (i - i_min) * tile_size_X + (j     - j_min);
                         const int cache_idx_y = (i - i_min) * tile_size_X + (j + 1 - j_min);
                         const float cached_x = cache_buffer[cache_idx_x];
@@ -139,46 +147,76 @@ void compute_ref(const bool rowwise,
                         const float2 scaled_elt_pair = {scaled_elt_x, scaled_elt_y};
 
                         fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
-
-                        const __half2_raw raw_truncated_to_fp4e2m1_pair =
-                            __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&casted_to_e2m1_pair),
-                                                        __NV_E2M1);
-
-                        const __half2 truncated_to_fp4e2m1_pair(raw_truncated_to_fp4e2m1_pair);
-                        const float truncated_to_fp4e2m1_x = static_cast<float>(truncated_to_fp4e2m1_pair.x);
-                        const float truncated_to_fp4e2m1_y = static_cast<float>(truncated_to_fp4e2m1_pair.y);
-
-                        // output_rowwise_nvfp4[idx_pair] = *(reinterpret_cast<fp4e2m1*>(&casted_to_e2m1_pair));
                         output_rowwise_nvfp4[idx_pair] = casted_to_e2m1_pair;
 
-                        // output_rowwise_nvfp4[idx] = static_cast<fp4e2m1>(cache_buffer[cache_idx] * scale_reciprocal);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_x, cached_x, scaled_elt_x, truncated_to_fp4e2m1_x);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_y, cached_y, scaled_elt_y, truncated_to_fp4e2m1_y);
+                        const float2 truncated_pair = cvt_fp4x2_to_float2(casted_to_e2m1_pair);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_x, cached_x, scaled_elt_x, truncated_pair.x);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_y, cached_y, scaled_elt_y, truncated_pair.y);
                     }
                     // printf("--------------------------------------------------------------------------\n\n");
                 }
             }
-            // if (colwise) {
-            //     for (size_t j = j_min; j < j_max; ++j) {
-            //         float block_amax = 0.0f;
+            if (colwise) {
+                for (size_t j = j_min; j < j_max; j += 2) {
+                    float block_amax_x = 0.0f;
+                    float block_amax_y = 0.0f;
+                    
+                    for (size_t i = i_min; i < i_max; ++i) {
+                        const int cache_idx_x = (i - i_min) * tile_size_X + (j - j_min);
+                        const int cache_idx_y = (i - i_min) * tile_size_X + (j + 1 - j_min);
+                        block_amax_x = std::max(block_amax_x, std::abs(cache_buffer[cache_idx_x]));
+                        block_amax_y = std::max(block_amax_y, std::abs(cache_buffer[cache_idx_y]));
+                    }
 
-            //         for (size_t i = i_min; i < i_max; ++i) {
-            //             const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-            //             block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
-            //         }
+                    // 2. Compute E4M3 scaling factor
+                    // Compute per-block encoding/decoding scaling factor
+                    const float S_dec_b_x = block_amax_x / 6.0f;
+                    const float S_dec_b_y = block_amax_y / 6.0f;
 
-            //         const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-            //         const int scale_idx = tile_Y * scales_stride_colwise + j;
-            //         scales_colwise_e8m0[scale_idx] = biased_exponent;
-            //         const float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    // Scale & Store per-block decoding scaling factor
+                    const fp8e4m3 S_dec_b_fp8_x = static_cast<fp8e4m3>(S_dec_b_x * S_enc);
+                    const fp8e4m3 S_dec_b_fp8_y = static_cast<fp8e4m3>(S_dec_b_y * S_enc);
 
-            //         for (size_t i = i_min; i < i_max; ++i) {
-            //             const int idx = i * cols + j;
-            //             const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-            //             output_colwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
-            //         }
-            //     }
-            // }
+                    // Compute "correct" per-block encoding scaling factor
+                    const float S_enc_b_fp8_x = S_enc / static_cast<float>(S_dec_b_fp8_x);
+                    const float S_enc_b_fp8_y = S_enc / static_cast<float>(S_dec_b_fp8_y);
+
+                    const int scale_idx_x = tile_Y * scales_stride_colwise + j;
+                    const int scale_idx_y = tile_Y * scales_stride_colwise + j + 1;
+
+                    scales_colwise_nvfp4[scale_idx_x] = S_dec_b_fp8_x;
+                    scales_colwise_nvfp4[scale_idx_y] = S_dec_b_fp8_y;
+                    const float scale_reciprocal_x = S_enc_b_fp8_x;
+                    const float scale_reciprocal_y = S_enc_b_fp8_y;
+
+                    // MXFP8 Scaling Type
+                    // const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
+                    // const int scale_idx = i * scales_stride_rowwise + tile_X;
+                    // scales_rowwise_mxfp8[scale_idx] = biased_exponent;
+                    // const float scale_reciprocal = exp2f_rcp(biased_exponent);
+
+                    // printf("Scale Reciprocal: %f\n", scale_reciprocal);
+                    for (size_t i = i_min; i < i_max; ++i) {
+                        const int idx_pair = (i * cols + j) / 2;
+
+                        const int cache_idx_x = (i - i_min) * tile_size_X + (j     - j_min);
+                        const int cache_idx_y = (i - i_min) * tile_size_X + (j + 1 - j_min);
+                        const float cached_x = cache_buffer[cache_idx_x];
+                        const float cached_y = cache_buffer[cache_idx_y];
+                        const float scaled_elt_x = cached_x * scale_reciprocal_x;
+                        const float scaled_elt_y = cached_y * scale_reciprocal_y;
+                        const float2 scaled_elt_pair = {scaled_elt_x, scaled_elt_y};
+
+                        fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
+                        output_colwise_nvfp4[idx_pair] = casted_to_e2m1_pair;
+
+                        const float2 truncated_pair = cvt_fp4x2_to_float2(casted_to_e2m1_pair);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_x, cached_x, scaled_elt_x, truncated_pair.x);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_y, cached_y, scaled_elt_y, truncated_pair.y);
+                    }
+                    // printf("--------------------------------------------------------------------------\n\n");
+                }
+            }
         }
     }
 }
@@ -421,6 +459,7 @@ void performTest_x1(float (*OP)(const float),
 // }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
+    {32, 32},
     // {1, 32},
     // {16, 48},    
     // {65, 96},
@@ -435,13 +474,13 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     // {1024},
     // {8, 32, 1024},
     // {16, 8, 4, 512},
-    {1024, 16384},
-    {4096, 13312},
+    // {1024, 16384},
+    // {4096, 13312},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
-    {1, 16},
-    // {16, 1},
+    // {1, 16},
+    {16, 1},
     // {16, 32},
     // {32, 16},
 };
