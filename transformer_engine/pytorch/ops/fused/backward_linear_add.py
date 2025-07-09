@@ -96,8 +96,7 @@ class BackwardLinearAdd(FusedOperation):
             grad_weight = None
 
         # Clear input tensor if possible
-        if linear_op_ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         return grad_input, [(grad_weight,), ()], [(), ()]
 

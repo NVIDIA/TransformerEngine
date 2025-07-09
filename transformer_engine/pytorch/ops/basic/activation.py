@@ -73,7 +73,6 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Compute dtype
@@ -114,7 +113,6 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         ctx.save_for_backward(x)
         ctx.with_quantized_compute = with_quantized_compute
         ctx.dtype = dtype
-        ctx.is_first_op = is_first_op
         ctx.prev_op_grad_input_quantizer = prev_op_grad_input_quantizer
 
         return y
@@ -151,8 +149,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             dx = dx.view(x.size())
 
         # Clear input tensor if possible
-        if not ctx.is_first_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
 
         return dx, ()
 

@@ -890,7 +890,6 @@ class BasicLinear(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check which grads are required
@@ -950,7 +949,6 @@ class BasicLinear(BasicOperation):
         ctx.dtype = dtype
         ctx.input_requires_grad = input_requires_grad
         ctx.weight_requires_grad = weight_requires_grad
-        ctx.has_prev_op = not is_first_op
 
         return output
 
@@ -1001,8 +999,7 @@ class BasicLinear(BasicOperation):
         )
 
         # Clear input tensor if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         if accumulate_into_main_grad:
             grad_weight = None

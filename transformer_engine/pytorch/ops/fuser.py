@@ -100,6 +100,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Operation autograd contexts
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
+        # Mark input tensors requiring grad as not deletable in backward
+        for tensor in (input_,) + params_and_extra_inputs:
+            if tensor.requires_grad:
+                tensor.do_not_clear = True
+
         # Unflatten list of parameters and extra tensor inputs
         extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
         basic_op_extra_inputs = []
@@ -134,7 +139,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             next_op_input_quantizer = None
             if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
-            is_first_op = prev_op is None
 
             x, fused_op_extra_outputs = op.fuser_forward(
                 [basic_op_ctxs[idx] for idx in basic_op_idxs],
@@ -142,7 +146,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_extra_inputs=extra_inputs,
                 prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
                 next_op_input_quantizer=next_op_input_quantizer,
-                is_first_op=is_first_op,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):

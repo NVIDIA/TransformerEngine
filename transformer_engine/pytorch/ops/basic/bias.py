@@ -123,7 +123,6 @@ class Bias(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
         x = input_
         b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])

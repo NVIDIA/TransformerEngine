@@ -61,7 +61,6 @@ class ForwardLinearBiasActivation(FusedOperation):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -133,7 +132,6 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.dtype = dtype
         linear_op_ctx.input_requires_grad = input_requires_grad
         linear_op_ctx.weight_requires_grad = weight_requires_grad
-        linear_op_ctx.has_prev_op = not is_first_op
 
         return output, [() for _ in range(len(self.basic_ops))]
 
