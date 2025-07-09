@@ -468,14 +468,14 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map,
 }  // namespace transformer_engine
 
 void nvte_fused_topk_with_score_function_forward(
-    const NVTETensor logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
+    const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
     NVTETensor intermediate_output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
   fused_topk_with_score_function_forward(
-      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, use_pre_softmax, num_groups,
+      *convertNVTETensorCheck(logits), num_tokens, num_experts, topk, static_cast<bool>(use_pre_softmax), num_groups,
       group_topk, scaling_factor, score_function, *convertNVTETensorCheck(expert_bias),
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(routing_map),
       *convertNVTETensorCheck(intermediate_output), stream);
@@ -484,13 +484,13 @@ void nvte_fused_topk_with_score_function_forward(
 void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
                                                   const NVTETensor intermediate_output,
                                                   const NVTETensor grad_probs, int num_tokens,
-                                                  int num_experts, int topk, bool use_pre_softmax,
+                                                  int num_experts, int topk, int use_pre_softmax,
                                                   float scaling_factor, int score_function,
                                                   NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
   using namespace transformer_engine;
   fused_topk_with_score_function_backward(
       *convertNVTETensorCheck(routing_map), *convertNVTETensorCheck(intermediate_output),
-      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk, use_pre_softmax,
+      *convertNVTETensorCheck(grad_probs), num_tokens, num_experts, topk, static_cast<bool>(use_pre_softmax),
       scaling_factor, score_function, *convertNVTETensorCheck(grad_logits), stream);
 }
