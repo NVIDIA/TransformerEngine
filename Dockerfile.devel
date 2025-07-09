@@ -9,6 +9,7 @@ SHELL ["bash", "-c"]
 COPY .git/ /opt/transformerengine/.git/
 COPY .gitignore /opt/transformerengine/
 COPY .gitlab-ci.yml docker-build.sh Dockerfile.base Dockerfile.devel Dockerfile.qa README-ci.md /opt/transformerengine/
+COPY te_ci_artifacts/ /opt/transformerengine/artifacts/
 
 # Avoid "Problem with the SSL CA cert" from git commands in the container
 RUN set -x \

@@ -161,6 +161,7 @@ before_script:
       git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git remote remove github &&
       git branch -D ${FETCH_BRANCH} &&
@@ -173,6 +174,7 @@ before_script:
       git merge ${FETCH_BRANCH} -m "Merged MR gitlab${GL_MR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git branch -D ${FETCH_BRANCH} &&
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
@@ -180,6 +182,7 @@ before_script:
     - test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} ||
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "CI on branch ${GH_BRANCH}" &&
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
     # version is available only after checkout so provide it here only once
@@ -685,7 +688,7 @@ send_result_to_slack:
     function sendSlackMessage() {
         local SLACK_MESSAGE_MRKDWN=${1}
         local PARENT_MESSAGE_TS=${2}
-        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json 
+        jq '{channel: $channel, blocks: []}' -n --arg channel "#swdl-fw-transformerengine-ci" > payload.json
         # Splits the message up into blocks due to Slack's limit of 3000 characters per block.
         [ -n "${SLACK_MESSAGE_MRKDWN}" ] && jq_in_place '.blocks += ($mrkdwn | split("\n") | map(select(. != "")) | map({type: "section", text: {type: "mrkdwn", text: .}}))' payload.json --arg mrkdwn "${SLACK_MESSAGE_MRKDWN}"
         [ -n "$PARENT_MESSAGE_TS" ] && jq_in_place '. += {"thread_ts" : $ts}' payload.json --arg ts ${PARENT_MESSAGE_TS//\"/}
