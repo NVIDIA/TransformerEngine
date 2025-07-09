@@ -5,6 +5,7 @@
 """JAX related extensions."""
 import os
 from pathlib import Path
+from packaging import version
 
 import setuptools
 
@@ -27,7 +28,13 @@ def xla_path() -> str:
     Throws FileNotFoundError if XLA source is not found."""
 
     try:
-        from jax.extend import ffi
+        import jax
+
+        if version.parse(jax.__version__) >= version.parse("0.5.0"):
+            from jax import ffi  # pylint: disable=ungrouped-imports
+        else:
+            from jax.extend import ffi  # pylint: disable=ungrouped-imports
+
     except ImportError:
         if os.getenv("XLA_HOME"):
             xla_home = Path(os.getenv("XLA_HOME"))

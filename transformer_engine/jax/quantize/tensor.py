@@ -142,9 +142,9 @@ class ScaledTensor1x(ScaledTensor):
             pad_width = tuple(
                 (0, a - b) for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
             )
-            # This actually pad scale_inv with nan, should we pad it with 127 directly instead?
+            # padding with the smallest number it can present
             self.scale_inv = jnp.pad(
-                self.scale_inv, pad_width=pad_width, mode="constant", constant_values=0
+                self.scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127
             )
 
     def tree_flatten(self):
