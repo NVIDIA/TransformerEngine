@@ -33,7 +33,7 @@ Array = Any
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
-Initializer = Callable[[PRNGKey, Shape, DType], Array]
+Initializer = Callable[[PRNGKey, Shape, jnp.dtype], Array]
 
 # Enables verbose printing of tensor numerics for debug.
 NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
@@ -1604,11 +1604,16 @@ def print_debug_tensor_stats(prefix, tensor, hist=False):
 
 @contextmanager
 def use_jax_gemm(enabled=False):
-    orig_custom_calls = os.environ.get("NVTE_JAX_CUSTOM_CALLS_RE", None)
+    orig_custom_calls_filter = os.environ.get("NVTE_JAX_CUSTOM_CALLS_RE", None)
+
     try:
         if enabled:
             os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
         yield
+
     finally:
-        if enabled and orig_custom_calls is not None:
-            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = orig_custom_calls
+        if enabled:
+            if orig_custom_calls_filter is None:
+                os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
+            else:
+                os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = orig_custom_calls_filter

@@ -165,11 +165,12 @@ class TestDistributedLayernormMLP:
             input_shape, activation_type, use_bias, dtype
         )
         static_inputs = [layernorm_type, activation_type]
-        value_and_grad_func = jax.value_and_grad(
-            self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
-        )
 
         with use_jax_gemm(enabled=with_jax_gemm):
+            value_and_grad_func = jax.value_and_grad(
+                self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
+            )
+
             # Single GPU
             with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
                 single_jitter = jax.jit(
