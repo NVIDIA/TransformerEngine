@@ -215,7 +215,9 @@ class TestDistributedLayernormMLP:
                     value_and_grad_func,
                     in_shardings=in_shardings,
                     out_shardings=out_shardings,
-                    static_argnums=range(len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1),
+                    static_argnums=range(
+                        len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1
+                    ),
                 )  # +1 for multi_gpus
 
                 multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)

@@ -930,7 +930,9 @@ class TestDense:
                 x,
                 w,
                 dimension_numbers=(contracting_dims, ((), ())),
-                lhs_quantizer=quantizer_set.x if x_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad,
+                lhs_quantizer=(
+                    quantizer_set.x if x_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad
+                ),
                 rhs_quantizer=(
                     quantizer_set.kernel if w_qtype == jnp.float8_e4m3fn else quantizer_set.dgrad
                 ),

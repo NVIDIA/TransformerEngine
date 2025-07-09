@@ -160,7 +160,7 @@ class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = True
     dropout_rate: float = 0.0
-    dtype: jnp.dtype =  jnp.float32
+    dtype: jnp.dtype = jnp.float32
     float32_logits: bool = False
     """Computes dot-product attention given query, key, and value.
 
@@ -283,7 +283,7 @@ class DenseGeneral(nn.Module):
 
     features: Union[Iterable[int], int]
     axis: Union[Iterable[int], int] = -1
-    dtype: jnp.dtype =  jnp.float32
+    dtype: jnp.dtype = jnp.float32
     kernel_init: Initializer = None
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
@@ -525,7 +525,7 @@ class MultiHeadAttention(nn.Module):
     num_gqa_groups: int | None = None
     head_dim: int = 64
     transpose_batch_sequence: bool = True
-    dtype: jnp.dtype =  jnp.float32
+    dtype: jnp.dtype = jnp.float32
     dropout_rate: float = 0.0
     kernel_init: Initializer = None
     float32_logits: bool = False  # computes logits in float32 for stability.
