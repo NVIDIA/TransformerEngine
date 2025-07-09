@@ -537,6 +537,8 @@ constexpr size_t SCALE_DIM_Y = 16;
 constexpr size_t SCALE_DIM_X = 16;
 
 constexpr size_t BUFFS_NUM = 2;
+constexpr size_t BUFF_DIM_Y = 16;
+
 constexpr size_t PACK_SIZE = 8;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
@@ -582,18 +584,24 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       return;
     }
   }
-  constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
-  constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
+  constexpr size_t THREADS_X_ROWWISE = CHUNK_DIM_X / SCALE_DIM_X;
+  constexpr size_t THREADS_Y_ROWWISE = THREADS_PER_CHUNK / THREADS_X_ROWWISE;
 
-  constexpr size_t BUFF_DIM_Y = THREADS_Y;
+  static_assert(BUFF_DIM_Y >= SCALE_DIM_Y && "Number of buffer rows must be greater or equal to the size of the columwise scaling block\0");
+  static_assert(CHUNK_DIM_Y >= BUFF_DIM_Y);
+  static_assert(BUFF_DIM_Y >= THREADS_Y_ROWWISE && "Number of buffer rows must be greater or equal to the number of rowwise processing threads in Y dimension\0");
+
   constexpr size_t BUFF_IN_DIM_X = CHUNK_DIM_X;
   constexpr size_t BUFF_OUT_DIM_X = (CHUNK_DIM_X * 4) / 8;      // Holds 2 elements of 4-bit size
   constexpr size_t BUFF_IN_DIM = BUFF_DIM_Y * BUFF_IN_DIM_X;
   constexpr size_t BUFF_OUT_DIM = BUFF_DIM_Y * BUFF_OUT_DIM_X;
-  // static_assert(BUFF_DIM_Y == 32);
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
-  static_assert(STAGES >= 1);
+
+  constexpr size_t ITERATIONS_ROWWISE = BUFF_DIM_Y / THREADS_Y_ROWWISE;
+  constexpr size_t ITERATIONS_COLWISE = BUFF_DIM_Y / SCALE_DIM_Y;
+  // static_assert(THREADS_PER_CHUNK >= CHUNK_DIM_X);    // there should be a sufficient number of
+  //                                                     // threads to process one row in a single iteration 
 
   constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS && ROWWISE_SCALING && COLWISE_SCALING;
 
@@ -604,8 +612,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_block_offset_Y_colwise = blockIdx.y * CHUNK_DIM_Y / SCALE_DIM_Y;
   const int scales_block_offset_X_colwise = blockIdx.x * CHUNK_DIM_X;
 
-  const int tid_Y_rowwise = threadIdx.x / THREADS_X;
-  const int tid_X_rowwise = threadIdx.x % THREADS_X;
+  const int tid_Y_rowwise = threadIdx.x / THREADS_X_ROWWISE;
+  const int tid_X_rowwise = threadIdx.x % THREADS_X_ROWWISE;
   const int tid_Y_colwise = 0;
   const int tid_X_colwise = threadIdx.x;
 
@@ -620,10 +628,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
-  // const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
-  // const int scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
-  // const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
-  // const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+  const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
+  const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -681,6 +687,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int next_stage = stage + 1;
     const int stage_offset_Y = stage * BUFF_DIM_Y;
 
+    const int buff_offset_in = buff * BUFF_IN_DIM;
+    const int buff_offset_out = buff * BUFF_OUT_DIM;
+
+    const int stage_scales_offset_Y_colwise = scales_offset_Y_colwise + stage * ITERATIONS_COLWISE;
+
     if (next_stage < STAGES) {
       // Wait for TMA transfer to have finished reading shared memory.
       // I.e. the buffer is ready to be written to
@@ -703,182 +714,34 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     float block_amax = 0.0f;
     if constexpr (COLWISE_SCALING) {
-      const int shmem_offset_base_colwise_in = buff * BUFF_IN_DIM + tid_X_colwise;
-      const int shmem_offset_base_colwise_out = buff * BUFF_OUT_DIM + tid_X_colwise / 2;
-      block_amax = 0.0f;
-      float in_compute_colwise[SCALE_DIM_Y];
-      IType in_colwise_IType[SCALE_DIM_Y];
+      #pragma unroll 
+      for (int it = 0; it < ITERATIONS_COLWISE; ++it) {
+        const int iteration_offset_in = buff_offset_in + it * SCALE_DIM_Y * BUFF_IN_DIM_X;
+        const int iteration_offset_out = buff_offset_out + it * SCALE_DIM_Y * BUFF_OUT_DIM_X;
 
-      // 1. Read/Compute elements. Find MXFP8-block AMAX
-      if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-        IType block_amax_f16 = static_cast<IType>(0.0f);
-        #pragma unroll
-        for (int i = 0; i < SCALE_DIM_Y; ++i) {
-          const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
-          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-          block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
-        }
-        block_amax = static_cast<float>(block_amax_f16);
-      } else {
-        #pragma unroll
-        for (int i = 0; i < SCALE_DIM_Y; ++i) {
-          const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+        const int shmem_offset_base_colwise_in = iteration_offset_in + tid_X_colwise;
+        const int shmem_offset_base_colwise_out = iteration_offset_out + tid_X_colwise / 2;
 
-          float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
-          if constexpr (COMPUTE_ACTIVATIONS) {
-            elt = OP(elt, {});
-          }
-          // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-          if constexpr (!std::is_same_v<IType, float>) {
-            elt = static_cast<float>(static_cast<IType>(elt));
-          }
-          // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
-          if constexpr (IS_CACHED_ACT_OP) {
-            cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
-          }
-
-          if constexpr (COMPUTE_ACTIVATIONS) {
-            const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
-            const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
-            if (!out_of_bounds) {
-              block_amax = fmaxf(block_amax, fabsf(elt));
-            }
-          } else {
-            // If no activation, elt is 0 so we can safely do this
-            block_amax = fmaxf(block_amax, fabsf(elt));
-          }
-          in_compute_colwise[i] = elt;
-        }
-      }
-
-      // 2. Compute E4M3 scaling factor
-      const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
-
-      // // Store the scaling factor
-      // const int stage_scales_offset_Y = tid_Y_rowwise + stage_offset_Y;
-      // const int stage_scales_offset_X = tid_X_rowwise;
-      // const int scale_idx = stage_scales_offset_Y * THREADS_X + stage_scales_offset_X;
-      // out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
-
-      // Compute "correct" per-block encoding scaling factor
-      const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
-
-      // 3. Scale elements
-      #pragma unroll
-      for (int i = 0; i < SCALE_DIM_Y; ++i) {
-        float in;
+        block_amax = 0.0f;
+        float in_compute_colwise[SCALE_DIM_Y];
+        IType in_colwise_IType[SCALE_DIM_Y];
+  
+        // 1. Read/Compute elements. Find MXFP8-block AMAX
         if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-          in = static_cast<float>(in_colwise_IType[i]);
+          IType block_amax_f16 = static_cast<IType>(0.0f);
+          #pragma unroll
+          for (int i = 0; i < SCALE_DIM_Y; ++i) {
+            const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+            in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+            block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+          }
+          block_amax = static_cast<float>(block_amax_f16);
         } else {
-          in = in_compute_colwise[i];
-        }
-        const float scaled_out = in * block_scale_inverse;
-
-        const int shmem_offset_elt = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
-        // Reuse the cache buffer to then read two adjacent elements at once by a single thread
-        // and them to convert them into FP4
-        in_sh[shmem_offset_elt] = static_cast<IType>(scaled_out);
-      }
-
-      // Only half of all threads process elements (two elements per thread)
-      // By taking only even-index threads, we don't need to synchronize them in the entire block,
-      // as the data they have written at earlier step are already synchronized on the warp level.
-      // TODO: check the performance impact, if half of all warps are used with __syncthreads(),
-      // instead of all warps (and half of all threads are idle)    
-      if (threadIdx.x % 2 == 0) {
-        #pragma unroll
-        for (int i = 0; i < SCALE_DIM_Y; ++i) { 
-          const int shmem_offset_elt_in = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
-          const int shmem_offset_elt_out = shmem_offset_base_colwise_out + i * BUFF_OUT_DIM_X;
-          // Read two adjacent elements from the cache buffer and convert them into FP4
-          using Type2 = typename Type2x<IType>::type;
-          const fp4e2m1x2 elt_pair_fp4(*reinterpret_cast<Type2*>(&in_sh[shmem_offset_elt_in]));
-          out_colwise_data_sh[shmem_offset_elt_out] = elt_pair_fp4;
-        }
-      }
-    }
-
-    if constexpr (ROWWISE_SCALING) {
-      const int shmem_offset_base_rowwise_in = buff * BUFF_IN_DIM + thread_offset_Y_rowwise * BUFF_IN_DIM_X;
-      const int shmem_offset_base_rowwise_out = buff * BUFF_OUT_DIM + thread_offset_Y_rowwise * BUFF_OUT_DIM_X;
-      block_amax = 0.0f;
-      float in_compute_rowwise[SCALE_DIM_X];
-      Vec<IType, PACK_SIZE> in_cached[WAVES];
-
-      // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
-      Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
-
-      // 1. Read/Compute elements. Find NVFP4-block AMAX
-      if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-        #pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
-          // Load elements
-          in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
           #pragma unroll
-          for (int e = 0; e < PACK_SIZE / 2; ++e) {
-            ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
-          }
-        }
-        block_amax =
-            static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-      } else if constexpr (IS_CACHED_ACT_OP) {
-        // ensures that all writes to cache made in the section above are visible to all threads
-        __syncthreads();
-        IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-        #pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
-
-          const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
-          const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
-          const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
-
-          // Load cached elements
-          in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-          // Since TMA requirement for the data alignment is 16B (i.e. cols % 8 == 0, in case of BF16 elements)
-          // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
-          if (!out_of_bounds) {
-            if constexpr (std::is_same_v<IType, float>) {
-              #pragma unroll
-              for (int e = 0; e < PACK_SIZE; ++e) {
-                block_amax = fmaxf(block_amax, fabsf(in_cached[w].data.elt[e]));
-              }
-            } else {
-              #pragma unroll
-              for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x = {in_cached[w].data.elt[e],
-                                             in_cached[w].data.elt[e + 1]};
-                ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
-              }
-            }
-          }
-        }
-        if constexpr (!std::is_same_v<IType, float>) {
-          block_amax =
-              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-        }
-      } else {
-        #pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
-
-          Vec<IType, PACK_SIZE> in;
-          Vec<IType, PACK_SIZE> act_in;
-
-          in.load_from(&in_sh[shmem_offset_rowwise]);
-          #pragma unroll
-          for (int e = 0; e < PACK_SIZE; ++e) {
-            const int j = w * PACK_SIZE + e;
-            // Compute element
-            float elt = static_cast<float>(in.data.elt[e]);
+          for (int i = 0; i < SCALE_DIM_Y; ++i) {
+            const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+  
+            float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
             if constexpr (COMPUTE_ACTIVATIONS) {
               elt = OP(elt, {});
             }
@@ -886,11 +749,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             if constexpr (!std::is_same_v<IType, float>) {
               elt = static_cast<float>(static_cast<IType>(elt));
             }
+            // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
+            if constexpr (IS_CACHED_ACT_OP) {
+              cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+            }
+  
             if constexpr (COMPUTE_ACTIVATIONS) {
-              const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
-              const bool swizzled_col_out_of_bounds =
-                  (block_offset_X + swizzled_thread_idx >= cols);
-              const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+              const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
+              const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
               if (!out_of_bounds) {
                 block_amax = fmaxf(block_amax, fabsf(elt));
               }
@@ -898,52 +764,212 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               // If no activation, elt is 0 so we can safely do this
               block_amax = fmaxf(block_amax, fabsf(elt));
             }
-            in_compute_rowwise[j] = elt;
+            in_compute_colwise[i] = elt;
+          }
+        }
+  
+        // 2. Compute E4M3 scaling factor
+        const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
+  
+        // Store the scaling factor
+        const int it_scales_offset_Y_colwise = stage_scales_offset_Y_colwise + it;
+        const int it_scales_offset_X_colwise = scales_offset_X_colwise;
+        const int scale_idx = it_scales_offset_Y_colwise * scale_stride_colwise + it_scales_offset_X_colwise;
+        scales_colwise_e4m3[scale_idx] = S_dec_b_fp8;
+  
+        // Compute "correct" per-block encoding scaling factor
+        const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
+  
+        // 3. Scale elements
+        #pragma unroll
+        for (int i = 0; i < SCALE_DIM_Y; ++i) {
+          float in;
+          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+            in = static_cast<float>(in_colwise_IType[i]);
+          } else {
+            in = in_compute_colwise[i];
+          }
+          const float scaled_out = in * block_scale_inverse;
+  
+          const int shmem_offset_elt = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+          // Reuse the cache buffer to then read two adjacent elements at once by a single thread
+          // and them to convert them into FP4
+          in_sh[shmem_offset_elt] = static_cast<IType>(scaled_out);
+        }
+  
+        // Only half of all threads process elements (two elements per thread)
+        // By taking only even-index threads, we don't need to synchronize them in the entire block,
+        // as the data they have written at earlier step are already synchronized on the warp level.
+        // TODO: check the performance impact, if half of all warps are used with __syncthreads(),
+        // instead of all warps (and half of all threads are idle)    
+        if (threadIdx.x % 2 == 0) {
+          #pragma unroll
+          for (int i = 0; i < SCALE_DIM_Y; ++i) { 
+            const int shmem_offset_elt_in = shmem_offset_base_colwise_in + i * BUFF_IN_DIM_X;
+            const int shmem_offset_elt_out = shmem_offset_base_colwise_out + i * BUFF_OUT_DIM_X;
+            // Read two adjacent elements from the cache buffer and convert them into FP4
+            using Type2 = typename Type2x<IType>::type;
+            const fp4e2m1x2 elt_pair_fp4(*reinterpret_cast<Type2*>(&in_sh[shmem_offset_elt_in]));
+            out_colwise_data_sh[shmem_offset_elt_out] = elt_pair_fp4;
           }
         }
       }
+    }
 
-      // 2. Compute E4M3 scaling factor
-      const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
+    if constexpr (ROWWISE_SCALING) {
+      #pragma unroll 
+      for (int it = 0; it < ITERATIONS_ROWWISE; ++it) {
+        const int it_thread_offset_Y_rowwise = thread_offset_Y_rowwise + it * THREADS_Y_ROWWISE;
 
-      const int stage_scales_offset_Y = tid_Y_rowwise + stage_offset_Y;
-      const int stage_scales_offset_X = tid_X_rowwise;
-      const int scale_idx = stage_scales_offset_Y * THREADS_X + stage_scales_offset_X;
-      out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
+        const int shmem_offset_base_rowwise_in = buff_offset_in + it_thread_offset_Y_rowwise * BUFF_IN_DIM_X;
+        const int shmem_offset_base_rowwise_out = buff_offset_out + it_thread_offset_Y_rowwise * BUFF_OUT_DIM_X;
 
-      // Compute "correct" per-block encoding scaling factor
-      const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
+        const int it_offset_Y = stage_offset_Y + it * THREADS_Y_ROWWISE;
 
-      // 3. Scale elements
-      #pragma unroll
-      for (int w = 0; w < WAVES; ++w) {
-        Vec<fp4e2m1x4, PACK_SIZE / 4> out;    // Vec<fp4e2m1x4, PACK_SIZE / 4> out;
-        #pragma unroll
-        for (int e = 0; e < PACK_SIZE / 4; ++e) {
-          IType2 in01;
-          IType2 in23;
-          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-            in01 = in_IType[w].data.elt[2 * e];
-            in23 = in_IType[w].data.elt[2 * e + 1];
-          } else if constexpr (IS_CACHED_ACT_OP) {
-            in01.x = in_cached[w].data.elt[4 * e];
-            in01.y = in_cached[w].data.elt[4 * e + 1];
-            in23.x = in_cached[w].data.elt[4 * e + 2];
-            in23.y = in_cached[w].data.elt[4 * e + 3];
-          } else {
-            const int j = w * PACK_SIZE + 4 * e;
-            in01.x = in_compute_rowwise[j];
-            in01.y = in_compute_rowwise[j + 1];
-            in23.x = in_compute_rowwise[j + 2];
-            in23.y = in_compute_rowwise[j + 3];
+        block_amax = 0.0f;
+        float in_compute_rowwise[SCALE_DIM_X];
+        Vec<IType, PACK_SIZE> in_cached[WAVES];
+  
+        // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
+        Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
+  
+        // 1. Read/Compute elements. Find NVFP4-block AMAX
+        if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+          #pragma unroll
+          for (int w = 0; w < WAVES; ++w) {
+            const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+            const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+            // Load elements
+            in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
+            #pragma unroll
+            for (int e = 0; e < PACK_SIZE / 2; ++e) {
+              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+            }
           }
-          fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
-          ptx::mul_cvt_4x(out_quad, in01, in23, block_scale_inverse);
+          block_amax =
+              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+        } else if constexpr (IS_CACHED_ACT_OP) {
+          // ensures that all writes to cache made in the section above are visible to all threads
+          __syncthreads();
+          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+          #pragma unroll
+          for (int w = 0; w < WAVES; ++w) {
+            const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+            const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+  
+            const bool row_out_of_bounds_rowwise = (row_base_rowwise + it_offset_Y >= rows);
+            const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
+            const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+  
+            // Load cached elements
+            in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
+            // Since TMA requirement for the data alignment is 16B (i.e. cols % 8 == 0, in case of BF16 elements)
+            // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
+            if (!out_of_bounds) {
+              if constexpr (std::is_same_v<IType, float>) {
+                #pragma unroll
+                for (int e = 0; e < PACK_SIZE; ++e) {
+                  block_amax = fmaxf(block_amax, fabsf(in_cached[w].data.elt[e]));
+                }
+              } else {
+                #pragma unroll
+                for (int e = 0; e < PACK_SIZE; e += 2) {
+                  const IType2 in_cached_2x = {in_cached[w].data.elt[e],
+                                               in_cached[w].data.elt[e + 1]};
+                  ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
+                }
+              }
+            }
+          }
+          if constexpr (!std::is_same_v<IType, float>) {
+            block_amax =
+                static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+          }
+        } else {
+          #pragma unroll
+          for (int w = 0; w < WAVES; ++w) {
+            const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+            const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const int shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+  
+            Vec<IType, PACK_SIZE> in;
+            Vec<IType, PACK_SIZE> act_in;
+  
+            in.load_from(&in_sh[shmem_offset_rowwise]);
+            #pragma unroll
+            for (int e = 0; e < PACK_SIZE; ++e) {
+              const int j = w * PACK_SIZE + e;
+              // Compute element
+              float elt = static_cast<float>(in.data.elt[e]);
+              if constexpr (COMPUTE_ACTIVATIONS) {
+                elt = OP(elt, {});
+              }
+              // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+              if constexpr (!std::is_same_v<IType, float>) {
+                elt = static_cast<float>(static_cast<IType>(elt));
+              }
+              if constexpr (COMPUTE_ACTIVATIONS) {
+                const bool row_out_of_bounds_rowwise = (row_base_rowwise + it_offset_Y >= rows);
+                const bool swizzled_col_out_of_bounds =
+                    (block_offset_X + swizzled_thread_idx >= cols);
+                const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+                if (!out_of_bounds) {
+                  block_amax = fmaxf(block_amax, fabsf(elt));
+                }
+              } else {
+                // If no activation, elt is 0 so we can safely do this
+                block_amax = fmaxf(block_amax, fabsf(elt));
+              }
+              in_compute_rowwise[j] = elt;
+            }
+          }
         }
-        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-        const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const int shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
-        out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+  
+        // 2. Compute E4M3 scaling factor
+        const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
+  
+        const int stage_scales_offset_Y = tid_Y_rowwise + it_offset_Y;
+        const int stage_scales_offset_X = tid_X_rowwise;
+        const int scale_idx = stage_scales_offset_Y * THREADS_X_ROWWISE + stage_scales_offset_X;
+        out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
+  
+        // Compute "correct" per-block encoding scaling factor
+        const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
+  
+        // 3. Scale elements
+        #pragma unroll
+        for (int w = 0; w < WAVES; ++w) {
+          Vec<fp4e2m1x4, PACK_SIZE / 4> out;    // Vec<fp4e2m1x4, PACK_SIZE / 4> out;
+          #pragma unroll
+          for (int e = 0; e < PACK_SIZE / 4; ++e) {
+            IType2 in01;
+            IType2 in23;
+            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+              in01 = in_IType[w].data.elt[2 * e];
+              in23 = in_IType[w].data.elt[2 * e + 1];
+            } else if constexpr (IS_CACHED_ACT_OP) {
+              in01.x = in_cached[w].data.elt[4 * e];
+              in01.y = in_cached[w].data.elt[4 * e + 1];
+              in23.x = in_cached[w].data.elt[4 * e + 2];
+              in23.y = in_cached[w].data.elt[4 * e + 3];
+            } else {
+              const int j = w * PACK_SIZE + 4 * e;
+              in01.x = in_compute_rowwise[j];
+              in01.y = in_compute_rowwise[j + 1];
+              in23.x = in_compute_rowwise[j + 2];
+              in23.y = in_compute_rowwise[j + 3];
+            }
+            fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
+            ptx::mul_cvt_4x(out_quad, in01, in23, block_scale_inverse);
+          }
+          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+          const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+          const int shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
+          out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
+        }
       }
     }
 
@@ -1697,9 +1723,6 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
   constexpr size_t CHUNK_DIM_X = 128;
   constexpr size_t THREADS_PER_CHUNK = 128;
 
-  constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
-  constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
-  constexpr size_t BUFF_DIM_Y = THREADS_Y;
   constexpr size_t BUFF_DIM_X = CHUNK_DIM_X;
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
@@ -1736,19 +1759,19 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
           alignas(64) CUtensorMap tensor_map_output_colwise{};
 
           create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
-                               BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(IType) * 8);
+                               nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(IType) * 8);
 
           if (use_rowwise_scaling) {
             create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
+                                 nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
           }
 
           if (use_colwise_scaling) {
             create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
-                                 BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
+                                 nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
           }
           
-          constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
+          constexpr size_t buff_elems = nvfp4_kernel::BUFF_DIM_Y * BUFF_DIM_X;
           constexpr size_t buff_elems_total = nvfp4_kernel::BUFFS_NUM * buff_elems;
           constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
           constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);

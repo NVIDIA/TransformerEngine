@@ -459,7 +459,7 @@ void performTest_x1(float (*OP)(const float),
 // }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    {32, 32},
+    // {32, 32},
     // {1, 32},
     // {16, 48},    
     // {65, 96},
@@ -474,8 +474,8 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     // {1024},
     // {8, 32, 1024},
     // {16, 8, 4, 512},
-    // {1024, 16384},
-    // {4096, 13312},
+    {1024, 16384},
+    {4096, 13312},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
