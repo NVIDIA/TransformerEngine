@@ -31,7 +31,7 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     RMSNorm,
     LayerNorm,
-    CPUOffload,
+    get_cpu_offload_context,
 )
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
@@ -292,14 +292,15 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
         _disable_wgrads(block)
 
     if cpu_offload:
-        cpu_offload = CPUOffload()
-        block = cpu_offload(block)
+        offload_context, sync_function = get_cpu_offload_context(enabled=True)
+    else:
+        offload_context = nullcontext()
+        sync_function = lambda x: x
 
     use_fp8 = fp8_recipe is not None
-    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe), offload_context:
         te_out = block(te_inp_hidden_states)
-    if cpu_offload:
-        cpu_offload.sync_before_bwd()
+    te_out = sync_function(te_out)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
