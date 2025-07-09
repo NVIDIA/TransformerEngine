@@ -13,6 +13,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
+from ...tensor import Quantizer
 
 
 class Identity(BasicOperation):
@@ -22,8 +23,9 @@ class Identity(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
     ) -> torch.Tensor:
         return input_
 

@@ -27,6 +27,9 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_WGRAD,
 )
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 all_boolean = [True, False]
 FP8_FORMAT = Format.HYBRID
@@ -246,8 +249,8 @@ def _init_model(weight):
     return model
 
 
-def _run_forward_backward(x, model, loss_scale=1.0, is_first_microbatch=None):
-    with tepytorch.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+def _run_forward_backward(x, model, loss_scale=1.0, is_first_microbatch=None, fp8=True):
+    with tepytorch.fp8_autocast(enabled=fp8, fp8_recipe=FP8_RECIPE):
         y = model(x, is_first_microbatch=is_first_microbatch)
     (y.sum() * loss_scale).backward()
     debug_api.step()
@@ -297,8 +300,8 @@ def run_logging_zero_numel_tensor(feature_dirs, **kwargs):
     x, weight = _get_tensors()
     x1 = x[:0, :]
     model = _init_model(weight)
-    _ = _run_forward_backward(x1, model)
-    _ = _run_forward_backward(x, model)
+    _ = _run_forward_backward(x1, model, fp8=False)
+    _ = _run_forward_backward(x, model, fp8=False)
 
 
 def test_logging_zero_numel_tensor(feature_dirs):
@@ -309,6 +312,8 @@ def test_logging_zero_numel_tensor(feature_dirs):
 @pytest.mark.parametrize("dgrad_fp8", all_boolean)
 @pytest.mark.parametrize("wgrad_fp8", all_boolean)
 def test_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8)
 
 
@@ -348,6 +353,8 @@ def run_disable_fp8_gemms(feature_dirs, fprop_fp8, dgrad_fp8, wgrad_fp8, **kwarg
 
 
 def test_disable_fp8_layer(feature_dirs):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_disable_fp8_layer(feature_dirs)
 
 
@@ -393,6 +400,8 @@ subset_combinations = random.sample(all_combinations, 20)
 def test_per_tensor_scaling(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     if not any([fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad]):
         pytest.skip("Skipping test because all parameters are False")
     run_per_tensor_scaling(
@@ -565,6 +574,8 @@ def run_per_tensor_scaling(
 def test_microbatching_per_tensor_scaling(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     if not any([fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad]):
         pytest.skip("Skipping test because all parameters are False")
 
@@ -654,6 +665,8 @@ subset_combinations = random.sample(all_combinations, 10)
 def test_fake_quant_fp8(
     feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
 ):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
     run_fake_quant_fp8(
         feature_dirs, fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad
     )

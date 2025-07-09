@@ -552,8 +552,20 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if fuse_wgrad_accumulation:
-                ctx.fc1_main_grad = fc1_weight.main_grad if fc1_weight.requires_grad else None
-                ctx.fc2_main_grad = fc2_weight.main_grad if fc2_weight.requires_grad else None
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(fc1_weight, "__fsdp_param__") and hasattr(fc2_weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.fc1_main_grad_func = (
+                        fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
+                    )
+                    ctx.fc2_main_grad_func = (
+                        fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
+                    )
+                else:
+                    ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
+                    ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
 
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -653,14 +665,14 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
-                ctx.fc1_main_grad
+                ctx.fc1_main_grad_func()
                 if fc1_weight is not None
                 and ctx.fuse_wgrad_accumulation
                 and ctx.fc1_weight_requires_grad
                 else None
             )
             fc2_weight_main_grad = (
-                ctx.fc2_main_grad
+                ctx.fc2_main_grad_func()
                 if origin_fc2_weight is not None
                 and ctx.fuse_wgrad_accumulation
                 and ctx.fc2_weight_requires_grad

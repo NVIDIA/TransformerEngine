@@ -14,6 +14,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
+from ...tensor import Quantizer
 
 
 class MakeExtraOutput(BasicOperation):
@@ -58,8 +59,9 @@ class MakeExtraOutput(BasicOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         return input_, [(input_,)]

@@ -93,6 +93,7 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
     if name in ("fp8", "fp8_delayed_scaling"):
         return transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            amax_history_len=8,
         )
     if name == "fp8_current_scaling":
         return transformer_engine.common.recipe.Float8CurrentScaling(
