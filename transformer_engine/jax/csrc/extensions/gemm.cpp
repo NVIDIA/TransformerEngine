@@ -62,6 +62,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTE_CHECK(group_sizes.dimensions().size() == 1);
   size_t num_gemms = group_sizes.dimensions()[0];
 
+  // It is weird that TE/Common GEMM only use colwise for MXFP8
+  const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
+  const bool is_tensor_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+                                 scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING;
+  const bool is_mxfp8_scaling = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
+  const bool rhs_use_colwise = is_mxfp8_scaling && !rhs_is_trans;
+  const bool lhs_use_colwise = is_mxfp8_scaling && lhs_is_trans;
+
   // Outputs
   auto out_ptr = reinterpret_cast<uint8_t *>(output->untyped_data());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
@@ -72,12 +80,25 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   auto lhs_sinv_size = product(lhs_sinv.dimensions());
   auto rhs_sinv_size = product(rhs_sinv.dimensions());
-  auto workspace_size =
-      (workspace_total_size - lhs_sinv_size - rhs_sinv_size - 3 * 256) / num_streams;
+  const size_t workspace_alignment_padding = 256;
+  const size_t tensor_scaling_sinv_aligment = 16;
+  const size_t mxfp8_scaling_sinv_alignment_padding = 256;
+  auto workspace_size = workspace_total_size - workspace_alignment_padding;
+  if (is_mxfp8_scaling) {
+    // For MXFP8 swizzled scale_inv buffers, only the first pointer needs to be with 256B alignment padding. Later pointers are guaranteed to be 256-aligned as the scale_inv shapes are padded by 128x4.
+    workspace_size -= (lhs_sinv_size + rhs_sinv_size + 2 * mxfp8_scaling_sinv_alignment_padding);
+  } else if (is_tensor_scaling) {
+    // For tensor scaling, each matrix has a single scale value, and all scales need to be aligned
+    // by 16 bytes to meet the requirement of CUDA 12.9.1 and later.
+    workspace_size -= tensor_scaling_sinv_aligment * (lhs_sinv_size + rhs_sinv_size);
+  }
+  workspace_size = workspace_size / num_streams;
   auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
   swizzled_lhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_lhs_sinv_ptr);
   auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
   swizzled_rhs_sinv_ptr = move_ptr_to_next_256B_aligned(swizzled_rhs_sinv_ptr);
+  auto lhs_scatter_aligned_ptr = swizzled_lhs_sinv_ptr;  // Already 256B aligned
+  auto rhs_scatter_aligned_ptr = lhs_scatter_aligned_ptr + num_gemms * tensor_scaling_sinv_aligment;
 
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
@@ -85,6 +106,23 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   size_t rhs_sinv_dtype_bytes = te_dtype_bytes(rhs_sinv_dtype);
   size_t bias_dtype_bytes = te_dtype_bytes(bias_dtype);
   size_t out_dtype_bytes = te_dtype_bytes(out_dtype);
+
+  if (is_tensor_scaling) {
+    cudaStream_t stream_0 = nvte_get_compute_stream(0);
+    size_t dpitch = tensor_scaling_sinv_aligment;
+    size_t spitch = lhs_sinv_dtype_bytes;
+    size_t width = lhs_sinv_dtype_bytes;
+    size_t height = lhs_sinv_size;
+    cudaMemcpy2DAsync(lhs_scatter_aligned_ptr, dpitch, lhs_sinv_ptr, spitch, width, height,
+                      cudaMemcpyDeviceToDevice, stream_0);
+    spitch = rhs_sinv_dtype_bytes;
+    width = rhs_sinv_dtype_bytes;
+    height = rhs_sinv_size;
+    cudaMemcpy2DAsync(rhs_scatter_aligned_ptr, dpitch, rhs_sinv_ptr, spitch, width, height,
+                      cudaMemcpyDeviceToDevice, stream_0);
+    lhs_sinv_ptr = lhs_scatter_aligned_ptr;
+    rhs_sinv_ptr = rhs_scatter_aligned_ptr;
+  }
 
   NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
   NVTE_CHECK(lhs_sinv_dtype_bytes == rhs_sinv_dtype_bytes,
@@ -134,14 +172,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   bool use_split_accumulator = false;
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
-
-  // It is weird that TE/Common GEMM only use colwise for MXFP8
-  const bool is_fp8_gemm = is_fp8_dtype(lhs_dtype);
-  const bool is_tensor_scaling = scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
-                                 scaling_mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING;
-  const bool is_mxfp8_scaling = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
-  const bool rhs_use_colwise = is_mxfp8_scaling && !rhs_is_trans;
-  const bool lhs_use_colwise = is_mxfp8_scaling && lhs_is_trans;
 
   if (arch < 100 && is_fp8_gemm) {
     NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
@@ -224,8 +254,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       auto tensor_scaling_sinv_shape = std::vector<size_t>{1};
       // If is_empty_gemm, scale_inv does not have the corresponding value, do not move the pointers
       if (!is_empty_gemm) {
-        lhs_sinv_size_i = 1;
-        rhs_sinv_size_i = 1;
+        lhs_sinv_size_i = tensor_scaling_sinv_aligment / lhs_sinv_dtype_bytes;
+        rhs_sinv_size_i = tensor_scaling_sinv_aligment / rhs_sinv_dtype_bytes;
       }
       if (rhs_use_colwise)  // MatA to enter cuBLAS
         rhs_i.set_columnwise_scale_inv(rhs_sinv_vptr, rhs_sinv_dtype, tensor_scaling_sinv_shape);
@@ -324,6 +354,10 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
 
   if (is_fp8_gemm) {
+    if (is_tensor_scaling) {
+      lhs_sinv_size *= tensor_scaling_sinv_aligment;
+      rhs_sinv_size *= tensor_scaling_sinv_aligment;
+    }
     NVTE_CHECK(lhs_sinv_total_size <= lhs_sinv_size, "Actual total lhs_sinv size ",
                lhs_sinv_total_size, " exceeds estimated upper bound ", lhs_sinv_size);
     NVTE_CHECK(rhs_sinv_total_size <= rhs_sinv_size, "Actual total rhs_sinv size ",
