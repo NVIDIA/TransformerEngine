@@ -428,10 +428,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #if CUBLAS_VERSION >= 120800
     if (cublas_version() >= 120800) {
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode_a, sizeof(scaling_mode_a)));
-      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode_b, sizeof(scaling_mode_b)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
+                                                       &scaling_mode_a, sizeof(scaling_mode_a)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
+                                                       &scaling_mode_b, sizeof(scaling_mode_b)));
     }
 #endif  // CUBLAS_VERSION >= 120800
     if (is_fp8_dtype(outputD->data.dtype)) {
@@ -519,12 +521,13 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   if (counter != nullptr) {
 #if !(CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 13000)
-  NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA verson is ",
-             CUDA_VERSION);
+    NVTE_ERROR("Atomic GEMM requires CUDA >=12.2.0 and <13.0.0, but compile-time CUDA verson is ",
+               CUDA_VERSION);
 #endif
 #if !(CUBLAS_VERSION >= 120205 && CUBLAS_VERSION < 130000)
-  NVTE_ERROR("Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS verson is ",
-             CUBLAS_VERSION);
+    NVTE_ERROR(
+        "Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS verson is ",
+        CUBLAS_VERSION);
 #endif
 #if CUDA_VERSION >= 12020 && CUBLAS_VERSION >= 120205 && CUDA_VERSION < 13000 && \
     CUBLAS_VERSION < 130000
@@ -650,9 +653,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_CHECK(cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
              "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA verson is ",
              cuda::cudart_version());
-  NVTE_CHECK(cublas_version() >= 120205 && cublas_version() < 130000,
-             "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS verson is ",
-             cublas_version());
+  NVTE_CHECK(
+      cublas_version() >= 120205 && cublas_version() < 130000,
+      "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS verson is ",
+      cublas_version());
 
   const Tensor *inputA = convertNVTETensorCheck(A);
   const Tensor *inputB = convertNVTETensorCheck(B);

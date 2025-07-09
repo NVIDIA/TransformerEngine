@@ -104,8 +104,8 @@ bool has_mnnvl_fabric(int device_id) {
   if (cuda::cudart_version() < 12040) {
     if (getenv("NVTE_UBDEBUG")) {
       printf(
-        "TransformerEngine does not support multi-node NVLINK "
-        "since it is not being run with CUDA version >= 12.4.\n");
+          "TransformerEngine does not support multi-node NVLINK "
+          "since it is not being run with CUDA version >= 12.4.\n");
     }
     return false;
   }
