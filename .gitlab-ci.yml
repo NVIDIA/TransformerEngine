@@ -179,6 +179,7 @@ before_script:
       git merge ${FETCH_BRANCH} -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git remote remove github &&
       git branch -D ${FETCH_BRANCH} &&
@@ -191,6 +192,7 @@ before_script:
       git merge ${FETCH_BRANCH} -m "Merged MR gitlab${GL_MR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "Merged PR ${GH_PR} into ${GH_BRANCH}, build ${CI_PIPELINE_ID}" &&
       git branch -D ${FETCH_BRANCH} &&
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
@@ -198,6 +200,7 @@ before_script:
     - test ${GH_PR} || test ${GL_MR} || test ${GL_MR_BRANCH} ||
       git checkout -b ${BUILD_BRANCH_NAME} &&
       git submodule add ../../devops/dlfw-ci &&
+      git submodule add ../te_ci_artifacts &&
       git commit -m "CI on branch ${GH_BRANCH}" &&
       git push ${ORIGIN_SSH} ${BUILD_BRANCH_NAME} --force
     # version is available only after checkout so provide it here only once
