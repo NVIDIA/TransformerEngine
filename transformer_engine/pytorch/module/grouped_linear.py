@@ -231,7 +231,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
@@ -259,12 +258,6 @@ class _GroupedLinear(torch.autograd.Function):
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
             main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
-
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                for i in range(ctx.num_gemms):
-                    w = torch.nn.Parameter(weights[i], weights[i].requires_grad)
-                    w.main_grad = main_grads[i]
-                    weights[i] = w
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -738,7 +731,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             else:
                 linear_fn = _GroupedLinear.forward
                 args = [None]
-            print(is_cpu_offload_enabled())
             args += (
                 inp,
                 m_splits,

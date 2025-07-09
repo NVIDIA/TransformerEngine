@@ -602,7 +602,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
@@ -689,12 +688,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 and ctx.fc2_weight_requires_grad
                 else None
             )
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.fuse_wgrad_accumulation:
-                origin_fc1_weight.main_grad = fc1_weight_main_grad
-                origin_fc2_weight.main_grad = fc2_weight_main_grad
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP

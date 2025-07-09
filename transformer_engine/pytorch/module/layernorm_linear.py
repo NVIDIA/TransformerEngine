@@ -68,7 +68,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 
 from ..cpp_extensions import (
     general_gemm,
@@ -421,11 +421,13 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
-                weightmat.is_weight = True
-                weight.is_weight = True
-                bias.is_weight = True
-                ln_weight.is_weight = True
-                ln_bias.is_weight = True
+                mark_is_weight(
+                    weightmat,
+                    weight,
+                    bias,
+                    ln_weight,
+                    ln_bias,
+                )
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,

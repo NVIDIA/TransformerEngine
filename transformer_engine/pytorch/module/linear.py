@@ -395,7 +395,6 @@ class _Linear(torch.autograd.Function):
                     ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
-            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
