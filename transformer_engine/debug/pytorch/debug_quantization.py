@@ -14,10 +14,11 @@ import torch
 
 import transformer_engine_torch as tex
 
-
+from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
+    QuantizedTensorBase,
     prepare_for_saving,
     restore_from_saved,
 )
@@ -60,6 +61,12 @@ class DebugQuantizer(Quantizer):
         self.parent_quantizer = parent_quantizer
         self.tp_group = tp_group  # used in inspect_tensor calls
         self.iteration = debug_api.DEBUG_MANAGER._trainer_iteration_count
+
+        # .internal = True is slightly faster, but results
+        # in errors when caching the weights.
+        # Setting .internal = False is safer.
+        if parent_quantizer is not None:
+            parent_quantizer.internal = False
 
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
@@ -299,8 +306,9 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
-            if columnwise_gemm_tensor.dtype != dtype:
-                raise ValueError("Dtype does not match the output of the modify_tensor call")
+            if dtype is not None:
+                if columnwise_gemm_tensor.dtype != dtype:
+                    raise ValueError("Dtype does not match the output of the modify_tensor call")
         if self.rowwise_tensor_plan == API_CALL_MODIFY:
             rowwise_gemm_tensor = debug_api.transformer_engine.modify_tensor(
                 layer_name=self.layer_name,
@@ -311,8 +319,9 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
                 dtype=dtype,
             )
-            if rowwise_gemm_tensor.dtype != dtype:
-                raise ValueError("Dtype does not match the output of the modify_tensor call")
+            if dtype is not None:
+                if rowwise_gemm_tensor.dtype != dtype:
+                    raise ValueError("Dtype does not match the output of the modify_tensor call")
 
         # 3. If some tensors still are not defined we use high precision tensor.
         if self.rowwise_tensor_plan == HIGH_PRECISION:
@@ -332,6 +341,7 @@ class DebugQuantizer(Quantizer):
             quantizer=self,
             layer_name=self.layer_name,
             tensor_name=self.tensor_name,
+            original_tensor=tensor,
         )
 
     def process_gemm_output(self, tensor: torch.Tensor):
@@ -455,8 +465,12 @@ class DebugQuantizer(Quantizer):
                 return True
         return False
 
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Probably not needed for debug quantizer"""
+        return None
 
-class DebugQuantizedTensor:
+
+class DebugQuantizedTensor(QuantizedTensorBase):
     """
     Class containing quantized tensors after debug. Depending on configuration
     it can contain one or two different objects. These objects can be accessed by the method
@@ -470,6 +484,7 @@ class DebugQuantizedTensor:
         quantizer,
         layer_name=None,
         tensor_name=None,
+        original_tensor=None,
     ):
 
         self.rowwise_gemm_tensor = rowwise_gemm_tensor
@@ -477,6 +492,7 @@ class DebugQuantizedTensor:
         self.quantizer = quantizer
         self._layer_name = layer_name
         self._tensor_name = tensor_name
+        self._original_tensor = original_tensor
 
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
@@ -524,5 +540,5 @@ class DebugQuantizedTensor:
         """Size of the tensor."""
         return self.rowwise_gemm_tensor.size()
 
-    def update_usage(self, rowwise_usage: bool, columnwise_usage: bool):
+    def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""

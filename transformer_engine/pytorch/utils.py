@@ -24,6 +24,12 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     return False
 
 
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor().cuda()
+
+
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
@@ -31,12 +37,20 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+
     for t in tensors:
         if t is not None:
+            # Workaround for double buffering in cpu offload
+            if hasattr(t, "do_not_clear"):
+                continue
+            if hasattr(t, "get_data_tensors"):
+                if any(hasattr(tensor, "do_not_clear") for tensor in t.get_data_tensors()):
+                    continue
+
             if hasattr(t, "clear"):
                 t.clear()
             else:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
             del t
 
 
@@ -434,6 +448,7 @@ def is_bf16_compatible() -> None:
     return torch.cuda.get_device_capability()[0] >= 8
 
 
+@functools.lru_cache(maxsize=None)
 def is_non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.

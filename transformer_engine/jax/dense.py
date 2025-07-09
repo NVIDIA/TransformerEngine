@@ -19,6 +19,7 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    TensorUsage,
 )
 
 
@@ -49,6 +50,7 @@ def dense(
     """
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set:
+        x = with_sharding_constraint_by_logical_axes(x, input_axes)
         output = tex.gemm(x, kernel, contracting_dims)
         if bias is not None:
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
@@ -104,8 +106,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
 
     # GEMM NN
     output = tex.gemm(
-        casted_x.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
+        casted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS),
         (x_contracting_dims, k_contracting_dims),
     )
 
@@ -115,8 +117,8 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
         x.shape,
         kernel.shape,
         use_bias,
@@ -137,8 +139,8 @@ def _dense_bwd_rule(
     fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
 
     (
-        colwise_casted_x,
-        rowwise_casted_kernel,
+        casted_x_lhs,
+        casted_kernel_rhs,
         x_shape,
         kernel_shape,
         use_bias,
@@ -152,28 +154,30 @@ def _dense_bwd_rule(
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_constracting_dim = tuple(
+    g_contracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim = tuple(
+    k_contracting_dim = tuple(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
-        (g_constracting_dim, k_constracting_dim),
+        casted_grad.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel_rhs,
+        (g_contracting_dim, k_contracting_dim),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
     # GEMM TN
     # x_non_contracting_dims
-    g_constracting_dim = x_constracting_dim = tuple(
+    g_contracting_dim = x_contracting_dim = tuple(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_constracting_dim, g_constracting_dim)
+        casted_x_lhs,
+        casted_grad.get_tensor(usage=TensorUsage.RHS),
+        (x_contracting_dim, g_contracting_dim),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
@@ -183,135 +187,238 @@ def _dense_bwd_rule(
 _dense.defvjp(_dense_fwd_rule, _dense_bwd_rule)
 
 
-"""
 def grouped_dense(
-    x_list,
-    kernel_list,
-    bias_list,
-    contracting_dims_list,
-    quantizer_set_list=None,
+    x: jnp.ndarray,
+    kernel: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (1,)),
+    bias: jnp.ndarray = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype = None,
+    group_offset: jnp.array = None,
+    quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
-    # Perform grouped_dense layer transformation with optional quantization.
+    """
+    Perform grouped dense (linear) layer transformation with optional quantization.
 
-    output_list = _grouped_dense(
-        x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+    Args:
+        x: Input tensor of shape (M, K)
+        kernel: Weight matrix of shape (G, K, N)
+        group_sizes: 1D array of shape (G,) specifying the size of each group
+        contracting_dims: Tuple of sequences specifying which dimensions to contract
+                          (currently only supports ((1,), (1,)))
+        bias: Bias tensor of shape (G, N)
+        precision: JAX precision for the GEMM operation
+        preferred_element_type: Preferred data type for the output tensor
+        group_offset: 1D array containing offsets for each group (not yet implemented)
+        quantizer_set: Set of quantizers for FP8 quantization of the input and output
+
+    Returns:
+        A jnp.ndarray containing the result of the grouped linear operation
+    """
+    output = _grouped_dense(
+        x,
+        kernel,
+        group_sizes,
+        contracting_dims,
+        bias,
+        precision,
+        preferred_element_type,
+        group_offset,
+        quantizer_set,
     )
-    return output_list
+    return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3,))
-def _grouped_dense(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
-    output_list, _ = _grouped_dense_fwd_rule(
-        x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+@partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7))
+def _grouped_dense(
+    x,
+    kernel,
+    group_sizes,
+    contracting_dims,
+    bias,
+    precision,
+    preferred_element_type,
+    group_offset,
+    quantizer_set,
+):
+    output, _ = _grouped_dense_fwd_rule(
+        x,
+        kernel,
+        group_sizes,
+        contracting_dims,
+        bias,
+        precision,
+        preferred_element_type,
+        group_offset,
+        quantizer_set,
     )
-    return output_list
+    return output
 
 
 def _grouped_dense_fwd_rule(
-    x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+    x,
+    kernel,
+    group_sizes,
+    contracting_dims,
+    bias,
+    precision,
+    preferred_element_type,
+    group_offset,
+    quantizer_set,
 ):
-    use_bias = bias_list is not None
-    output_list = []
-    x_rowwise_list = []
-    x_colwise_list = []
-    kernel_colwise_list = []
-    kernel_rowwise_list = []
-    x_shape_list = []
-    kernel_shape_list = []
-    if quantizer_set_list is None:
-        x_rowwise_list = x_list
-        x_colwise_list = x_list
-        kernel_colwise_list = kernel_list
-        kernel_rowwise_list = kernel_list
-        x_shape_list = [x.shape for x in x_list]
-        kernel_shape_list = [kernel.shape for kernel in kernel_list]
-    else:
-        for i in range(len(x_list)):  # pylint: disable=consider-using-enumerate
-            q_x = tex.quantize(x_list[i], quantizer_set_list[i].x)
-            q_kernel = tex.quantize(kernel_list[i], quantizer_set_list[i].kernel)
-            x_rowwise_list.append(q_x.get_rowwise_tensor())
-            x_colwise_list.append(q_x.get_colwise_tensor())
-            kernel_colwise_list.append(q_kernel.get_colwise_tensor())
-            kernel_rowwise_list.append(q_kernel.get_rowwise_tensor())
-            x_shape_list.append(x_rowwise_list[-1].data.shape)
-            kernel_shape_list.append(kernel_rowwise_list[-1].data.shape)
+    use_bias = bias is not None
+    is_noop_quantizer_set = quantizer_set == noop_quantizer_set
 
-    output_list = tex.grouped_gemm(
-        x_rowwise_list, kernel_colwise_list, contracting_dims_list, bias_list
+    if is_noop_quantizer_set:
+        grouped_gemm_x = x
+        grouped_gemm_kernel = kernel
+        ctx_x = x
+        ctx_kernel = kernel
+        flatten_axis_k = None
+    else:
+        x_contracting_dims, k_contracting_dims = contracting_dims
+        flatten_axis_x = -len(x_contracting_dims)
+        flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
+
+        assert x.ndim == 2, "Grouped dense expects a 2D input tensor of shape (M, K)"
+        assert kernel.ndim == 3, "Grouped dense expects a 3D kernel tensor of shape (G, K, N)"
+        # Expected k_contracting_dims == (1,), need to tweak it for grouped_gemm FP8 extra transpose
+        # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
+        assert x_contracting_dims == (1,) and k_contracting_dims == (1,), (
+            "grouped_dense for FP8 can only handle x_contracting_dims=(1,) "
+            "and k_contracting_dims=(1,) for now, "
+            f"got {x_contracting_dims=} and {k_contracting_dims=}"
+        )
+
+        casted_x = tex.grouped_quantize(
+            x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
+        )
+        casted_kernel = tex.grouped_quantize(
+            kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k
+        )
+        contracting_dims = (x_contracting_dims, k_contracting_dims)
+
+        # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we should have
+        # rowwise_casted_x.original_shape == (M, K)
+        # colwise_casted_kernel.original_shape == (G, N, K)
+        grouped_gemm_x = casted_x.get_tensor(usage=TensorUsage.LHS)
+        grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
+        ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
+        ctx_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS)
+
+    output = tex.grouped_gemm(
+        grouped_gemm_x,
+        grouped_gemm_kernel,
+        group_sizes,
+        contracting_dims,
+        bias,
+        precision,
+        preferred_element_type,
+        group_offset,
     )
 
     ctx = (
-        x_colwise_list,
-        kernel_rowwise_list,
-        x_shape_list,
-        kernel_shape_list,
+        group_sizes,
+        ctx_x,
+        ctx_kernel,
+        x.shape,
+        kernel.shape,
         use_bias,
-        quantizer_set_list,
+        is_noop_quantizer_set,
+        quantizer_set,
+        flatten_axis_k,
     )
-    return output_list, ctx
+    return output, ctx
 
 
-def _grouped_dense_bwd_rule(contracting_dims_list, ctx, grad_list):
+def _grouped_dense_bwd_rule(
+    contracting_dims, precision, preferred_element_type, group_offset, ctx, grad
+):
+    fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
+
     (
-        colwise_x_list,
-        rowwise_kernel_list,
-        x_shape_list,
-        kernel_shape_list,
+        group_sizes,
+        ctx_x,
+        ctx_kernel,
+        x_shape,
+        kernel_shape,
         use_bias,
-        quantizer_set_list,
+        is_noop_quantizer_set,
+        quantizer_set,
+        flatten_axis_k,
     ) = ctx
 
-    group_size = len(grad_list)
-    dbias_list = []
-    grad_rowwise_list = []
-    grad_colwise_list = []
-    dgrad_contracting_dims_list = []
-    wgrad_contracting_dims_list = []
-    for i in range(group_size):
-        grad = grad_list[i]
-        x_shape = x_shape_list[i]
-        kernel_shape = kernel_shape_list[i]
-        fwd_contracting_dims = contracting_dims_list[i]
-
-        if quantizer_set_list is None:
-            casted_grad = grad
-            dbias = tex.quantization._jax_dbias(grad)
-            grad_rowwise_list.append(grad)
-            grad_colwise_list.append(grad)
-        else:
-            quantizer_set = quantizer_set_list[i]
-            casted_grad, dbias = tex.quantize_dbias(
-                grad, is_dbias=use_bias, quantizer=quantizer_set.dgrad
-            )
-            grad_rowwise_list.append(casted_grad.get_rowwise_tensor())
-            grad_colwise_list.append(casted_grad.get_colwise_tensor())
-        dbias_list.append(dbias)
-
-        # GEMM NT
-        fwd_x_contracting_dims, fwd_k_contracting_dims = fwd_contracting_dims
+    if is_noop_quantizer_set:
+        # The 1 in range is for excluding the group dimension (shall we use the hardcoded results below?)
+        # g_contracting_dim = (1, )
+        # k_contracting_dim = (2, )
         g_contracting_dim = tuple(
-            range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
+            range(1 + grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
         )
         k_contracting_dim = tuple(
-            dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
+            dim for dim in range(1, len(kernel_shape)) if dim not in fwd_k_contracting_dims
         )
         dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
-        dgrad_contracting_dims_list.append(dgrad_contracting_dims)
+        dgrad_grad = grad
+        dgrad_kernel_T = ctx_kernel
 
-        # GEMM TN
+        # g_contracting_dim = (0, )
+        # x_contracting_dim = (0, )
         g_contracting_dim = x_contracting_dim = tuple(
             range(0, len(x_shape) - len(fwd_x_contracting_dims))
         )
         wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
-        wgrad_contracting_dims_list.append(wgrad_contracting_dims)
+        wgrad_x_T = ctx_x
+        wgrad_grad = grad
+    else:
+        casted_grad = tex.grouped_quantize(
+            grad, quantizer_set.dgrad, group_sizes, flatten_axis=flatten_axis_k
+        )
 
-    dgrad_list = tex.grouped_gemm(
-        grad_rowwise_list, rowwise_kernel_list, dgrad_contracting_dims_list
+        # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we need to use
+        # g_contracting_dim = (1,) and k_contracting_dim = (2,) to make it work after the
+        # extra transpose for FP8 in grouped_gemm
+        # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
+        g_contracting_dim = (1,)
+        k_contracting_dim = (2,)
+        dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
+        dgrad_grad = casted_grad.get_tensor(usage=TensorUsage.LHS)
+        dgrad_kernel_T = ctx_kernel
+
+        # We need to use g_contracting_dim = (0,) and x_contracting_dim = (0,) to make it work
+        # after the extra transpose for FP8 in grouped_gemm
+        # TODO(Hua): Do we have a better way for this? What if is_gemm_with_all_layouts_supported()?
+        g_contracting_dim = (0,)
+        x_contracting_dim = (0,)
+        wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
+        wgrad_x_T = ctx_x
+        wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
+
+    dgrad = tex.grouped_gemm(
+        dgrad_grad,
+        dgrad_kernel_T,
+        group_sizes,
+        dgrad_contracting_dims,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
     )
-    wgrad_list = tex.grouped_gemm(colwise_x_list, grad_colwise_list, wgrad_contracting_dims_list)
 
-    return dgrad_list, wgrad_list, dbias_list, quantizer_set_list
+    wgrad = tex.grouped_gemm(
+        wgrad_x_T,
+        wgrad_grad,
+        group_sizes,
+        wgrad_contracting_dims,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        group_offset=group_offset,
+    )
+
+    group_sizes_grad = None
+    dbias = tex.grouped_dbias(grad, group_sizes) if use_bias else None
+
+    return dgrad, wgrad, group_sizes_grad, dbias, quantizer_set
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
-"""

@@ -754,19 +754,20 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
           if constexpr (IS_DGATED) {
             create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X,
-                                 cols, 0, sizeof(IType));
+                                 cols, 0, typeToNumBits(gated_input.dtype()));
           }
 
           const uint32_t tensor_stride_elems = output_cols;
 
           create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, cols * 2, 0, sizeof(IType));
+                               SHMEM_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
           create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, cols * 2, cols, sizeof(IType));
+                               SHMEM_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
           create_2D_tensor_map(tensor_map_output_act, output->data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, tensor_stride_elems, 0, sizeof(OType));
+                               SHMEM_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
           create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, tensor_stride_elems, cols, sizeof(OType));
+                               SHMEM_DIM_X, tensor_stride_elems, cols,
+                               typeToNumBits(output->dtype()));
 
           const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
           const size_t buff_size_aligned_in =
@@ -849,31 +850,33 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
                   if constexpr (IS_DGATED) {
                     create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y,
-                                         SHMEM_DIM_X, cols, 0, sizeof(IType));
+                                         SHMEM_DIM_X, cols, 0, typeToNumBits(gated_input.dtype()));
                   }
 
                   const uint32_t tensor_stride_elems = output_cols;
                   create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols,
-                                       SHMEM_DIM_Y, SHMEM_DIM_X, cols * 2, 0, sizeof(IType));
+                                       SHMEM_DIM_Y, SHMEM_DIM_X, cols * 2, 0,
+                                       typeToNumBits(gated_input.dtype()));
                   create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols,
-                                       SHMEM_DIM_Y, SHMEM_DIM_X, cols * 2, cols, sizeof(IType));
+                                       SHMEM_DIM_Y, SHMEM_DIM_X, cols * 2, cols,
+                                       typeToNumBits(gated_input.dtype()));
 
                   if (USE_ROWWISE_SCALING) {
                     create_2D_tensor_map(tensor_map_output_act_rowwise, output->data, rows, cols,
                                          SHMEM_DIM_Y, SHMEM_DIM_X, tensor_stride_elems, 0,
-                                         sizeof(OType));
+                                         typeToNumBits(output->dtype()));
                     create_2D_tensor_map(tensor_map_output_gate_rowwise, output->data, rows, cols,
                                          SHMEM_DIM_Y, SHMEM_DIM_X, tensor_stride_elems, cols,
-                                         sizeof(OType));
+                                         typeToNumBits(output->dtype()));
                   }
 
                   if (USE_COLWISE_SCALING) {
                     create_2D_tensor_map(tensor_map_output_act_colwise, output->columnwise_data,
                                          rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X, tensor_stride_elems,
-                                         0, sizeof(OType));
+                                         0, typeToNumBits(output->dtype()));
                     create_2D_tensor_map(tensor_map_output_gate_colwise, output->columnwise_data,
                                          rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X, tensor_stride_elems,
-                                         cols, sizeof(OType));
+                                         cols, typeToNumBits(output->dtype()));
                   }
 
                   const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
@@ -1057,10 +1060,9 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
                            cudaStream_t stream) {
   using namespace gated_kernels;
   Tensor grad_empty_tensor;
-  const Tensor &grad_tensor =
-      IS_DGATED ? *(reinterpret_cast<const Tensor *>(grad)) : grad_empty_tensor;
-  const Tensor gated_input_tensor = *reinterpret_cast<const Tensor *>(gated_input);
-  Tensor *output_tensor = reinterpret_cast<Tensor *>(output);
+  const Tensor &grad_tensor = IS_DGATED ? *(convertNVTETensorCheck(grad)) : grad_empty_tensor;
+  const Tensor gated_input_tensor = *convertNVTETensorCheck(gated_input);
+  Tensor *output_tensor = convertNVTETensorCheck(output);
 
   if (is_supported_by_CC_100()) {
     quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
