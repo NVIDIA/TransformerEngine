@@ -242,7 +242,7 @@ class Tensor {
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
+      // NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -257,7 +257,7 @@ class Tensor {
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
+      // NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -571,7 +571,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
             printf("dtype: %d\n", static_cast<int>(dtype)); \
-            NVTE_ERROR("Invalid type MARKED TEST."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -590,7 +590,7 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 2."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
@@ -598,7 +598,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         using namespace transformer_engine; \
         SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 3."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -623,5 +623,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 4."); \
+            NVTE_ERROR("Invalid type."); \
     }

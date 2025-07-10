@@ -20,6 +20,12 @@ using namespace test;
 
 namespace {
 
+enum ScalingType {
+    ROWWISE = 0,
+    COLWISE = 1,
+    BIDIMENSIONAL = 2
+};
+
 enum ActivationType {
     Identity,
     GeLU,
@@ -44,27 +50,25 @@ void compute_ref(const bool rowwise,
                  const bool colwise,
                  float (*OP)(const float),
                  const InputType* input,
-                 OutputType* output_rowwise_mxfp8,
-                 OutputType* output_colwise_mxfp8,
                  fp4e2m1x2* output_rowwise_nvfp4,
-                 fp4e2m1x2* output_colwise_nvfp4,
-                 fp8e8m0* scales_rowwise_mxfp8,
-                 fp8e8m0* scales_colwise_mxfp8,
+                 OutputType* output_colwise_mxfp8,
                  fp8e4m3* scales_rowwise_nvfp4,
-                 fp8e4m3* scales_colwise_nvfp4,
+                 fp8e8m0* scales_colwise_mxfp8,
                  const float nvfp4_second_stage_scale,
                  const size_t rows,
                  const size_t cols,
                  const size_t scales_stride_rowwise,
                  const size_t scales_stride_colwise)
 {
-    const size_t tile_size_Y = 16;
+    const size_t tile_size_Y = 32;
     const size_t tile_size_X = 16;
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b 
     const float S_enc = 1.0f / nvfp4_second_stage_scale;
+
+    printf("CPU S_enc: %f\n", S_enc);
 
     #pragma omp parallel proc_bind(spread)
     {
@@ -129,12 +133,6 @@ void compute_ref(const bool rowwise,
                     scales_rowwise_nvfp4[scale_idx] = S_dec_b_fp8;
                     const float scale_reciprocal = S_enc_b_fp8;
 
-                    // MXFP8 Scaling Type
-                    // const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    // const int scale_idx = i * scales_stride_rowwise + tile_X;
-                    // scales_rowwise_mxfp8[scale_idx] = biased_exponent;
-                    // const float scale_reciprocal = exp2f_rcp(biased_exponent);
-
                     // printf("Scale Reciprocal: %f\n", scale_reciprocal);
                     for (size_t j = j_min; j < j_max; j += 2) {
                         const int idx_pair = (i * cols + j) / 2;
@@ -150,71 +148,31 @@ void compute_ref(const bool rowwise,
                         output_rowwise_nvfp4[idx_pair] = casted_to_e2m1_pair;
 
                         const float2 truncated_pair = cvt_fp4x2_to_float2(casted_to_e2m1_pair);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_x, cached_x, scaled_elt_x, truncated_pair.x);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_y, cached_y, scaled_elt_y, truncated_pair.y);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", cache_idx_x, cached_x, scaled_elt_x, truncated_pair.x);
+                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", cache_idx_y, cached_y, scaled_elt_y, truncated_pair.y);
                     }
                     // printf("--------------------------------------------------------------------------\n\n");
                 }
             }
             if (colwise) {
-                for (size_t j = j_min; j < j_max; j += 2) {
-                    float block_amax_x = 0.0f;
-                    float block_amax_y = 0.0f;
-                    
+                for (size_t j = j_min; j < j_max; ++j) {
+                    float block_amax = 0.0f;
+
                     for (size_t i = i_min; i < i_max; ++i) {
-                        const int cache_idx_x = (i - i_min) * tile_size_X + (j - j_min);
-                        const int cache_idx_y = (i - i_min) * tile_size_X + (j + 1 - j_min);
-                        block_amax_x = std::max(block_amax_x, std::abs(cache_buffer[cache_idx_x]));
-                        block_amax_y = std::max(block_amax_y, std::abs(cache_buffer[cache_idx_y]));
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
-                    // 2. Compute E4M3 scaling factor
-                    // Compute per-block encoding/decoding scaling factor
-                    const float S_dec_b_x = block_amax_x / 6.0f;
-                    const float S_dec_b_y = block_amax_y / 6.0f;
+                    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
+                    const int scale_idx = tile_Y * scales_stride_colwise + j;
+                    scales_colwise_mxfp8[scale_idx] = biased_exponent;
+                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
-                    // Scale & Store per-block decoding scaling factor
-                    const fp8e4m3 S_dec_b_fp8_x = static_cast<fp8e4m3>(S_dec_b_x * S_enc);
-                    const fp8e4m3 S_dec_b_fp8_y = static_cast<fp8e4m3>(S_dec_b_y * S_enc);
-
-                    // Compute "correct" per-block encoding scaling factor
-                    const float S_enc_b_fp8_x = S_enc / static_cast<float>(S_dec_b_fp8_x);
-                    const float S_enc_b_fp8_y = S_enc / static_cast<float>(S_dec_b_fp8_y);
-
-                    const int scale_idx_x = tile_Y * scales_stride_colwise + j;
-                    const int scale_idx_y = tile_Y * scales_stride_colwise + j + 1;
-
-                    scales_colwise_nvfp4[scale_idx_x] = S_dec_b_fp8_x;
-                    scales_colwise_nvfp4[scale_idx_y] = S_dec_b_fp8_y;
-                    const float scale_reciprocal_x = S_enc_b_fp8_x;
-                    const float scale_reciprocal_y = S_enc_b_fp8_y;
-
-                    // MXFP8 Scaling Type
-                    // const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    // const int scale_idx = i * scales_stride_rowwise + tile_X;
-                    // scales_rowwise_mxfp8[scale_idx] = biased_exponent;
-                    // const float scale_reciprocal = exp2f_rcp(biased_exponent);
-
-                    // printf("Scale Reciprocal: %f\n", scale_reciprocal);
                     for (size_t i = i_min; i < i_max; ++i) {
-                        const int idx_pair = (i * cols + j) / 2;
-
-                        const int cache_idx_x = (i - i_min) * tile_size_X + (j     - j_min);
-                        const int cache_idx_y = (i - i_min) * tile_size_X + (j + 1 - j_min);
-                        const float cached_x = cache_buffer[cache_idx_x];
-                        const float cached_y = cache_buffer[cache_idx_y];
-                        const float scaled_elt_x = cached_x * scale_reciprocal_x;
-                        const float scaled_elt_y = cached_y * scale_reciprocal_y;
-                        const float2 scaled_elt_pair = {scaled_elt_x, scaled_elt_y};
-
-                        fp4e2m1x2 casted_to_e2m1_pair(scaled_elt_pair);
-                        output_colwise_nvfp4[idx_pair] = casted_to_e2m1_pair;
-
-                        const float2 truncated_pair = cvt_fp4x2_to_float2(casted_to_e2m1_pair);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_x, cached_x, scaled_elt_x, truncated_pair.x);
-                        // printf("Idx: %d Cached: %f, Scaled: %f, Truncated to E2M1: %f\n", idx_y, cached_y, scaled_elt_y, truncated_pair.y);
+                        const int idx = i * cols + j;
+                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        output_colwise_mxfp8[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
                     }
-                    // printf("--------------------------------------------------------------------------\n\n");
                 }
             }
         }
@@ -277,50 +235,58 @@ void compareResults_nvfp4(const std::string &name, const Tensor &test,
 
 
 /**
- * Scaling along single dimension (either rows or columns)
- * Produces one set of output data and the corresponding data of the fused operation (dbias):
- * 1) Scaled rows + row-wise scaling factors
- *       OR
- * 2) Scaled columns + column-wise scaling factors
+ * Scaling along selected dimensions (rows and/or columns)
+ * Produces sets of output data:
+ * 1) NVFP4 Scaled rows + E4M3 row-wise scaling factors
+ *       AND/OR
+ * 2) MXFP8 Scaled columns + E8M0 column-wise scaling factors
  */
 
 template <typename InputType, typename OutputType>
-void performTest_x1(float (*OP)(const float),
-                    const std::vector<size_t>& shape,
-                    const bool rowwise,
-                    const bool colwise,
-                    InputsFillCase fill_case) {
+void performTest(float (*OP)(const float),
+                 const std::vector<size_t>& shape,
+                 const bool rowwise,
+                 const bool colwise,
+                 InputsFillCase fill_case) {
     using namespace test;
     using EncodingType = fp32;
     DType itype = TypeInfo<InputType>::dtype;
-    // DType otype = TypeInfo<OutputType>::dtype;
-    
-    DType otype = TypeInfo<fp4e2m1>::dtype;
+    DType otype = rowwise ? TypeInfo<fp4e2m1>::dtype : TypeInfo<OutputType>::dtype;
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    const size_t block_size_rows = rowwise ? 1 : 16;
-    const size_t block_size_cols = colwise ? 1 : 16;
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 16);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
 
-    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows, block_size_cols);
+    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
+    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
+    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
+    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
 
-    const size_t unpadded_blocks_Y = scale_dims[0];
-    const size_t unpadded_blocks_X = scale_dims[1];
-    const size_t blocks_Y = scale_dims[2];
-    const size_t blocks_X = scale_dims[3];
-    const size_t scales_stride = blocks_X;
+    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
+    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
+    const size_t blocks_Y_colwise = scale_dims_colwise[2];
+    const size_t blocks_X_colwise = scale_dims_colwise[3];
+    const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor input("input", shape, itype);
-
-    std::vector<size_t> shape_nvfp4 = shape;
-
     Tensor output("output", shape, otype, rowwise, colwise, NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
 
-    std::unique_ptr<OutputType[]> ref_output_mxfp8 = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp4e2m1x2[]> ref_output_nvfp4 = std::make_unique<fp4e2m1x2[]>(rows * cols / 2);
-    std::unique_ptr<fp8e8m0[]> ref_scales_mxfp8 = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
-    std::unique_ptr<fp8e4m3[]> ref_scales_nvfp4 = std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
+    std::unique_ptr<fp4e2m1x2[]> ref_output_nvfp4;
+    std::unique_ptr<OutputType[]> ref_output_mxfp8;
+    std::unique_ptr<fp8e4m3[]> ref_scales_nvfp4;
+    std::unique_ptr<fp8e8m0[]> ref_scales_mxfp8;
+
+    if (rowwise) {
+        ref_output_nvfp4 = std::make_unique<fp4e2m1x2[]>(rows * cols / 2);
+        ref_scales_nvfp4 = std::make_unique<fp8e4m3[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    }
+    if (colwise) {
+        ref_output_mxfp8 = std::make_unique<OutputType[]>(rows * cols);
+        ref_scales_mxfp8 = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
+    }
 
     fillCase<EncodingType>(&input, fill_case);
     setRandomScale(&output);
@@ -342,124 +308,52 @@ void performTest_x1(float (*OP)(const float),
                                        colwise,
                                        OP,
                                        input.rowwise_cpu_dptr<InputType>(),
-                                       ref_output_mxfp8.get(),
-                                       ref_output_mxfp8.get(),
                                        ref_output_nvfp4.get(),
-                                       ref_output_nvfp4.get(),
-                                       ref_scales_mxfp8.get(),
-                                       ref_scales_mxfp8.get(),
+                                       ref_output_mxfp8.get(),
                                        ref_scales_nvfp4.get(),
-                                       ref_scales_nvfp4.get(),
+                                       ref_scales_mxfp8.get(),
                                        output.scale(),
                                        rows,
                                        cols,
-                                       scales_stride,
-                                       scales_stride);
+                                       scales_stride_rowwise,
+                                       scales_stride_colwise);
 
-    // auto [atol, rtol] = getTolerances(otype);
-    const double atol = 0.05;
-    const double rtol = 0.1;
-    compareResults_nvfp4("output", output, ref_output_nvfp4.get(), rowwise, atol, rtol);
+    if (rowwise) {
+        const double atol = 0.05;
+        const double rtol = 0.1;
+        const bool rowwise_true = true;
+        compareResults_nvfp4("output_nvfp4", output, ref_output_nvfp4.get(), rowwise_true, atol, rtol);
+    
+        size_t scale_mismatches_num = 0;
+        compare_scaling_factors("rowwise_scales_E4M3", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                ref_scales_nvfp4.get(),
+                                unpadded_blocks_Y_rowwise, unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                                scale_mismatches_num);
+        printf("scale_mismatches_num: %lu \n", scale_mismatches_num);
+    }
+    if (colwise) {
+        const size_t scale_diff_abs_tolerance = 0;
+        const double abs_tolerable_mismatches_limit = 0.0;
+        const double rel_tolerable_mismatches_limit = 0.0;
 
-    const fp8e4m3* const gpu_scales_ptr = rowwise
-                                          ? output.rowwise_cpu_scale_inv_ptr<fp8e4m3>()
-                                          : output.columnwise_cpu_scale_inv_ptr<fp8e4m3>();
+        size_t mismatches_scales = 0;
+        compare_scaling_factors("colwise_scales_E8M0", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                                ref_scales_mxfp8.get(),
+                                unpadded_blocks_Y_colwise, unpadded_blocks_X_colwise, scales_stride_colwise,
+                                mismatches_scales,
+                                scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit,
+                                rel_tolerable_mismatches_limit);
 
-    size_t scale_mismatches_num = 0;
-    compare_scaling_factors("scales", gpu_scales_ptr, ref_scales_nvfp4.get(),
-                            unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                            scale_mismatches_num);
-    printf("scale_mismatches_num: %lu \n", scale_mismatches_num);
+        const size_t mismatches_elts_limit = 32 * mismatches_scales;
+        auto [atol, rtol] = getTolerances(otype);
+        const bool rowwise_false = false;
+        compareResults("output_mxfp8", output, ref_output_mxfp8.get(), rowwise_false, atol, rtol, true, mismatches_elts_limit);
+    }
 }
 
-/**
- * Scaling along both dimensions (rows and columns)
- * Produces two sets of scaled output data and the corresponding data of the fused operation (dbias):
- * 1) Scaled rows + row-wise scaling factors
- *      AND
- * 2) Scaled columns + column-wise scaling factors
- */
-// template <typename InputType, typename OutputType>
-// void performTest_x2(float (*OP)(const float),
-//                     const std::vector<size_t>& shape,
-//                     const size_t block_size_rows,
-//                     const size_t block_size_cols,
-//                     InputsFillCase fill_case) {
-//     using namespace test;
-//     using EncodingType = fp32;
-//     DType itype = TypeInfo<InputType>::dtype;
-//     DType otype = TypeInfo<OutputType>::dtype;
-
-//     const size_t rows = first_dimension(shape);
-//     const size_t cols = last_dimension(shape);
-
-//     const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
-//     const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
-
-//     const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
-//     const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
-//     const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
-//     const size_t blocks_X_rowwise = scale_dims_rowwise[3];
-//     const size_t scales_stride_rowwise = blocks_X_rowwise;
-
-//     const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
-//     const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
-//     const size_t blocks_Y_colwise = scale_dims_colwise[2];
-//     const size_t blocks_X_colwise = scale_dims_colwise[3];
-//     const size_t scales_stride_colwise = blocks_X_colwise;
-
-//     Tensor input("input", shape, itype);
-//     Tensor output("output", shape, otype, true, true, NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
-    
-//     const float global_prev_amax = 6.0f * 448.0f;
-
-//     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
-//     std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
-//     std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
-//     std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
-
-//     fillCase<EncodingType>(&input, fill_case);
-
-//     auto nvte_quantize_operation = &nvte_quantize;
-//     if (OP == &gelu)       { nvte_quantize_operation = &nvte_gelu; }
-//     else if (OP == &silu)  { nvte_quantize_operation = &nvte_silu; }
-//     else if (OP == &relu)  { nvte_quantize_operation = &nvte_relu; }
-//     else if (OP == &qgelu) { nvte_quantize_operation = &nvte_qgelu; }
-//     else if (OP == &srelu) { nvte_quantize_operation = &nvte_srelu; }
-
-//     nvte_quantize_operation(input.data(), output.data(), 0);
-
-//     cudaDeviceSynchronize();
-//     auto err = cudaGetLastError();
-//     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-
-//     compute_ref<InputType, OutputType>(true,
-//                                        true,
-//                                        OP,
-//                                        input.rowwise_cpu_dptr<InputType>(),
-//                                        ref_output_c_rowwise.get(),
-//                                        ref_output_c_colwise.get(),
-//                                        ref_scales_rowwise.get(),
-//                                        ref_scales_colwise.get(),
-//                                        global_prev_amax,
-//                                        rows,
-//                                        cols,
-//                                        scales_stride_rowwise,
-//                                        scales_stride_colwise);
-
-//     auto [atol, rtol] = getTolerances(otype);
-//     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
-//     compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
-//     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-//                                  ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-//                                  unpadded_blocks_X_rowwise, scales_stride_rowwise);
-//     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-//                                  ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-//                                  unpadded_blocks_X_colwise, scales_stride_colwise);
-// }
-
 std::vector<std::vector<size_t>> matrix_sizes = {
-    // {32, 32},
+    {1, 32},
     // {1, 32},
     // {16, 48},    
     // {65, 96},
@@ -474,15 +368,14 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     // {1024},
     // {8, 32, 1024},
     // {16, 8, 4, 512},
-    {1024, 16384},
-    {4096, 13312},
+    // {1024, 16384},
+    // {4096, 13312},
 };
 
-std::vector<std::pair<size_t, size_t>> block_sizes = {
-    // {1, 16},
-    {16, 1},
-    // {16, 32},
-    // {32, 16},
+std::vector<ScalingType> scaling_case = {
+    ScalingType::ROWWISE,           // Row-wise NVFP4{1, 16}
+    // ScalingType::COLWISE,           // Column-wise MXFP8 {32, 1},
+    // ScalingType::BIDIMENSIONAL      // {32, 16} Row-wise NVFP4 AND Column-wise MXFP8
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -508,7 +401,7 @@ std::vector<ActivationType> Activation_types = {
 class FusedCastNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<ActivationType,
                 std::vector<size_t>,
-                std::pair<size_t, size_t>,
+                ScalingType,
                 transformer_engine::DType,
                 transformer_engine::DType,
                 InputsFillCase>> {};
@@ -524,13 +417,13 @@ TEST_P(FusedCastNVFP4TestSuite, TestFusedCastNVFP4) {
 
     const ActivationType Act_type = std::get<0>(GetParam());
     const auto tensor_dims = std::get<1>(GetParam());
-    const auto block_size = std::get<2>(GetParam());
+    const ScalingType scaling_case = std::get<2>(GetParam());
     const DType input_type = std::get<3>(GetParam());
     const DType output_type = std::get<4>(GetParam());
     const InputsFillCase fill_case = std::get<5>(GetParam());
 
-    const bool rowwise = block_size.second != 1;
-    const bool colwise = block_size.first != 1;
+    const bool rowwise = (scaling_case == ScalingType::ROWWISE) || (scaling_case == ScalingType::BIDIMENSIONAL);
+    const bool colwise = (scaling_case == ScalingType::COLWISE) || (scaling_case == ScalingType::BIDIMENSIONAL);
 
     // Skip tests with colwise scaling, if the input tensor is 1D  
     if (tensor_dims.size() < 2 && colwise) {
@@ -549,11 +442,7 @@ TEST_P(FusedCastNVFP4TestSuite, TestFusedCastNVFP4) {
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
-            if (rowwise && colwise) {
-                // performTest_x2<InputType, OutputType>(OP, tensor_dims, block_size.first, block_size.second, fill_case);
-            } else {
-                performTest_x1<InputType, OutputType>(OP, tensor_dims, rowwise, colwise, fill_case);
-            }
+            performTest<InputType, OutputType>(OP, tensor_dims, rowwise, colwise, fill_case);
         );
     );
 }
@@ -570,13 +459,22 @@ std::string to_string(const ActivationType Act_type) {
     }
 }
 
+std::string to_string(const ScalingType scaling_type) {
+    switch (scaling_type) {
+        case ScalingType::ROWWISE:       return "ROWWISE_NVFP4_1x16";
+        case ScalingType::COLWISE:       return "COLWISE_MXFP8_32x1";
+        case ScalingType::BIDIMENSIONAL: return "BIDIMENSIONAL_32x16";
+        default: return "";
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     FusedCastNVFP4TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
-        ::testing::ValuesIn(block_sizes),
+        ::testing::ValuesIn(scaling_case),
         // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::Values(DType::kBFloat16),
@@ -588,8 +486,7 @@ INSTANTIATE_TEST_SUITE_P(
       for ( const auto& s: shape) {
         name += "X" + std::to_string(s);
       }
-      name += "X" + std::to_string(std::get<2>(info.param).first) +
-              "X" + std::to_string(std::get<2>(info.param).second) +
+      name += "X" + to_string(std::get<2>(info.param)) +
               "X" + test::typeName(std::get<3>(info.param)) +
               "X" + test::typeName(std::get<4>(info.param)) +
               "X" + test::caseName(std::get<5>(info.param));

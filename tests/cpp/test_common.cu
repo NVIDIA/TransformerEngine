@@ -155,15 +155,15 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     {
       auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(16)), alignment) * alignment;
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(32)), alignment) * alignment;
       alignment = block_alignment[1];
       auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat8E4M3;
-    ret_colwise.type = DType::kFloat8E4M3;
+    ret_colwise.type = DType::kFloat8E8M0;
     ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
 
     return {ret_rowwise, ret_colwise};
   }
