@@ -22,7 +22,7 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_autocast_dtype, reshape, maybe_dequantize
+from .._common import maybe_autocast_dtype, maybe_dequantize
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 
