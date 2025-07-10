@@ -12,8 +12,8 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../utils.cuh"
-#include "utils.h"
 #include "common/util/cuda_runtime.h"
+#include "utils.h"
 
 namespace transformer_engine {
 
@@ -168,35 +168,34 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_experts, int topk, float coeff,
                                                 DataType* aux_loss, float* Const_buf,
                                                 cudaStream_t stream) {
-  if(cuda::sm_arch(cuda::current_device()) >= 900) {
-      cudaLaunchConfig_t config = {0};
-      int cluster_size = 8;
-      config.gridDim = cluster_size;
-      config.blockDim = 1024;
-      config.dynamicSmemBytes = sizeof(CompType) * num_experts;
+  if (cuda::sm_arch(cuda::current_device()) >= 900) {
+    cudaLaunchConfig_t config = {0};
+    int cluster_size = 8;
+    config.gridDim = cluster_size;
+    config.blockDim = 1024;
+    config.dynamicSmemBytes = sizeof(CompType) * num_experts;
 
-      // Update the max cluster size based on the device
-      cudaOccupancyMaxPotentialClusterSize(
-          &cluster_size,
-          reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config);
+    // Update the max cluster size based on the device
+    cudaOccupancyMaxPotentialClusterSize(
+        &cluster_size,
+        reinterpret_cast<void*>(fused_moe_aux_loss_forward_kernel<DataType, IndexType>), &config);
 
-      cudaLaunchAttribute attribute[1];
-      attribute[0].id = cudaLaunchAttributeClusterDimension;
-      attribute[0].val.clusterDim.x = cluster_size;
-      attribute[0].val.clusterDim.y = 1;
-      attribute[0].val.clusterDim.z = 1;
-      config.numAttrs = 1;
-      config.attrs = attribute;
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeClusterDimension;
+    attribute[0].val.clusterDim.x = cluster_size;
+    attribute[0].val.clusterDim.y = 1;
+    attribute[0].val.clusterDim.z = 1;
+    config.numAttrs = 1;
+    config.attrs = attribute;
 
-      cudaLaunchKernelEx(&config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs,
-                        tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
-                        aux_loss, Const_buf);
-  }
-  else {
+    cudaLaunchKernelEx(&config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs,
+                       tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff,
+                       aux_loss, Const_buf);
+  } else {
     size_t smem_size = sizeof(CompType) * num_experts;
-    fused_moe_aux_loss_forward_kernel<DataType, IndexType><<<1, 1024, smem_size, stream>>>(
-        probs, tokens_per_expert, total_num_tokens, num_tokens, num_experts, topk, coeff, aux_loss,
-        Const_buf);
+    fused_moe_aux_loss_forward_kernel<DataType, IndexType>
+        <<<1, 1024, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens, num_tokens,
+                                         num_experts, topk, coeff, aux_loss, Const_buf);
   }
 }
 
