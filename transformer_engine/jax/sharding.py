@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
+import warnings
 from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
@@ -146,6 +147,8 @@ def with_sharding_constraint_by_logical_axes(
             )
     except ImportError:
         pass
+
+    warnings.warn("TransformerEngine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated and will be removed in a future version. Please use Flax logical axes with a flax.linen.logical_axis_rules context instead.", DeprecationWarning)
 
     # If no logical axis rules are available from Flax, fallback to TE's hardcoded logical axis rule table
     assert len(x.shape) == len(logical_axis_names)
