@@ -39,3 +39,4 @@ downloads/
 compile_commands.json
 .nfs
 tensor_dumps/
+artifacts/

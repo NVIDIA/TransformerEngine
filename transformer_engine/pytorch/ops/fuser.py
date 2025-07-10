@@ -344,6 +344,9 @@ class OperationFuser:
         self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
         self._backward_ops = list(reversed(self._forward_ops))
 
+        # Flag for checking if this is the first iteration
+        self._is_first_forward = True
+
         # Fuse ops if needed
         if fuse_ops:
             self.fuse_ops()
@@ -391,8 +394,12 @@ class OperationFuser:
             )
 
         # Initialization before forward pass
-        for op in self._basic_ops:
-            op.pre_forward()
+        if self._is_first_forward:
+            with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+            recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+            for op in self._basic_ops:
+                op.pre_first_forward(recipe=recipe)
+            self._is_first_forward = False
 
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
