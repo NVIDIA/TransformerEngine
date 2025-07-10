@@ -68,7 +68,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         input_: torch.Tensor,
         fuser: OperationFuser,
         basic_op_kwargs: list[dict[str, Any]],
-        is_grad_enabled: bool,
         *params_and_extra_inputs: torch.nn.Parameter,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass
@@ -83,8 +82,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             Container for the pipeline of operations to run
         basic_op_kwargs: list of dict
             Keyword arguments to BasicOperation
-        is_grad_enabled: bool
-            Should context be saved for backward
         *params_and_extra_inputs: torch.Tensor
             Other tensor inputs to include in autograd graph. Consists
             of parameter tensors, followed by extra operation inputs.
@@ -113,9 +110,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             basic_op_extra_inputs.append(xs)
 
         # Apply forward ops
+        is_grad_enabled = func_ctx is not None
         x = input_
         requires_grad = is_grad_enabled and x.requires_grad
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        with_quantized_compute = fuser.recipe is not None
         extra_outputs = [None] * fuser._num_basic_ops
         for op, basic_op_idxs in fuser._forward_ops:
 
@@ -304,7 +302,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             dx,  # input_
             None,  # fuser
             None,  # basic_op_kwargs
-            None,  # is_grad_enabled
             *grad_params_flat,
             *grad_extra_inputs_flat,
         )
@@ -415,8 +412,7 @@ class OperationFuser:
             basic_op_kwargs = [{}] * self._num_basic_ops
 
         # Fuser forward pass
-        is_grad_enabled = torch.is_grad_enabled()
-        if is_grad_enabled:
+        if torch.is_grad_enabled():
             forward_func = _OperationFuserAutogradFunction.apply
             args = []
         else:
@@ -426,7 +422,6 @@ class OperationFuser:
             input,
             self,
             basic_op_kwargs,
-            is_grad_enabled,
             *self._basic_op_params,
             *extra_inputs,
         )
