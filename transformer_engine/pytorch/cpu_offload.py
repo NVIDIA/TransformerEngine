@@ -69,7 +69,7 @@ class TensorGroupProcessor:
         """
         Public API call - for a single tensor, when this tensor is pushed to be offloaded.
         """
-        if offload_base_tensor:
+        if offload_base_tensor or hasattr(tensor, "offload_base_tensor"):
             # Tensor is marked as a view of a base tensor that needs to be offloaded,
             # we process this in _switch_to_base_tensors and _switch_to_views in the
             # tensor_group_process_before_offload and tensor_group_process_after_reload.
