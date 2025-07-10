@@ -367,22 +367,14 @@ def profile_topk_softmax(
 
 if __name__ == "__main__":
     test_fused_scores_for_aux_loss(
-        dtype=torch.float32, num_tokens=2, num_experts=32, topk=8, score_function="sigmoid"
+        dtype=torch.float32, num_tokens=2, num_experts=32, topk=8, score_function="softmax"
     )
-    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=2, num_experts=32, topk=8)
-    profile_topk_softmax(
-        dtype=torch.float32,
-        num_tokens=1,
-        num_experts=256,
-        topk=8,
-        enable_bias=False,
-        use_pre_softmax=True,
-    )
-    profile_topk_softmax(
-        dtype=torch.float32,
-        num_tokens=1,
-        num_experts=256,
-        topk=8,
-        enable_bias=True,
-        use_pre_softmax=False,
-    )
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=2048, num_experts=32, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=2048, num_experts=128, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=2048, num_experts=256, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=32, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=128, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=256, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=32, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=128, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=256, topk=4)
