@@ -328,7 +328,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
         shape: torch.shape,
-        quantizer: Quantizer,
+        quantizer: Optional[Quantizer] = None,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
