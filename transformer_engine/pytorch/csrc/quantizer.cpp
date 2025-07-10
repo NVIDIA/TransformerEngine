@@ -480,11 +480,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   at::Tensor rowwise_data1, columnwise_data, rowwise_scale_inv,
       columnwise_scale_inv;  // TODO(pgadzinski) - change
   opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
-  auto last_dim = static_cast<size_t>(torch_shape.back());
-
-  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 requires tensor dims that are divisble by ", MXFP8_BLOCK_SIZE,
-             " (got shape=", torch_shape, ")");
 
   at::Tensor data;
   if (rowwise_usage) {
@@ -493,9 +488,10 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     } else {
       data = at::empty(torch_shape, opts);
     }
-    auto sinv0 = roundup(numel / last_dim, 128);
-    auto sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
-    rowwise_scale_inv = at::zeros({sinv0, sinv1}, opts);
+    auto scale_shape = get_scale_shape(shape, false);
+    size_t sinv0 = scale_shape[0];
+    size_t sinv1 = scale_shape[1];
+    rowwise_scale_inv = at::zeros({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts);
     tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(
         rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
@@ -503,10 +499,12 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   }
 
   if (columnwise_usage) {
-    auto sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
-    auto sinv1 = roundup(last_dim, 128);
+    auto scale_shape = get_scale_shape(shape, true);
+    size_t sinv0 = scale_shape[0];
+    size_t sinv1 = scale_shape[1];
     columnwise_data = at::empty(torch_shape, opts);
-    columnwise_scale_inv = at::zeros({sinv0, sinv1}, opts);
+    columnwise_scale_inv =
+        at::zeros({static_cast<int64_t>(sinv0), static_cast<int64_t>(sinv1)}, opts);
 
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(
@@ -532,6 +530,37 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   }
 
   return {std::move(tensor), std::move(ret)};
+}
+
+std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& shape,
+                                                    bool columnwise) const {
+  size_t numel = 1;
+  for (auto s : shape) {
+    numel *= s;
+  }
+
+  auto last_dim = shape.back();
+
+  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
+             "MXFP8 requires tensor dims that are divisble by ", MXFP8_BLOCK_SIZE,
+             " (got shape=", shape, ")");
+
+  std::vector<size_t> scale_shape;
+
+  bool rowwise_usage = !columnwise;
+
+  if (rowwise_usage) {
+    // rowwise scaling factor shape
+    size_t sinv0 = roundup(numel / last_dim, 128);
+    size_t sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
+    scale_shape = {sinv0, sinv1};
+  } else {
+    // columnwise scaling factor shape
+    size_t sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    size_t sinv1 = roundup(last_dim, 128);
+    scale_shape = {sinv0, sinv1};
+  }
+  return scale_shape;
 }
 
 }  // namespace transformer_engine::pytorch
