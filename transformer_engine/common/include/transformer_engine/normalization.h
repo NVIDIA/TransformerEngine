@@ -149,6 +149,10 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
 void nvte_enable_cudnn_norm_fwd(bool enable);
 void nvte_enable_cudnn_norm_bwd(bool enable);
 
+/*! \brief Helper to query if cuDNN backend for normalization is enabled */
+int nvte_use_cudnn_norm_fwd();
+int nvte_use_cudnn_norm_bwd();
+
 /*! \brief Control whether norm computes `gamma += 1.0` for zero-centered gamma
  *  in weight dtype. If set to false, it will compute in compute dtype.
  *
