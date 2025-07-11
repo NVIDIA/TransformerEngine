@@ -278,11 +278,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("topk"), py::arg("score_function"), "Fused topk softmax bwd");
   m.def("fused_moe_aux_loss_fwd", &transformer_engine::pytorch::fused_moe_aux_loss_fwd,
         py::arg("probs"), py::arg("tokens_per_expert"), py::arg("total_num_tokens"),
-        py::arg("num_tokens"), py::arg("num_experts"), py::arg("topk"), py::arg("coeff"),
+        py::arg("num_experts"), py::arg("num_rows"), py::arg("num_cols"), py::arg("topk"),
+        py::arg("coeff"),
         "Fused aux loss fwd");
   m.def("fused_moe_aux_loss_bwd", &transformer_engine::pytorch::fused_moe_aux_loss_bwd,
-        py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_tokens"),
-        py::arg("num_experts"), py::arg("grad_aux_loss"), "Fused aux loss bwd");
+        py::arg("Const_buf"), py::arg("tokens_per_expert"), py::arg("num_rows"), py::arg("num_cols"),
+        py::arg("grad_aux_loss"), "Fused aux loss bwd");
 
   // Misc
   m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
