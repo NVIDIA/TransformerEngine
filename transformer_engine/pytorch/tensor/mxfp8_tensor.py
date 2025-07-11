@@ -274,14 +274,24 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             if self._columnwise_data is not None
             else None
         )
+        new_rowwise_scale_inv = (
+            torch.empty_like(self._rowwise_scale_inv, *args, **kwargs)
+            if self._rowwise_scale_inv is not None
+            else None
+        )
+        new_columnwise_scale_inv = (
+            torch.empty_like(self._columnwise_scale_inv, *args, **kwargs)
+            if self._columnwise_scale_inv is not None
+            else None
+        )
         return MXFP8Tensor(
             shape=self.shape,
             dtype=self.dtype,
             rowwise_data=new_rowwise_data,
-            rowwise_scale_inv=self._rowwise_scale_inv,
+            rowwise_scale_inv=new_rowwise_scale_inv,
             fp8_dtype=self._fp8_dtype,
             columnwise_data=new_columnwise_data,
-            columnwise_scale_inv=self._columnwise_scale_inv,
+            columnwise_scale_inv=new_columnwise_scale_inv,
             quantizer=self._quantizer,
         )
 

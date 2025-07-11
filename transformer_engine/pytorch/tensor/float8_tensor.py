@@ -445,19 +445,19 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         )
 
     def empty_like(self, *args, **kwargs):
-        """Create a new empty tensor with the same shape and type as this tensor"""
         new_data = torch.empty_like(self._data, *args, **kwargs) if self._data is not None else None
         new_transpose = (
             torch.empty_like(self._transpose, *args, **kwargs)
             if self._transpose is not None
             else None
         )
+        new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
         device = new_data.device if new_data is not None else new_transpose.device
         return Float8Tensor(
             shape=self.shape,
             dtype=self.dtype,
             data=new_data,
-            fp8_scale_inv=self._scale_inv,
+            fp8_scale_inv=new_scale_inv,
             fp8_dtype=self._fp8_dtype,
             data_transpose=new_transpose,
             quantizer=self._quantizer,

@@ -797,14 +797,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        weight.main_grad.dtype
+                        origin_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,
                     "layout": "NT",
-                    "out": weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "out": origin_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,

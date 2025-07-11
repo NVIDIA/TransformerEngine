@@ -8,10 +8,11 @@ from __future__ import annotations
 import contextlib
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+import warnings
+from typing import Any, Optional
 import torch
 from torch.autograd.graph import saved_tensors_hooks
-
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["get_cpu_offload_context", "mark_is_weight", "start_offload_if_offload_enabled"]
@@ -39,7 +40,6 @@ def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor
     for tensor in tensors:
         if tensor is not None:
             OFFLOAD_SYNCHRONIZER.push_tensor(tensor, offload_base_tensor)  # type: ignore[attr-defined]
-
 
 @dataclass
 class TensorGroup:
@@ -120,9 +120,9 @@ class TensorGroupProcessor:
         MultiHeadAttention for interleavedq, k, v tensors.
         """
         aux["views"] = []
-        for tensor_id in range(
+        for tensor_id in range( # pylint: disable=consider-using-enumerate
             len(tensor_group.tensor_list)
-        ):  # pylint: disable=consider-using-enumerate
+        ):
             tensor = tensor_group.tensor_list[tensor_id]
             if getattr(tensor, "offload_base_tensor", False):
                 aux["views"].append((tensor.shape, tensor.stride(), tensor.storage_offset()))
@@ -138,7 +138,14 @@ class TensorGroupProcessor:
         """
         Make tensors contiguous.
         """
-        tensor_group.tensor_list = [tensor.contiguous() for tensor in tensor_group.tensor_list]
+        any_non_contiguous = False
+        for tensor in tensor_group.tensor_list:
+            if not tensor.is_contiguous():
+                any_non_contiguous = True
+                break
+        if any_non_contiguous:
+            warnings.warn("Non-contiguous tensors are offloaded. Reloading will change memory layout to contiguous.")
+            tensor_group.tensor_list = [tensor.contiguous() for tensor in tensor_group.tensor_list]
         return tensor_group
 
     @staticmethod
@@ -387,8 +394,7 @@ class OffloadSynchronizer:
         offloaded_tensor_group = TensorGroup()
         for tensor_id, tensor in enumerate(tensor_group.tensor_list):
             assert tensor.is_contiguous()
-            # empty_like is defined also for QuantizedTensors, if it is defined on cpu,
-            # then scaling factors are left on GPU to avoid unnecessary copy of small tensors.
+            # empty_like is defined also for QuantizedTensors
             offloaded_tensor = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
             self.offload_stream.wait_event(tensor_group.events[tensor_id])  # type: ignore[arg-type]
 
@@ -464,7 +470,7 @@ class OffloadSynchronizer:
 
 def get_cpu_offload_context(
     enabled: bool = False,
-    num_layers: int = 1,
+    num_layers: Optional[int] = 1,
     model_layers: int = 1,
     offload_activations: bool = True,
     offload_weights: bool = False,
@@ -531,8 +537,6 @@ def get_cpu_offload_context(
         )
 
     if offload_weights:
-        import warnings
-
         warnings.warn(
             "Offloading weights is deprecated. Using offload_weights=True does not have any"
             " effect.",
@@ -545,6 +549,9 @@ def get_cpu_offload_context(
 
     if TEDebugState.debug_enabled:
         raise RuntimeError("CPU offload is not supported in debug mode.")
+
+    if num_layers is not None:
+        assert num_layers <= model_layers - 1, "Cannot offload all layers with synchronization_dict=None - last layer is not offloaded."
 
     offload_synchronizer = OffloadSynchronizer(
         model_layers,
