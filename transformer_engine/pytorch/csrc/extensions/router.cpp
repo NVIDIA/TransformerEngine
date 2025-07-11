@@ -168,11 +168,11 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   return std::make_tuple(aux_loss, Const_buf);
 }
 
-at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert,
-                                  int num_rows, int num_cols, at::Tensor grad_aux_loss) {
+at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
+                                  int num_cols, at::Tensor grad_aux_loss) {
   // Create the output tensor
-  at::Tensor grad_probs = at::empty({num_rows, num_cols},
-                                    at::dtype(grad_aux_loss.scalar_type()).device(at::kCUDA));
+  at::Tensor grad_probs =
+      at::empty({num_rows, num_cols}, at::dtype(grad_aux_loss.scalar_type()).device(at::kCUDA));
 
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);
