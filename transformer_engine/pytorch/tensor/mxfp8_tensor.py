@@ -152,6 +152,7 @@ class MXFP8Quantizer(Quantizer):
             columnwise_data=None,
             columnwise_scale_inv=None,
             fp8_dtype=fp8_dtype,
+            quantizer=self,
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
