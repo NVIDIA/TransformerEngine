@@ -886,6 +886,16 @@ send_result_to_slack:
         jq -r '.comment.user.login' <<< "${githubData}"
     }
 
+    function get_github_pr_info_as_markdown() {
+        if [[ -z "${githubData}" ]]; then
+          echo ""
+        else
+          local pr_title=$(jq -r '.issue.title' <<< "${githubData}")
+          local pr_url=$(jq -r '.issue.html_url' <<< "${githubData}")
+          echo "<${pr_url}|PR>: ${pr_title}"
+        fi
+    }
+
     function get_nvidia_username_from_github_username() {
         local github_username="$1"
         local nv_username="INVALID"
@@ -951,6 +961,8 @@ send_result_to_slack:
         echo "CI Pipeline <https://gitlab-master.nvidia.com/dl/transformerengine/transformerengine/-/pipelines/${CI_PIPELINE_ID}|${CI_PIPELINE_ID}> completed."
 
         echo "Triggered by: $slack_user_id"
+
+        echo "$(get_github_pr_info_as_markdown)"
     }
 
     function get_pipeline_job_summary_message() {
