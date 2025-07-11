@@ -41,6 +41,7 @@ def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor
         if tensor is not None:
             OFFLOAD_SYNCHRONIZER.push_tensor(tensor, offload_base_tensor)  # type: ignore[attr-defined]
 
+
 @dataclass
 class TensorGroup:
     """
@@ -120,7 +121,7 @@ class TensorGroupProcessor:
         MultiHeadAttention for interleavedq, k, v tensors.
         """
         aux["views"] = []
-        for tensor_id in range( # pylint: disable=consider-using-enumerate
+        for tensor_id in range(  # pylint: disable=consider-using-enumerate
             len(tensor_group.tensor_list)
         ):
             tensor = tensor_group.tensor_list[tensor_id]
@@ -144,7 +145,10 @@ class TensorGroupProcessor:
                 any_non_contiguous = True
                 break
         if any_non_contiguous:
-            warnings.warn("Non-contiguous tensors are offloaded. Reloading will change memory layout to contiguous.")
+            warnings.warn(
+                "Non-contiguous tensors are offloaded. Reloading will change memory layout to"
+                " contiguous."
+            )
             tensor_group.tensor_list = [tensor.contiguous() for tensor in tensor_group.tensor_list]
         return tensor_group
 
@@ -551,7 +555,9 @@ def get_cpu_offload_context(
         raise RuntimeError("CPU offload is not supported in debug mode.")
 
     if num_layers is not None:
-        assert num_layers <= model_layers - 1, "Cannot offload all layers with synchronization_dict=None - last layer is not offloaded."
+        assert (
+            num_layers <= model_layers - 1
+        ), "Cannot offload all layers with synchronization_dict=None - last layer is not offloaded."
 
     offload_synchronizer = OffloadSynchronizer(
         model_layers,
