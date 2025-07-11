@@ -174,6 +174,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
     config.gridDim = cluster_size;
     config.blockDim = 1024;
     config.dynamicSmemBytes = sizeof(CompType) * num_experts;
+    config.stream = stream;
 
     // Update the max cluster size based on the device
     cudaOccupancyMaxPotentialClusterSize(
