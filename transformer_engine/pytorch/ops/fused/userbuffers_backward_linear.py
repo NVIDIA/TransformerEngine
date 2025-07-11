@@ -48,14 +48,14 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": None, "bias": None, "reduce_scatter": None}
         ops = []
-        if reduce_scatter is not None:
-            op_idxs["reduce_scatter"] = len(ops)
-            ops.append(reduce_scatter)
+        op_idxs["linear"] = len(ops)
+        ops.append(linear)
         if bias is not None:
             op_idxs["bias"] = len(ops)
             ops.append(bias)
-        op_idxs["linear"] = len(ops)
-        ops.append(linear)
+        if reduce_scatter is not None:
+            op_idxs["reduce_scatter"] = len(ops)
+            ops.append(reduce_scatter)
 
         # Initialize base class
         super().__init__(ops)
