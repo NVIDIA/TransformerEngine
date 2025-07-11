@@ -125,10 +125,10 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
+(2) cd flash-attention/ && git checkout 3ba6f82 && git submodule update --init && cd hopper/ && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
-(5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.py"""
+(5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
     v3_warning_printed = False
 
     @staticmethod
@@ -476,11 +476,10 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-        ):
-            logger.debug("Disabling FlashAttention as it does not support MLA.")
-        use_flash_attention = False
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
+            use_flash_attention_2 = False
+
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -507,9 +506,38 @@ def get_attention_backend(
                 ".".join([str(i) for i in device_compute_capability]),
             )
         use_flash_attention_2 = False
-    if use_flash_attention_3 and (head_dim_qk > 128 or head_dim_v > 128):
+    if use_flash_attention_3 and (
+        head_dim_qk > 256
+        or num_heads % num_gqa_groups != 0
+        or (
+            head_dim_qk != head_dim_v
+            and (head_dim_qk <= 128 or head_dim_qk > 192 or head_dim_v <= 96 or head_dim_v > 128)
+            and (head_dim_qk > 64 or head_dim_v > 512)
+        )
+        or (
+            head_dim_qk != head_dim_v
+            and head_dim_v > 256
+            and qkv_dtype not in [torch.bfloat16, torch.float16]
+        )
+    ):
         if FlashAttentionUtils.v3_is_installed:
-            logger.debug("Disabling FlashAttention 3 for head_dim > 128")
+            logger.debug(
+                "Disabling FlashAttention 3 due to unsupported num_heads, num_gqa_groups, "
+                "head_dim_qk, head_dim_v or qkv_dtype. "
+                "Supported: head_dim_qk <= 256, and num_heads %% num_gqa_groups = 0, and "
+                "if head_dim_qk is different from head_dim_v, then "
+                "(head_dim_qk must in (128, 192] and head_dim_v in (96, 128]) or "
+                "(head_dim_qk <= 64 and head_dim_v <= 512), and "
+                "if head_dim_qk is different from head_dim_v and head_dim_v > 256, then "
+                "qkv_dtype requires fp16 and bf16 data type. "
+                "Found: num_heads = %s, num_gqa_groups = %s, "
+                "head_dim_qk = %s, head_dim_v = %s and qkv_dtype = %s.",
+                num_heads,
+                num_gqa_groups,
+                head_dim_qk,
+                head_dim_v,
+                qkv_dtype,
+            )
         use_flash_attention_3 = False
 
     # Filter: QKV layout
