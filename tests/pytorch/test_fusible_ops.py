@@ -20,7 +20,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
-    BackwardBiasActivation,
+    BackwardActivationBias,
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
     ForwardLinearBiasAdd,
@@ -1870,7 +1870,7 @@ class TestFusedOps:
     @pytest.mark.parametrize("out_shape", ((32, 32), (32, 1, 32), (8, 2, 2, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
-    def test_backward_bias_activation(
+    def test_backward_activation_bias(
         self,
         *,
         activation: str,
@@ -1938,7 +1938,7 @@ class TestFusedOps:
         backward_ops = model._module_groups[0]._backward_ops
         if with_quantization and quantization in ["fp8_delayed_scaling", "mxfp8"]:
             assert len(backward_ops) == 2
-            assert isinstance(backward_ops[0][0], BackwardBiasActivation)
+            assert isinstance(backward_ops[0][0], BackwardActivationBias)
             assert isinstance(backward_ops[1][0], te_ops.Quantize)
         else:
             assert len(backward_ops) == 3

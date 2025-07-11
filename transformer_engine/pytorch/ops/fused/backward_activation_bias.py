@@ -29,7 +29,7 @@ _fused_activations = {GELU: tex.dbias_dgelu, ReLU: tex.dbias_drelu}
 _fusible_activations = tuple(_fused_activations.keys())
 
 
-class BackwardBiasActivation(FusedOperation):
+class BackwardActivationBias(FusedOperation):
     """Fused backward dbias + dact + quantize
 
     Uses the next operation's input quantizer.
@@ -68,13 +68,13 @@ class BackwardBiasActivation(FusedOperation):
         # Get previous op quantizer
         if not bias_op_ctx.with_quantized_compute:
             raise RuntimeError(
-                "BackwardBiasActivation requires quantized compute, "
+                "BackwardActivationBias requires quantized compute, "
                 "but Bias context has it disabled"
             )
         quantizer = bias_op_ctx.grad_input_quantizer
         if quantizer is None:
             raise RuntimeError(
-                "BackwardBiasActivation requires previous op's grad output quantizer, "
+                "BackwardActivationBias requires previous op's grad output quantizer, "
                 "but Bias context has no quantizer"
             )
 
@@ -87,7 +87,7 @@ class BackwardBiasActivation(FusedOperation):
         return dx, [(), (db,)], [(), ()]
 
 
-def fuse_backward_bias_activation(
+def fuse_backward_activation_bias(
     ops: list[tuple[FusibleOperation, list[int]]],
     recipe: Optional[Recipe],
 ) -> list[tuple[FusibleOperation, list[int]]]:
@@ -138,7 +138,7 @@ def fuse_backward_bias_activation(
         ops = ops[1:]
 
         # Replace window with fused op
-        op = BackwardBiasActivation(
+        op = BackwardActivationBias(
             activation=window[0][0],
             bias=window[1][0],
         )

@@ -17,7 +17,7 @@ from transformer_engine.pytorch.ops.op import (
     OperationContext,
 )
 from transformer_engine.pytorch.ops.fused import (
-    fuse_backward_bias_activation,
+    fuse_backward_activation_bias,
     fuse_backward_linear_add,
     fuse_forward_linear_bias_activation,
     fuse_forward_linear_bias_add,
@@ -381,7 +381,7 @@ class OperationFuser:
         """Attempt to fuse operations in backward pass"""
         ops = fuse_userbuffers_backward_linear(ops)
         ops = fuse_backward_linear_add(ops)
-        ops = fuse_backward_bias_activation(ops, recipe)
+        ops = fuse_backward_activation_bias(ops, recipe)
         return ops
 
     def fuse_ops(self) -> None:
