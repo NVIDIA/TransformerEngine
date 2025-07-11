@@ -71,8 +71,7 @@ def is_norm_fwd_cudnn_enabled(scaling_mode: ScalingMode) -> bool:
     """Retrieves whether CuDNN norm fwd is enabled."""
     # MXFP8_1D_SCALING always uses CuDNN currently
     return (
-        transformer_engine_jax.use_cudnn_norm_fwd()
-        or scaling_mode == ScalingMode.MXFP8_1D_SCALING
+        transformer_engine_jax.use_cudnn_norm_fwd() or scaling_mode == ScalingMode.MXFP8_1D_SCALING
     )
 
 
