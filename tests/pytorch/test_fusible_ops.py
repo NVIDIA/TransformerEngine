@@ -262,6 +262,65 @@ class TestSequentialContainer:
         model(torch.zeros(1))
         assert len(model._module_groups) == 6
 
+    def test_extra_tensors(self, size: int = 16) -> None:
+        """Check that extra inputs are distributed properly between module groups
+        and that extra outputs are properly collected"""
+
+        # Construct sequential container
+        bias = te_ops.Bias(size=size, device="cpu")
+        with torch.no_grad():
+            bias.bias.copy_(torch.rand((size,)))
+        model = te_ops.Sequential(  #    | Inputs  | Outputs
+            torch.nn.Identity(),  #      | x1      | x1
+            te_ops.MakeExtraOutput(),  # | x1      | x1 [x1]
+            bias,  #                     | x1      | h1 (= x1 + b)
+            te_ops.MakeExtraOutput(),  # | h1      | h1 [h1]
+            te_ops.AddInPlace(),  #      | h1 [x2] | x2 (= x2 + h1)
+            te_ops.MakeExtraOutput(),  # | x2      | x2 [x2]
+            torch.nn.Identity(),  #      | x2      | x2
+            bias,  #                     | x2      | h2 (= x2 + b)
+            te_ops.AddInPlace(),  #      | h2 [x3] | x3 (= x3 + h2)
+            te_ops.MakeExtraOutput(),  # | x3      | x3 [x3]
+            te_ops.AddInPlace(),  #      | x3 [x4] | x4 (= x4 + x3)
+            torch.nn.Identity(),  #      | x4      | x4
+            te_ops.Identity(),  #        | x4      | x4
+            te_ops.MakeExtraOutput(),  # | x4      | x4 [x4]
+            te_ops.Identity(),  #        | x4      | x4
+        )
+
+        # Create input tensors
+        x1 = torch.rand((size,))
+        x2 = torch.rand((size,))
+        x3 = torch.rand((size,))
+        x4 = torch.rand((size,))
+
+        # Save original input tensor values
+        x1_orig = x1.clone()
+        x2_orig = x2.clone()
+        x3_orig = x3.clone()
+        x4_orig = x4.clone()
+
+        # Run forward
+        ys = model(x1, x2, x3, x4)
+
+        # Check whether outputs match (x4, x1, h1, x2, x3, x4)
+        assert len(ys) == 6
+        assert ys[0].data_ptr() == x4.data_ptr()
+        assert ys[1].data_ptr() == x1.data_ptr()
+        assert ys[2].data_ptr() not in [x.data_ptr() for x in (x1, x2, x3, x4)]
+        assert ys[3].data_ptr() == x2.data_ptr()
+        assert ys[4].data_ptr() == x3.data_ptr()
+        assert ys[5].data_ptr() == x4.data_ptr()
+
+        # Check whether tensors have correct values
+        b = bias.bias
+        h1 = ys[2]
+        torch.testing.assert_close(x1, x1_orig)
+        torch.testing.assert_close(h1, x1_orig + b)
+        torch.testing.assert_close(x2, x2_orig + h1)
+        torch.testing.assert_close(x3, x3_orig + x2 + b)
+        torch.testing.assert_close(x4, x4_orig + x3)
+
 
 class TestFuser:
     """Tests for operation fusion infrastructure"""

@@ -162,23 +162,6 @@ class Sequential(torch.nn.Module):
             if isinstance(group, list):
                 groups[idx] = OperationFuser(group)
 
-        # Check if operations expect extra input or output tensors
-        # Note: If any op has extra inputs or outputs, then the entire
-        # Sequential must be made up of TE ops.
-        if len(groups) > 1:
-            ops = []
-            for group in groups:
-                if isinstance(group, OperationFuser):
-                    ops.extend(group._basic_ops)
-            num_extra_inputs = sum(op.num_extra_inputs for op in ops)
-            num_extra_outputs = sum(op.num_extra_outputs for op in ops)
-            if num_extra_inputs > 0 or num_extra_outputs > 0:
-                raise RuntimeError(
-                    f"`Sequential` expects {num_extra_inputs} extra inputs "
-                    f"and {num_extra_outputs} extra outputs, "
-                    "but it contains non-fusible operations"
-                )
-
         return groups
 
     def forward(
@@ -194,6 +177,22 @@ class Sequential(torch.nn.Module):
 
         # Forward pass for each module group
         x = input
+        extra_outputs: list[torch.Tensor] = []
         for module_group in self._module_groups:
-            x = module_group(x, *extra_inputs)
+            if isinstance(module_group, OperationFuser):
+                xs, extra_inputs = (
+                    (x,) + extra_inputs[:module_group.num_extra_inputs],
+                    extra_inputs[module_group.num_extra_inputs:],
+                )
+                xs = module_group(*xs)
+                if isinstance(xs, tuple):
+                    x, ys = xs[0], xs[1:]
+                    extra_outputs.extend(ys)
+                else:
+                    x = xs
+            else:
+                x = module_group(x)
+
+        if extra_outputs:
+            return (x,) + tuple(extra_outputs)
         return x
