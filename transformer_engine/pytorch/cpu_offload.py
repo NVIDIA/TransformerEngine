@@ -12,7 +12,6 @@ import warnings
 from typing import Any, Optional
 import torch
 from torch.autograd.graph import saved_tensors_hooks
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["get_cpu_offload_context", "mark_is_weight", "start_offload_if_offload_enabled"]
