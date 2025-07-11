@@ -172,7 +172,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int topk, float coeff,
                                                 DataType* aux_loss, float* Const_buf,
                                                 cudaStream_t stream) {
-  if (cuda::sm_arch(cuda::current_device()) >= 900) {
+  if (cuda::sm_arch(cuda::current_device()) >= 90) {
     cudaLaunchConfig_t config = {0};
     int cluster_size = 8;
     config.gridDim = cluster_size;
