@@ -542,7 +542,7 @@ def get_cpu_offload_context(
         # Weights offloading is deprecated but we maintain backward compatibility by doing nothing.
         if not offload_activations:
             return contextlib.nullcontext(), lambda x: x
-    
+
     if TEDebugState.debug_enabled:
         raise RuntimeError("CPU offload is not supported in debug mode.")
 
