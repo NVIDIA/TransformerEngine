@@ -103,7 +103,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             tensor.do_not_clear = True
 
         # Unflatten list of parameters and extra tensor inputs
-        extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
+        extra_inputs = params_and_extra_inputs[-fuser.num_extra_inputs :]
         basic_op_extra_inputs = []
         for op in fuser._basic_ops:
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
@@ -113,7 +113,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         is_grad_enabled = func_ctx is not None
         x = input_
         requires_grad = is_grad_enabled and x.requires_grad
-        with_quantized_compute = fuser.recipe is not None
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         extra_outputs = [None] * fuser._num_basic_ops
         for op, basic_op_idxs in fuser._forward_ops:
 
@@ -191,7 +191,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_ops = fuser._basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
             func_ctx.basic_op_num_params = fuser._num_list_basic_op_params
-            func_ctx.num_extra_inputs = fuser._num_extra_inputs
+            func_ctx.num_extra_inputs = fuser.num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
             func_ctx.with_quantized_compute = with_quantized_compute
@@ -314,19 +314,12 @@ class OperationFuser:
     ----------
     ops: list of FusibleOperation
         Pipeline of operations
-    fuse_ops: bool
-        Whether to attempt fusing operations
-    recipe: Recipe, optional
-        Quantization recipe to use when fusing and executing operations.
-        Note: certain fusions may depend on what kind of recipe is being used.
 
     """
 
     def __init__(
         self,
         ops: list[FusibleOperation],
-        fuse_ops: bool,
-        recipe: Optional[Recipe],
     ) -> None:
 
         # Get list of basic operations
@@ -340,21 +333,14 @@ class OperationFuser:
         self._basic_ops: list[BasicOperation] = basic_ops
 
         # Number of extra tensor inputs
-        self._num_extra_inputs: int = sum(op.num_extra_inputs for op in basic_ops)
+        self.num_extra_inputs: int = sum(op.num_extra_inputs for op in basic_ops)
 
-        # Ops for forward and backward pass
+        # Ops for forward and backward pass, will be populated in fuse_ops
         self._forward_ops: list[tuple[FusibleOperation, list[int]]]
         self._backward_ops: list[tuple[FusibleOperation, list[int]]]
-        self._forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
-        self._backward_ops = list(reversed(self._forward_ops))
 
-        # Flag for checking if this is the first iteration
-        self._is_first_forward = True
-
-        # Fuse ops if needed
-        self.recipe = recipe
-        if fuse_ops:
-            self.fuse_ops()
+        # Cache and detect change of state relevant for fusing operations
+        self._last_fusion_params = None
 
         # Flatten list of parameters
         self._basic_op_params = [param for op in self._basic_ops for param in op.parameters()]
@@ -384,10 +370,13 @@ class OperationFuser:
         ops = fuse_backward_activation_bias(ops, recipe)
         return ops
 
-    def fuse_ops(self) -> None:
+    def fuse_ops(self, recipe: Optional[Recipe]) -> None:
         """Attempt to fuse operations"""
-        self._forward_ops = self._fuse_forward_ops(self._forward_ops, self.recipe)
-        self._backward_ops = self._fuse_backward_ops(self._backward_ops, self.recipe)
+        forward_ops = [(op, (idx,)) for idx, op in enumerate(self._basic_ops)]
+        backward_ops = list(reversed(forward_ops))
+
+        self._forward_ops = self._fuse_forward_ops(forward_ops, recipe)
+        self._backward_ops = self._fuse_backward_ops(backward_ops, recipe)
 
     def __call__(
         self,
@@ -396,16 +385,22 @@ class OperationFuser:
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         # Verify extra input count
-        if len(extra_inputs) != self._num_extra_inputs:
+        if len(extra_inputs) != self.num_extra_inputs:
             raise ValueError(
-                f"Expected {self._num_extra_inputs} extra inputs but got {len(extra_inputs)}"
+                f"Expected {self.num_extra_inputs} extra inputs but got {len(extra_inputs)}"
             )
 
-        # Initialization before forward pass
-        if self._is_first_forward:
+        # Get current fusion parameters
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        fusion_params = (with_quantized_compute, type(recipe))
+
+        # Fuse ops and prepare them for forward if fusion parameters changed
+        if fusion_params != self._last_fusion_params:
+            self._last_fusion_params = fusion_params
+            self.fuse_ops(recipe)
             for op in self._basic_ops:
-                op.pre_first_forward(recipe=self.recipe)
-            self._is_first_forward = False
+                op.pre_first_forward(recipe=recipe)
 
         # Canonicalize op kwargs
         if basic_op_kwargs is None:
