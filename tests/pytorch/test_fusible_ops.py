@@ -1894,10 +1894,8 @@ class TestFusedOps:
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
-            quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            test_is_quantized=with_quantization,
         )
         b_ref, b_test = make_reference_and_test_tensors(
             hidden_size,
@@ -1906,10 +1904,8 @@ class TestFusedOps:
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
-            quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            test_is_quantized=with_quantization,
             requires_grad=False,
         )
 

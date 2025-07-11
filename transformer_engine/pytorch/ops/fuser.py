@@ -101,10 +101,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         # Operation autograd contexts
         basic_op_ctxs = [OperationContext() for _ in range(fuser._num_basic_ops)]
 
-        # Mark input tensors requiring grad as not deletable in backward
+        # Mark input tensors as not deletable in backward
         for tensor in (input_,) + params_and_extra_inputs:
-            if tensor.requires_grad:
-                tensor.do_not_clear = True
+            tensor.do_not_clear = True
 
         # Unflatten list of parameters and extra tensor inputs
         extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]

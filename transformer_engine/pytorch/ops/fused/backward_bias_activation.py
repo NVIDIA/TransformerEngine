@@ -71,15 +71,14 @@ class BackwardBiasActivation(FusedOperation):
                 "BackwardBiasActivation requires quantized compute, "
                 "but Bias context has it disabled"
             )
-        quantizer = bias_op_ctx.grad_output_quantizer
+        quantizer = bias_op_ctx.grad_input_quantizer
         if quantizer is None:
             raise RuntimeError(
-                "BackwardBiasActivation requires previous op's grad input quantizer, "
+                "BackwardBiasActivation requires previous op's grad output quantizer, "
                 "but Bias context has no quantizer"
             )
 
         # Launch kernel
-        # Note: input doesn't need view as gated activation fusions are not currently supported
         db, dx = self._fused_function(dy, act_input, quantizer)
 
         # Clear activation input tensor

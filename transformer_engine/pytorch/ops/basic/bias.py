@@ -132,15 +132,15 @@ class Bias(BasicOperation):
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
 
-        # Check if output is quantized
-        grad_output_quantizer = None
+        # Check if previous op quantizes its output's gradient
+        grad_input_quantizer = None
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
-            grad_output_quantizer = prev_op_grad_input_quantizer
+            grad_input_quantizer = prev_op_grad_input_quantizer
 
         if requires_grad:
             ctx.with_quantized_compute = with_quantized_compute
-            ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.grad_input_quantizer = grad_input_quantizer
 
         return x + b
 
@@ -151,7 +151,7 @@ class Bias(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
         dy = grad_output
         if dy.dim() > 1:
-            quantizer = ctx.grad_output_quantizer
+            quantizer = ctx.grad_input_quantizer
             if ctx.with_quantized_compute and quantizer is not None:
                 db, dy = tex.bgrad_quantize(dy, quantizer)
             else:

@@ -137,7 +137,7 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.weight_requires_grad = weight_requires_grad
         if bias_op is not None:
             bias_op_ctx.with_quantized_compute = with_quantized_compute
-            bias_op_ctx.grad_output_quantizer = linear_op.get_grad_input_quantizer()
+            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_input_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
