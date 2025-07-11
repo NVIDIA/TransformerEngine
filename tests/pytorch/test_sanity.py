@@ -321,7 +321,7 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
         _disable_wgrads(block)
 
     if cpu_offload:
-        offload_context, sync_function = get_cpu_offload_context(enabled=True)
+        offload_context, sync_function = get_cpu_offload_context(enabled=True, num_layers=0)
     else:
         offload_context = nullcontext()
         sync_function = lambda x: x

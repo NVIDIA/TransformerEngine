@@ -173,7 +173,12 @@ class Utils:
         # Only cublas workspaces and some global tensors are allowed to be allocated.
         # All other allocations should be released.
         # This is a simple check to catch memory leaks.
-        assert Utils.get_cuda_memory_mb() < 100, f"Memory leak: {Utils.get_cuda_memory_mb()} MB"
+        if Utils.get_cuda_memory_mb() > 100:
+            memory_num = Utils.get_cuda_memory_mb()
+            import gc;
+            gc.collect() # We want next test to be run with clean state.
+            gc.disable()
+            raise RuntimeError(f"Memory leak: {memory_num} MB")
 
 
 class TestsOffloadSynchronizer:
