@@ -14,6 +14,37 @@
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
+ * Router fusion
+ **************************************************************************************************/
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
+    at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
+    c10::optional<int> group_topk, c10::optional<float> scaling_factor, std::string score_function,
+    c10::optional<at::Tensor> expert_bias);
+
+at::Tensor fused_topk_with_score_function_bwd(int num_tokens, int num_experts,
+                                              at::Tensor routing_map,
+                                              at::Tensor intermediate_output, at::Tensor grad_probs,
+                                              int topk, bool use_pre_softmax,
+                                              c10::optional<float> scaling_factor,
+                                              std::string score_function);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
+    at::Tensor logits, int topk, std::string score_function);
+
+at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
+                                            at::Tensor intermediate_output, at::Tensor grad_probs,
+                                            int topk, std::string score_function);
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
+                                                          at::Tensor tokens_per_expert,
+                                                          int total_num_tokens, int num_tokens,
+                                                          int num_experts, int topk, float coeff);
+
+at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert,
+                                  int num_tokens, int num_experts, at::Tensor grad_aux_loss);
+
+/***************************************************************************************************
  * Permutation
  **************************************************************************************************/
 
