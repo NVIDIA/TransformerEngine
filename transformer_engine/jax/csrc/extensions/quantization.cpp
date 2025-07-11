@@ -385,7 +385,7 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
     total_rowwise_sinv_size += sinv_size;
     total_colwise_sinv_size += colwise_sinv_size;
   }
-  if (is_mxfp8_scaling){
+  if (is_mxfp8_scaling) {
     nvte_memset(scale_invs->untyped_data(), 0, total_rowwise_sinv_size, stream);
     nvte_memset(colwise_scale_invs->untyped_data(), 0, total_colwise_sinv_size, stream);
   }
