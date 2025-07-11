@@ -926,8 +926,8 @@ void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
              "Wrong output shape. Expected (after flattening) [", input.flat_first_dim(),
              ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(input.flat_last_dim() % 2 == 0,
-             "Wrong input shape. Expected (after flattening) last dimension to be even, ",
-             "got [", input.flat_first_dim(), ", ", input.flat_last_dim(), "]."); 
+             "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
+             input.flat_first_dim(), ", ", input.flat_last_dim(), "].");
   NVTE_CHECK(output->flat_last_dim() == input.flat_last_dim() / 2,
              "Wrong output shape. Expected (after flattening) [*, ", input.flat_last_dim() / 2,
              "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
