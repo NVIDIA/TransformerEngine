@@ -123,7 +123,7 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         x = input_
@@ -136,7 +136,7 @@ class Bias(BasicOperation):
         grad_input_quantizer = None
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
-            grad_input_quantizer = prev_op_grad_input_quantizer
+            grad_input_quantizer = prev_op_grad_output_quantizer
 
         if requires_grad:
             ctx.with_quantized_compute = with_quantized_compute

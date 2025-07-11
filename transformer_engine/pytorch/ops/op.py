@@ -75,8 +75,8 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def get_input_quantizer(self) -> Optional[Quantizer]:
         """Get builder class for quantized input tensor"""
 
-    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
-        """Get builder class for quantized input's grad tensor"""
+    def get_grad_output_quantizer(self) -> Optional[Quantizer]:
+        """Get builder class for quantized output's grad tensor"""
 
     def fuser_forward(
         self,
@@ -84,7 +84,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
@@ -104,8 +104,8 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Input tensor
         basic_op_extra_inputs: list of torch.Tensor
             Extra tensor inputs to basic operations
-        prev_op_grad_input_quantizer: Quantizer, optional
-            The grad_input_quantizer of the preceeding operation
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
         basic_op_kwargs: list of dict
@@ -214,7 +214,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return self.get_quantizer("forward", 0)
         return None
 
-    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
+    def get_grad_output_quantizer(self) -> Optional[Quantizer]:
         if self.num_quantizers("backward") > 0:
             return self.get_quantizer("backward", 0)
         return None
@@ -414,7 +414,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         ctx: OperationContext,
         input_: torch.Tensor,
         *,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -426,8 +426,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Context to coordinate between forward and backward passes
         input_: torch.Tensor
             Input tensor
-        prev_op_grad_input_quantizer: Quantizer, optional
-            The grad_input_quantizer of the preceeding operation
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
 
@@ -468,7 +468,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
@@ -482,7 +482,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         output = self.op_forward(
             basic_op_ctxs[0],
             input_,
-            prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
             next_op_input_quantizer=next_op_input_quantizer,
             **basic_op_kwargs[0],
         )
@@ -708,8 +708,8 @@ class FusedOperation(FusibleOperation):
     def get_input_quantizer(self) -> Optional[Quantizer]:
         return self.basic_ops[0].get_input_quantizer()
 
-    def get_grad_input_quantizer(self) -> Optional[Quantizer]:
-        return self.basic_ops[-1].get_grad_input_quantizer()
+    def get_grad_output_quantizer(self) -> Optional[Quantizer]:
+        return self.basic_ops[-1].get_grad_output_quantizer()
 
     def pre_first_forward(self, *args, **kwargs) -> None:
         """Preprocessing before forward pass"""

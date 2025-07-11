@@ -894,7 +894,7 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
@@ -916,7 +916,7 @@ class BasicLinear(BasicOperation):
             weight_quantizer = self.get_quantizer("forward", 1)
             output_quantizer = next_op_input_quantizer
             grad_output_quantizer = self.get_quantizer("backward", 0)
-            grad_input_quantizer = prev_op_grad_input_quantizer
+            grad_input_quantizer = prev_op_grad_output_quantizer
 
             # Configure quantizers
             # Note: We cache the quantized input for backward pass,

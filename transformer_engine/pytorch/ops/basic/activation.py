@@ -71,7 +71,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
@@ -106,7 +106,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         ctx.save_for_backward(x)
         ctx.with_quantized_compute = with_quantized_compute
         ctx.dtype = dtype
-        ctx.prev_op_grad_input_quantizer = prev_op_grad_input_quantizer
+        ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         return y
 
@@ -128,7 +128,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Check if quantized compute is enabled
         quantizer = None
         if ctx.with_quantized_compute:
-            quantizer = ctx.prev_op_grad_input_quantizer
+            quantizer = ctx.prev_op_grad_output_quantizer
 
         # Launch kernel
         dx = self._activation_backward_impl(dy, x, quantizer)

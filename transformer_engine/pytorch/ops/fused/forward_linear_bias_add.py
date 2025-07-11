@@ -57,7 +57,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
@@ -93,7 +93,7 @@ class ForwardLinearBiasAdd(FusedOperation):
             input_quantizer = linear_op.get_quantizer("forward", 0)
             weight_quantizer = linear_op.get_quantizer("forward", 1)
             grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            grad_input_quantizer = prev_op_grad_input_quantizer
+            grad_input_quantizer = prev_op_grad_output_quantizer
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -133,7 +133,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         linear_op_ctx.weight_requires_grad = weight_requires_grad
         if bias_op is not None:
             bias_op_ctx.with_quantized_compute = with_quantized_compute
-            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_input_quantizer()
+            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
