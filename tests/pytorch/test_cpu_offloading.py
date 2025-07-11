@@ -175,8 +175,9 @@ class Utils:
         # This is a simple check to catch memory leaks.
         if Utils.get_cuda_memory_mb() > 100:
             memory_num = Utils.get_cuda_memory_mb()
-            import gc;
-            gc.collect() # We want next test to be run with clean state.
+            import gc
+
+            gc.collect()  # We want next test to be run with clean state.
             gc.disable()
             raise RuntimeError(f"Memory leak: {memory_num} MB")
 
