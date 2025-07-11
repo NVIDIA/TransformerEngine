@@ -321,7 +321,7 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
         _disable_wgrads(block)
 
     if cpu_offload:
-        offload_context, sync_function = get_cpu_offload_context(enabled=True, num_layers=0)
+        offload_context, sync_function = get_cpu_offload_context(enabled=True, num_layers=1, model_layers=2)
     else:
         offload_context = nullcontext()
         sync_function = lambda x: x
@@ -330,6 +330,11 @@ def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe), offload_context:
         te_out = block(te_inp_hidden_states)
     te_out = sync_function(te_out)
+    if cpu_offload:
+        # We need at least 2 layers to test offload of activations.
+        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe), offload_context:
+            te_out = block(te_out)
+        te_out = sync_function(te_out)
     loss = te_out.sum()
     loss.backward()
     torch.cuda.synchronize()
