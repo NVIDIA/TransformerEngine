@@ -36,6 +36,9 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
     output_tensor.set_columnwise_data(static_cast<void *>(&temp), out_dtype, input_shape);
   }
 
+  // Enable norm with cuDNN instead of TE kernels
+  nvte_enable_cudnn_norm_fwd(true);
+
   // dummy tensor wrappers that will carry workspace size info later
   TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
@@ -138,6 +141,9 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                             colwise_scale_inv_buf->dimensions().back()});
   }
 
+  // Enable norm with cuDNN instead of TE kernels
+  nvte_enable_cudnn_norm_fwd(true);
+
   if (_norm_type == NVTE_Norm_Type::LayerNorm) {
     NVTE_CHECK(w_dtype == convert_ffi_datatype_to_te_dtype(beta_buf.element_type()),
                "gamma and beta must have the same data type.");
@@ -199,6 +205,9 @@ pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_s
   // dummy tensor wrappers that will carry workspace size info later
   TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
+
+  // Enable norm with cuDNN instead of TE kernels
+  nvte_enable_cudnn_norm_bwd(true);
 
   if (norm_type == NVTE_Norm_Type::LayerNorm) {
     auto mu_tensor = TensorWrapper(nullptr, intermediates_shape, intermediates_dtype);
@@ -269,6 +278,9 @@ Error_Type NormBackwardFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type 
 
   auto workspace_shape = std::vector<size_t>{wkspace_size};
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, wkspace_dtype);
+
+  // Enable norm with cuDNN instead of TE kernels
+  nvte_enable_cudnn_norm_bwd(true);
 
   if (static_cast<NVTE_Norm_Type>(norm_type) == NVTE_Norm_Type::LayerNorm) {
     auto mu_tensor = TensorWrapper(mu, intermediates_shape, intermediates_dtype);

@@ -539,3 +539,13 @@ void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
   NVTE_API_CALL(nvte_enable_zero_centered_gamma_in_weight_dtype);
   transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
 }
+
+int nvte_use_cudnn_norm_fwd() {
+  NVTE_API_CALL(nvte_use_cudnn_norm_fwd);
+  return transformer_engine::normalization::use_cudnn_norm_fwd();
+}
+
+int nvte_use_cudnn_norm_bwd() {
+  NVTE_API_CALL(nvte_use_cudnn_norm_bwd);
+  return transformer_engine::normalization::use_cudnn_norm_bwd();
+}
