@@ -85,16 +85,16 @@ __all__ = ["LayerNormMLP"]
 
 def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
     if recipe is None:
-        # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+        # bf16 (recipe is None):
         return {
-            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "gelu": (tex.gelu, tex.dgelu, None),
+            "relu": (tex.relu, tex.drelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
             "reglu": (tex.reglu, tex.dreglu, None),
             "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+            "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+            "srelu": (tex.srelu, tex.dsrelu, None),
         }
     if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]

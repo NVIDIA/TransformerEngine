@@ -86,7 +86,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         """Forward pass
@@ -109,10 +108,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             The grad_input_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
-        is_first_op: bool
-            Does this op have a preceeding op or is it the first one in the
-            fuser. Used in the backward pass to safely delete the saved input
-            tensor when no longer needed and there is a preceeding op.
         basic_op_kwargs: list of dict
             Keyword arguments to forward functions of basic
             operations.
@@ -421,7 +416,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
@@ -436,10 +430,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             The grad_input_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
-        is_first_op: bool
-            Does this op have a preceeding op or is it the first one in the
-            fuser. Used in the backward pass to safely delete the saved input
-            tensor when no longer needed and there is a preceeding op.
 
         Returns
         -------
@@ -480,7 +470,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
@@ -495,7 +484,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             input_,
             prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
             next_op_input_quantizer=next_op_input_quantizer,
-            is_first_op=is_first_op,
             **basic_op_kwargs[0],
         )
         return output, [()]
@@ -530,7 +518,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -737,7 +727,9 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,
