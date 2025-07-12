@@ -145,8 +145,9 @@ at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_tokens,
-                                                          int num_experts, int topk, float coeff) {
+                                                          int total_num_tokens, int num_experts,
+                                                          int num_rows, int num_cols, int topk,
+                                                          float coeff) {
   TORCH_CHECK(topk > 0, "topk must be greater than 0");
   TORCH_CHECK(total_num_tokens > 0, "total_num_tokens must be greater than 0");
   TORCH_CHECK(num_experts > 0, "num_experts must be greater than 0");
@@ -161,17 +162,17 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
 
   nvte_fused_moe_aux_loss_forward(probs_cu.data(), tokens_per_expert_cu.data(), total_num_tokens,
-                                  num_tokens, num_experts, topk, coeff, aux_loss_cu.data(),
+                                  num_experts, num_rows, num_cols, topk, coeff, aux_loss_cu.data(),
                                   Const_buf_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(aux_loss, Const_buf);
 }
 
-at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert,
-                                  int num_tokens, int num_experts, at::Tensor grad_aux_loss) {
+at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
+                                  int num_cols, at::Tensor grad_aux_loss) {
   // Create the output tensor
-  at::Tensor grad_probs = at::empty({num_tokens, num_experts},
-                                    at::dtype(grad_aux_loss.scalar_type()).device(at::kCUDA));
+  at::Tensor grad_probs =
+      at::empty({num_rows, num_cols}, at::dtype(grad_aux_loss.scalar_type()).device(at::kCUDA));
 
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);
@@ -179,8 +180,8 @@ at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_ex
   auto grad_probs_cu = makeTransformerEngineTensor(grad_probs);
 
   // Meta data for the kernel
-  nvte_fused_moe_aux_loss_backward(Const_buf_cu.data(), tokens_per_expert_cu.data(), num_tokens,
-                                   num_experts, grad_aux_loss_cu.data(), grad_probs_cu.data(),
+  nvte_fused_moe_aux_loss_backward(Const_buf_cu.data(), tokens_per_expert_cu.data(), num_rows,
+                                   num_cols, grad_aux_loss_cu.data(), grad_probs_cu.data(),
                                    at::cuda::getCurrentCUDAStream());
 
   return grad_probs;
