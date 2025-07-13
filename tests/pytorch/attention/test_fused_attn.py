@@ -20,11 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     get_attention_backend,
     check_set_window_size,
-    #AttentionParams,
 )
-#from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-#    AttentionLogging as attn_log,
-#)
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 import transformer_engine.pytorch.cpp_extensions as ext

@@ -31,7 +31,6 @@ SIZE = model_config["model1"].hidden_size #512
 NUM_HEADS = model_config["model1"].num_heads #8
 NUM_LAYERS = model_config["model1"].num_layers #5
 EPSILON = 0.1
-print("SSSS", SIZE, NUM_HEADS, NUM_LAYERS)
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
@@ -80,7 +79,6 @@ def _get_fp8_weight_cache_size(models, fp8_recipe):
 
 
 def _measure_memory_between_forward_and_backward(models, fp8_recipe, cpu_offload):
-    print('xxxx', fp8_recipe, cpu_offload)
     tensor = _get_input()
     if cpu_offload:
         offload_context, sync_function = te.get_cpu_offload_context(
