@@ -20,6 +20,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
+
 @contextmanager
 def logging_context(highest_level=logging.WARNING):
     previous_level = logging.root.manager.disable
@@ -129,5 +130,3 @@ def _get_attention_backends(
             if fused_attention_backend == FusedAttnBackend[backends[i]]:
                 fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends
-
-

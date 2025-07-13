@@ -180,7 +180,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtypes[dtype],
-        qkv_layout="_".join([qkv_format]*3),
+        qkv_layout="_".join([qkv_format] * 3),
         window_size=config.window_size,
         context_parallel=True,
     )

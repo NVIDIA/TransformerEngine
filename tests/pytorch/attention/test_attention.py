@@ -1334,6 +1334,7 @@ model_configs_fp8_extra_state = {
     "large": ModelConfig(2, 4, 4, 128, 128, 128, 0.0, "no_mask", "no_bias", num_layers=1),
 }
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper.")
 @pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")

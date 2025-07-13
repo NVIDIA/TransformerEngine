@@ -26,10 +26,10 @@ fp8_recipes = [
 
 model_config = {
     "model1": ModelConfig(2, 8, 8, 64, 512, 512, 0.0, "no_mask", "no_bias", num_layers=5),
-    }
-SIZE = model_config["model1"].hidden_size #512
-NUM_HEADS = model_config["model1"].num_heads #8
-NUM_LAYERS = model_config["model1"].num_layers #5
+}
+SIZE = model_config["model1"].hidden_size  # 512
+NUM_HEADS = model_config["model1"].num_heads  # 8
+NUM_LAYERS = model_config["model1"].num_layers  # 5
 EPSILON = 0.1
 
 # Flash attention saves some internal tensor for the backward pass

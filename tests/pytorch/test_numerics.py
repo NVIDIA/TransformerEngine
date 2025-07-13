@@ -115,7 +115,9 @@ fp8_recipes = [
 ]
 
 
-def is_fused_attn_available(config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True):
+def is_fused_attn_available(
+    config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
+):
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -1085,7 +1087,8 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     mask = torch.triu(
-        torch.ones(config.max_seqlen_q, config.max_seqlen_kv, dtype=torch.bool, device="cuda"), diagonal=1
+        torch.ones(config.max_seqlen_q, config.max_seqlen_kv, dtype=torch.bool, device="cuda"),
+        diagonal=1,
     )
     query, key, value = [
         torch.randn(
@@ -2003,7 +2006,9 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     static_input = torch.randn(
         config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
     )
-    static_target = torch.randn(config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype)
+    static_target = torch.randn(
+        config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype
+    )
 
     real_input = torch.rand_like(static_input)
     real_target = torch.rand_like(static_target)
