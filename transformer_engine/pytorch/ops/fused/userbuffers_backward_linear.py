@@ -547,8 +547,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             grad_bias = extra_outputs["grad_bias"]
 
         # Clear input tensor if possible
-        if linear_op_ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         # Return gradients
         grad_params = [() for _ in range(len(self.basic_ops))]
@@ -569,13 +568,13 @@ def fuse_userbuffers_backward_linear(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of the corresponding
+        Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
     ops: list of tuples
-        Updated forward pass operations
+        Updated backward pass operations
 
     """
 
