@@ -4,12 +4,20 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+
+# Initialize RNG state
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+_cpu_rng_state = torch.get_rng_state()
+_cuda_rng_state = torch.cuda.get_rng_state()
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -105,3 +113,62 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling()
     raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
+def reset_rng_states() -> None:
+    """Revert back to initial RNG state"""
+    torch.set_rng_state(_cpu_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
+
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    fp8.FP8GlobalStateManager.reset()
+
+
+class ModelConfig:
+    def __init__(
+        self,
+        batch_size: int,
+        num_heads: int,
+        num_gqa_groups: int,
+        head_dim_qk: int,
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+        dropout_p: float,
+        attn_mask_type: str,
+        attn_bias_type: str,
+        head_dim_v: int = None,
+        alibi_type: str = "none",
+        num_layers: int = 1,
+        bias_shape: str = "1hss",
+        window_size: Tuple[int, int] = (-1, -1),
+        total_requests: int = None,
+        max_ctx_len: int = None,
+        eps: float = 1e-5,
+    ):
+        self.batch_size = batch_size
+        self.num_heads = num_heads
+        self.num_gqa_groups = num_gqa_groups
+        self.head_dim_qk = head_dim_qk
+        self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
+        if self.head_dim_qk == self.head_dim_v:
+            self.kv_channels = self.head_dim_qk
+        else:
+            self.kv_channels = (self.head_dim_qk, self.head_dim_v)
+        self.hidden_size = num_heads * head_dim_qk
+        self.hidden_size_kv = num_gqa_groups * self.head_dim_v
+        self.max_seqlen_q = max_seqlen_q
+        self.max_seqlen_kv = max_seqlen_kv
+        self.dropout_p = dropout_p
+        self.attn_mask_type = attn_mask_type
+        self.attn_bias_type = attn_bias_type
+        self.alibi_type = alibi_type
+        self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
+        self.num_layers = num_layers
+        self.bias_shape = bias_shape
+        self.window_size = window_size
+        self.total_requests = total_requests
+        self.max_ctx_len = max_ctx_len
+        self.eps = eps

@@ -12,7 +12,8 @@ from transformer_engine.pytorch.utils import (
     get_cudnn_version,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
-from test_fused_attn import ModelConfig
+from ..utils import ModelConfig
+from .utils import _get_attention_backends
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
@@ -175,6 +176,17 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
+    dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtypes[dtype],
+        qkv_layout="_".join([qkv_format]*3),
+        window_size=config.window_size,
+        context_parallel=True,
+    )
+    _, fused_attn_supported, _ = available_backends
+    if not fused_attn_supported:
+        pytest.skip("No attention backend available.")
 
     subprocess.run(
         get_bash_arguments(

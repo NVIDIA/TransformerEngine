@@ -23,6 +23,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
+from utils import ModelConfig, reset_rng_states
 
 
 # Check if FP8 is supported.
@@ -41,18 +42,9 @@ _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
 
-@dataclass
-class ModelConfig:
-    """Data tensor dimensions within Transformer model"""
-
-    sequence_length: int
-    batch_size: int
-    hidden_size: int
-    num_heads: int
-    kv_channels: int
-
-
-model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
+model_configs = {
+    "small": ModelConfig(32, 2, 2, 32, 2, 2, 0.0, "no_mask", "no_ bias"),
+}
 
 fp8_recipes = [
     recipe.DelayedScaling(),
@@ -65,18 +57,6 @@ fp8_recipes = [
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
-
-
-def reset_rng_states() -> None:
-    """Revert to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
-
-
-@pytest.fixture(autouse=True)
-def reset_global_fp8_state():
-    yield
-    FP8GlobalStateManager.reset()
 
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:

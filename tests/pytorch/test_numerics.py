@@ -45,6 +45,7 @@ from transformer_engine.pytorch.module.base import get_multi_stream_cublas_works
 from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
+from .utils import ModelConfig, reset_rng_states
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -65,24 +66,12 @@ _cuda_rng_state = torch.cuda.get_rng_state()
 torch._dynamo.config.recompile_limit = 16
 
 
-class ModelConfig:
-    def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.num_attention_heads = num_attention_heads
-        self.embed = embed
-        self.num_layers = num_layers
-        self.seq_len = seq_len
-
-
 model_configs = {
-    "small": ModelConfig(128, 1e-5, 8, 36, 4, 128),
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
+    "small": ModelConfig(1, 8, 8, 16, 128, 128, 0.0, "no_mask", "no_ bias", num_layers=4),
+    "126m": ModelConfig(1, 12, 12, 64, 2048, 2048, 0.0, "no_mask", "no_bias", num_layers=12),
 }
-
 model_configs_inference = {
-    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 256),
+    "126m": ModelConfig(1, 12, 12, 64, 256, 256, 0.0, "no_mask", "no_bias", num_layers=12),
 }
 backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
@@ -171,18 +160,6 @@ def assert_allclose(
                     f"(diff {max_diff.item()})."
                 )
             raise AssertionError(msg)
-
-
-def reset_rng_states() -> None:
-    """revert back to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
-
-
-@pytest.fixture(autouse=True)
-def reset_global_fp8_state():
-    yield
-    FP8GlobalStateManager.reset()
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
@@ -531,13 +508,13 @@ def _test_e2e_selective_recompute(
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -546,13 +523,13 @@ def _test_e2e_selective_recompute(
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         te_out = block(
@@ -626,13 +603,13 @@ def _test_e2e_full_recompute(
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -641,14 +618,14 @@ def _test_e2e_full_recompute(
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=use_reentrant,
     )
     if use_reentrant:
         te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if recompute:
@@ -757,13 +734,13 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     return TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0.1,
         attention_dropout=0.1,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
         params_dtype=dtype,
@@ -775,7 +752,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -865,13 +842,13 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
-    inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
@@ -895,7 +872,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
-        num_attention_heads=config.num_attention_heads,
+        num_attention_heads=config.num_heads,
         layernorm_epsilon=config.eps,
         attention_dropout=0.1,
         hidden_dropout=0.1,
@@ -910,7 +887,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
         TorchGPT(
             config.hidden_size,
             config.eps,
-            config.num_attention_heads,
+            config.num_heads,
             parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
@@ -971,13 +948,13 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
-    inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
+    inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q) if mask_type == "causal" else None
 
     forward_kwargs = {}
     if te:
@@ -1005,7 +982,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
 
     te_mha = MultiheadAttention(
         config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         fuse_qkv_params=True,
         params_dtype=dtype,
         qkv_weight_interleaved=False,
@@ -1016,7 +993,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
     torch_mha = (
         TorchMHA(
             config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
         )
         .to(dtype=dtype)
         .cuda()
@@ -1059,7 +1036,7 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False)
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -1090,11 +1067,11 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     mask = torch.triu(
-        torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1
+        torch.ones(config.max_seqlen_q, config.max_seqlen_kv, dtype=torch.bool, device="cuda"), diagonal=1
     )
     query, key, value = [
         torch.randn(
-            (config.seq_len, bs, config.num_attention_heads, config.embed),
+            (config.max_seqlen_q, bs, config.num_heads, config.kv_channels),
             dtype=dtype,
             device="cuda",
             requires_grad=True,
@@ -1123,8 +1100,8 @@ def test_dpa_accuracy(dtype, bs, model):
 
     te_dpa = (
         DotProductAttention(
-            config.num_attention_heads,
-            config.embed,
+            config.num_heads,
+            config.kv_channels,
             attention_dropout=0.0,  # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
@@ -1133,7 +1110,7 @@ def test_dpa_accuracy(dtype, bs, model):
 
     torch_dpa = (
         TorchDotProductAttention(
-            config.embed,
+            config.kv_channels,
             0.0,  # dropout
         )
         .to(dtype=dtype)
@@ -1664,7 +1641,7 @@ def _test_grouped_linear_accuracy(
         FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -1677,14 +1654,14 @@ def _test_grouped_linear_accuracy(
             split_size = 16
             if recipe.mxfp8():
                 split_size = 128
-        m = config.seq_len // split_size
+        m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
         m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
         m_splits = m_splits * split_size
-        assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+        assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
     else:
-        m_splits = torch.tensor([config.seq_len])
+        m_splits = torch.tensor([config.max_seqlen_q])
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
@@ -1750,7 +1727,7 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -1897,14 +1874,14 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
         FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len * bs, config.hidden_size),
+        (config.max_seqlen_q * bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
 
-    m_splits = _generate_random_numbers(num_gemms, config.seq_len * bs)
+    m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
@@ -1950,7 +1927,7 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2006,9 +1983,9 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 
     # Placeholders used for graph capture.
     static_input = torch.randn(
-        config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
+        config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
     )
-    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype)
+    static_target = torch.randn(config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype)
 
     real_input = torch.rand_like(static_input)
     real_target = torch.rand_like(static_target)
@@ -2072,7 +2049,7 @@ def test_gpt_cuda_graph(dtype, bs, model):
     block_args = (
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
     )
     block_kwargs = dict(
         layernorm_epsilon=config.eps,
@@ -2080,7 +2057,7 @@ def test_gpt_cuda_graph(dtype, bs, model):
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0.1,
         attention_dropout=0.1,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2115,13 +2092,13 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -2130,13 +2107,13 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=True, fp8_recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
@@ -2199,13 +2176,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_sbhd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2220,13 +2197,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_bshd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2238,13 +2215,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_thd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2259,15 +2236,15 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
 
     x_sbhd = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
 
     x_bshd = x_sbhd.transpose(0, 1).contiguous()
-    x_thd = x_bshd.reshape(bs * config.seq_len, config.hidden_size).contiguous()
-    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.seq_len
+    x_thd = x_bshd.reshape(bs * config.max_seqlen_q, config.hidden_size).contiguous()
+    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.max_seqlen_q
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -2294,164 +2271,14 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             x_thd,
             cu_seqlens_q=x_thd_cumsum,
             cu_seqlens_kv=x_thd_cumsum,
-            max_seqlen_q=config.seq_len,
-            max_seqlen_kv=config.seq_len,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
         )
 
         torch.testing.assert_close(
             y_bshd,
-            y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
+            y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
         )
-
-
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model_key", model_configs_inference.keys())
-@pytest.mark.parametrize("use_RoPE", all_boolean)
-@pytest.mark.parametrize("input_format", input_formats_inference)
-@pytest.mark.parametrize("module", module_inference)
-@pytest.mark.parametrize("backend", backends_inference)
-@pytest.mark.parametrize("is_paged", [False, True])
-def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged):
-    reset_rng_states()
-
-    if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
-        pytest.skip("FusedAttention and FlashAttention do not support FP32")
-    if use_RoPE:
-        pytest.skip("KV cache does not support starting positions for RoPE")
-    if (
-        backend == "FusedAttention"
-        and get_device_compute_capability() == (8, 9)
-        and get_cudnn_version() < (9, 12, 0)
-    ):
-        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.12")
-
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    elif backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    elif backend == "UnfusedAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-
-    config = model_configs_inference[model_key]
-
-    S = config.seq_len
-    B = bs
-    H = config.num_attention_heads
-    D = config.hidden_size
-    head_size = config.embed
-    layer_number = 1
-
-    # Limits the max size of KV-cache
-    B_max = B
-    S_max = S
-
-    if module == "TransformerLayer":
-        model = TransformerLayer(
-            hidden_size=D,
-            ffn_hidden_size=4 * D,
-            num_attention_heads=H,
-            attn_input_format=input_format,
-            self_attn_mask_type="causal",
-            enc_dec_attn_mask_type="causal",
-            layer_number=layer_number,
-            attention_dropout=0.0,
-            params_dtype=dtype,
-            device="cuda",
-        ).eval()
-    else:
-        model = (
-            MultiheadAttention(
-                hidden_size=D,
-                num_attention_heads=H,
-                qkv_format=input_format,
-                layer_number=layer_number,
-                attention_dropout=0.0,
-                attn_mask_type="causal",
-                params_dtype=dtype,
-            )
-            .cuda()
-            .eval()
-        )
-
-    inference_params = InferenceParams(
-        max_batch_size=B_max,
-        max_sequence_length=S_max,
-        num_heads_kv=H,
-        head_dim_k=head_size,
-        dtype=dtype,
-        is_paged=is_paged,
-        total_num_pages=int(B_max * S_max / 256),
-        page_size=256,
-    )
-
-    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
-
-    input = torch.randn((S, B, D), dtype=dtype, device="cuda")
-    if input_format == "bshd":
-        input = input.transpose(0, 1).contiguous()
-
-    incremental_output = torch.zeros_like(input)
-
-    # Generate output for the entire sequence
-    full_output = model(hidden_states=input, rotary_pos_emb=rotary_freqs if use_RoPE else None)
-
-    # Incrementaly generate outputs using KV-cache
-    step_dict = OrderedDict(zip(list(range(B)), [1] * B))
-    for i in range(S):
-        inference_params.pre_step(step_dict)
-
-        if input_format == "sbhd":
-            incremental_input = input[i].view(1, B, D)
-        else:
-            incremental_input = input[:, i, :].view(B, 1, D)
-
-        seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
-        cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        cu_seqlens_kv = cu_seqlens_q.clone()
-
-        mask_type = "padding"
-        kwargs = {}
-        if module == "TransformerLayer":
-            kwargs["self_attn_mask_type"] = mask_type
-        else:
-            kwargs["attn_mask_type"] = mask_type
-        line_output = model(
-            hidden_states=incremental_input,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_freqs if use_RoPE else None,
-            **kwargs,
-            max_seqlen_q=1,
-            max_seqlen_kv=S,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-        )
-
-        if input_format == "sbhd":
-            incremental_output[i, :, :] = line_output.view(B, D)
-        else:
-            incremental_output[:, i, :] = line_output.view(B, D)
-
-    if module == "TransformerLayer":
-        atol = {
-            torch.float32: 5e-3,
-            torch.half: 5e-3,
-            torch.bfloat16: 5e-2,
-        }
-    else:
-        atol = {
-            torch.float32: 1e-3,
-            torch.half: 1e-3,
-            torch.bfloat16: 1e-2,
-        }
-
-    # Check if the fully generated output matches the one generated incrementally
-    assert_allclose(full_output, incremental_output, atol[dtype])
 
 
 @pytest.mark.parametrize(

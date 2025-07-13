@@ -46,8 +46,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
-from test_numerics import reset_rng_states, dtype_tols
-from fused_attn.test_fused_attn import ModelConfig, _get_attention_backends
+from .utils import ModelConfig, dtype_tols
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -130,12 +129,6 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 def _disable_wgrads(block):
     for p in block.parameters():
         p.requires_grad = False
-
-
-@pytest.fixture(autouse=True)
-def reset_global_fp8_state():
-    yield
-    FP8GlobalStateManager.reset()
 
 
 def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -1109,146 +1102,6 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
         use_split_accumulator=False,
     )
     torch.cuda.synchronize()
-
-
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper.")
-@pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
-@pytest.mark.parametrize("model", ["large"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_sanity_attention_extra_state(model, dtype):
-    config = model_configs[model]
-    # Test backend availability
-    is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
-        config,
-        qkv_dtype=torch.float8_e4m3fn,
-        qkv_layout="sb3hd",
-        is_training=is_training,
-    )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    # Skip if only unfused backend is supported
-    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 1:
-        pytest.skip("No attention backend available.")
-
-    outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
-    outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
-    outputs_checkpoint_v1_6 = _run_attention_extra_state(
-        dtype, config, mimic_v1_6=True, checkpoint=True
-    )
-
-    # Check that results match
-    tols = dtype_tols(dtype)
-    if dtype in (torch.float16, torch.bfloat16):
-        tols.update(dict(rtol=2e-2, atol=2e-3))
-    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
-        torch.testing.assert_close(
-            test,
-            ref,
-            **tols,
-        )
-    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint_v1_6)):
-        torch.testing.assert_close(
-            test,
-            ref,
-            **tols,
-        )
-
-
-def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
-    steps = 10
-    path = "checkpoint.pt"
-    fp8_enabled = True
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=fp8_enabled,
-        fp8_mha=False,
-    )
-
-    reset_rng_states()
-    hidden_states = torch.randn(
-        (config.max_seqlen_q, config.batch_size, config.hidden_size),
-        dtype=dtype,
-        device="cuda",
-        requires_grad=True,
-    )
-
-    def get_model(dtype, config):
-        sigma = 0.023
-        init_method = init_method_normal(sigma)
-        output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
-
-        with fp8_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
-            block = TransformerLayer(
-                config.hidden_size,
-                4 * config.hidden_size,
-                config.num_heads,
-                init_method=init_method,
-                output_layer_init_method=output_layer_init_method,
-                hidden_dropout=0.0,
-                attention_dropout=0.0,
-                fuse_qkv_params=True,
-                params_dtype=dtype,
-                device="cuda",
-            )
-        return block
-
-    block = get_model(dtype, config)
-    for i in range(steps // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
-            output = block(hidden_states, None)
-            loss = output.sum()
-            loss.backward()
-
-    if checkpoint:
-        sd = block.state_dict()
-        if mimic_v1_6:
-            sd["self_attention.core_attention.fused_attention._extra_state"] = sd[
-                "self_attention.core_attention._extra_state"
-            ]
-            del sd["self_attention.core_attention._extra_state"]
-        torch.save(sd, path)
-
-        param_grads = []
-        for p in block.parameters():
-            if p.requires_grad:
-                param_grads.append(p.grad.clone())
-
-        _cpu_rng_state_new = torch.get_rng_state()
-        _cuda_rng_state_new = torch.cuda.get_rng_state()
-
-        del block
-        block = get_model(dtype, config)
-        block.load_state_dict(torch.load(path, weights_only=False))
-        torch.set_rng_state(_cpu_rng_state_new)
-        torch.cuda.set_rng_state(_cuda_rng_state_new)
-
-        for p in block.parameters():
-            if p.requires_grad:
-                p.grad = param_grads.pop(0)
-
-        assert not param_grads, "Oops!"
-
-    for i in range((steps + 1) // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
-            output = block(hidden_states, None)
-            loss = output.sum()
-            loss.backward()
-
-    torch.cuda.synchronize()
-
-    if os.path.exists(path):
-        os.remove(path)
-
-    outputs = [output, hidden_states.grad]
-    for p in block.parameters():
-        if p.requires_grad:
-            outputs.append(p.grad)
-
-    return outputs
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)

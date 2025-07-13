@@ -11,11 +11,11 @@ import math
 import pytest
 import torch
 
-from test_fused_attn import (
+from ..utils import (
     ModelConfig,
     reset_rng_states,
-    _get_attention_backends,
 )
+from .utils import _get_attention_backends
 
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
