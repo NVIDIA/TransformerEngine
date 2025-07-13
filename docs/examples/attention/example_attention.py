@@ -9,10 +9,9 @@ import numpy as np
 import torch
 import nvtx
 import transformer_engine
-from tests.pytorch.fused_attn.test_fused_attn import (
-    ModelConfig,
-    _get_attention_backends,
-    _run_dot_product_attention,
+from tests.pytorch.utils import ModelConfig
+from tests.pytorch.attention.utils import _get_attention_backends
+from tests.pytorch.attention.test_attention import _run_dot_product_attention
 )
 
 # data type

@@ -44,7 +44,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
         "--nproc-per-node=" + str(num_gpus_per_node),
     ]
     te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-    script_path = os.path.join(te_path, "tests/pytorch/fused_attn/run_fused_attn_with_cp.py")
+    script_path = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp.py")
     args.append(script_path)
     for k, v in kwargs.items():
         args.append(f"{k}={v}")
