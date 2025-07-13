@@ -40,12 +40,14 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from .utils import ModelConfig, reset_rng_states
+from .attention.utils import _get_attention_backends
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -67,7 +69,7 @@ torch._dynamo.config.recompile_limit = 16
 
 
 model_configs = {
-    "small": ModelConfig(1, 8, 8, 16, 128, 128, 0.0, "no_mask", "no_ bias", num_layers=4),
+    "small": ModelConfig(1, 8, 8, 16, 128, 128, 0.0, "no_mask", "no_bias", num_layers=4),
     "126m": ModelConfig(1, 12, 12, 64, 2048, 2048, 0.0, "no_mask", "no_bias", num_layers=12),
 }
 model_configs_inference = {
@@ -111,6 +113,16 @@ fp8_recipes = [
     recipe.Float8CurrentScaling(),
     recipe.Float8BlockScaling(),
 ]
+
+
+def is_fused_attn_available(config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True):
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+    )
+    return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -822,6 +834,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype):
+        pytest.skip("No attention backend available.")
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
@@ -868,6 +882,8 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+        pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -979,6 +995,8 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+        pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(
         config.hidden_size,

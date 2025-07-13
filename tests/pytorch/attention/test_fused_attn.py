@@ -55,12 +55,12 @@ from ..utils import reset_rng_states, ModelConfig
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 
-## Initialize RNG state
-#seed = 1234
-#torch.manual_seed(seed)
-#torch.cuda.manual_seed(seed)
-#_cpu_rng_state = torch.get_rng_state()
-#_cuda_rng_state = torch.cuda.get_rng_state()
+# Initialize RNG state
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+_cpu_rng_state = torch.get_rng_state()
+_cuda_rng_state = torch.cuda.get_rng_state()
 
 
 model_configs_base = {
@@ -1763,8 +1763,18 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     # Skip if only unfused backend is supported
-    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
-        pytest.skip("Less than two backends to compare.")
+    if flash_attn_supported + fused_attn_supported < 1:
+        pytest.skip("No FP8 attention backend available.")
+    if not fp8_dpa_bwd:
+        available_backends, _, fused_attn_backends = _get_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_layout,
+            is_training=is_training,
+        )
+        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+        if not fused_attn_supported:
+            pytest.skip("No attention backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 

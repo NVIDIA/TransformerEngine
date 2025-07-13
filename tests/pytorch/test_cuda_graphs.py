@@ -23,7 +23,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
+from .utils import ModelConfig, reset_rng_states
 
 
 # Check if FP8 is supported.
@@ -43,7 +43,7 @@ _cuda_rng_state = torch.cuda.get_rng_state()
 
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32, 2, 2, 0.0, "no_mask", "no_ bias"),
+    "small": ModelConfig(32, 2, 2, 32, 2, 2, 0.0, "no_mask", "no_bias"),
 }
 
 fp8_recipes = [
@@ -87,7 +87,7 @@ def generate_data(
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
     return gen_func(
-        model_config.sequence_length,
+        model_config.max_seqlen_q,
         model_config.batch_size,
         model_config.hidden_size,
         device="cuda",
@@ -369,7 +369,7 @@ def generate_data_for_dot_product_attention(
     gen_func = torch.ones if warmup else torch.randn
     return [
         gen_func(
-            model_config.sequence_length,
+            model_config.max_seqlen_q,
             model_config.batch_size,
             model_config.num_heads,
             model_config.kv_channels,
@@ -463,8 +463,8 @@ def _test_cuda_graphs_with_kwargs(
             (
                 model_config.batch_size,
                 1,
-                model_config.sequence_length,
-                model_config.sequence_length,
+                model_config.max_seqlen_q,
+                model_config.max_seqlen_kv,
             ),
             dtype=torch.bool,
             device="cuda",
@@ -490,8 +490,8 @@ def _test_cuda_graphs_with_kwargs(
                 (
                     model_config.batch_size,
                     1,
-                    model_config.sequence_length,
-                    model_config.sequence_length,
+                    model_config.max_seqlen_q,
+                    model_config.max_seqlen_kv,
                 ),
                 dtype=torch.bool,
                 device="cuda",
