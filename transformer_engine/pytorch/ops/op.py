@@ -65,7 +65,11 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         """Whether this op is the fusion of one or more basic ops"""
 
-    def pre_forward(self) -> None:
+    def pre_first_forward(
+        self,
+        *,
+        recipe: Optional[Recipe],
+    ) -> None:
         """Preprocessing before forward pass"""
 
     def get_input_quantizer(self) -> Optional[Quantizer]:
@@ -82,7 +86,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         """Forward pass
@@ -105,10 +108,6 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             The grad_input_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
-        is_first_op: bool
-            Does this op have a preceeding op or is it the first one in the
-            fuser. Used in the backward pass to safely delete the saved input
-            tensor when no longer needed and there is a preceeding op.
         basic_op_kwargs: list of dict
             Keyword arguments to forward functions of basic
             operations.
@@ -223,13 +222,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def _reset_quantization_recipe_state(
         self,
         *,
-        recipe: Optional[Recipe] = None,
+        recipe: Recipe,
     ) -> None:
         """Construct state for quantization recipe"""
-
-        # Quantization recipe
-        if recipe is None:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
 
         # Quantization recipe state for forward and backward pass
         self._fp8_metas = {"forward": None, "backward": None}
@@ -265,13 +260,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def _update_quantization_recipe_state(
         self,
         *,
-        recipe: Optional[Recipe] = None,
+        recipe: Recipe,
     ) -> None:
         """Make sure quantizer state matches quantization recipe"""
-
-        # Quantization recipe
-        if recipe is None:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
 
         # Reset quantization state if needed
         if self._fp8_metas is None or self._quantizers is None:
@@ -346,7 +337,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
         if self._quantizers is None:
-            self._reset_quantization_recipe_state()
+            self._reset_quantization_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
         return self._quantizers[mode][index]
 
     @torch.no_grad()
@@ -397,19 +388,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
                 self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
 
-    def pre_forward(
+    def pre_first_forward(
         self,
         *,
-        fp8_enabled: Optional[bool] = None,
-        fp8_recipe: Optional[Recipe] = None,
+        recipe: Optional[Recipe],
     ) -> None:
         """Preprocessing before forward pass"""
 
         # Initialize FP8 metadata if needed
-        if fp8_enabled is None:
-            fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        if fp8_enabled:
-            self._update_quantization_recipe_state(recipe=fp8_recipe)
+        if recipe is not None:
+            self._update_quantization_recipe_state(recipe=recipe)
             if not FP8GlobalStateManager.fp8_graph_capturing():
                 if self.num_quantizers("forward"):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
@@ -428,7 +416,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         *,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
@@ -443,10 +430,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             The grad_input_quantizer of the preceeding operation
         next_op_input_quantizer: Quantizer, optional
             The input_quantizer of the following operation
-        is_first_op: bool
-            Does this op have a preceeding op or is it the first one in the
-            fuser. Used in the backward pass to safely delete the saved input
-            tensor when no longer needed and there is a preceeding op.
 
         Returns
         -------
@@ -487,7 +470,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
         if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
@@ -502,7 +484,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             input_,
             prev_op_grad_input_quantizer=prev_op_grad_input_quantizer,
             next_op_input_quantizer=next_op_input_quantizer,
-            is_first_op=is_first_op,
             **basic_op_kwargs[0],
         )
         return output, [()]
@@ -537,7 +518,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=[kwargs],
@@ -647,7 +630,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Get op's quantizer state, initializing if needed
             if self._fp8_metas is None or self._fp8_metas[mode] is None:
                 with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
-                    self._reset_quantization_recipe_state()
+                    self._reset_quantization_recipe_state(recipe=state[mode]["recipe"])
             fp8_meta = self._fp8_metas[mode]
 
             # Load extra items
@@ -728,10 +711,10 @@ class FusedOperation(FusibleOperation):
     def get_grad_input_quantizer(self) -> Optional[Quantizer]:
         return self.basic_ops[-1].get_grad_input_quantizer()
 
-    def pre_forward(self) -> None:
+    def pre_first_forward(self, *args, **kwargs) -> None:
         """Preprocessing before forward pass"""
         for op in self.basic_ops:
-            op.pre_forward()
+            op.pre_first_forward(*args, **kwargs)
 
     def forward(
         self,
@@ -744,7 +727,9 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
+        return OperationFuser([self], fuse_ops=False, recipe=recipe)(
             input,
             *extra_inputs,
             basic_op_kwargs=basic_op_kwargs,

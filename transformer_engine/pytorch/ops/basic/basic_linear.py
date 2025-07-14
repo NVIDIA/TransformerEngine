@@ -19,7 +19,7 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...fp8 import FP8GlobalStateManager
+from ...fp8 import FP8GlobalStateManager, Recipe
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
@@ -303,8 +303,12 @@ class BasicLinear(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(
+        self,
+        *,
+        recipe: Optional[Recipe],
+    ) -> None:
+        super().pre_first_forward(recipe=recipe)
 
         # Initialize weights if needed
         weight = self.weight
@@ -313,23 +317,17 @@ class BasicLinear(BasicOperation):
             weight = self.weight
 
         # Configure quantizers
-        if FP8GlobalStateManager.is_fp8_enabled():
+        if recipe is not None:
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
 
             # Specify required tensor formats
-            is_grad_enabled = torch.is_grad_enabled()
-            weight_requires_grad = is_grad_enabled and weight.requires_grad
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             input_quantizer.internal = True
             weight_quantizer.internal = True
             grad_output_quantizer.internal = True
 
             # Recipe-specific configuration
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
             if recipe.float8_current_scaling():
                 if any(
                     not isinstance(q, Float8CurrentScalingQuantizer)
@@ -394,7 +392,7 @@ class BasicLinear(BasicOperation):
             Bias tensor
         device: torch.device, default = default CUDA device
             Tensor device
-        dtype: torch.dtype, default = default dtype
+        dtype: torch.dtype, default = infer from out or weight
             Tensor datatype
         out: torch.Tensor, optional
             Output tensor
@@ -441,8 +439,14 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype if out is None else out.dtype
-        dtype = canonicalize_dtype(dtype)
+            if out is not None and isinstance(out, torch.Tensor):
+                dtype = out.dtype
+            elif weight is not None and isinstance(out, torch.Tensor):
+                dtype = weight.dtype
+            else:
+                raise ValueError(
+                    "Could not infer dtype from weight nor out and dtype was not provided"
+                )
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
         if out is not None and out.dtype != dtype:
@@ -663,9 +667,9 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            if weight is not None and not is_quantized_tensor(weight):
+            if isinstance(weight, torch.Tensor):
                 dtype = weight.dtype
-            else:
+            elif isinstance(grad_output, torch.Tensor):
                 dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -693,6 +697,11 @@ class BasicLinear(BasicOperation):
             else:
                 if not is_quantized_tensor(dy_local):
                     dy_local = grad_output_quantizer(dy_local)
+                else:
+                    dy_local.update_usage(
+                        rowwise_usage=input_requires_grad,
+                        columnwise_usage=weight_requires_grad,
+                    )
                 dy = dy_local
         else:
             dy_local = maybe_dequantize(dy_local, dtype)
@@ -887,7 +896,6 @@ class BasicLinear(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check which grads are required
@@ -917,9 +925,10 @@ class BasicLinear(BasicOperation):
             weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = self.weight.dtype
 
         # Linear forward
         output, x_local, w = BasicLinear._functional_forward(
@@ -947,7 +956,6 @@ class BasicLinear(BasicOperation):
         ctx.dtype = dtype
         ctx.input_requires_grad = input_requires_grad
         ctx.weight_requires_grad = weight_requires_grad
-        ctx.has_prev_op = not is_first_op
 
         return output
 
@@ -998,8 +1006,7 @@ class BasicLinear(BasicOperation):
         )
 
         # Clear input tensor if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         if accumulate_into_main_grad:
             grad_weight = None
