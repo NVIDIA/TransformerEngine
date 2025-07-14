@@ -289,14 +289,16 @@ def _make_graphed_callables(
 
     fwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     bwd_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
+    bwd_dw_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
     # For cases with multiple active RNG states, e.g. TP.
     if graph_safe_rng_available():
         for _, state in get_all_rng_states().items():
-            for fwd_graph, bwd_graph in zip(fwd_graphs, bwd_graphs):
+            for fwd_graph, bwd_graph, bwd_dw_graph in zip(fwd_graphs, bwd_graphs, bwd_dw_graphs):
                 fwd_graph.register_generator_state(state)
                 bwd_graph.register_generator_state(state)
+                bwd_dw_graph.register_generator_state(state)
 
     mempool = graph_pool_handle() if pool is None else pool
 
@@ -333,11 +335,8 @@ def _make_graphed_callables(
     ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
 
     # Filter the TE modules that cudagraph can access.
-    visited_te_modules = set()
-
-    def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
-        if isinstance(module, TransformerEngineBaseModule):
-            visited_te_modules.add(module)
+    visited_te_modules = {}
+    need_bwd_dw_graph = {}
 
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
@@ -345,6 +344,13 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
+
+            def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
+                if isinstance(module, TransformerEngineBaseModule):
+                    if func_idx not in visited_te_modules:
+                        visited_te_modules[func_idx] = set()
+                    visited_te_modules[func_idx].add(module)
+
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
@@ -389,6 +395,15 @@ def _make_graphed_callables(
                             module_params_with_grad
                         )
                         per_callable_static_input_surfaces[func_idx] = static_input_surface
+
+                    # Run wgrad. This is essential for some TE modules when they have
+                    # delay_wgrad_compute enabled.
+                    need_backward_dw = False
+                    for module in visited_te_modules.get(func_idx, set()):
+                        if module.need_backward_dw():
+                            need_backward_dw = True
+                            module.backward_dw()
+                    need_bwd_dw_graph[func_idx] = need_backward_dw
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
@@ -458,6 +473,14 @@ def _make_graphed_callables(
                                 allow_unused=allow_unused_input,
                                 retain_graph=retain_graph_in_backward,
                             )
+                        # If no one module needs the backward_dw, the bwd_dw_graph will be empty.
+                        # So skip capturing it.
+                        if need_bwd_dw_graph[per_callable_bwd_idx]:
+                            bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
+                            with torch.cuda.graph(bwd_dw_graph, pool=mempool):
+                                for module in visited_te_modules[per_callable_bwd_idx]:
+                                    if module.need_backward_dw():
+                                        module.backward_dw()
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
@@ -516,10 +539,12 @@ def _make_graphed_callables(
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
         per_callable_static_grad_inputs = []
-        for static_input_surface, static_outputs, bwd_graph in zip(
+        for static_input_surface, static_outputs, bwd_graph, bwd_dw_graph, bwd_idx in zip(
             reversed(per_callable_static_input_surfaces),
             reversed(per_callable_static_outputs),
             reversed(bwd_graphs),
+            reversed(bwd_dw_graphs),
+            reversed(range(len(per_callable_static_input_surfaces))),
         ):
             # For now, assumes all static_outputs require grad
             static_grad_outputs = tuple(
@@ -535,6 +560,11 @@ def _make_graphed_callables(
                         allow_unused=allow_unused_input,
                         retain_graph=retain_graph_in_backward,
                     )
+                if need_bwd_dw_graph[bwd_idx]:
+                    with torch.cuda.graph(bwd_dw_graph, pool=mempool):
+                        for module in visited_te_modules[bwd_idx]:
+                            if module.need_backward_dw():
+                                module.backward_dw()
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
             # don't require grad. I couldn't think of a slick one-liner for this pattern.
@@ -666,6 +696,7 @@ def _make_graphed_callables(
         )
 
         func = graph_callables[i]
+        te_modules = visited_te_modules.get(i, set())
         if isinstance(func, torch.nn.Module):
 
             def make_graphed_forward(func, graph_training_state, graphed, orig_fwd):
@@ -679,7 +710,7 @@ def _make_graphed_callables(
                                 isinstance(m, TransformerEngineBaseModule)
                                 and FP8GlobalStateManager.is_fp8_enabled()
                             ):
-                                if m not in visited_te_modules:
+                                if m not in te_modules:
                                     # Only Set the FP8 meta for the modules included by forward
                                     continue
                                 fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -712,6 +743,13 @@ def _make_graphed_callables(
                 ret.append(forward)
         else:
             ret.append(graphed)
+
+        # Attach backward_dw as an attribute to the graphed callable.
+        def backward_dw(need_backward_dw=need_bwd_dw_graph[i], bwd_dw_graph=bwd_dw_graphs[i]):
+            if need_backward_dw:
+                bwd_dw_graph.replay()
+
+        setattr(ret[-1], "backward_dw", backward_dw)
 
     if just_one_callable:
         return ret[0]
