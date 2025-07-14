@@ -430,6 +430,7 @@ def permute_with_mask_map(
         )
     else:
         permuted_scale = None
+    # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _permute_kernel[grid](
         inp,
@@ -607,6 +608,7 @@ def unpermute_with_mask_map(
         )
     else:
         unpermuted_probs = None
+    # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _unpermute_kernel[grid](
         inp,
@@ -967,6 +969,7 @@ def sort_chunks_by_map(
         permuted_probs = torch.empty((num_tokens,), dtype=probs.dtype, device="cuda")
     else:
         permuted_probs = None
+    # pylint: disable=unnecessary-lambda-assignment
     grid = lambda META: (num_tokens, triton.cdiv(hidden_size, META["BLOCK_SIZE"]))
     _sort_chunks_by_map_kernel[grid](
         inp,
