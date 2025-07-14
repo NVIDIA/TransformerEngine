@@ -96,6 +96,8 @@ stats_to_num = {
     "dynamic_range": 13,
     "fp8_delayed_scaling_overflows_num": 14,
     "fp8_delayed_scaling_overflows%": 15,
+    "overflows_num": 16,
+    "overflows%": 17,
 }
 
 DEPENDENCIES = {
@@ -115,6 +117,8 @@ DEPENDENCIES = {
     "dynamic_range": {"dynamic_range_top", "dynamic_range_bottom"},
     "fp8_delayed_scaling_overflows_num": {"fp8_delayed_scaling_overflows_num"},
     "fp8_delayed_scaling_overflows%": {"fp8_delayed_scaling_overflows_num", "numel"},
+    "overflows_num": {"overflows_num"},
+    "overflows%": {"overflows_num", "numel"},
 }
 
 STATS = {
@@ -183,6 +187,18 @@ STATS = {
         * sum(_get(buffers, "fp8_delayed_scaling_overflows_num"))
         / sum(_get(buffers, "numel")),
     ),
+    "overflows_num": (
+        lambda x, aux_dict: (x > aux_dict["fp8_delayed_scaling"].max_fwd).sum(),
+        lambda buffers: sum(_get(buffers, "overflows_num")),
+    ),
+    "overflows%": (
+        lambda x, aux_dict: (x > aux_dict["fp8_delayed_scaling"].max_fwd).sum()
+        / x.numel()
+        * 100,
+        lambda buffers: 100
+        * sum(_get(buffers, "overflows_num"))
+        / sum(_get(buffers, "numel")),
+    ),
 }
 
 
@@ -220,14 +236,16 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     This replaces the earlier separate helpers and avoids duplicated boilerplate.
     """
+    # Determine which attribute holds the scale-inverse tensor.
+
+    def get_scale_inv(quantized_tensor, columnwise):
+        if hasattr(quantized_tensor, "_scale_inv"):
+            return getattr(quantized_tensor, "_scale_inv")
+        if columnwise:
+            return getattr(quantized_tensor, "_columnwise_scale_inv")
+        return getattr(quantized_tensor, "_rowwise_scale_inv")
 
     columnwise_suffix = "_columnwise" if columnwise else ""
-
-    # Determine which attribute holds the scale-inverse tensor.
-    scale_inv_attr = "_scale_inv"
-    if recipe_name in {"mxfp8", "fp8_block_scaling"}:
-        scale_inv_attr = "_columnwise_scale_inv" if columnwise else "_rowwise_scale_inv"
-
     # Prepare stat names.
     stat_name_min = (
         f"{recipe_name}{'_' if recipe_name != '' else ''}scale_inv_min{columnwise_suffix}"
@@ -242,11 +260,11 @@ def add_scale_inv_stats(recipe_name: str, columnwise: bool = False):
 
     # Capture the attribute name inside lambdas via default args to avoid late binding.
     STATS[stat_name_min] = (
-        lambda x, aux_dict, _attr=scale_inv_attr: getattr(aux_dict[recipe_name], _attr).min(),
+        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).min(),
         lambda buffers, _sn=stat_name_min: min(_get(buffers, _sn)),
     )
     STATS[stat_name_max] = (
-        lambda x, aux_dict, _attr=scale_inv_attr: getattr(aux_dict[recipe_name], _attr).max(),
+        lambda x, aux_dict, _col=columnwise: get_scale_inv(aux_dict[recipe_name], _col).max(),
         lambda buffers, _sn=stat_name_max: max(_get(buffers, _sn)),
     )
 
