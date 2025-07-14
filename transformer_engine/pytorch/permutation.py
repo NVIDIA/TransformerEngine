@@ -349,7 +349,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         if restore_shape is None:
             restore_shape = inp.shape
         num_tokens, hidden_size = restore_shape
-        num_experts = row_id_map.size(0)
+        num_experts = (row_id_map.size(1) - 1) // 2
 
         with_probs = merging_probs is not None
         if with_probs:
@@ -651,14 +651,20 @@ class _moe_chunk_sort(torch.autograd.Function):
             fp8_scale_inv = inp._scale_inv
             fake_dtype = inp.dtype
             inp = inp._data
-        output, row_id_map, permuted_probs = triton_permutation.sort_chunks_by_idx(
-            inp,
+
+        row_id_map = triton_permutation.make_chunk_sort_map(
             split_sizes,
             sorted_idxs,
+            num_tokens,
+            num_splits,
+        )
+        output, permuted_probs = triton_permutation.sort_chunks_by_map(
+            inp,
+            row_id_map,
             probs,
             num_tokens,
             hidden_size,
-            num_splits,
+            is_forward=True,
         )
         if fp8:
             output = Float8Tensor(
@@ -700,6 +706,7 @@ class _moe_chunk_sort(torch.autograd.Function):
                 permuted_probs_grad,
                 ctx.num_tokens,
                 ctx.hidden_size,
+                is_forward=False,
             )
             if fp8:
                 act_grad = Float8Tensor(

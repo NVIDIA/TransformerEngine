@@ -96,8 +96,7 @@ class BackwardLinearAdd(FusedOperation):
             grad_weight = None
 
         # Clear input tensor if possible
-        if linear_op_ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         return grad_input, [(grad_weight,), ()], [(), ()]
 
@@ -110,13 +109,13 @@ def fuse_backward_linear_add(
     Parameters
     ----------
     ops: list of tuples
-        Forward pass operations and the indices of the corresponding
+        Backward pass operations and the indices of the corresponding
         basic operations.
 
     Returns
     -------
     ops: list of tuples
-        Updated forward pass operations
+        Updated backward pass operations
 
     """
 

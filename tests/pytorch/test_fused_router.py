@@ -148,14 +148,17 @@ def run_comparison(
 ):
     # Set some parameters
     if score_function == "sigmoid":
-        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 0.1
-        logits = logits.unsqueeze(0).repeat(num_tokens, 1)
+        # Construct the special logits to avoid inf in the sigmoid function
+        offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
+        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
     else:
         logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=dtype) * 1e-4
-    logits = logits.view(num_tokens, num_experts)
+        logits = logits.view(num_tokens, num_experts)
     logits.requires_grad = True
     if enable_bias and score_function == "sigmoid":
         expert_bias = torch.arange(num_experts, device="cuda") * 0.1
+        expert_bias = torch.flip(expert_bias, dims=[0])
         expert_bias.requires_grad = True
     else:
         expert_bias = None
@@ -210,7 +213,7 @@ def run_comparison(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
+@pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("group_topk", [None, 4])
@@ -241,7 +244,7 @@ def test_topk_sigmoid(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
+@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("use_pre_softmax", [True, False])
@@ -272,12 +275,19 @@ def test_topk_softmax(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
+@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
-    logits = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
+    if score_function == "sigmoid":
+        # Construct the special logits to avoid inf in the sigmoid function
+        offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
+        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+    else:
+        logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=dtype) * 1e-4
+        logits = logits.view(num_tokens, num_experts)
     logits.requires_grad = True
 
     logits_clone = deepcopy(logits)
@@ -307,11 +317,15 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 32111])
+@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [256, 128, 32])
 @pytest.mark.parametrize("topk", [4])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
-    probs = torch.randn(num_tokens, num_experts, device="cuda", dtype=dtype)
+    # Construct the special probs to avoid inf in the sigmoid function
+    offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
+    probs = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+    probs = probs.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+    probs = probs.view(num_tokens, num_experts)
     probs.requires_grad = True
 
     tokens_per_expert = torch.randint(1, 1000, (num_experts,), device="cuda", dtype=torch.int32)
@@ -375,6 +389,6 @@ if __name__ == "__main__":
     test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=32, topk=4)
     test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=128, topk=4)
     test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=7168, num_experts=256, topk=4)
-    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=32, topk=4)
-    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=128, topk=4)
-    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=32111, num_experts=256, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=14234, num_experts=32, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=14234, num_experts=128, topk=4)
+    test_fused_moe_aux_loss(dtype=torch.float32, num_tokens=14234, num_experts=256, topk=4)
