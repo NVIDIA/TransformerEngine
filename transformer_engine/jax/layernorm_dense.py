@@ -16,12 +16,11 @@ import jax
 import jax.numpy as jnp
 
 from . import cpp_extensions as tex
-
 from .quantize import (
     QuantizerSet,
+    TensorUsage,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
-    TensorUsage,
 )
 
 

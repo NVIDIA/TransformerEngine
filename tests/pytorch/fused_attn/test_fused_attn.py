@@ -4,48 +4,47 @@
 import logging
 import math
 import os
-from typing import Any, Dict, List, Tuple, Union, Optional
 from contextlib import contextmanager
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pytest
 import torch
 
+import transformer_engine.pytorch.cpp_extensions as ext
+import transformer_engine.pytorch.fp8 as fp8
+import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
+from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
 from transformer_engine.pytorch.attention.dot_product_attention import (
     DotProductAttention,
     _attention_backends,
 )
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-    FlashAttentionUtils,
-    get_attention_backend,
-    check_set_window_size,
     AttentionParams,
+    FlashAttentionUtils,
+    check_set_window_size,
+    get_attention_backend,
 )
-from transformer_engine.pytorch.attention import InferenceParams
-from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-import transformer_engine.pytorch.cpp_extensions as ext
+from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
     fused_attn_bwd,
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    init_method_normal,
-    scaled_init_method_normal,
-    is_bf16_compatible,
-)
-from transformer_engine.pytorch.utils import get_cudnn_version
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     Quantizer,
     prepare_for_saving,
     restore_from_saved,
+)
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    get_device_compute_capability,
+    init_method_normal,
+    is_bf16_compatible,
+    scaled_init_method_normal,
 )
 
 # Only run FP8 tests on H100

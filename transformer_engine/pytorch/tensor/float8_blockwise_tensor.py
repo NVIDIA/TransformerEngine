@@ -4,18 +4,20 @@
 
 """Tensor class with FP8 data quantized with NxN tiles"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Union
 
 import math
+from typing import Iterable, Optional, Tuple, Union
+
 import torch
+
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine_torch import Float8BlockScaleTensorFormat
 
-from transformer_engine.common.recipe import Float8BlockScaling, Recipe
+from ..utils import devices_match, round_up_to_nearest_multiple
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
-from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
 

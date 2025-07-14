@@ -5,20 +5,18 @@
 """Mixin class holding data specific for Float8Tensor"""
 
 from __future__ import annotations
+
 import math
 from typing import Any, Dict, Optional, Tuple
+
 import torch
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ..quantized_tensor import QuantizedTensorBase
-
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
-
-from ..quantized_tensor import Quantizer
-
-from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
+from ...utils import _empty_tensor, is_non_tn_fp8_gemm_supported
+from ..quantized_tensor import QuantizedTensorBase, Quantizer
 
 
 class _FromFloat8Func(torch.autograd.Function):

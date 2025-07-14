@@ -10,14 +10,14 @@ When log() is called, they gather stats from all nodes, compute combined final s
 
 
 from collections import defaultdict
-import torch
 
-from nvdlfw_inspect.utils import gather_along_first_dim
+import torch
 from nvdlfw_inspect.logging import MetricLogger
+from nvdlfw_inspect.utils import gather_along_first_dim
 
 from transformer_engine.debug.features.utils.stats_computation import (
-    STATS,
     DEPENDENCIES,
+    STATS,
     stats_to_num,
 )
 

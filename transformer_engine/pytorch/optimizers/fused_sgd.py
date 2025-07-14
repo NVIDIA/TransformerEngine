@@ -4,14 +4,16 @@
 
 """Fused SGD optimizer."""
 from __future__ import annotations
+
+import warnings
 from collections.abc import Iterable
 from typing import Any, Optional
-import warnings
 
 import torch
 from torch.optim.optimizer import Optimizer, required
 
 import transformer_engine_torch as tex
+
 from .multi_tensor_apply import multi_tensor_applier
 
 

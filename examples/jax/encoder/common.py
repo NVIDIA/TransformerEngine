@@ -6,10 +6,11 @@ from functools import lru_cache
 
 import jax
 import jax.numpy
-import transformer_engine
-from transformer_engine_jax import get_device_compute_capability
-from transformer_engine.common import recipe
 import numpy as np
+
+import transformer_engine
+from transformer_engine.common import recipe
+from transformer_engine_jax import get_device_compute_capability
 
 
 @lru_cache

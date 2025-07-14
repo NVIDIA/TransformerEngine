@@ -2,10 +2,10 @@
 #
 # See LICENSE for license information.
 
-from transformer_engine.pytorch import MultiheadAttention
-
 import pytest
 import torch
+
+from transformer_engine.pytorch import MultiheadAttention
 
 
 @pytest.mark.parametrize("use_qk_norm", [False, True])

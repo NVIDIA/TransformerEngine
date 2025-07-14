@@ -5,14 +5,16 @@
 """Fusible operation for linear layer without bias."""
 
 from __future__ import annotations
-from collections.abc import Callable, Iterable
+
 import contextlib
 import math
+from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.module.base import get_workspace
+
 from ...cpp_extensions import general_gemm
 from ...distributed import (
     CudaRNGStatesTracker,
@@ -20,20 +22,15 @@ from ...distributed import (
     reduce_scatter_along_first_dim,
 )
 from ...fp8 import FP8GlobalStateManager, Recipe
-from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
+from ...module.base import _2X_ACC_DGRAD, _2X_ACC_FPROP, _2X_ACC_WGRAD
 from ...tensor import Quantizer
-from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ...tensor.mxfp8_tensor import MXFP8Quantizer
+from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data, devices_match
+from .._common import is_quantized_tensor, maybe_dequantize
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
-from ...utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    clear_tensor_data,
-    devices_match,
-)
 
 
 def _wait_async(handle: Optional[Any]) -> None:

@@ -4,14 +4,16 @@
 
 """Functionality for CPU offloading of tensors saved for backward pass."""
 from __future__ import annotations
+
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .tensor.quantized_tensor import QuantizedTensorBase
+
 from .tensor.float8_tensor import Float8Tensor
+from .tensor.quantized_tensor import QuantizedTensorBase
 
 __all__ = ["get_cpu_offload_context"]
 

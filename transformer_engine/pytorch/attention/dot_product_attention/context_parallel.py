@@ -5,42 +5,39 @@
 """Context Parallelism."""
 import os
 from typing import List, Union
-import torch
-import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.utils import (
-    combine_tensors,
-    get_cudnn_version,
-    nvtx_range_pop,
-    nvtx_range_push,
-    get_device_compute_capability,
+import torch
+
+# Import attention utils
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
 )
+from transformer_engine.pytorch.constants import TE_DType, dist_group_type
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
     FusedAttnBackend,
+    fused_attn_bwd,
+    fused_attn_fwd,
+)
+from transformer_engine.pytorch.distributed import (
+    gather_along_first_dim,
+    get_distributed_rank,
+    get_distributed_world_size,
+    reduce_scatter_along_first_dim,
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.jit import jit_fuser
-from transformer_engine.pytorch.constants import (
-    dist_group_type,
-    TE_DType,
-)
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    get_distributed_rank,
-    gather_along_first_dim,
-    reduce_scatter_along_first_dim,
-)
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-
-# Import attention utils
-import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-    FlashAttentionUtils as fa_utils,
+from transformer_engine.pytorch.utils import (
+    combine_tensors,
+    get_cudnn_version,
+    get_device_compute_capability,
+    nvtx_range_pop,
+    nvtx_range_push,
 )
 
 _cu_seqlens_info_with_cp_cache = {}

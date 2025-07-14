@@ -1,12 +1,12 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from typing import Callable, Sequence, Union, Optional
-import pytest
+from typing import Callable, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from utils import (
     assert_allclose,
@@ -16,25 +16,23 @@ from utils import (
 )
 
 from transformer_engine.common import recipe
-from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 from transformer_engine.jax import fp8_autocast
+from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
 from transformer_engine.jax.flax import LayerNormMLP
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
+from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
 from transformer_engine.jax.sharding import (
+    BATCH_AXES,
     HIDDEN_AXES,
     HIDDEN_TP_AXES,
-    BATCH_AXES,
-    SEQLEN_TP_AXES,
     SEQLEN_AXES,
-    W_NO_SHARD_AXES,
+    SEQLEN_TP_AXES,
     W_FSDP_AXES,
-    W_TP_AXES,
     W_JOINED_AXES,
+    W_NO_SHARD_AXES,
+    W_TP_AXES,
+    MeshResource,
 )
-from transformer_engine.jax.sharding import MeshResource
-from transformer_engine.jax.quantize import QuantizerFactory
-from transformer_engine.jax.cpp_extensions.misc import get_min_device_compute_capability
-
 
 is_fp8_supported, reason = is_fp8_available()
 is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)

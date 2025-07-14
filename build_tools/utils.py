@@ -12,8 +12,8 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 from importlib.metadata import version
+from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
 

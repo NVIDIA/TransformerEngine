@@ -7,6 +7,7 @@ Mathematical functions used to tensor statistics computation.
 """
 
 import math
+
 import torch
 
 MAX_FP8_VALUE_INT8 = 126

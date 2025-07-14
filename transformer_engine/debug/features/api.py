@@ -6,15 +6,14 @@
 
 import copy
 from typing import Dict, Union
-from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
-from nvdlfw_inspect.registry import Registry
 
 import torch
+from nvdlfw_inspect.base import BaseConfigAPIMapper, BaseNamespaceAPI
+from nvdlfw_inspect.registry import Registry
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.pytorch.tensor import get_all_tensor_types
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
+from transformer_engine.pytorch.tensor import QuantizedTensor, Quantizer, get_all_tensor_types
 
 
 class TEConfigAPIMapper(BaseConfigAPIMapper):

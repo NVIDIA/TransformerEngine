@@ -4,10 +4,10 @@
 
 """Internal function used by multiple modules."""
 
-from typing import Any, List, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
-
 import queue
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional, Tuple, Union
+
 import torch
 
 from .. import cpp_extensions as tex

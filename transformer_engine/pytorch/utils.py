@@ -4,16 +4,19 @@
 
 """Utility functions for Transformer Engine modules"""
 from __future__ import annotations
+
 import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+
 import numpy as np
 import torch
 
 import transformer_engine.pytorch.cpp_extensions as ext
-from . import torch_version
+
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
+from . import torch_version
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:

@@ -5,17 +5,13 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    FusibleOperation,
-    OperationContext,
-)
 from transformer_engine.pytorch.ops.fused import (
     fuse_backward_bias_activation,
     fuse_backward_linear_add,
@@ -24,6 +20,7 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_userbuffers_backward_linear,
     fuse_userbuffers_forward_linear,
 )
+from transformer_engine.pytorch.ops.op import BasicOperation, FusibleOperation, OperationContext
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,

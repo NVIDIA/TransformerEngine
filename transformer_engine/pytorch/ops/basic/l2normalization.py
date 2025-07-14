@@ -5,21 +5,22 @@
 """Fusable operation for L2 Normalization."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
-from ...utils import clear_tensor_data
-from .._common import maybe_dequantize
-from ..op import BasicOperation, OperationContext
 from ...jit import (
+    l2normalization_backward_fused,
     l2normalization_fused,
     l2normalization_fwd_fused,
-    l2normalization_backward_fused,
     set_jit_fusion_options,
     warmup_jit_l2normalization_all_dtypes,
 )
 from ...tensor import Quantizer
+from ...utils import clear_tensor_data
+from .._common import maybe_dequantize
+from ..op import BasicOperation, OperationContext
 
 
 class L2Normalization(BasicOperation):

@@ -5,47 +5,41 @@
 """
 Utils/Helper classes and methods for attention
 """
+import functools
+import logging
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
-import logging
-import functools
-
 from dataclasses import dataclass, fields
-import numpy as np
-from packaging.version import Version as PkgVersion
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import transformer_engine_torch as tex
+from packaging.version import Version as PkgVersion
+
 import transformer_engine as te
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    QKVLayout,
+    META_DO,
+    META_DP,
+    META_DQKV,
+    META_DQKV_CP,
+    META_O,
+    META_O_CP,
+    META_QKV,
+    META_S,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
-    META_QKV,
-    META_DQKV,
-    META_O,
-    META_DO,
-    META_S,
-    META_DP,
-    META_O_CP,
-    META_DQKV_CP,
+    QKVLayout,
 )
-from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType
-
-
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    get_cudnn_version,
-)
-
 from transformer_engine.pytorch.jit import jit_fuser
+from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))

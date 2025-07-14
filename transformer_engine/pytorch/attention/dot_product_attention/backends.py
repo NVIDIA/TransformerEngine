@@ -3,58 +3,54 @@
 # See LICENSE for license information.
 
 """Attention Backends."""
-from contextlib import nullcontext
-from importlib.metadata import version as get_pkg_version
-from importlib.metadata import PackageNotFoundError
-import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import warnings
 import logging
-from packaging.version import Version as PkgVersion
+import os
+import warnings
+from contextlib import nullcontext
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_pkg_version
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from packaging.version import Version as PkgVersion
+
+# Import attention utils
+import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.utils import (
-    SplitAlongDim,
-    get_device_compute_capability,
-    combine_tensors,
-    split_tensor_along_dim,
+from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
+    attn_forward_func_with_cp,
 )
-from transformer_engine.pytorch.utils import attention_mask_func
+from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    AttentionLogging as attn_log,
+)
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
+)
+from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.constants import QKVLayouts, TE_DType, dist_group_type
+from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+    META_O,
+    META_QKV,
+    FusedAttnBackend,
+    fused_attn_bwd,
+    fused_attn_fwd,
+)
+from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
+from transformer_engine.pytorch.jit import no_torch_dynamo
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
     restore_from_saved,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.constants import (
-    TE_DType,
-    QKVLayouts,
-    dist_group_type,
-)
-from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
-    FusedAttnBackend,
-    META_O,
-    META_QKV,
-)
-from transformer_engine.pytorch.fp8 import get_fp8_torch_dtype
-from transformer_engine.pytorch.distributed import get_distributed_world_size
-from transformer_engine.pytorch.jit import no_torch_dynamo
-from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
-    attn_forward_func_with_cp,
-)
-from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
-from transformer_engine.pytorch.attention.inference import InferenceParams
-
-# Import attention utils
-import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-    FlashAttentionUtils as fa_utils,
-)
-from transformer_engine.pytorch.attention.dot_product_attention.utils import (
-    AttentionLogging as attn_log,
+from transformer_engine.pytorch.utils import (
+    SplitAlongDim,
+    attention_mask_func,
+    combine_tensors,
+    get_device_compute_capability,
+    split_tensor_along_dim,
 )
 
 # Global vars for flash attn v2 and v3 imports
@@ -77,16 +73,16 @@ else:
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
-        )
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
@@ -115,6 +111,8 @@ except PackageNotFoundError:
     flash_attn_with_kvcache_v3 = None
     # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
+    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
@@ -122,8 +120,6 @@ else:
     from flash_attn_3.flash_attn_interface import (
         flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
     )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
 
