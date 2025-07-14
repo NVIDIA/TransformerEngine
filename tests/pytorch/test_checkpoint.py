@@ -11,10 +11,9 @@ import pathlib
 
 import pytest
 import torch
+from utils import make_recipe
 
 import transformer_engine.pytorch as te
-
-from utils import make_recipe
 
 # Check supported quantization schemes
 fp8_available, reason_for_no_fp8 = te.fp8.FP8GlobalStateManager.is_fp8_available()

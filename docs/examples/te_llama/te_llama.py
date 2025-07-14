@@ -2,26 +2,25 @@
 #
 # See LICENSE for license information.
 
+import gc
 import os
 import re
-import gc
 from contextlib import contextmanager
 
 import torch
+import transformers
+from transformers.modeling_utils import _add_variant, load_state_dict
+from transformers.models.llama.modeling_llama import (
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaModel,
+    LlamaRMSNorm,
+)
+from transformers.utils import WEIGHTS_INDEX_NAME
+from transformers.utils.hub import get_checkpoint_shard_files
 
 import transformer_engine as te
 from transformer_engine.pytorch.attention import RotaryPositionEmbedding
-
-import transformers
-from transformers.models.llama.modeling_llama import (
-    LlamaModel,
-    LlamaForCausalLM,
-    LlamaRMSNorm,
-    LlamaConfig,
-)
-from transformers.modeling_utils import _add_variant, load_state_dict
-from transformers.utils import WEIGHTS_INDEX_NAME
-from transformers.utils.hub import get_checkpoint_shard_files
 
 
 @contextmanager

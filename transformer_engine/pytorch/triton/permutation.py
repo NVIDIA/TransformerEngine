@@ -9,10 +9,8 @@ from typing import Union
 import torch
 import triton
 import triton.language as tl
-
 from triton.language import core
 from triton.language.standard import _log2
-
 
 # The following three argsort related kernels are adapted from
 # the issue https://github.com/triton-lang/triton/issues/3698

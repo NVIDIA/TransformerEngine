@@ -8,16 +8,15 @@ import ctypes
 import functools
 import glob
 import importlib
-from importlib.metadata import version, metadata, PackageNotFoundError
 import logging
 import os
-from pathlib import Path
 import platform
 import subprocess
 import sys
 import sysconfig
+from importlib.metadata import PackageNotFoundError, metadata, version
+from pathlib import Path
 from typing import Optional
-
 
 _logger = logging.getLogger(__name__)
 

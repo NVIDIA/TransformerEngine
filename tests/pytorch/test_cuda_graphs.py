@@ -2,12 +2,15 @@
 #
 # See LICENSE for license information.
 
-from dataclasses import dataclass
 import itertools
+from dataclasses import dataclass
 from typing import Iterable, List, Tuple, Union
-import pytest
 
+import pytest
 import torch
+
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     DotProductAttention,
     LayerNormLinear,
@@ -21,9 +24,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common import recipe
-
 
 # Check if FP8 is supported.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

@@ -3,30 +3,30 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import Tuple, Sequence, Union, Dict
-from functools import partial, reduce
-import operator
 import math
+import operator
+from functools import partial, reduce
+from typing import Dict, Sequence, Tuple, Union
+
 import jax
 import jax.numpy as jnp
+
 from transformer_engine_jax import get_device_compute_capability, get_num_compute_streams
 
+from ..quantize import (
+    GroupedQuantizer,
+    GroupedScaledTensor1x,
+    QuantizeConfig,
+    QuantizeLayout,
+    Quantizer,
+    QuantizerSet,
+    ScaledTensor,
+    ScalingMode,
+    is_fp8_gemm_with_all_layouts_supported,
+    noop_quantizer_set,
+)
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
-
-from ..quantize import (
-    ScaledTensor,
-    GroupedScaledTensor1x,
-    ScalingMode,
-    Quantizer,
-    GroupedQuantizer,
-    QuantizeConfig,
-    QuantizerSet,
-    QuantizeLayout,
-    noop_quantizer_set,
-    is_fp8_gemm_with_all_layouts_supported,
-)
-
 
 __all__ = ["gemm", "grouped_gemm"]
 

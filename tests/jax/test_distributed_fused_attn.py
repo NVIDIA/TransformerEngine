@@ -3,28 +3,29 @@
 # See LICENSE for license information.
 
 import os
-import pytest
+
 import jax
 import jax.numpy as jnp
-from jax import random
+import pytest
 from distributed_test_base import (
+    generate_collectives_count,
     generate_configs,
     generate_context_parallel_configs,
-    generate_collectives_count,
 )
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
+from jax import random
+from test_fused_attn import BiasShape, FusedAttnRunner, SeqDescFormat
+
 from transformer_engine.jax.attention import (
-    is_fused_attn_kernel_available,
     AttnBiasType,
     AttnMaskType,
-    QKVLayout,
-    QKVFormat,
-    reorder_causal_load_balancing,
-    inverse_reorder_causal_load_balancing,
     CPStrategy,
+    QKVFormat,
+    QKVLayout,
     ReorderStrategy,
+    inverse_reorder_causal_load_balancing,
+    is_fused_attn_kernel_available,
+    reorder_causal_load_balancing,
 )
-
 
 DTYPES = [jnp.bfloat16]
 

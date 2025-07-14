@@ -6,24 +6,22 @@ Tensor quantization classes for TE/JAX.
 
 This module provides classes and utilities for quantizing tensors in JAX.
 """
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Union, Optional, Tuple
-import warnings
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
+
 from transformer_engine_jax import QuantizeLayout
 
+from .device_utils import is_fp8_gemm_with_all_layouts_supported
+from .helper import AmaxComputeAlgo, QuantizeConfig
 from .scaling_modes import ScalingMode
 from .tensor import ScaledTensor, ScaledTensor1x, ScaledTensor2x, ScaledTensorFactory
-from .helper import (
-    QuantizeConfig,
-    AmaxComputeAlgo,
-)
-from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
 __all__ = [
     "QuantizeLayout",

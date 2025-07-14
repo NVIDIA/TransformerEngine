@@ -14,11 +14,7 @@ from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
-from build_tools.utils import (
-    cuda_archs,
-    get_frameworks,
-    remove_dups,
-)
+from build_tools.utils import cuda_archs, get_frameworks, remove_dups
 
 frameworks = get_frameworks()
 current_file_path = Path(__file__).parent.resolve()

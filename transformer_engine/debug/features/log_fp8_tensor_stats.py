@@ -6,19 +6,18 @@
 
 from typing import Dict, Union
 
-import torch
-
 import nvdlfw_inspect.api as debug_api
+import torch
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 
 @Registry.register_feature(namespace="transformer_engine")

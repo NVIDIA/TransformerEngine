@@ -31,17 +31,15 @@ from transformer_engine.common import load_framework_extension
 
 load_framework_extension("jax")
 
-from . import flax
-from . import quantize
-
-from .quantize import fp8_autocast, update_collections, get_delayed_scaling
-from .quantize import NVTE_FP8_COLLECTION_NAME
-
-from .sharding import MeshResource
-from .sharding import MajorShardingType, ShardingResource, ShardingType
-
-from ..common.utils import deprecate_wrapper
-from ..common.utils import DeprecatedEnum
+from ..common.utils import DeprecatedEnum, deprecate_wrapper
+from . import flax, quantize
+from .quantize import (
+    NVTE_FP8_COLLECTION_NAME,
+    fp8_autocast,
+    get_delayed_scaling,
+    update_collections,
+)
+from .sharding import MajorShardingType, MeshResource, ShardingResource, ShardingType
 
 MajorShardingType = DeprecatedEnum(
     MajorShardingType, "MajorShardingType is deprecating in the near feature."

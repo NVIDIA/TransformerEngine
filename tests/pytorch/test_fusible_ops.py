@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 import io
 import math
 import pathlib
 import sys
+from collections.abc import Iterable
 from typing import Optional
 
 import pytest
@@ -17,8 +17,9 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.fused import (
     BackwardBiasActivation,
     BackwardLinearAdd,
@@ -27,13 +28,12 @@ from transformer_engine.pytorch.ops.fused import (
 )
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
+    Float8Tensor,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()

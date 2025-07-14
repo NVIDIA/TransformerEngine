@@ -14,11 +14,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
-from jax.interpreters import pxla
+
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec
 import numpy as np
+from jax.interpreters import pxla
+from jax.sharding import PartitionSpec
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 

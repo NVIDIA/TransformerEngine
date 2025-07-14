@@ -6,10 +6,10 @@
 # See LICENSE for license information.
 
 
+import datetime
+import json
 import os
 import sys
-import json
-import datetime
 
 if len(sys.argv) < 2:
     print("Usage: python3 copyright_checker.py <path>")

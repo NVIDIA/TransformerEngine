@@ -2,26 +2,25 @@
 #
 # See LICENSE for license information.
 
-from collections.abc import Iterable
 import io
-from typing import Any, Dict, List, Tuple, Union, Optional
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pytest
 import torch
+from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8CurrentScalingQuantizer,
     Float8Quantizer,
     Float8Tensor,
-    Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
-import transformer_engine_torch as tex
-
-from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]

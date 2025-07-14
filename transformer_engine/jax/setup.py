@@ -21,9 +21,9 @@ behaviors for:
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import sys
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import setuptools
@@ -43,12 +43,12 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
     shutil.copytree(build_tools_dir, build_tools_copy)
 
 
-from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers
-from build_tools.te_version import te_version
-from build_tools.jax import setup_jax_extension, install_requirements, test_requirements
-
 from pybind11.setup_helpers import build_ext as BuildExtension
+
+from build_tools.build_ext import get_build_ext
+from build_tools.jax import install_requirements, setup_jax_extension, test_requirements
+from build_tools.te_version import te_version
+from build_tools.utils import copy_common_headers
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)

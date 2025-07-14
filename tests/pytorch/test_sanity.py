@@ -2,40 +2,31 @@
 #
 # See LICENSE for license information.
 
+import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional
-from contextlib import nullcontext
 
-import torch
 import pytest
-import os
+import torch
+from utils import dtype_tols
 
 import transformer_engine.pytorch
-from transformer_engine.pytorch.fp8 import (
-    fp8_autocast,
-    FP8GlobalStateManager,
-    fp8_model_init,
-)
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    init_method_normal,
-    scaled_init_method_normal,
-    is_bf16_compatible,
-    get_cudnn_version,
-)
+import transformer_engine_torch as tex
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
-    LayerNormLinear,
-    Linear,
     GroupedLinear,
-    LayerNormMLP,
-    TransformerLayer,
-    RMSNorm,
     LayerNorm,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
+    RMSNorm,
+    TransformerLayer,
     get_cpu_offload_context,
 )
-from transformer_engine.common import recipe
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.distributed import checkpoint
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
@@ -45,8 +36,13 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from transformer_engine.pytorch.distributed import checkpoint
-from utils import dtype_tols
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    get_device_compute_capability,
+    init_method_normal,
+    is_bf16_compatible,
+    scaled_init_method_normal,
+)
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

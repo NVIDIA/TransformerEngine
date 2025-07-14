@@ -5,10 +5,10 @@
 """Inference"""
 import logging
 from collections import OrderedDict, defaultdict
-from typing import Optional, List
-from einops import rearrange
+from typing import List, Optional
 
 import torch
+from einops import rearrange
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat

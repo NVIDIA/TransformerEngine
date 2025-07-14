@@ -2,28 +2,27 @@
 #
 # See LICENSE for license information.
 
+import warnings
 from typing import Iterable, Optional
 
 import pytest
 import torch
-import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+import transformer_engine.pytorch.ops as te_ops
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
+from transformer_engine.pytorch import GroupedLinear, LayerNormLinear, LayerNormMLP, Linear
+from transformer_engine.pytorch.distributed import fp8_autocast
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
     fp8_model_init,
 )
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
-from transformer_engine.pytorch.distributed import fp8_autocast
-from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
-import transformer_engine_torch as tex
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

@@ -2,10 +2,10 @@
 #
 # See LICENSE for license information.
 
-import torch
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-
 import nvdlfw_inspect.api as debug_api
+import torch
+
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 
 try:
     import transformer_engine

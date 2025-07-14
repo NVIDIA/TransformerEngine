@@ -4,18 +4,19 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from collections.abc import Iterable
+
 import math
+from collections.abc import Iterable
 from typing import Optional, Tuple, Union
 
 import torch
+
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from transformer_engine_torch import DType as TE_DType
 
-from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
-
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 

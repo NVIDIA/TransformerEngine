@@ -2,12 +2,16 @@
 #
 # See LICENSE for license information.
 
-import os, sys, time
+import os
 import subprocess
-import pandas as pd
+import sys
+import time
+
 import numpy as np
-import torch
 import nvtx
+import pandas as pd
+import torch
+
 import transformer_engine
 from tests.pytorch.fused_attn.test_fused_attn import (
     ModelConfig,

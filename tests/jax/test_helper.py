@@ -8,15 +8,16 @@ import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from utils import assert_allclose
-from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8CurrentScaling
+
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 from transformer_engine.common.recipe import Format as FP8Format
+from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.jax import fp8_autocast, get_delayed_scaling
 from transformer_engine.jax.quantize import (
     QuantizeConfig,
-    is_fp8_available,
     ScalingMode,
+    is_fp8_available,
     update_collections,
 )
 from transformer_engine.jax.sharding import MeshResource, global_mesh_resource

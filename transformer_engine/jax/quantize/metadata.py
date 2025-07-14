@@ -9,8 +9,8 @@ This module provides classes for managing quantization metadata, including
 scale factors and amax history for different tensor types.
 """
 from dataclasses import dataclass
-import jax.numpy as jnp
 
+import jax.numpy as jnp
 
 __all__ = ["QuantizeMeta", "QuantizeMetaSet"]
 
