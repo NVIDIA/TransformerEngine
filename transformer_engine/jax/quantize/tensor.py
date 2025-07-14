@@ -17,13 +17,15 @@ from jax.tree_util import register_pytree_node_class
 
 from transformer_engine_jax import QuantizeLayout
 
-from .scaling_modes import ScalingMode
+from .helper import apply_padding_to_scale_inv
+from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
 from ..sharding import (
     with_sharding_constraint_by_logical_axes as original_with_sharding_constraint_by_logical_axes,
 )
 
 __all__ = [
+    "TensorUsage",
     "ScaledTensor",
     "ScaledTensor1x",
     "ScaledTensor2x",
@@ -55,6 +57,11 @@ class ScaledTensor(ABC):
         """
         return cls(*children, *aux_data)
 
+    @property
+    @abstractmethod
+    def ndim(self):
+        """Number of dimensions of the underlying quantized array."""
+
     @abstractmethod
     def dequantize(self):
         """Dequantizes the tensor back to its original precision.
@@ -64,25 +71,15 @@ class ScaledTensor(ABC):
         """
 
     @abstractmethod
-    def get_rowwise_tensor(self):
-        """Returns the row-wise component of the tensor.
+    def get_tensor(self, usage: TensorUsage):
+        """Returns the appropriate tensor based on the tensor usage and the scaling mode.
+        If the tensor usage is not valid for the scaling mode, an error is raised.
+
+        Args:
+            usage: The usage of the tensor
 
         Returns:
-            The row-wise tensor component
-
-        Raises:
-            ValueError: If called on a tensor that doesn't support row-wise access
-        """
-
-    @abstractmethod
-    def get_colwise_tensor(self):
-        """Returns the column-wise component of the tensor.
-
-        Returns:
-            The column-wise tensor component
-
-        Raises:
-            ValueError: If called on a tensor that doesn't support column-wise access
+            The tensor based on the usage
         """
 
     @abstractmethod
@@ -136,24 +133,16 @@ class ScaledTensor1x(ScaledTensor):
             0 < self.flatten_axis < len(self.data.shape)
         ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
-        expected_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=True, flatten_axis=self.flatten_axis
-        )
-        expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=False, flatten_axis=self.flatten_axis
-        )
-        if self.scale_inv.shape != expected_scale_shape:
-            assert self.scale_inv.shape == expected_unpadded_scale_shape, (
-                f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-                f" scale_inv or {expected_unpadded_scale_shape} for unpadded scale_inv, got"
-                f" {self.scale_inv.shape}"
-            )
-            pad_width = tuple(
-                (0, a - b) for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
-            )
-            # This actually pad scale_inv with nan, should we pad it with 127 directly instead?
-            self.scale_inv = jnp.pad(
-                self.scale_inv, pad_width=pad_width, mode="constant", constant_values=0
+        if self.scaling_mode == ScalingMode.NO_SCALING:
+            self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
+
+        else:
+            self.scale_inv = apply_padding_to_scale_inv(
+                self.scale_inv,
+                self.scaling_mode,
+                self.data.shape,
+                is_colwise=self.is_colwise,
+                flatten_axis=self.flatten_axis,
             )
 
     def tree_flatten(self):
@@ -173,6 +162,10 @@ class ScaledTensor1x(ScaledTensor):
         )
         return (children, aux_data)
 
+    @property
+    def ndim(self):
+        return self.data.ndim
+
     def dequantize(self):
         """Dequantizes the tensor using the stored dequantization function.
 
@@ -181,33 +174,19 @@ class ScaledTensor1x(ScaledTensor):
         """
         return self._dq_func(self)
 
-    def get_rowwise_tensor(self):
-        """Returns the tensor if it's row-wise quantized.
+    def get_tensor(self, usage: TensorUsage):
+        """Returns the tensor based on the tensor usage."""
+        q_layout = self.scaling_mode.get_quantize_layout(usage)
+        colwise_usage_valid = q_layout == QuantizeLayout.COLWISE and self.is_colwise
+        rowwise_usage_valid = q_layout == QuantizeLayout.ROWWISE and not self.is_colwise
 
-        Returns:
-            The row-wise tensor
-
-        Raises:
-            ValueError: If called on a column-wise quantized tensor
-        """
-        if not self.is_colwise:
+        if colwise_usage_valid or rowwise_usage_valid:
             return self
 
-        raise ValueError("Calling get_rowwise_tensor() from a colwise ScaledTensor1x!")
-
-    def get_colwise_tensor(self):
-        """Returns the tensor if it's column-wise quantized.
-
-        Returns:
-            The column-wise tensor
-
-        Raises:
-            ValueError: If called on a row-wise quantized tensor
-        """
-        if self.is_colwise:
-            return self
-
-        raise ValueError("Calling get_colwise_tensor() from a rowwise ScaledTensor1x!")
+        raise ValueError(
+            f"Calling get_tensor() with usage {usage} is not valid for this tensor as"
+            f" self.is_colwise={self.is_colwise}!"
+        )
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
         """Applies sharding constraints to a tensor based on logical axis names.
@@ -370,6 +349,11 @@ class ScaledTensor2x(ScaledTensor):
         aux_data = ()
         return (children, aux_data)
 
+    @property
+    def ndim(self):
+        """Number of dimensions of the underlying row-wise tensor."""
+        return self.rowwise_tensor.ndim
+
     def dequantize(self):
         """Dequantizes the tensor using the row-wise component's dequantization.
 
@@ -378,21 +362,21 @@ class ScaledTensor2x(ScaledTensor):
         """
         return self.rowwise_tensor.dequantize()
 
-    def get_rowwise_tensor(self):
-        """Returns the row-wise quantized component.
+    def get_tensor(self, usage: TensorUsage):
+        """Returns the tensor based on the tensor usage."""
+        q_layout_rowwise = self.rowwise_tensor.scaling_mode.get_quantize_layout(usage)
+        q_layout_colwise = self.colwise_tensor.scaling_mode.get_quantize_layout(usage)
 
-        Returns:
-            The row-wise tensor component
-        """
-        return self.rowwise_tensor
+        if q_layout_rowwise == QuantizeLayout.ROWWISE:
+            return self.rowwise_tensor
 
-    def get_colwise_tensor(self):
-        """Returns the column-wise quantized component.
+        if q_layout_colwise == QuantizeLayout.COLWISE:
+            return self.colwise_tensor
 
-        Returns:
-            The column-wise tensor component
-        """
-        return self.colwise_tensor
+        raise ValueError(
+            f"Calling get_tensor() with usage {usage} is not valid for this tensor as"
+            f" q_layout_rowwise={q_layout_rowwise} and q_layout_colwise={q_layout_colwise}!"
+        )
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
         """Applies sharding constraints to a tensor based on logical axis names.

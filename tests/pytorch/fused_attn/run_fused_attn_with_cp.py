@@ -89,7 +89,7 @@ def run_dpa_with_cp(
     # instantiate core attn module
     core_attn = DotProductAttention(
         config.num_heads,
-        config.head_dim_qk,
+        (config.head_dim_qk, config.head_dim_v),
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
@@ -106,16 +106,22 @@ def run_dpa_with_cp(
             config.num_heads,
             config.head_dim_qk,
         )
-        kv_input_shape = (
+        k_input_shape = (
             config.batch_size,
             config.max_seqlen_kv,
             config.num_gqa_groups,
             config.head_dim_qk,
         )
+        v_input_shape = (
+            config.batch_size,
+            config.max_seqlen_kv,
+            config.num_gqa_groups,
+            config.head_dim_v,
+        )
         attn_output_shape = (
             config.batch_size,
             config.max_seqlen_q,
-            config.num_heads * config.head_dim_qk,
+            config.num_heads * config.head_dim_v,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
@@ -128,16 +134,22 @@ def run_dpa_with_cp(
             config.num_heads,
             config.head_dim_qk,
         )
-        kv_input_shape = (
+        k_input_shape = (
             config.max_seqlen_kv,
             config.batch_size,
             config.num_gqa_groups,
             config.head_dim_qk,
         )
+        v_input_shape = (
+            config.max_seqlen_kv,
+            config.batch_size,
+            config.num_gqa_groups,
+            config.head_dim_v,
+        )
         attn_output_shape = (
             config.max_seqlen_q,
             config.batch_size,
-            config.num_heads * config.head_dim_qk,
+            config.num_heads * config.head_dim_v,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
@@ -149,14 +161,19 @@ def run_dpa_with_cp(
             config.num_heads,
             config.head_dim_qk,
         )
-        kv_input_shape = (
+        k_input_shape = (
             config.batch_size * config.max_seqlen_q,
             config.num_gqa_groups,
             config.head_dim_qk,
         )
+        v_input_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_gqa_groups,
+            config.head_dim_v,
+        )
         attn_output_shape = (
             config.batch_size * config.max_seqlen_q,
-            config.num_heads * config.head_dim_qk,
+            config.num_heads * config.head_dim_v,
         )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
@@ -177,8 +194,8 @@ def run_dpa_with_cp(
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
     q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
-    k = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
-    v = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
+    k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
+    v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
     dout_quantizer = Float8Quantizer(
         fp8_dtype=tex.DType.kFloat8E5M2,

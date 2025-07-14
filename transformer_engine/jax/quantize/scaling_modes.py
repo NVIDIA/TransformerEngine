@@ -13,18 +13,52 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from typing import Tuple, Dict
-from functools import reduce
+from functools import reduce, lru_cache
 import operator
 import numpy as np
 
-from jax.experimental.custom_partitioning import CompoundFactor
+from jax.experimental.custom_partitioning import BATCHING
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
-from transformer_engine_jax import JAXX_Scaling_Mode
+from transformer_engine_jax import JAXX_Scaling_Mode, QuantizeLayout
+from .device_utils import is_fp8_gemm_with_all_layouts_supported
 
 
-__all__ = ["QuantizeShardyRules", "ScalingMode"]
+__all__ = [
+    "QuantizeShardyRules",
+    "ScalingMode",
+    "TensorUsage",
+]
+
+
+class TensorUsage(Enum):
+    """Enum indicating tensor usage in GEMM operations.
+
+    Given a GEMM operation: C = A * B in which A and B can be in the normal or transposed form.
+    The tensor usage can be:
+    - LHS: A is in the normal form
+    - LHS_TRANS: A is in the transposed form
+    - RHS: B is in the normal form
+    - RHS_TRANS: B is in the transposed form
+
+    The tensor usage is used in the ScaledTensor.get_tensor() method.
+    """
+
+    # LHS: Left-hand side, RHS: Right-hand side
+    # LHS_TRANS: Left-hand side transposed, RHS_TRANS: Right-hand side transposed
+    LHS = 0
+    LHS_TRANS = 1
+    RHS = 2
+    RHS_TRANS = 3
+
+    def __eq__(self, other):
+        if not isinstance(other, TensorUsage):
+            return False
+        return self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
 
 
 def DIVUP(a, b):
@@ -104,6 +138,18 @@ class ScalingModeMetadataImpl(ABC):
             The shape for scale tensors
         """
 
+    @lru_cache(maxsize=4)
+    @abstractmethod
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+
     @abstractmethod
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis
@@ -157,6 +203,23 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
             return (0,)
         return (1,)
 
+    @lru_cache(maxsize=4)
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+        if is_fp8_gemm_with_all_layouts_supported():
+            return QuantizeLayout.ROWWISE
+
+        if usage in (TensorUsage.LHS, TensorUsage.RHS_TRANS):
+            return QuantizeLayout.ROWWISE
+        return QuantizeLayout.COLWISE
+
     def get_grouped_scale_shape(
         self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
@@ -189,8 +252,9 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
             The Shardy rules for the scaling mode
         """
         del flatten_axis
-        input_spec = tuple(f"x{i}" for i in range(input_rank))
-        return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
+        input_spec = tuple(f"{unique_var}{i}" for i in range(input_rank))
+        scale_var = BATCHING + unique_var + "_scale_inv"
+        return QuantizeShardyRules(input_spec, (scale_var,), (scale_var,), {})
 
 
 class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
@@ -321,6 +385,27 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
+    @lru_cache(maxsize=4)
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+        # If we need to support 1x1x for inference in the future
+        # if QuantizeConfig.INFERENCE_MODE:
+        #     assert usage not in (TensorUsage.LHS_TRANS, TensorUsage.RHS_TRANS), (f"Invalid usage {usage} as we are in MXFP8_1D_SCALING 1x1x (FWD only) mode so no transposed usage is needed!")
+        #     if usage == TensorUsage.LHS:
+        #         return QuantizeLayout.ROWWISE
+        #     return QuantizeLayout.COLWISE
+
+        if usage in (TensorUsage.LHS, TensorUsage.RHS_TRANS):
+            return QuantizeLayout.ROWWISE
+        return QuantizeLayout.COLWISE
+
     def get_grouped_scale_shape(
         self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
@@ -404,31 +489,41 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        input_spec = [f"x{i}" for i in range(input_rank)]
+        del flatten_axis
+        input_spec = [f"{unique_var}{i}" for i in range(input_rank)]
+        rowwise = [f"{unique_var}scale_inv_rowwise{i}" for i in range(input_rank)]
+        colwise = [f"{unique_var}scale_inv_colwise{i}" for i in range(input_rank)]
 
-        # We have to use two different factors in the two CompoundFactors because of Shardy
-        # verifier requirements, even though they are the same.
-        rowwise_var = unique_var
-        colwise_var = f"{unique_var}_"
-        input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
-        input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
+        # NOTE (Alp): Padding the scales breaks the size relationship in CompoundFactors.
+        #             Unfortunately, because Shardy rules are applied to the inner primitive, the
+        #             only way to preserve the relationship is to lower unpadded scales to the
+        #             underlying custom call and pad them in C++. Until that's implemented, the
+        #             Shardy rules for block scales have to be completely disconnected from the
+        #             Shardy rules for the tensor they belong to.
 
-        # The rowwise and colwise scale tensors should be sharded the same way as the input.
-        # However, we need to adjust the dimensions where the block scaling factor applies.
-        rowwise = input_spec.copy()
-        rowwise[-1] = rowwise_var
+        # # We have to use two different factors in the two CompoundFactors because of Shardy
+        # # verifier requirements, even though they are the same.
+        # rowwise_var = unique_var
+        # colwise_var = f"{unique_var}_"
+        # input_spec[flatten_axis - 1] = CompoundFactor(colwise_var, "block_size_colwise")
+        # input_spec[-1] = CompoundFactor(rowwise_var, "block_size_rowwise")
 
-        colwise = input_spec.copy()
-        colwise[flatten_axis - 1] = colwise_var
+        # # The rowwise and colwise scale tensors should be sharded the same way as the input.
+        # # However, we need to adjust the dimensions where the block scaling factor applies.
+        # rowwise = input_spec.copy()
+        # rowwise[-1] = rowwise_var
 
-        # This implementation needs to be updated for different block dims.
-        assert self._block_dims == (1, 32)
+        # colwise = input_spec.copy()
+        # colwise[flatten_axis - 1] = colwise_var
+
+        # # This implementation needs to be updated for different block dims.
+        # assert self._block_dims == (1, 32)
 
         return QuantizeShardyRules(
             tuple(input_spec),
             tuple(rowwise),
             tuple(colwise),
-            {"block_size_rowwise": 32, "block_size_colwise": 32},
+            {},  # {"block_size_rowwise": 32, "block_size_colwise": 32},
         )
 
 
@@ -505,6 +600,17 @@ class ScalingMode(Enum):
             The shape for scale tensors
         """
         return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
+
+    def get_quantize_layout(self, usage: TensorUsage) -> QuantizeLayout:
+        """Get the quantize layout for the tensor usage.
+
+        Args:
+            usage: The usage of the tensor
+
+        Returns:
+            The quantize layout for the tensor usage
+        """
+        return self._get_impl().get_quantize_layout(usage)
 
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis=-1

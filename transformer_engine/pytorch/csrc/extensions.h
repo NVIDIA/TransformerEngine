@@ -14,6 +14,38 @@
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
+ * Router fusion
+ **************************************************************************************************/
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
+    at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
+    c10::optional<int> group_topk, c10::optional<float> scaling_factor, std::string score_function,
+    c10::optional<at::Tensor> expert_bias);
+
+at::Tensor fused_topk_with_score_function_bwd(int num_tokens, int num_experts,
+                                              at::Tensor routing_map,
+                                              at::Tensor intermediate_output, at::Tensor grad_probs,
+                                              int topk, bool use_pre_softmax,
+                                              c10::optional<float> scaling_factor,
+                                              std::string score_function);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
+    at::Tensor logits, int topk, std::string score_function);
+
+at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
+                                            at::Tensor intermediate_output, at::Tensor grad_probs,
+                                            int topk, std::string score_function);
+
+std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
+                                                          at::Tensor tokens_per_expert,
+                                                          int total_num_tokens, int num_experts,
+                                                          int num_rows, int num_cols, int topk,
+                                                          float coeff);
+
+at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
+                                  int num_cols, at::Tensor grad_aux_loss);
+
+/***************************************************************************************************
  * Permutation
  **************************************************************************************************/
 
@@ -108,10 +140,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
-                                             std::optional<std::vector<py::object>> output_list,
-                                             std::vector<py::handle> quantizer_list, DType otype);
-
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
@@ -182,9 +210,16 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
  **************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop);
+                    std::optional<at::Tensor> noop_flag);
 
 py::object dequantize(const py::handle &input, DType otype);
+
+std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
+                                              std::vector<py::handle> quantizer_list);
+
+std::vector<py::object> split_quantize(const at::Tensor &tensor,
+                                       const std::vector<int> &split_sections,
+                                       std::vector<py::handle> quantizer_list);
 
 /***************************************************************************************************
  * Bias gradient fusions
@@ -365,6 +400,9 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
 
+void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
+                               std::vector<size_t> input_row_list,
+                               std::vector<size_t> unpadded_input_row_list);
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/

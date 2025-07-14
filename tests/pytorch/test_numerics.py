@@ -102,7 +102,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
-NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
     # The numerics of all the layers should work the same,
@@ -2322,9 +2322,9 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     if (
         backend == "FusedAttention"
         and get_device_compute_capability() == (8, 9)
-        and get_cudnn_version() < (9, 11, 0)
+        and get_cudnn_version() < (9, 12, 0)
     ):
-        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.11")
+        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.12")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"

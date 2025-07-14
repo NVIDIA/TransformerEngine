@@ -8,7 +8,7 @@ architectures, including support for quantization and automatic differentiation.
 It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
 """
-
+import warnings
 from typing import Tuple, Sequence
 from functools import partial
 import jax
@@ -19,7 +19,18 @@ from .quantize import (
     QuantizerSet,
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
+    TensorUsage,
 )
+
+
+DENSE_BATCH_FIRST_WARNING_ISSUED = False
+
+
+def _issue_batch_first_warning(msg):
+    global DENSE_BATCH_FIRST_WARNING_ISSUED
+    if not DENSE_BATCH_FIRST_WARNING_ISSUED:
+        warnings.warn(msg, UserWarning)
+        DENSE_BATCH_FIRST_WARNING_ISSUED = True
 
 
 def dense(
@@ -29,6 +40,7 @@ def dense(
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
+    batch_first: bool = True,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -42,25 +54,28 @@ def dense(
         kernel: Weight matrix for the dense layer transformation
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
+        batch_first: Assume that X is batched in the first dimension.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
         Transformed output tensor
     """
     # Remove when tex.quantize() can handle quantizer=None
-    if quantizer_set == noop_quantizer_set:
+    if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
-        output = tex.gemm(x, kernel, contracting_dims)
+        output = tex.gemm(x, kernel, contracting_dims=contracting_dims)
         if bias is not None:
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
             output += jnp.reshape(bias, bias_new_shape)
     else:
-        output = _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set)
+        output = _dense(
+            x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
+        )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
-def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set):
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set):
     """Internal implementation of dense layer transformation with custom VJP.
 
     This function implements the core dense layer transformation logic with support
@@ -74,81 +89,126 @@ def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
 
     Returns:
         Transformed output tensor
     """
     output, _ = _dense_fwd_rule(
-        x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set
+        x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
     )
     return output
 
 
-def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set):
+def _dense_fwd_rule(
+    x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
+):
     """Forward pass rule for dense layer transformation.
 
     Returns:
         Tuple of (output, context) for backward pass
     """
-    x_contracting_dims, k_contracting_dims = contracting_dims
+    x_contracting_dims, k_contracting_dims = map(
+        tex.sanitize_dims, (x.ndim, kernel.ndim), contracting_dims
+    )
+
+    # Check supported input layout
+    x_is_transposed = x.ndim - 1 not in x_contracting_dims
+    k_is_transposed = kernel.ndim - 1 in k_contracting_dims
+    assert (
+        not x_is_transposed and not k_is_transposed
+    ), "Dense layer only supports `NN` layout inputs, i.e. non-transposed X and Kernel."
+
+    # Determine X batch dimension
+    # - If `batch_first=True` -> (batch, leading..., contracting...)
+    # - Otherwise             -> (leading..., batch, contracting...)
+    # NOTE: Always assume a single batch dimension
+    x_bdim = None
+    num_cdims = len(x_contracting_dims)
+    if x.ndim >= num_cdims + 2:
+        # Assume X is batched if it has at least +2 dimensions more than the number of contracting
+        # dimensions.
+        if not batch_first:
+            _issue_batch_first_warning(
+                "TE/JAX `dense()` layer implementation does not officially support sequence-first "
+                "inputs and may produce incorrect results when `batch_first=False`. Use "
+                "sequence-first inputs at your own discretion.",
+            )
+        x_bdim = 0 if batch_first else x.ndim - num_cdims - 1
 
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
 
-    casted_x = tex.quantize(x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x)
+    casted_x = tex.quantize(
+        x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x, noop_scaled_tensor=True
+    )
     casted_x = with_sharding_constraint_by_logical_axes(casted_x, input_axes)
 
     casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel
+        kernel,
+        flatten_axis=flatten_axis_k,
+        quantizer=quantizer_set.kernel,
+        noop_scaled_tensor=True,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     # GEMM NN
+    use_bias = bias is not None
     output = tex.gemm(
-        casted_x.get_rowwise_tensor(),
-        casted_kernel.get_colwise_tensor(),
-        (x_contracting_dims, k_contracting_dims),
+        casted_x.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS),
+        contracting_dims=(x_contracting_dims, k_contracting_dims),
+        batched_dims=((x_bdim,), ()),
+        bias=bias if not tex.gemm_uses_jax_dot() else None,
+        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
     )
 
-    use_bias = bias is not None
-    if use_bias:
+    if use_bias and tex.gemm_uses_jax_dot():
         bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
         output += jnp.reshape(bias, bias_new_shape)
 
     ctx = (
-        casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None,
-        casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None,
+        casted_x.get_tensor(usage=TensorUsage.LHS_TRANS),
+        casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS),
         x.shape,
         kernel.shape,
         use_bias,
         quantizer_set,
         flatten_axis_k,
+        x_bdim,
     )
     return output, ctx
 
 
 def _dense_bwd_rule(
-    contracting_dims, input_axes, kernel_axes, ctx, grad
+    contracting_dims, input_axes, kernel_axes, batch_first, ctx, grad
 ):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
     Returns:
         Tuple of gradients with respect to inputs
     """
-    fwd_x_contracting_dims, fwd_k_contracting_dims = contracting_dims
-
     (
-        colwise_casted_x,
-        rowwise_casted_kernel,
+        casted_x_lhs,
+        casted_kernel_rhs,
         x_shape,
         kernel_shape,
         use_bias,
         quantizer_set,
         flatten_axis_k,
+        x_bdim,
     ) = ctx
 
+    fwd_x_contracting_dims, fwd_k_contracting_dims = map(
+        tex.sanitize_dims, (casted_x_lhs.ndim, casted_kernel_rhs.ndim), contracting_dims
+    )
+
     casted_grad, dbias = tex.quantize_dbias(
-        grad, is_dbias=use_bias, flatten_axis=flatten_axis_k, quantizer=quantizer_set.dgrad
+        grad,
+        is_dbias=use_bias,
+        flatten_axis=flatten_axis_k,
+        quantizer=quantizer_set.dgrad,
+        noop_scaled_tensor=True,
     )
 
     # GEMM NT
@@ -161,9 +221,10 @@ def _dense_bwd_rule(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.gemm(
-        casted_grad.get_rowwise_tensor(),
-        rowwise_casted_kernel,
-        (g_contracting_dim, k_contracting_dim),
+        casted_grad.get_tensor(usage=TensorUsage.LHS),
+        casted_kernel_rhs,
+        contracting_dims=(g_contracting_dim, k_contracting_dim),
+        batched_dims=((x_bdim,), ()),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
@@ -174,7 +235,10 @@ def _dense_bwd_rule(
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_contracting_dim, g_contracting_dim)
+        casted_x_lhs,
+        casted_grad.get_tensor(usage=TensorUsage.RHS),
+        contracting_dims=(x_contracting_dim, g_contracting_dim),
+        batched_dims=((x_bdim,), (x_bdim,)),
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
@@ -287,13 +351,6 @@ def _grouped_dense_fwd_rule(
             "and k_contracting_dims=(1,) for now, "
             f"got {x_contracting_dims=} and {k_contracting_dims=}"
         )
-        scaling_mode = quantizer_set.x.scaling_mode
-        if scaling_mode.is_tensor_scaling():
-            k_contracting_dims = (0,)
-        elif scaling_mode.is_1d_block_scaling():
-            k_contracting_dims = (1,)
-        else:
-            raise ValueError(f"Unsupported scaling mode {scaling_mode.value} for grouped_dense")
 
         casted_x = tex.grouped_quantize(
             x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x
@@ -306,11 +363,10 @@ def _grouped_dense_fwd_rule(
         # For x_contracting_dims == (1,) and k_contracting_dims == (1,), we should have
         # rowwise_casted_x.original_shape == (M, K)
         # colwise_casted_kernel.original_shape == (G, N, K)
-        grouped_gemm_x = casted_x.get_rowwise_tensor()
-        grouped_gemm_kernel = casted_kernel.get_colwise_tensor()
-        # TODO(Hua): Shall we give warning/error if not quantizer_set.x.is_2x2x()?
-        ctx_x = casted_x.get_colwise_tensor() if quantizer_set.x.is_2x2x() else None
-        ctx_kernel = casted_kernel.get_rowwise_tensor() if quantizer_set.kernel.is_2x2x() else None
+        grouped_gemm_x = casted_x.get_tensor(usage=TensorUsage.LHS)
+        grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
+        ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
+        ctx_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     output = tex.grouped_gemm(
         grouped_gemm_x,
@@ -388,7 +444,7 @@ def _grouped_dense_bwd_rule(
         g_contracting_dim = (1,)
         k_contracting_dim = (2,)
         dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
-        dgrad_grad = casted_grad.get_rowwise_tensor()
+        dgrad_grad = casted_grad.get_tensor(usage=TensorUsage.LHS)
         dgrad_kernel_T = ctx_kernel
 
         # We need to use g_contracting_dim = (0,) and x_contracting_dim = (0,) to make it work
@@ -398,7 +454,7 @@ def _grouped_dense_bwd_rule(
         x_contracting_dim = (0,)
         wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
         wgrad_x_T = ctx_x
-        wgrad_grad = casted_grad.get_colwise_tensor()
+        wgrad_grad = casted_grad.get_tensor(usage=TensorUsage.RHS)
 
     dgrad = tex.grouped_gemm(
         dgrad_grad,
