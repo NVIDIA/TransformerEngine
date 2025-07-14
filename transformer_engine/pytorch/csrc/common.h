@@ -29,6 +29,7 @@
 #include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
+#include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
@@ -214,6 +215,8 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);

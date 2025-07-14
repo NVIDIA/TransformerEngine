@@ -30,7 +30,7 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
     LOG_FILE="${TEST_CASE}_gpu_${i}.log"
 
     # Run pytest and redirect stdout and stderr to the log file
-    pytest -c "$TE_PATH/tests/jax/pytest.ini" \
+    pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
       -vs "$TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py::TestEncoder::$TEST_CASE" \
       --num-process=$NUM_GPUS \
       --process-id=$i > "$LOG_FILE" 2>&1 &
