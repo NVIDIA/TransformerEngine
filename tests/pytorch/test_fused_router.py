@@ -149,17 +149,16 @@ def run_comparison(
     # Set some parameters
     if score_function == "sigmoid":
         # Construct the special logits to avoid inf in the sigmoid function
-        logits = 1 + torch.arange(num_experts, device="cuda", dtype=dtype) * 0.01
-        logits = logits.unsqueeze(0).repeat(num_tokens, 1)
-        random_values = torch.rand(num_tokens, num_experts, device="cuda")
-        _, indices = torch.sort(random_values, dim=1)
-        logits = torch.gather(logits, 1, indices)
+        offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
+        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
     else:
         logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=dtype) * 1e-4
         logits = logits.view(num_tokens, num_experts)
     logits.requires_grad = True
     if enable_bias and score_function == "sigmoid":
         expert_bias = torch.arange(num_experts, device="cuda") * 0.1
+        expert_bias = torch.flip(expert_bias, dims=[0])
         expert_bias.requires_grad = True
     else:
         expert_bias = None
@@ -214,7 +213,7 @@ def run_comparison(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
+@pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
 @pytest.mark.parametrize("num_experts", [128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("group_topk", [None, 4])
@@ -283,11 +282,9 @@ def test_topk_softmax(
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     if score_function == "sigmoid":
         # Construct the special logits to avoid inf in the sigmoid function
-        logits = 1 + torch.arange(num_experts, device="cuda", dtype=dtype) * 0.01
-        logits = logits.unsqueeze(0).repeat(num_tokens, 1)
-        random_values = torch.rand(num_tokens, num_experts, device="cuda")
-        _, indices = torch.sort(random_values, dim=1)
-        logits = torch.gather(logits, 1, indices)
+        offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
+        logits = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
     else:
         logits = torch.arange(num_tokens * num_experts, device="cuda", dtype=dtype) * 1e-4
         logits = logits.view(num_tokens, num_experts)
@@ -325,11 +322,9 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 @pytest.mark.parametrize("topk", [4])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     # Construct the special probs to avoid inf in the sigmoid function
-    probs = 1 + torch.arange(num_experts, device="cuda", dtype=dtype) * 0.01
-    probs = probs.unsqueeze(0).repeat(num_tokens, 1)
-    random_values = torch.rand(num_tokens, num_experts, device="cuda")
-    _, indices = torch.sort(random_values, dim=1)
-    probs = torch.gather(probs, 1, indices)
+    offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4 
+    probs = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
+    probs = probs.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
     probs = probs.view(num_tokens, num_experts)
     probs.requires_grad = True
 
