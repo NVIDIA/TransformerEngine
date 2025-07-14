@@ -188,11 +188,11 @@ STATS = {
         / sum(_get(buffers, "numel")),
     ),
     "overflows_num": (
-        lambda x, aux_dict: (x > aux_dict[""].max_fwd).sum(),
+        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(x, aux_dict[""]),
         lambda buffers: sum(_get(buffers, "overflows_num")),
     ),
     "overflows%": (
-        lambda x, aux_dict: (x > aux_dict[""].max_fwd).sum()
+        lambda x, aux_dict: compute_fp8_delayed_scaling_overflows_num(x, aux_dict[""])
         / x.numel()
         * 100,
         lambda buffers: 100
