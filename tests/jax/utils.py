@@ -3,11 +3,12 @@
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
 
+import os
 import functools
 import math
 import operator
-from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
-import os
+from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional, NewType
+from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
@@ -20,7 +21,6 @@ from jax import random as jax_random
 import pytest
 
 from transformer_engine.jax.attention import (
-    AttnMaskType,
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
@@ -28,8 +28,8 @@ from transformer_engine.jax.quantize.helper import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-DType = jnp.dtype
-Array = Any
+DType = NewType("DType", jnp.dtype)
+Array = NewType("Array", jnp.ndarray)
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
@@ -1519,7 +1519,7 @@ def dtype_tols(
             TEDType.kFloat8E5M2: jnp.float8_e5m2,
         }[dtype]
     elif isinstance(dtype, np.dtype):
-        dtype = jnp.dtype(dtype)
+        dtype = DType(dtype)
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):
@@ -1600,3 +1600,20 @@ def print_debug_tensor_stats(prefix, tensor, hist=False):
             fmt = fmt + "\n  {}\n  {}"
 
         jax.debug.print(fmt, *args)
+
+
+@contextmanager
+def use_jax_gemm(enabled=False):
+    orig_custom_calls_filter = os.environ.get("NVTE_JAX_CUSTOM_CALLS_RE", None)
+
+    try:
+        if enabled:
+            os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+        yield
+
+    finally:
+        if enabled:
+            if orig_custom_calls_filter is None:
+                os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
+            else:
+                os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = orig_custom_calls_filter

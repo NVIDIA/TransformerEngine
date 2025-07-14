@@ -73,7 +73,6 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Compute dtype
@@ -95,14 +94,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             quantizer = next_op_input_quantizer
 
         # Launch kernel
-        y = self._activation_forward_impl(
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check output tensor
-        if len(y.size()) != x.dim():
-            y = y.view(list(x.shape[:-1]) + [-1])
+        y = self._activation_forward_impl(x, quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -114,7 +106,6 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         ctx.save_for_backward(x)
         ctx.with_quantized_compute = with_quantized_compute
         ctx.dtype = dtype
-        ctx.is_first_op = is_first_op
         ctx.prev_op_grad_input_quantizer = prev_op_grad_input_quantizer
 
         return y
@@ -140,19 +131,10 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             quantizer = ctx.prev_op_grad_input_quantizer
 
         # Launch kernel
-        dx = self._activation_backward_impl(
-            dy.view((-1, dy.size(-1))),
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check grad input tensor
-        if dx.size() != x.size():
-            dx = dx.view(x.size())
+        dx = self._activation_backward_impl(dy, x, quantizer)
 
         # Clear input tensor if possible
-        if not ctx.is_first_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
 
         return dx, ()
 
