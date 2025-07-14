@@ -161,7 +161,6 @@ class RMSNorm(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check tensor dims
@@ -206,7 +205,6 @@ class RMSNorm(BasicOperation):
         if requires_grad:
             ctx.save_for_backward(x, rstdevs)
             ctx.dtype = dtype
-            ctx.has_prev_op = not is_first_op
 
         # Reshape output tensor
         out = y.view(input_dims)
@@ -241,8 +239,7 @@ class RMSNorm(BasicOperation):
         )
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
         clear_tensor_data(rstdevs)
 
         # Reshape results
