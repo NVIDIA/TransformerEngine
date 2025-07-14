@@ -2244,6 +2244,7 @@ class TestSequentialModules:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
     @pytest.mark.parametrize("quantized_compute", (False, True))
@@ -2253,6 +2254,7 @@ class TestSequentialModules:
     def test_layernorm_mlp(
         self,
         *,
+        requires_grad: bool,
         bias: bool,
         normalization: str,
         quantized_compute: bool,
@@ -2293,6 +2295,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            requires_grad=requires_grad,
         )
         _, dy_test = make_reference_and_test_tensors(
             in_shape,

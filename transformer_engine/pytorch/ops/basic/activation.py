@@ -103,10 +103,11 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             x = input_quantizer(x)
 
         # Save state for backward pass
-        ctx.save_for_backward(x)
-        ctx.with_quantized_compute = with_quantized_compute
-        ctx.dtype = dtype
-        ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+        if ctx.requires_grad:
+            ctx.save_for_backward(x)
+            ctx.with_quantized_compute = with_quantized_compute
+            ctx.dtype = dtype
+            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         return y
 

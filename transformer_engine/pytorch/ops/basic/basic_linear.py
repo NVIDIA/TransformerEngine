@@ -947,15 +947,16 @@ class BasicLinear(BasicOperation):
         )
 
         # Save state for backward pass
-        ctx.save_for_backward(x_local, w)
-        ctx.with_quantized_compute = with_quantized_compute
-        ctx.input_quantizer = input_quantizer
-        ctx.weight_quantizer = weight_quantizer
-        ctx.grad_output_quantizer = grad_output_quantizer
-        ctx.grad_input_quantizer = grad_input_quantizer
-        ctx.dtype = dtype
-        ctx.input_requires_grad = input_requires_grad
-        ctx.weight_requires_grad = weight_requires_grad
+        if ctx.requires_grad:
+            ctx.save_for_backward(x_local, w)
+            ctx.with_quantized_compute = with_quantized_compute
+            ctx.input_quantizer = input_quantizer
+            ctx.weight_quantizer = weight_quantizer
+            ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.grad_input_quantizer = grad_input_quantizer
+            ctx.dtype = dtype
+            ctx.input_requires_grad = input_requires_grad
+            ctx.weight_requires_grad = weight_requires_grad
 
         return output
 

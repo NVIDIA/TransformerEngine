@@ -41,7 +41,8 @@ class Reshape(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
-        ctx.input_shape = input_.size()
+        if ctx.requires_grad:
+            ctx.input_shape = input_.size()
         return input_.reshape(*self._shape)
 
     def op_backward(

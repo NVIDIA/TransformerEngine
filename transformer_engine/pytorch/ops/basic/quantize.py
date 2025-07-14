@@ -64,7 +64,8 @@ class Quantize(BasicOperation):
         if quantize_forward and not is_quantized_tensor(out):
             out = self.get_quantizer("forward", 0)(out)
 
-        ctx.quantize_backward = quantize_backward
+        if ctx.requires_grad:
+            ctx.quantize_backward = quantize_backward
         return out
 
     def op_backward(

@@ -356,17 +356,18 @@ class UserbuffersForwardLinear(FusedOperation):
         w = extra_outputs["weight"]
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local, w)
-        linear_op_ctx.with_quantized_compute = with_quantized_compute
-        linear_op_ctx.input_quantizer = input_quantizer
-        linear_op_ctx.weight_quantizer = weight_quantizer
-        linear_op_ctx.grad_output_quantizer = grad_output_quantizer
-        linear_op_ctx.grad_input_quantizer = grad_input_quantizer
-        linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_dims = input_.size()
-        linear_op_ctx.input_requires_grad = input_requires_grad
-        linear_op_ctx.weight_requires_grad = weight_requires_grad
-        if bias_op is not None:
+        if linear_op_ctx.requires_grad:
+            linear_op_ctx.save_for_backward(x_local, w)
+            linear_op_ctx.with_quantized_compute = with_quantized_compute
+            linear_op_ctx.input_quantizer = input_quantizer
+            linear_op_ctx.weight_quantizer = weight_quantizer
+            linear_op_ctx.grad_output_quantizer = grad_output_quantizer
+            linear_op_ctx.grad_input_quantizer = grad_input_quantizer
+            linear_op_ctx.dtype = dtype
+            linear_op_ctx.input_dims = input_.size()
+            linear_op_ctx.input_requires_grad = input_requires_grad
+            linear_op_ctx.weight_requires_grad = weight_requires_grad
+        if bias_op is not None and bias_op_ctx.requires_grad:
             bias_op_ctx.with_quantized_compute = with_quantized_compute
             bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
 

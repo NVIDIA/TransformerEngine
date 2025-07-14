@@ -44,7 +44,7 @@ def set_capture_end() -> None:
     _IS_GRAPH_CAPTURING = False
 
 
-def is_graph_capturing() -> None:
+def is_graph_capturing() -> bool:
     """Return whether within `make_graphed_callables`."""
     return _IS_GRAPH_CAPTURING
 
