@@ -322,7 +322,7 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 @pytest.mark.parametrize("topk", [4])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     # Construct the special probs to avoid inf in the sigmoid function
-    offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4 
+    offset = torch.arange(0, num_tokens, dtype=dtype, device="cuda") * 1e-4
     probs = torch.arange(num_experts, device="cuda", dtype=dtype) * 1e-2
     probs = probs.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
     probs = probs.view(num_tokens, num_experts)
