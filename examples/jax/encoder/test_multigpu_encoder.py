@@ -275,98 +275,89 @@ def train_and_evaluate(args):
             fp8_recipe=fp8_recipe,
             mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None),
         ):
+            encoder = Net(num_embed)
+            inputs = jnp.zeros(input_shape, dtype=jnp.int32)
+            masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
+            abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
+
             sharding_rules = te_flax.extend_logical_axis_rules(tuple())
-            with flax.linen.logical_axis_rules(sharding_rules):
-                encoder = Net(num_embed)
-                inputs = jnp.zeros(input_shape, dtype=jnp.int32)
-                masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
-                abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
+            params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
+            inputs_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None))
+            masks_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None, None, None))
 
-                params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
-                inputs_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None))
-                masks_sharding = NamedSharding(
-                    mesh, PartitionSpec(DEVICE_DP_AXIS, None, None, None)
+            in_shardings = (None, inputs_sharding, masks_sharding)
+            out_shardings = {
+                key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
+            }
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
+            var_collect = jit_encoder_init(init_rngs, inputs, masks)
+
+            optimizer = optax.adamw(args.lr)
+            var_collect, params = flax.core.pop(var_collect, PARAMS_KEY)
+            state = train_state.TrainState.create(
+                apply_fn=encoder.apply, params=params, tx=optimizer
+            )
+            state_sharding = get_state_sharding(state, params_sharding)
+            labels_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(
+                    DEVICE_DP_AXIS,
+                ),
+            )
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
+            out_shardings = (state_sharding, None, None, None)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
+
+            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
+            out_shardings = (None, None)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
+
+            if args.use_fp8:
+                labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
+                check_fp8(state, var_collect, inputs, masks, labels)
+
+            if args.dry_run:
+                labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
+                rngs = {DROPOUT_KEY: dropout_rng}
+                jit_train_step(state, inputs, masks, labels, var_collect, rngs)
+                print("PASSED")
+                return None
+
+            for epoch in range(1, args.epochs + 1):
+                rng, input_rng = jax.random.split(rng)
+                rng, dropout_rng = jax.random.split(rng)
+                rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
+
+                state, train_loss, train_accuracy, var_collect = train_epoch(
+                    state, train_ds, args.batch_size, rngs, var_collect, jit_train_step
                 )
 
-                in_shardings = (None, inputs_sharding, masks_sharding)
-                out_shardings = {
-                    key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
-                }
-                jit_encoder_init = jax.jit(
-                    encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
-                )
-                var_collect = jit_encoder_init(init_rngs, inputs, masks)
-
-                optimizer = optax.adamw(args.lr)
-                var_collect, params = flax.core.pop(var_collect, PARAMS_KEY)
-                state = train_state.TrainState.create(
-                    apply_fn=encoder.apply, params=params, tx=optimizer
-                )
-                state_sharding = get_state_sharding(state, params_sharding)
-                labels_sharding = NamedSharding(
-                    mesh,
-                    PartitionSpec(
-                        DEVICE_DP_AXIS,
-                    ),
-                )
-                in_shardings = (
-                    state_sharding,
-                    inputs_sharding,
-                    masks_sharding,
-                    labels_sharding,
-                    None,
-                    None,
-                )
-                out_shardings = (state_sharding, None, None, None)
-                jit_train_step = jax.jit(
-                    train_step, in_shardings=in_shardings, out_shardings=out_shardings
+                test_loss, test_accuracy = eval_model(
+                    state, test_ds, args.test_batch_size, var_collect, jit_eval_step
                 )
 
-                in_shardings = (
-                    state_sharding,
-                    inputs_sharding,
-                    masks_sharding,
-                    labels_sharding,
-                    None,
-                )
-                out_shardings = (None, None)
-                jit_eval_step = jax.jit(
-                    eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+                print(
+                    f"Epoch: {epoch:>2} "
+                    f"Train Loss: {train_loss:.6f} "
+                    f"Train Accuracy: {train_accuracy:.6f} "
+                    f"Test Loss: {test_loss:.6f} "
+                    f"Test Accuracy: {test_accuracy:.6f} "
                 )
 
-                if args.use_fp8:
-                    labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                    check_fp8(state, var_collect, inputs, masks, labels)
-
-                if args.dry_run:
-                    labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
-                    rngs = {DROPOUT_KEY: dropout_rng}
-                    jit_train_step(state, inputs, masks, labels, var_collect, rngs)
-                    print("PASSED")
-                    return None
-
-                for epoch in range(1, args.epochs + 1):
-                    rng, input_rng = jax.random.split(rng)
-                    rng, dropout_rng = jax.random.split(rng)
-                    rngs = {INPUT_KEY: input_rng, DROPOUT_KEY: dropout_rng}
-
-                    state, train_loss, train_accuracy, var_collect = train_epoch(
-                        state, train_ds, args.batch_size, rngs, var_collect, jit_train_step
-                    )
-
-                    test_loss, test_accuracy = eval_model(
-                        state, test_ds, args.test_batch_size, var_collect, jit_eval_step
-                    )
-
-                    print(
-                        f"Epoch: {epoch:>2} "
-                        f"Train Loss: {train_loss:.6f} "
-                        f"Train Accuracy: {train_accuracy:.6f} "
-                        f"Test Loss: {test_loss:.6f} "
-                        f"Test Accuracy: {test_accuracy:.6f} "
-                    )
-
-                return [train_loss, train_accuracy, test_loss, test_accuracy]
+            return [train_loss, train_accuracy, test_loss, test_accuracy]
 
 
 def encoder_parser(args):

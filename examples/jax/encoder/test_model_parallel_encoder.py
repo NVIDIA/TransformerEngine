@@ -262,36 +262,35 @@ def train_and_evaluate(args):
         fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
-    with te.fp8_autocast(
-        enabled=args.use_fp8,
-        fp8_recipe=fp8_recipe,
-        mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
+    with jax.sharding.Mesh(
+        devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
+    ) as mesh, nn_partitioning.axis_rules(
+        ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
     ):
-        # Get the base axis rules and extend them with TE's rules.
-        axis_rules = flax.linen.get_logical_axis_rules()
-        axis_rules += ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
-        te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
+        rng = jax.random.PRNGKey(args.seed)
+        rng, params_rng = jax.random.split(rng)
+        rng, dropout_rng = jax.random.split(rng)
+        init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
 
-        with jax.sharding.Mesh(
-            devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-        ) as mesh, flax.linen.logical_axis_rules(te_extended_axis_rules):
+        input_shape = [args.batch_size, args.max_seq_len]
+        mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
+        label_shape = [args.batch_size]
 
-            print(f"Device mesh: {mesh}")
-            print(f"Axis rules: {te_extended_axis_rules}")
-
-            rng = jax.random.PRNGKey(args.seed)
-            rng, params_rng = jax.random.split(rng)
-            rng, dropout_rng = jax.random.split(rng)
-            init_rngs = {PARAMS_KEY: params_rng, DROPOUT_KEY: dropout_rng}
-
-            input_shape = [args.batch_size, args.max_seq_len]
-            mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
-            label_shape = [args.batch_size]
-
+        with te.fp8_autocast(
+            enabled=args.use_fp8,
+            fp8_recipe=fp8_recipe,
+            mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
+        ):
             encoder = Net(num_embed, args.enable_sp)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
+
+            # Get the base axis rules and extend them with TE's rules.
+            axis_rules = nn_partitioning.get_axis_rules()
+            te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
+            print(f"Device mesh: {mesh}")
+            print(f"Axis rules: {te_extended_axis_rules}")
 
             logical_partition_spec = nn.get_partition_spec(abs_var_collect)
 

@@ -180,9 +180,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
-        # (b, h, q, k): Last two axes are always replicated
         attn_weights = with_sharding_constraint_by_logical_axes(
-            attn_weights, (BATCH_AXES, HEAD_AXES, None, None)
+            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES)
         )
 
         # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
