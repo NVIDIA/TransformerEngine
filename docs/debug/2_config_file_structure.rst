@@ -107,6 +107,8 @@ The ``TransformerLayer`` in Transformer Engine is a composition of multiple sub-
 
 depending on the configuration. Some layers, like ``LayerNormLinear``, are fusions of two layers: ``LayerNorm`` and ``Linear``. When referring to such layers in precision debug tools, only the ``Linear`` part is affected.
 
+For `GroupedLinear` layer, the names of underlying GEMMS are of the form `layer_name.gemm_n`, where `n` is the index of the GEMM.
+
 Below is an example ``TransformerLayer`` with four linear layers that can be influenced by the precision debug tools.
 
 .. figure:: ./img/names.svg

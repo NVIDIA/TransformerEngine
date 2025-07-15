@@ -904,6 +904,6 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            [DebugQuantizer(self.name + f"_{q_id}", name, q, self.tp_group) for q_id, q in enumerate(qs)]
+            [DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group) for q_id, q in enumerate(qs)]
             for name, qs in zip(names, original_quantizers)
         )
