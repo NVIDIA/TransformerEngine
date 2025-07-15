@@ -66,7 +66,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorBase,
@@ -216,6 +216,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_weight = cast_if_needed(ln_weight, activation_dtype)
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
+        start_offload_if_offload_enabled(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
@@ -505,11 +506,6 @@ class _LayerNormMLP(torch.autograd.Function):
             if isinstance(fc2_weight_final, QuantizedTensorBase):
                 fc2_weight_final.update_usage(columnwise_usage=True)
 
-            if cpu_offloading:
-                mark_activation_offload(
-                    inputmat, mu, rsigma, ln_out, fc1_out, fc1_out_without_bias, act_out
-                )
-
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves
@@ -534,6 +530,19 @@ class _LayerNormMLP(torch.autograd.Function):
             if not fc2_weight.requires_grad:
                 clear_tensor_data(act_out)
                 act_out = None
+
+            if cpu_offloading:
+                mark_is_weight(
+                    ln_weight,
+                    ln_bias,
+                    fc1_weight_final,
+                    fc1_weight,
+                    fc1_bias,
+                    fc2_weight_final,
+                    fc2_weight,
+                    fc2_bias,
+                )
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,
@@ -550,22 +559,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 mu,
                 rsigma,
             )
-
-            if fuse_wgrad_accumulation:
-                # This check is needed to ensure that main_grad is not created
-                # during the forward pass when using MCore FSDP as it creates
-                # the main_grad buffer lazily before backprop
-                if hasattr(fc1_weight, "__fsdp_param__") and hasattr(fc2_weight, "__fsdp_param__"):
-                    # MCore FSDP creates main_grad lazily before backward
-                    ctx.fc1_main_grad_func = (
-                        fc1_weight.get_main_grad if fc1_weight.requires_grad else lambda: None
-                    )
-                    ctx.fc2_main_grad_func = (
-                        fc2_weight.get_main_grad if fc2_weight.requires_grad else lambda: None
-                    )
-                else:
-                    ctx.fc1_main_grad_func = lambda: fc1_weight.main_grad
-                    ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
 
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
@@ -591,7 +584,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
@@ -662,28 +654,6 @@ class _LayerNormMLP(torch.autograd.Function):
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
-
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            fc1_weight_main_grad = (
-                ctx.fc1_main_grad_func()
-                if fc1_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc1_weight_requires_grad
-                else None
-            )
-            fc2_weight_main_grad = (
-                ctx.fc2_main_grad_func()
-                if origin_fc2_weight is not None
-                and ctx.fuse_wgrad_accumulation
-                and ctx.fc2_weight_requires_grad
-                else None
-            )
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.fuse_wgrad_accumulation:
-                origin_fc1_weight.main_grad = fc1_weight_main_grad
-                origin_fc2_weight.main_grad = fc2_weight_main_grad
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP
