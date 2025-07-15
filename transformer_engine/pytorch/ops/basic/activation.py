@@ -12,7 +12,7 @@ import torch
 
 import transformer_engine_torch as tex
 from ...fp8 import FP8GlobalStateManager
-from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
+from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
@@ -71,8 +71,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
 
         # Compute dtype
@@ -88,24 +88,13 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         x = maybe_dequantize(input_.contiguous(), dtype)
 
         # Check if quantized compute is enabled
-        quantized_compute_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         quantizer = None
-        if (
-            quantized_compute_enabled
-            and next_op is not None
-            and next_op.num_quantizers("forward") > 0
-        ):
-            quantizer = next_op.get_quantizer("forward", 0)
+        if with_quantized_compute:
+            quantizer = next_op_input_quantizer
 
         # Launch kernel
-        y = self._activation_forward_impl(
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check output tensor
-        if y.dim() != x.dim():
-            y = y.view(list(x.shape[:-1]) + [-1])
+        y = self._activation_forward_impl(x, quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -114,10 +103,10 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             x = input_quantizer(x)
 
         # Save state for backward pass
-        ctx.save_for_backward(x.detach())
-        ctx.quantized_compute_enabled = quantized_compute_enabled
+        ctx.save_for_backward(x)
+        ctx.with_quantized_compute = with_quantized_compute
         ctx.dtype = dtype
-        ctx.prev_op = prev_op
+        ctx.prev_op_grad_input_quantizer = prev_op_grad_input_quantizer
 
         return y
 
@@ -138,27 +127,14 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Check if quantized compute is enabled
         quantizer = None
-        if (
-            ctx.quantized_compute_enabled
-            and ctx.prev_op is not None
-            and ctx.prev_op.num_quantizers("backward") > 0
-        ):
-            quantizer = ctx.prev_op.get_quantizer("backward", 0)
+        if ctx.with_quantized_compute:
+            quantizer = ctx.prev_op_grad_input_quantizer
 
         # Launch kernel
-        dx = self._activation_backward_impl(
-            dy.view((-1, dy.size(-1))),
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check grad input tensor
-        if dx.size() != x.size():
-            dx = dx.view(x.size())
+        dx = self._activation_backward_impl(dy, x, quantizer)
 
         # Clear input tensor if possible
-        if ctx.prev_op is not None:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
 
         return dx, ()
 

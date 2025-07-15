@@ -47,6 +47,15 @@ enum class JAXX_Scaling_Mode : int64_t {
   CURRENT_TENSOR_SCALING = 3,
 };
 
+inline bool is_tensor_scaling(const JAXX_Scaling_Mode &mode) {
+  return (mode == JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING ||
+          mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING);
+}
+
+inline bool is_block_scaling(const JAXX_Scaling_Mode &mode) {
+  return (mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING);
+}
+
 static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
   switch (mode) {
     case JAXX_Scaling_Mode::NO_SCALING:

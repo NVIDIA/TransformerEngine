@@ -14,6 +14,7 @@ from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
 )
+from ...tensor import Quantizer
 
 
 class Reshape(BasicOperation):
@@ -37,8 +38,8 @@ class Reshape(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         ctx.input_shape = input_.size()
         return input_.reshape(*self._shape)
