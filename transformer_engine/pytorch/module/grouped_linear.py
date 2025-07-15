@@ -208,9 +208,18 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_requires_grad = weights[0].requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
-                ctx.main_grads = [weights[i].main_grad for i in range(num_gemms)]
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(weights[0], "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.main_grad_funcs = [weights[i].get_main_grad for i in range(num_gemms)]
+                else:
+                    ctx.main_grad_funcs = [
+                        lambda j=i: weights[j].main_grad for i in range(num_gemms)
+                    ]
             else:
-                ctx.main_grads = [None] * num_gemms
+                ctx.main_grad_funcs = [lambda: None for i in range(num_gemms)]
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
@@ -246,7 +255,7 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[N : 2 * N]
             origin_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
-            main_grads = ctx.main_grads
+            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
                 for i in range(ctx.num_gemms):
