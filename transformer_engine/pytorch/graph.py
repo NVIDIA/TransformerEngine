@@ -721,7 +721,7 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: Recipe,
+    fp8_recipe: Optional[Recipe],
 ) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
@@ -777,7 +777,7 @@ def make_graphed_callables(
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     fp8_enabled: bool = False,
     fp8_calibrating: bool = False,
-    fp8_recipe: Optional[DelayedScaling] = None,
+    fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
@@ -828,7 +828,7 @@ def make_graphed_callables(
                      data of fp8 tensors even when executing without fp8 enabled. This is
                      useful for saving an inference ready fp8 checkpoint while training
                      using a higher precision.
-    fp8_recipe: recipe.DelayedScaling, default = `None`
+    fp8_recipe: Recipe, default = `None`
                 recipe used for FP8 training.
     fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
                distributed group over which amaxes for the fp8 tensors
@@ -844,7 +844,10 @@ def make_graphed_callables(
     """
     set_capture_start()
 
-    fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
+    if fp8_enabled and fp8_recipe is None:
+        fp8_recipe = get_default_fp8_recipe()
+    elif not fp8_enabled:
+        fp8_recipe = None
 
     # Handle single module.
     just_one_callable = False

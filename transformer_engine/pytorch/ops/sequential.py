@@ -181,8 +181,8 @@ class Sequential(torch.nn.Module):
         for module_group in self._module_groups:
             if isinstance(module_group, OperationFuser):
                 xs, extra_inputs = (
-                    (x,) + extra_inputs[:module_group.num_extra_inputs],
-                    extra_inputs[module_group.num_extra_inputs:],
+                    (x,) + extra_inputs[: module_group.num_extra_inputs],
+                    extra_inputs[module_group.num_extra_inputs :],
                 )
                 xs = module_group(*xs)
                 if isinstance(xs, tuple):

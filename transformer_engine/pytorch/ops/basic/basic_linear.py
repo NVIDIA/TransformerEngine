@@ -291,6 +291,14 @@ class BasicLinear(BasicOperation):
         # Quantize if needed
         if self._with_quantized_weight:
             quantizer = self.get_quantizer("forward", 1)
+            if quantizer is None:
+                raise RuntimeError(
+                    "Tried to quantize weight with deferred initialization "
+                    "due to meta device, but no quantizer was available. "
+                    "This is most likely because fp8_model_init was called "
+                    "with enabled=True and recipe=None, instead of providing "
+                    "a recipe to use for quantization."
+                )
             quantizer.set_usage(
                 rowwise=True,
                 columnwise=torch.is_grad_enabled(),
@@ -308,13 +316,13 @@ class BasicLinear(BasicOperation):
         *,
         recipe: Optional[Recipe],
     ) -> None:
-        super().pre_first_forward(recipe=recipe)
-
         # Initialize weights if needed
         weight = self.weight
         if weight.device.type == "meta":
             self.reset_parameters()
             weight = self.weight
+
+        super().pre_first_forward(recipe=recipe)
 
         # Configure quantizers
         if recipe is not None:
@@ -903,21 +911,13 @@ class BasicLinear(BasicOperation):
         weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
 
         # FP8 metadata
+        input_quantizer = self.get_quantizer("forward", 0)
+        weight_quantizer = self.get_quantizer("forward", 1)
+        output_quantizer = next_op_input_quantizer
+        grad_output_quantizer = self.get_quantizer("backward", 0)
+        grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        input_quantizer = None
-        weight_quantizer = None
-        output_quantizer = None
-        grad_output_quantizer = None
-        grad_input_quantizer = None
         if with_quantized_compute:
-
-            # Get quantizers
-            input_quantizer = self.get_quantizer("forward", 0)
-            weight_quantizer = self.get_quantizer("forward", 1)
-            output_quantizer = next_op_input_quantizer
-            grad_output_quantizer = self.get_quantizer("backward", 0)
-            grad_input_quantizer = prev_op_grad_output_quantizer
-
             # Configure quantizers
             # Note: We cache the quantized input for backward pass,
             # but discard the quantized weights.

@@ -188,6 +188,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Objects for quantization
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
         self._fp8_metas: Optional[dict[str, dict[str, Any]]] = None
+        if FP8GlobalStateManager.with_fp8_parameters():
+            self._reset_quantization_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
 
     @property
     def is_fused_op(self) -> bool:
@@ -327,7 +329,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         mode: str,
         index: int,
-    ) -> Quantizer:
+    ) -> Optional[Quantizer]:
         """Get builder class for quantized tensor
 
         Parameters
@@ -337,7 +339,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
         if self._quantizers is None:
-            self._reset_quantization_recipe_state(recipe=FP8GlobalStateManager.get_fp8_recipe())
+            return None
         return self._quantizers[mode][index]
 
     @torch.no_grad()

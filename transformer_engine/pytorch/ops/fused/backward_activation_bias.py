@@ -66,11 +66,6 @@ class BackwardActivationBias(FusedOperation):
         dy = maybe_dequantize(grad_output.contiguous(), act_input.dtype)
 
         # Get previous op quantizer
-        if not bias_op_ctx.with_quantized_compute:
-            raise RuntimeError(
-                "BackwardActivationBias requires quantized compute, "
-                "but Bias context has it disabled"
-            )
         quantizer = bias_op_ctx.grad_input_quantizer
         if quantizer is None:
             raise RuntimeError(

@@ -132,12 +132,12 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             prev_op_idx = basic_op_idxs[0] - 1
             prev_op = fuser._basic_ops[prev_op_idx] if prev_op_idx >= 0 else None
             prev_op_grad_output_quantizer = None
-            if prev_op is not None and with_quantized_compute:
+            if prev_op is not None:
                 prev_op_grad_output_quantizer = prev_op.get_grad_output_quantizer()
             next_op_idx = basic_op_idxs[-1] + 1
             next_op = fuser._basic_ops[next_op_idx] if next_op_idx < fuser._num_basic_ops else None
             next_op_input_quantizer = None
-            if next_op is not None and with_quantized_compute:
+            if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
             x, fused_op_extra_outputs = op.fuser_forward(
@@ -346,7 +346,7 @@ class OperationFuser:
         self.first_op_requiring_backward = 0
 
         # Flatten list of parameters
-        self._basic_op_params = [[param for param in op.parameters()] for op in self._basic_ops]
+        self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
         self._basic_op_num_params = list(map(len, self._basic_op_params))
         self._flat_basic_op_params = sum(self._basic_op_params, [])
 
