@@ -183,9 +183,8 @@ def general_grouped_gemm(
             )
         if single_output:
             out = torch.cat(out, dim=0)
-        
-        return out, bias, gelu_input
 
+        return out, bias, gelu_input
 
     if gelu:
         gelu_input = [

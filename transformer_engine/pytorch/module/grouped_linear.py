@@ -218,7 +218,6 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
-
             ctx.grad_input_quantizers = grad_input_quantizers
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
@@ -466,7 +465,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             *wgrad_list,
             *grad_biases,
-            None
+            None,
         )
 
 
@@ -729,14 +728,16 @@ class GroupedLinear(TransformerEngineBaseModule):
             weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
-            quantizers = (
-                self._get_quantizers()
-                if not debug
-                else self._get_debug_quantizers()
-            )
+            quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
 
-            input_quantizers, weight_quantizers, output_quantizers,\
-                 grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers = quantizers
+            (
+                input_quantizers,
+                weight_quantizers,
+                output_quantizers,
+                grad_input_quantizers,
+                grad_weight_quantizers,
+                grad_output_quantizers,
+            ) = quantizers
 
             if debug:
                 if not any_feature_enabled(list(chain(*quantizers))):
@@ -865,15 +866,18 @@ class GroupedLinear(TransformerEngineBaseModule):
         for i in range(self.num_gemms):
             weight_quantizers[i].internal = True
         return weight_quantizers
-    
+
     def _get_quantizers(self):
         weight_quantizers = self._get_weight_quantizers()
         input_quantizers, output_quantizers = (
             [None] * self.num_gemms,
             [None] * self.num_gemms,
         )
-        grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers =\
-            [None] * self.num_gemms, [None] * self.num_gemms, [None] * self.num_gemms
+        grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers = (
+            [None] * self.num_gemms,
+            [None] * self.num_gemms,
+            [None] * self.num_gemms,
+        )
         if self.fp8:
             input_quantizers = [
                 self.quantizers["scaling_fwd"][
@@ -893,17 +897,25 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ]
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
-        return input_quantizers, weight_quantizers, output_quantizers,\
-                 grad_input_quantizers, grad_weight_quantizers, grad_output_quantizers
-        
+        return (
+            input_quantizers,
+            weight_quantizers,
+            output_quantizers,
+            grad_input_quantizers,
+            grad_weight_quantizers,
+            grad_output_quantizers,
+        )
+
     def _get_debug_quantizers(self):
         original_quantizers = self._get_quantizers()
         assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            [DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group) for q_id, q in enumerate(qs)]
+            [
+                DebugQuantizer(self.name + f".gemm_{q_id}", name, q, self.tp_group)
+                for q_id, q in enumerate(qs)
+            ]
             for name, qs in zip(names, original_quantizers)
         )
