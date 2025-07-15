@@ -122,6 +122,7 @@ def general_grouped_gemm(
     A: List[torch.Tensor],
     B: List[torch.Tensor],
     out: List[torch.Tensor],
+    quantization_params: Optional[Quantizer],
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
     layout: str = "TN",
@@ -162,6 +163,29 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    if isinstance(quantization_params, DebugQuantizer):
+        for i in range(num_gemms):
+            general_gemm(
+                A[i],
+                B[i],
+                workspaces[i],
+                quantization_params=quantization_params[i],
+                out_dtype=out_dtype,
+                layout=layout,
+                gelu=gelu,
+                gelu_in=gelu_input[i],
+                accumulate=accumulate,
+                out=out[i],
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+                grad=grad,
+            )
+        if single_output:
+            out = torch.cat(out, dim=0)
+        
+        return out, bias, gelu_input
+
 
     if gelu:
         gelu_input = [
