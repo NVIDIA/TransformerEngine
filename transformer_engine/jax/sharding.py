@@ -151,7 +151,9 @@ def with_sharding_constraint_by_logical_axes(
     warnings.warn(
         "TransformerEngine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated and"
         " will be removed in a future version. Please use Flax logical axes with a"
-        " flax.linen.logical_axis_rules context instead.",
+        " flax.linen.logical_axis_rules context and optionally use"
+        " transformer_engine.jax.flax.extend_logical_axis_rules to add BATCH_AXES, etc. to your"
+        " rules.",
         DeprecationWarning,
     )
 
