@@ -1271,9 +1271,7 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("recipe", fp8_recipes + [None])
-def test_linear_accuracy_save_original_input(
-    dtype, model, recipe
-):
+def test_linear_accuracy_save_original_input(dtype, model, recipe):
     bs = 1
     fuse_wgrad_accumulation = True
     fp8_model_params = False
