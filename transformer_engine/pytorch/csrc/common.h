@@ -98,8 +98,8 @@ class Quantizer {
 
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
-  virtual std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const = 0;
+  virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                             DType dtype) const = 0;
 
   virtual ~Quantizer() = default;
 
@@ -120,11 +120,11 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype, at::Tensor data) const;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Tensor data) const;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -140,13 +140,13 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> data, std::optional<at::Tensor> transpose,
-      std::optional<at::Tensor> scale_inv) const;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     std::optional<at::Tensor> data,
+                                                     std::optional<at::Tensor> transpose,
+                                                     std::optional<at::Tensor> scale_inv) const;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -166,8 +166,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
 };
 
 class Float8BlockQuantizer : public Quantizer {
@@ -199,8 +199,8 @@ class Float8BlockQuantizer : public Quantizer {
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -215,8 +215,8 @@ class MXFP8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };

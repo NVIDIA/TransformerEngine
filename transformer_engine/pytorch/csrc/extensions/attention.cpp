@@ -375,16 +375,16 @@ std::vector<py::object> fused_attn_bwd(
       NVTE_ERROR("QKV layout not supported!");
   }
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    auto* fp8_quantizer = dynamic_cast<Float8Quantizer*>(dQKV_quantizer.get());
+    auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
     NVTE_CHECK(fp8_quantizer != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_dQ, py_dQ) = fp8_quantizer->create_tensor(q_shape, fake_dtype_te, dQ,
-                                                          std::nullopt, std::nullopt);
-    std::tie(te_dK, py_dK) = fp8_quantizer->create_tensor(k_shape, fake_dtype_te, dK,
-                                                          std::nullopt, std::nullopt);
-    std::tie(te_dV, py_dV) = fp8_quantizer->create_tensor(v_shape, fake_dtype_te, dV,
-                                                          std::nullopt, std::nullopt);
+    std::tie(te_dQ, py_dQ) =
+        fp8_quantizer->create_tensor(q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
+    std::tie(te_dK, py_dK) =
+        fp8_quantizer->create_tensor(k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
+    std::tie(te_dV, py_dV) =
+        fp8_quantizer->create_tensor(v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
   } else {
-    auto* none_quantizer = dynamic_cast<NoneQuantizer*>(dQKV_quantizer.get());
+    auto *none_quantizer = dynamic_cast<NoneQuantizer *>(dQKV_quantizer.get());
     NVTE_CHECK(none_quantizer != nullptr, "Expected NoneQuantizer when dtype is not FP8");
     std::tie(te_dQ, py_dQ) = none_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
     std::tie(te_dK, py_dK) = none_quantizer->create_tensor(k_shape, fake_dtype_te, dK);

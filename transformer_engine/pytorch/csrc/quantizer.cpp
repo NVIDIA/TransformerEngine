@@ -37,15 +37,16 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
   this->dtype = type;
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
+                                                                  DType dtype) const {
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto opts = at::TensorOptions().dtype(GetATenDType(dtype)).device(torch::kCUDA);
   return create_tensor(shape, dtype, at::empty(shape_int64, opts));
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, at::Tensor data) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
+                                                                  DType dtype,
+                                                                  at::Tensor data) const {
   py::object out_py = py::cast(data);
   TensorWrapper out_cpp;
   out_cpp.set_rowwise_data(data.data_ptr(), dtype, shape);
@@ -104,21 +105,18 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   };
 
   // Construct FP8 tensor
-  return create_tensor(shape, dtype, std::move(data),
-                       std::move(transpose), std::move(scale_inv));
+  return create_tensor(shape, dtype, std::move(data), std::move(transpose), std::move(scale_inv));
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
-    std::optional<at::Tensor> transpose,
-    std::optional<at::Tensor> scale_inv) const {
+    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv) const {
   using namespace pybind11::literals;
 
   // Initialize data tensor
   at::Tensor data_tensor;
   if (rowwise_usage) {
-    NVTE_CHECK(data,
-               "Constructing Float8Tensor with row-wise usage, but no FP8 data was provided");
+    NVTE_CHECK(data, "Constructing Float8Tensor with row-wise usage, but no FP8 data was provided");
     data_tensor = std::move(*data);
   }
   py::object data_py = rowwise_usage ? py::cast(data_tensor) : py::none();
@@ -127,8 +125,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   at::Tensor transpose_tensor;
   const bool with_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
   if (with_transpose) {
-    NVTE_CHECK(transpose,
-               "Constructing Float8Tensor with column-wise usage, but no FP8 transpose was provided");
+    NVTE_CHECK(
+        transpose,
+        "Constructing Float8Tensor with column-wise usage, but no FP8 transpose was provided");
     transpose_tensor = std::move(*transpose);
   }
   py::object transpose_py = with_transpose ? py::cast(transpose_tensor) : py::none();
@@ -508,8 +507,8 @@ void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype) const {
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
+                                                                   DType dtype) const {
   using namespace pybind11::literals;
 
   // Tensor dimensions
@@ -546,7 +545,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 
   // Construct Python MXFP8 tensor
   py::object out_py;
-  auto py_cast = [] (at::Tensor &tensor, bool need_cast) -> py::object {
+  auto py_cast = [](at::Tensor& tensor, bool need_cast) -> py::object {
     return need_cast ? py::cast(tensor) : py::none();
   };
   py::object rowwise_data_py = py_cast(rowwise_data_tensor, rowwise_usage);
@@ -555,14 +554,16 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   py::object columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
   if (internal) {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorBasePythonClass));
-    out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
+    out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py,
+                              "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
                               "columnwise_scale_inv"_a = columnwise_scale_inv_py,
                               "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
   } else {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass));
     out_py = MXFP8TensorClass("shape"_a = shape_int64, "dtype"_a = GetATenDType(dtype),
-                              "rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
+                              "rowwise_data"_a = rowwise_data_py,
+                              "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
                               "columnwise_scale_inv"_a = columnwise_scale_inv_py,
                               "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
