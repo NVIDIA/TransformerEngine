@@ -23,6 +23,7 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
+from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 
 
@@ -178,8 +179,9 @@ class LayerNorm(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
+        if is_in_onnx_export_mode():
+            return self.op_onnx_forward(input_)
 
         # Check tensor dims
         weight = self.weight
@@ -225,7 +227,6 @@ class LayerNorm(BasicOperation):
         if requires_grad:
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
-            ctx.has_prev_op = not is_first_op
 
         # Reshape output tensor
         out = y.view(input_dims)
@@ -261,8 +262,7 @@ class LayerNorm(BasicOperation):
         )
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
         clear_tensor_data(means)
         clear_tensor_data(rstdevs)
 
@@ -271,3 +271,13 @@ class LayerNorm(BasicOperation):
         grad_weight = dw.view(weight_dims)
         grad_bias = db.view(weight_dims)
         return grad_input, (grad_weight, grad_bias)
+
+    def op_onnx_forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        """Every operand in this function has a defined ONNX translation."""
+        weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+        return torch.nn.functional.layer_norm(
+            input_, input_.shape[-1:], weight, self.bias, self.eps
+        )

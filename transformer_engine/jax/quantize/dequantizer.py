@@ -36,6 +36,22 @@ class Dequantizer(ABC):
         """Dequantizing given tensor to higher precision."""
 
 
+@dataclass
+class NoopDequantizer(Dequantizer):
+    """No-op Dequantizer Class"""
+
+    @staticmethod
+    def _dequantize_func(data, *args, **kwargs):
+        """A no-op dequantize function that returns the data without any changes."""
+        del args, kwargs
+        return data
+
+    @staticmethod
+    def dequantize(scaled_tensor):
+        """A no-op dequantize function that simply returns the data array in the ScaledTensor."""
+        return scaled_tensor.data
+
+
 class TensorScaleDequantizer(Dequantizer):
     """
     TensorScaling Dequantizer Class
@@ -152,6 +168,7 @@ ScalingModeToDequantizerMap = {
     ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.CURRENT_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
+    ScalingMode.NO_SCALING: NoopDequantizer,
 }
 
 
