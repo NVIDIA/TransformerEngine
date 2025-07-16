@@ -38,12 +38,11 @@ DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
     case xla::ffi::DataType::F8E4M3FN:
       return DType::kFloat8E4M3;
       break;
-    // case xla::ffi::DataType::F8E8M0FNU:
-    //   return DType::kFloat8E8M0;
-    //   break;
+    case xla::ffi::DataType::F8E8M0FNU:
+      return DType::kFloat8E8M0;
+      break;
     default:
       auto type_num = static_cast<XLA_FFI_DataType>(type);
-      if (type_num == 33) return DType::kFloat8E8M0;
       NVTE_ERROR("TE does not support conversion of XLA_FFI_DataType %d",
                  static_cast<int>(type_num));
       break;

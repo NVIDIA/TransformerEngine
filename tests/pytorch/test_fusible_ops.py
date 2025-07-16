@@ -20,6 +20,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
+    BackwardBiasActivation,
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
     ForwardLinearBiasAdd,
@@ -152,7 +153,7 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
-class TestSequential:
+class TestSequentialContainer:
     """Tests for sequential container"""
 
     def test_modules(self) -> None:
@@ -1865,6 +1866,98 @@ class TestFusedOps:
             db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
+    @pytest.mark.parametrize("activation", ("relu", "gelu"))
+    @pytest.mark.parametrize("out_shape", ((32, 32), (32, 1, 32), (8, 2, 2, 32)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_backward_bias_activation(
+        self,
+        *,
+        activation: str,
+        out_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+    ) -> None:
+        """Backward dbias + dact + quantize"""
+
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        hidden_size = in_shape[-1]
+
+        # Skip invalid configurations
+        with_quantization = quantization is not None
+        maybe_skip_quantization(quantization, device=device)
+        if quantization == "mxfp8" and (len(in_shape) < 2 or in_shape[-1] % 32 != 0):
+            pytest.skip("Unsupported tensor size for MXFP8")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b_ref, b_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = x_ref + b_ref.reshape([1] * (len(in_shape) - 1) + [hidden_size])
+        if activation == "gelu":
+            y_ref = torch.nn.functional.gelu(y_ref, approximate="tanh")
+        elif activation == "relu":
+            y_ref = torch.nn.functional.relu(y_ref)
+        else:
+            raise ValueError(f"Unexpected activation function ({activation})")
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operations
+        recipe = make_recipe(quantization)
+        act_type = te_ops.GELU if activation == "gelu" else te_ops.ReLU
+        model = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=True),
+            te_ops.Bias(hidden_size, device=device, dtype=dtype),
+            act_type(),
+        )
+        with torch.no_grad():
+            model[1].bias.copy_(b_test)
+            del b_test
+        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+            y_test = model(x_test)
+        y_test.backward(dy_test)
+
+        # Check that backward operations have been fused
+        backward_ops = model._module_groups[0]._backward_ops
+        if with_quantization and quantization in ["fp8_delayed_scaling", "mxfp8"]:
+            assert len(backward_ops) == 2
+            assert isinstance(backward_ops[0][0], BackwardBiasActivation)
+            assert isinstance(backward_ops[1][0], te_ops.Quantize)
+        else:
+            assert len(backward_ops) == 3
+            assert isinstance(backward_ops[0][0], act_type)
+            assert isinstance(backward_ops[1][0], te_ops.Bias)
+            assert isinstance(backward_ops[2][0], te_ops.Quantize)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if with_quantization:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        db_test = model[1].bias.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_backward_linear_add(
@@ -2080,3 +2173,109 @@ class TestCheckpointing:
             torch.testing.assert_close(y_load, y_save, **tols)
         for x_load, x_save in zip(xs_load, xs_save):
             torch.testing.assert_close(x_load.grad, x_save.grad, **tols)
+
+
+class TestSequentialModules:
+    """Test for larger Sequentials with modules commonly used together"""
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
+    @pytest.mark.parametrize("quantized_compute", (False, True))
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_layernorm_mlp(
+        self,
+        *,
+        bias: bool,
+        normalization: str,
+        quantized_compute: bool,
+        quantized_weight: bool,
+        dtype: torch.dtype,
+        quantization: Optional[str],
+        device: torch.device = "cuda",
+        hidden_size: int = 32,
+        sequence_length: int = 512,
+        batch_size: int = 4,
+        ffn_hidden_size: int = 64,
+        layernorm_epsilon: float = 1e-5,
+    ) -> None:
+        """
+        LayerNorm/RMSNorm + Linear + GELU + Linear
+
+        Note that this test checks only if the module runs
+        as when chaining multiple modules it is hard to validate
+        numerical accuracy.
+        """
+
+        # Make input shape
+        in_shape = (sequence_length, batch_size, hidden_size)
+        ffn_shape = in_shape[:-1] + (ffn_hidden_size,)
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=ffn_shape, device=device)
+        quantization_needed = quantized_compute or quantized_weight
+        if quantization is None and quantization_needed:
+            pytest.skip("Quantization scheme is not specified")
+        if quantization is not None and not quantization_needed:
+            pytest.skip("Quantization scheme is not used")
+
+        # Random data
+        _, x_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        _, dy_test = make_reference_and_test_tensors(
+            in_shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Implementation with fusible operations
+        recipe = make_recipe(quantization)
+        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+            if normalization == "LayerNorm":
+                norm = te_ops.LayerNorm(
+                    hidden_size,
+                    eps=layernorm_epsilon,
+                    device=device,
+                    dtype=dtype,
+                )
+            else:
+                norm = te_ops.RMSNorm(
+                    hidden_size,
+                    eps=layernorm_epsilon,
+                    device=device,
+                    dtype=dtype,
+                )
+            ffn1 = te_ops.Linear(
+                hidden_size,
+                ffn_hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+            act = te_ops.GELU()
+            ffn2 = te_ops.Linear(
+                ffn_hidden_size,
+                hidden_size,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+            )
+        forward = te_ops.Sequential(norm, ffn1, act, ffn2)
+        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
