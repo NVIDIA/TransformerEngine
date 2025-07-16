@@ -9,10 +9,7 @@ import numpy as np
 import torch
 import nvtx
 import transformer_engine
-from tests.pytorch.utils import (
-    ModelConfig,
-    get_available_attention_backends,
-)
+from tests.pytorch.utils import ModelConfig, get_available_attention_backends
 from tests.pytorch.attention.test_attention import _run_dot_product_attention
 )
 
@@ -91,7 +88,7 @@ def main():
     models = ["test_0"]
     for model in models:
         config = model_configs[model]
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
+        available_backends, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
