@@ -10,8 +10,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from .utils import ModelConfig
-from .attention.utils import _get_attention_backends
+from utils import ModelConfig, get_available_attention_backends
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -136,7 +135,7 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
             pytest.skip(reason_for_no_mxfp8)
 
     if model_key in ["multihead_attention", "transformer_layer"]:
-        available_backends, *_ = _get_attention_backends(
+        available_backends, *_ = get_available_attention_backends(
             model_config["model1"],
             qkv_dtype=torch.bfloat16,
             qkv_layout="sbhd_sbhd_sbhd",

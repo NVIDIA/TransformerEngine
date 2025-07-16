@@ -46,8 +46,7 @@ from transformer_engine.pytorch.module.base import get_multi_stream_cublas_works
 from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from .utils import ModelConfig, reset_rng_states
-from .attention.utils import _get_attention_backends
+from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -118,7 +117,7 @@ fp8_recipes = [
 def is_fused_attn_available(
     config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
 ):
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,

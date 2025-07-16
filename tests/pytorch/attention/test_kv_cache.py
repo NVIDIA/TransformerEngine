@@ -5,17 +5,13 @@
 from collections import OrderedDict
 from typing import List
 import os
+import sys
+import pathlib
 import logging
 import math
 
 import pytest
 import torch
-
-from ..utils import (
-    ModelConfig,
-    reset_rng_states,
-)
-from .utils import _get_attention_backends
 
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
@@ -32,6 +28,13 @@ from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
+)
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import (
+    ModelConfig,
+    reset_rng_states,
+    get_available_attention_backends,
 )
 
 # Initialize RNG state
@@ -470,7 +473,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,

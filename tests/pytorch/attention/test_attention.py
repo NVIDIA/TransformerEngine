@@ -4,6 +4,8 @@
 import logging
 import math
 import os
+import sys
+import pathlib
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 import pytest
@@ -45,8 +47,9 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from .utils import logging_context, _get_attention_backends
-from ..utils import reset_rng_states, ModelConfig
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import reset_rng_states, ModelConfig, dtype_tols, logging_context, get_available_attention_backends
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
@@ -116,7 +119,7 @@ def test_dot_product_attention(
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -127,7 +130,7 @@ def test_dot_product_attention(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
         is_training = False
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -1006,7 +1009,7 @@ def test_transformer_layer(
 
     # Test backend availability
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=(
@@ -1017,7 +1020,7 @@ def test_transformer_layer(
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
         is_training = False
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=(
@@ -1344,7 +1347,7 @@ def test_sanity_attention_extra_state(model, dtype):
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout="sb3hd",
@@ -1538,7 +1541,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     config = model_configs_fp8_vs_f16[model]
 
     # Test backend availability
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_format.replace("hd", "h3d"),
@@ -1548,6 +1551,16 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
         pytest.skip("Less than two backends to compare.")
+    if not fp8_dpa_bwd:
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
+            config,
+            qkv_dtype=dtype,
+            qkv_layout=qkv_format.replace("hd", "h3d"),
+            is_training=is_training,
+        )
+        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+        if not fused_attn_supported:
+            pytest.skip("No attention backend available.")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -1752,7 +1765,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
     # Test backend availability
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_layout,
@@ -1763,7 +1776,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     if flash_attn_supported + fused_attn_supported < 1:
         pytest.skip("No FP8 attention backend available.")
     if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = _get_attention_backends(
+        available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
@@ -2016,7 +2029,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
 
     # Test backend availability
     is_training = True
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout="t3hd" if cudnn_frontend_version == 0 else "bs3hd",

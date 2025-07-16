@@ -46,7 +46,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.distributed import checkpoint
-from .utils import ModelConfig, dtype_tols
+from utils import ModelConfig, dtype_tols
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

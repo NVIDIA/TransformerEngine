@@ -23,7 +23,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from .utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, reset_rng_states
 
 
 # Check if FP8 is supported.
