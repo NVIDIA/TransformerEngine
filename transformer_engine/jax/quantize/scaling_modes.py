@@ -199,8 +199,8 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
             The shape for scale tensors - (1,)
         """
         del is_colwise
-        if np.prod(data_shape) == 0:
-            return (0,)
+        # if np.prod(data_shape) == 0:
+        #     return (0,)
         return (1,)
 
     @lru_cache(maxsize=4)

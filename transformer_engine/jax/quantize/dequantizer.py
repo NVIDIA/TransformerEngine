@@ -121,9 +121,6 @@ class BlockScaleDequantizer(Dequantizer):
         scale_shape = scaling_mode.get_scale_shape(
             data_shape, is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
-        scale_inv = jax.lax.slice(
-            scale_inv, [0] * len(scale_shape), scale_shape
-        )  # slice out the padding
 
         data = data.reshape(
             *data_shape[: flatten_axis - 1],
@@ -211,28 +208,35 @@ def _grouped_dequantize(grouped_scaled_tensor):
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"
         )
-        scale_shape_i = scaling_mode.get_scale_shape(
+        padded_scale_shape_i = scaling_mode.get_scale_shape(
             data_shape_i,
             grouped_scaled_tensor.is_colwise,
             is_padded=True,
             flatten_axis=flatten_axis,
         )
-        scale_shape_i_size = math.prod(scale_shape_i)
-        scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + scale_shape_i_size]
+        unpadded_scale_shape_i = scaling_mode.get_scale_shape(
+            data_shape_i,
+            grouped_scaled_tensor.is_colwise,
+            is_padded=False,
+            flatten_axis=flatten_axis,
+        )
+        scale_inv_i = scale_inv[scale_inv_ptr: scale_inv_ptr +
+                                math.prod(padded_scale_shape_i)].reshape(padded_scale_shape_i)
+        scale_inv_i = jax.lax.slice(scale_inv_i, [0] * len(unpadded_scale_shape_i), unpadded_scale_shape_i)
         dequantizer_type = ScalingModeToDequantizerMap.get(grouped_scaled_tensor.scaling_mode)
         if len(data_i) == 0:
             out_i = []
         else:
             out_i = dequantizer_type._dequantize_func(
                 data_i.reshape(data_shape_i),
-                scale_inv_i.reshape(scale_shape_i),
+                scale_inv_i,
                 grouped_scaled_tensor.dq_dtype,
                 scaling_mode=grouped_scaled_tensor.scaling_mode,
                 is_colwise=grouped_scaled_tensor.is_colwise,
                 flatten_axis=grouped_scaled_tensor.flatten_axis,
             )
         output.append(out_i)
-        scale_inv_ptr += scale_shape_i_size
+        scale_inv_ptr += math.prod(padded_scale_shape_i)
 
     return output
 

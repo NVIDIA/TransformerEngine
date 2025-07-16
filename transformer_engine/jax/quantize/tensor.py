@@ -17,7 +17,6 @@ from jax.tree_util import register_pytree_node_class
 
 from transformer_engine_jax import QuantizeLayout
 
-from .helper import apply_padding_to_scale_inv
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
 from ..sharding import (
@@ -135,15 +134,6 @@ class ScaledTensor1x(ScaledTensor):
 
         if self.scaling_mode == ScalingMode.NO_SCALING:
             self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
-
-        else:
-            self.scale_inv = apply_padding_to_scale_inv(
-                self.scale_inv,
-                self.scaling_mode,
-                self.data.shape,
-                is_colwise=self.is_colwise,
-                flatten_axis=self.flatten_axis,
-            )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
