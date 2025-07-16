@@ -220,9 +220,12 @@ def _grouped_dequantize(grouped_scaled_tensor):
             is_padded=False,
             flatten_axis=flatten_axis,
         )
-        scale_inv_i = scale_inv[scale_inv_ptr: scale_inv_ptr +
-                                math.prod(padded_scale_shape_i)].reshape(padded_scale_shape_i)
-        scale_inv_i = jax.lax.slice(scale_inv_i, [0] * len(unpadded_scale_shape_i), unpadded_scale_shape_i)
+        scale_inv_i = scale_inv[
+            scale_inv_ptr : scale_inv_ptr + math.prod(padded_scale_shape_i)
+        ].reshape(padded_scale_shape_i)
+        scale_inv_i = jax.lax.slice(
+            scale_inv_i, [0] * len(unpadded_scale_shape_i), unpadded_scale_shape_i
+        )
         dequantizer_type = ScalingModeToDequantizerMap.get(grouped_scaled_tensor.scaling_mode)
         if len(data_i) == 0:
             out_i = []
