@@ -33,10 +33,6 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
-  if (getDeviceComputeCapability() < blackwellComputeCapability && use_cudnn) {
-    GTEST_SKIP() << "cuDNN normalizations not supported on pre-Blackwell GPUs yet!";
-  }
-
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
   DType wtype = TypeInfo<WeightType>::dtype;
