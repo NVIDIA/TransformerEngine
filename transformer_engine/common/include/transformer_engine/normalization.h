@@ -142,15 +142,22 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
                       NVTETensor workspace, const int multiprocessorCount,
                       const bool zero_centered_gamma, cudaStream_t stream);
 
-/*! \brief Helper to enable cuDNN backend for normalization
+/*! \brief Helper to enable cuDNN backend LayerNorm/RMSNorm forward pass
  *
  *  \param[in]     bool              Enable if True
  */
 void nvte_enable_cudnn_norm_fwd(bool enable);
+
+/*! \brief Helper to enable cuDNN backend LayerNorm/RMSNorm backward pass
+ *
+ *  \param[in]     bool              Enable if True
+ */
 void nvte_enable_cudnn_norm_bwd(bool enable);
 
-/*! \brief Helper to query if cuDNN backend for normalization is enabled */
+/*! \brief Whether cuDNN backend is enabled for LayerNorm/RMSNorm forward pass */
 int nvte_use_cudnn_norm_fwd();
+
+/*! \brief Whether cuDNN backend is enabled for LayerNorm/RMSNorm backward pass */
 int nvte_use_cudnn_norm_bwd();
 
 /*! \brief Control whether norm computes `gamma += 1.0` for zero-centered gamma
@@ -163,6 +170,8 @@ int nvte_use_cudnn_norm_bwd();
  */
 void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable);
 
+/*! \brief Enumerate for normalization type used in TE
+ */
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 
 #ifdef __cplusplus
