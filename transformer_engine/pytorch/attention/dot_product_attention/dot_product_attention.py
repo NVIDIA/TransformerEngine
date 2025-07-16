@@ -17,6 +17,7 @@ from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
     AttnTypes,
@@ -963,47 +964,54 @@ class DotProductAttention(TransformerEngineBaseModule):
                 inference_params=inference_params,
             )
             global _attention_backends
-            if (
-                _attention_backends["attention_params"] is None
-                or attention_params != _attention_backends["attention_params"]
-            ):
-                _attention_backends["attention_params"] = attention_params
-                _attention_backends["backend_selection_requires_update"] = True
-            if _attention_backends["backend_selection_requires_update"]:
-                (
-                    use_flash_attention,
-                    flash_attention_backend,
-                    use_fused_attention,
-                    fused_attention_backend,
-                    use_unfused_attention,
-                    _,
-                ) = dpa_utils.get_attention_backend(attention_params)
-                # Set global _attention_backends var using return value
-                # from get_attention_backend()
-                _attention_backends["use_flash_attention"] = use_flash_attention
-                _attention_backends["flash_attention_backend"] = flash_attention_backend
-                _attention_backends["use_fused_attention"] = use_fused_attention
-                _attention_backends["fused_attention_backend"] = fused_attention_backend
-                _attention_backends["use_unfused_attention"] = use_unfused_attention
-                _attention_backends["backend_selection_requires_update"] = False
-                if use_flash_attention:
-                    self.logger.info(
-                        "Running with FlashAttention backend (version %s)",
-                        flash_attention_backend,
-                    )
-                elif use_fused_attention:
-                    self.logger.info(
-                        "Running with FusedAttention backend (sub-backend %s)",
-                        int(fused_attention_backend),
-                    )
-                elif use_unfused_attention:
-                    self.logger.info("Running with UnfusedDotProductAttention backend")
+            if is_in_onnx_export_mode():
+                # We do not want to call get_attention_backend() in ONNX mode
+                # and we want to avoid using any global variables like _attention_backends.
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = True
             else:
-                use_flash_attention = _attention_backends["use_flash_attention"]
-                flash_attention_backend = _attention_backends["flash_attention_backend"]
-                use_fused_attention = _attention_backends["use_fused_attention"]
-                fused_attention_backend = _attention_backends["fused_attention_backend"]
-                use_unfused_attention = _attention_backends["use_unfused_attention"]
+                if (
+                    _attention_backends["attention_params"] is None
+                    or attention_params != _attention_backends["attention_params"]
+                ):
+                    _attention_backends["attention_params"] = attention_params
+                    _attention_backends["backend_selection_requires_update"] = True
+                if _attention_backends["backend_selection_requires_update"]:
+                    (
+                        use_flash_attention,
+                        flash_attention_backend,
+                        use_fused_attention,
+                        fused_attention_backend,
+                        use_unfused_attention,
+                        _,
+                    ) = dpa_utils.get_attention_backend(attention_params)
+                    # Set global _attention_backends var using return value
+                    # from get_attention_backend()
+                    _attention_backends["use_flash_attention"] = use_flash_attention
+                    _attention_backends["flash_attention_backend"] = flash_attention_backend
+                    _attention_backends["use_fused_attention"] = use_fused_attention
+                    _attention_backends["fused_attention_backend"] = fused_attention_backend
+                    _attention_backends["use_unfused_attention"] = use_unfused_attention
+                    _attention_backends["backend_selection_requires_update"] = False
+                    if use_flash_attention:
+                        self.logger.info(
+                            "Running with FlashAttention backend (version %s)",
+                            flash_attention_backend,
+                        )
+                    elif use_fused_attention:
+                        self.logger.info(
+                            "Running with FusedAttention backend (sub-backend %s)",
+                            int(fused_attention_backend),
+                        )
+                    elif use_unfused_attention:
+                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                else:
+                    use_flash_attention = _attention_backends["use_flash_attention"]
+                    flash_attention_backend = _attention_backends["flash_attention_backend"]
+                    use_fused_attention = _attention_backends["use_fused_attention"]
+                    fused_attention_backend = _attention_backends["fused_attention_backend"]
+                    use_unfused_attention = _attention_backends["use_unfused_attention"]
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
