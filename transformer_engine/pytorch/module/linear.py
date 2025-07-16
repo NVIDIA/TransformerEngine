@@ -447,9 +447,6 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
-            ctx.save_original_input = save_original_input and backward_needs_input
-            ctx.own_quantized_input = own_quantized_input
-
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -573,9 +570,10 @@ class _Linear(torch.autograd.Function):
             # --------------------------------------------------
             inputmat_total = None
             inputmat_total_work = None
-            if ctx.save_original_input:
+            if ctx.requires_wgrad:
+                input_is_quantized = isinstance(inputmat, QuantizedTensorBase)
                 if ctx.fp8 or ctx.debug:
-                    if ctx.own_quantized_input:
+                    if not input_is_quantized:
                         quantizer = ctx.input_quantizer
                         if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                             quantizer.set_usage(
@@ -586,7 +584,10 @@ class _Linear(torch.autograd.Function):
                             quantizer.set_usage(rowwise=False, columnwise=True)
                         inputmat = quantizer(inputmat)
                 else:
-                    inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
+                    if input_is_quantized:
+                        inputmat = inputmat.dequantize(dtype=ctx.activation_dtype)
+                    else:
+                        inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if ctx.backward_input_needs_gather:
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
