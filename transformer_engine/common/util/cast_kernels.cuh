@@ -560,7 +560,7 @@ compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
 } 
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, typename OType, bool ROWWISE_SCALING, bool COLWISE_SCALING,
+          typename IType, typename OType, bool COLWISE_SCALING,
           size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     cast_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -571,19 +571,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                       const size_t rows, const size_t cols,
                       const size_t scale_stride_rowwise, const size_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  constexpr bool ROWWISE_SCALING = true;
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT = (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
 
-  const bool printing_thread = (threadIdx.x < cols) && (threadIdx.y == 0) && (blockIdx.x == 0) && (blockIdx.y == 0);
-  using IType4 = typename ptx::FPx4<IType>;
   using IType2 = typename ptx::FPx2<IType>;
-  using OType2 = typename ptx::FPx2<OType>;
 
   if constexpr (!COMPUTE_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
       return;
     }
   }
-  constexpr size_t THREADS_X_ROWWISE = CHUNK_DIM_X / SCALE_DIM_X;
+  constexpr size_t NVFP4_SCALING_FACTORS_PER_CHUNK_ROW = CHUNK_DIM_X / SCALE_DIM_X;
+  constexpr size_t THREADS_X_ROWWISE = NVFP4_SCALING_FACTORS_PER_CHUNK_ROW;
   constexpr size_t THREADS_Y_ROWWISE = THREADS_PER_CHUNK / THREADS_X_ROWWISE;
 
   static_assert(BUFF_DIM_Y >= SCALE_DIM_Y && "Number of buffer rows must be greater or equal to the size of the columwise scaling block\0");
@@ -635,17 +634,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
-  constexpr size_t buff_in_elems = BUFF_DIM_Y * BUFF_IN_DIM_X;
-  constexpr size_t buff_out_elems = BUFF_DIM_Y * BUFF_OUT_DIM_X;
-  constexpr size_t buff_in_elems_total = BUFFS_NUM * buff_in_elems;
-  constexpr size_t buff_out_elems_total = BUFFS_NUM * buff_out_elems;   // 1-byte structure of 2x 4-bit values
+  constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_IN_DIM_X;
+  constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
 
-  constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_in_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out_nvfp4 = DIVUP_TO_MULTIPLE((buff_out_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out_mxfp8 = DIVUP_TO_MULTIPLE(buff_in_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out_nvfp4 = DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out_mxfp8 = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
-  constexpr size_t buff_size_nvfp4_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 16 * sizeof(fp8e4m3);
-  constexpr size_t buff_size_mxfp8_scales = (CHUNK_DIM_Y * CHUNK_DIM_X) / 32 * sizeof(fp8e8m0);
+  constexpr size_t buff_size_nvfp4_scales = CHUNK_DIM_Y * (CHUNK_DIM_X / SCALE_DIM_X) * sizeof(fp8e4m3);
+  constexpr size_t buff_size_mxfp8_scales = (CHUNK_DIM_Y / SCALE_DIM_Y) * CHUNK_DIM_X * sizeof(fp8e8m0);
 
   constexpr size_t in_mem = buff_size_aligned_in;
 
@@ -670,10 +667,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const float S_enc = (nvfp4_second_stage_scale_ptr == nullptr)
                       ? 1.0f
                       : 1.0f / (*nvfp4_second_stage_scale_ptr);
-
-  if (is_master_thread) {
-    printf("GPU S_enc: %f\n", S_enc);
-  }
 
   float thread_amax = 0.0f;
 
@@ -770,11 +763,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      scales_colwise_e8m0[scale_idx] = biased_exponent;
-      // if (printing_thread) {
-      //   printf("tid: %d   biased_exponent: %d \n", threadIdx.x, static_cast<int>(biased_exponent));
-      // }
-
+      if (global_scales_offset_X < cols) {
+        scales_colwise_e8m0[scale_idx] = biased_exponent;
+      }
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 
       // 3. Scale elements
@@ -794,6 +785,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     if constexpr (ROWWISE_SCALING) {
+      const int stage_rowwise_scales_offset_Y = stage * BUFF_DIM_Y;
       #pragma unroll 
       for (int it = 0; it < ITERATIONS_ROWWISE; ++it) {
         const int it_thread_offset_Y_rowwise = thread_offset_Y_rowwise + it * THREADS_Y_ROWWISE;
@@ -861,8 +853,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             }
           }
           if constexpr (!std::is_same_v<IType, float>) {
-            block_amax =
-                static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+            block_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
           }
         } else {
           #pragma unroll
@@ -889,8 +880,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               }
               if constexpr (COMPUTE_ACTIVATIONS) {
                 const bool row_out_of_bounds_rowwise = (row_base_rowwise + it_offset_Y >= rows);
-                const bool swizzled_col_out_of_bounds =
-                    (block_offset_X + swizzled_thread_idx >= cols);
+                const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
                 const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
                 if (!out_of_bounds) {
                   block_amax = fmaxf(block_amax, fabsf(elt));
@@ -907,13 +897,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         // 2. Compute E4M3 scaling factor
         const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
   
-        const int stage_scales_offset_Y = tid_Y_rowwise + it_offset_Y;
-        const int stage_scales_offset_X = tid_X_rowwise;
-        const int scale_idx = stage_scales_offset_Y * THREADS_X_ROWWISE + stage_scales_offset_X;
+        const int shmem_scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise;
+        const int shmem_scales_offset_X = tid_X_rowwise;
+        const int scale_idx = shmem_scales_offset_Y * NVFP4_SCALING_FACTORS_PER_CHUNK_ROW + shmem_scales_offset_X;
         out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
-        // if (threadIdx.x < 2) {
-        //   printf("tid: %d   S_dec_b_fp8: %f\n", threadIdx.x, static_cast<float>(S_dec_b_fp8));
-        // }
   
         // Compute "correct" per-block encoding scaling factor
         const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
@@ -988,20 +975,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Each thread stores multiple scaling factors in one store instruction.
   if constexpr (ROWWISE_SCALING) {
     // Number of scaling factors = CHUNK_DIM_X / SCALE_DIM_X
-    constexpr int SCALING_FACTORS_PER_CHUNK_ROW = CHUNK_DIM_X / SCALE_DIM_X;
     const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + threadIdx.x;
     const int scales_offset_X_rowwise = scales_block_offset_X_rowwise;
     const int scale_idx_global = scales_offset_Y_rowwise * scale_stride_rowwise + scales_offset_X_rowwise;
-    const int scale_idx_shmem = threadIdx.x * SCALING_FACTORS_PER_CHUNK_ROW;
+    const int scale_idx_shmem = threadIdx.x * NVFP4_SCALING_FACTORS_PER_CHUNK_ROW;
+
     if ((threadIdx.x < CHUNK_DIM_Y) && (scales_offset_Y_rowwise < rows) && (scales_offset_X_rowwise < (cols / SCALE_DIM_X))) {
-      using ScalesVec_t = Vec<fp8e4m3, SCALING_FACTORS_PER_CHUNK_ROW>;
+      using ScalesVec_t = Vec<fp8e4m3, NVFP4_SCALING_FACTORS_PER_CHUNK_ROW>;
       const ScalesVec_t& scales = *reinterpret_cast<ScalesVec_t*>(&out_rowwise_scales_sh[scale_idx_shmem]);
       scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
     }
-  }
-
-  if constexpr (COLWISE_SCALING) {
-    // TODO: 
   }
 
   float chunk_amax = 0.0f;
@@ -1018,28 +1001,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-
-// // Prints only the first row
-// __global__ static void print_fp4_tensor(const fp4e2m1* const data, const size_t rows, const size_t cols) {
-//   const __nv_fp4x2_storage_t* const raw_fp16_data = reinterpret_cast<const __nv_fp4x2_storage_t*>(data);
-//   if ((blockIdx.x == 0) && (threadIdx.x == 0)) {
-//     for (int y = 0; y < 3; ++y) {
-//       for (int x = 0; x < cols / 2; ++x) {
-//         const int idx = y * cols / 2 + x;
-//         const __half2_raw pair_raw = __nv_cvt_fp4x2_to_halfraw2(raw_fp16_data[idx], __NV_E2M1);
-//         const __half2 pair(pair_raw);
-    
-//         const float elt_x = static_cast<float>(pair.x);
-//         const float elt_y = static_cast<float>(pair.y);
-    
-//         const int g_x = 2 * x;
-//         const int g_idx = y * cols + g_x;
-//         printf("Idx: %4d  (Y:%4d  X:%4d)  Elt: %f\n", g_idx,     y, g_x,     elt_x);
-//         printf("Idx: %4d  (Y:%4d  X:%4d)  Elt: %f\n", g_idx + 1, y, g_x + 1, elt_y);
-//       }
-//     }
-//   }
-// } 
 }  // namespace nvfp4_kernel
 
 
@@ -1675,86 +1636,22 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   );           // NOLINT(*)
 }
 
-// Set up parameters to create TMA descriptor.
-inline void create_special_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
-                                         const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                                         const uint32_t shmemX, const uint32_t stride_elems,
-                                         const uint32_t offset_elems, const size_t type_num_bits,
-                                         const DType tensor_type) {
-  // Get a function pointer to the cuTensorMapEncodeTiled driver API
-  // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
-  static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
-    void *driver_ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
-    return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(driver_ptr);
-  }();
-  // rank is the number of dimensions of the array
-  constexpr uint32_t rank = 2;
-
-  // Dimension for the packed data types must reflect the number of individual U# values.
-  uint64_t size[rank] = {globalX, globalY};
-
-  // The stride is the number of bytes to traverse from the first element of one row to the next
-  uint64_t stride[rank - 1] = {(stride_elems * type_num_bits) / 8};
-
-  // The boxSize is the size of the shared memory buffer that is used as the
-  // source/destination of a TMA transfer
-  uint32_t boxSize[rank] = {shmemX, shmemY};
-
-  // The distance between elements in units of sizeof(element)
-  uint32_t elemStride[rank] = {1, 1};
-
-  const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor_type);
-  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
-                                           (offset_elems * type_num_bits) / 8);
-
-  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_GMEM_ALIGNMENT),
-             "Tensor data pointer must be 16B aligned");
-
-  const int TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
-  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
-             "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
-
-  // Create the tensor descriptor.
-  NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
-      &tensorMap,  // CUtensorMap *tensorMap,
-      tensorDataType,
-      rank,        // cuuint32_t tensorRank,
-      dataPtr,     // void *globalAddress,
-      size,        // const cuuint64_t *globalDim,
-      stride,      // const cuuint64_t *globalStrides,
-      boxSize,     // const cuuint32_t *boxDim,
-      elemStride,  // const cuuint32_t *elementStrides,
-      // Interleave patterns can be used to accelerate loading of values that
-      // are less than 4 bytes long.
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-
-      // Swizzling can be used to avoid shared memory bank conflicts.
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-
-      // L2 Promotion can be used to widen the effect of a cache-policy to a wider
-      // set of L2 cache lines.
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      // CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
-
-      // Any element that is outside of bounds will be set to zero by the TMA transfer.
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-}
-
-
+// This kernel supports only two scaling cases:
+// 1. r16c0  - Rowwise NVFP4
+// 2. r16c32 - Rowwise NVFP4 AND Colwise MXFP8
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &)>
-void nvfp4_quantize(const Tensor &input, const Tensor *noop,
-                    Tensor *output, cudaStream_t stream) {
+void nvfp4_quantize(const Tensor &input, const Tensor *noop, Tensor *output, cudaStream_t stream) {
   using namespace nvfp4_kernel;
   using namespace ptx;
-  bool use_rowwise_scaling = output->has_data();
-  bool use_colwise_scaling = output->has_columnwise_data();
   checkCuDriverContext(stream);
-  NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  // NVTE_CHECK(is_fp4_dtype(output->dtype()), "Output must have FP4 type.");
 
-  if (use_rowwise_scaling) {
-    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-  }
+  NVTE_CHECK(output->has_data(), "NVFP4 Output tensor must be allocated.");
+  NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
+  
+  NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+
+  bool use_colwise_scaling = output->has_columnwise_data();
   if (use_colwise_scaling) {
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
                "Columnwise scaling tensor must be allocated");
@@ -1775,33 +1672,28 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = THREADS_PER_CHUNK;
 
-  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
+  const size_t scale_stride_rowwise = output->scale_inv.shape[1];
   const size_t scale_stride_colwise = use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
 
-  // printf("use_rowwise_scaling: %d\n", use_rowwise_scaling);
-  // printf("use_colwise_scaling: %d\n", use_colwise_scaling);
-  // printf("scale_stride_rowwise: %lu\n", scale_stride_rowwise);
-  // printf("scale_stride_colwise: %lu\n", scale_stride_colwise);
-
-  fp8e4m3 *const scales_rowwise_e4m3_ptr = use_rowwise_scaling ? reinterpret_cast<fp8e4m3 *>(output->scale_inv.dptr) : nullptr;
+  fp8e4m3 *const scales_rowwise_e4m3_ptr = reinterpret_cast<fp8e4m3 *>(output->scale_inv.dptr);
   e8m0_t *const scales_colwise_e8m0_ptr = use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
 
-  ScalingType scaling_type;
-  if (use_rowwise_scaling && (!use_colwise_scaling)) {
-    scaling_type = ScalingType::ROWWISE;
-  } else if ((!use_rowwise_scaling) && use_colwise_scaling) {
-    scaling_type = ScalingType::COLWISE;
-  } else if (use_rowwise_scaling && use_colwise_scaling) {
-    scaling_type = ScalingType::BIDIMENSIONAL;
-  }
+  const ScalingType scaling_type = use_colwise_scaling
+                                   ? ScalingType::BIDIMENSIONAL
+                                   : ScalingType::ROWWISE;
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   const float *const nvfp4_second_stage_scale_ptr = reinterpret_cast<const float *>(output->scale.dptr);
 
+  // Output data type is only required for the column-wise MXFP8 scaling.
+  // It has no effect for the row-wise NVFP4 scaling, but is set to the default E4M3 for the macros to work
+  const DType output_data_type = use_colwise_scaling
+                                 ? output->columnwise_data.dtype
+                                 : DType::kFloat8E4M3;
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input.dtype(), IType,
-      // TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output->dtype(), OType,
-          using OType = fp8e4m3;
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output_data_type, OType,
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
           alignas(64) CUtensorMap tensor_map_output_colwise{};
@@ -1809,16 +1701,12 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
           create_2D_tensor_map(tensor_map_input, input.data, rows, cols,
                                nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(IType) * 8);
 
-          if (use_rowwise_scaling) {
-            create_special_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                                         nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4,
-                                         DType::kFloat4E2M1);
-          }
+          create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
+                               nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, 4);
 
           if (use_colwise_scaling) {
-            create_special_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
-                                         nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(OType) * 8,
-                                         DType::kFloat8E4M3);
+            create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
+                                 nvfp4_kernel::BUFF_DIM_Y, BUFF_DIM_X, cols, 0, sizeof(OType) * 8);
           }
           
           constexpr size_t buff_elems = nvfp4_kernel::BUFF_DIM_Y * BUFF_DIM_X;
@@ -1831,11 +1719,11 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
 
           constexpr size_t in_mem = buff_size_aligned_in;
 
-          const size_t out_rowwise_data_mem = (use_rowwise_scaling ? buff_size_aligned_out_nvfp4 : 0);
-          const size_t out_colwise_data_mem = (use_colwise_scaling ? buff_size_aligned_out_mxfp8 : 0);
+          const size_t out_rowwise_data_mem = buff_size_aligned_out_nvfp4;
+          const size_t out_colwise_data_mem = use_colwise_scaling ? buff_size_aligned_out_mxfp8 : 0;
 
-          const size_t out_rowwise_scales_mem = (use_rowwise_scaling ? buff_size_nvfp4_scales : 0);
-          const size_t out_colwise_scales_mem = (use_colwise_scaling ? buff_size_mxfp8_scales : 0);
+          const size_t out_rowwise_scales_mem = buff_size_nvfp4_scales;
+          const size_t out_colwise_scales_mem = use_colwise_scaling ? buff_size_mxfp8_scales : 0;
 
           const size_t out_mem = out_rowwise_data_mem + out_colwise_data_mem
                                  + out_rowwise_scales_mem + out_colwise_scales_mem;
@@ -1845,25 +1733,11 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
           switch (scaling_type) {
             case ScalingType::ROWWISE:
               cudaFuncSetAttribute(
-                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true, false,
+                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false,
                                     CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true, false,
-                                CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                    tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
-                    scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr,
-                    noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
-                    rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              break;
-            case ScalingType::COLWISE:
-              cudaFuncSetAttribute(
-                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
-                                    CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-
-              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false, true,
+              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false,
                                 CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
                     tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
@@ -1873,11 +1747,11 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
               break;
             case ScalingType::BIDIMENSIONAL:
               cudaFuncSetAttribute(
-                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true, true,
+                  cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
                                     CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true, true,
+              cast_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true,
                                 CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
                     tensor_map_input, tensor_map_output_rowwise, tensor_map_output_colwise,
@@ -1886,11 +1760,8 @@ void nvfp4_quantize(const Tensor &input, const Tensor *noop,
                     rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
           }
-      // );  // NOLINT(*)
+      );  // NOLINT(*)
   );      // NOLINT(*)
-
-  // print_fp4_tensor<<<1,32>>>(reinterpret_cast<const fp4e2m1*>(output->data.dptr), rows, cols);
-  // cudaDeviceSynchronize();
 }
 
 namespace detail {
@@ -2107,79 +1978,81 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
   const NVTETensor noop = quant_config_cpp ? quant_config_cpp->noop_tensor : nullptr;
   const auto noop_tensor = noop != nullptr ? *(convertNVTETensorCheck(noop)) : Tensor();
 
-  nvfp4_quantize<IS_ACT, ParamOP, OP>(*input_tensor, &noop_tensor, output_tensor, stream);
-
-  // switch (output_tensor->scaling_mode) {
-  //   case NVTE_DELAYED_TENSOR_SCALING: {
-  //     if (output_tensor->has_columnwise_data()) {
-  //       NVTE_CHECK(output_tensor->has_data(),
-  //                  "Quantizing in only the columnwise direction not supported yet!");
-  //       if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
-  //         cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
-  //       } else {
-  //         cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
-  //             *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
-  //             stream);
-  //       }
-  //     } else if (output_tensor->has_data()) {
-  //       fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-  //           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-  //           workspace_tensor, stream);
-  //     }
-  //     break;
-  //   }
-  //   case NVTE_MXFP8_1D_SCALING: {
-  //     mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-  //         *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
-  //         workspace_tensor, stream);
-  //     break;
-  //   }
-  //   case NVTE_BLOCK_SCALING_2D: {
-  //     // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
-  //     NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-  //                "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
-  //     bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : true;
-  //     float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
-  //     quantize_transpose_square_blockwise(
-  //         input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
-  //         output_tensor->data, output_tensor->columnwise_data, epsilon,
-  //         /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
-  //     break;
-  //   }
-  //   case NVTE_BLOCK_SCALING_1D: {
-  //     // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
-  //     NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-  //                "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
-  //     bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
-  //     float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
-  //     FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
-  //     FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
-  //     if (output_tensor->has_data()) {
-  //       bool rowwise_compact = quant_config_cpp
-  //                                  ? quant_config_cpp->float8_block_scale_tensor_format ==
-  //                                        Float8BlockScaleTensorFormat::COMPACT
-  //                                  : false;
-  //       rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-  //                                        : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
-  //     }
-  //     if (output_tensor->has_columnwise_data()) {
-  //       bool columnwise_compact = quant_config_cpp
-  //                                     ? quant_config_cpp->float8_block_scale_tensor_format ==
-  //                                           Float8BlockScaleTensorFormat::COMPACT
-  //                                     : false;
-  //       columnwise_option = columnwise_compact
-  //                               ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-  //                               : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
-  //     }
-  //     quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
-  //                                         output_tensor->columnwise_scale_inv, output_tensor->data,
-  //                                         output_tensor->columnwise_data, epsilon, rowwise_option,
-  //                                         columnwise_option, force_pow_2_scales, stream);
-  //     break;
-  //   }
-  //   default:
-  //     NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
-  // }
+  switch (output_tensor->scaling_mode) {
+    // case NVTE_DELAYED_TENSOR_SCALING: {
+    //   if (output_tensor->has_columnwise_data()) {
+    //     NVTE_CHECK(output_tensor->has_data(),
+    //                "Quantizing in only the columnwise direction not supported yet!");
+    //     if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
+    //       cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
+    //     } else {
+    //       cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
+    //           *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
+    //           stream);
+    //     }
+    //   } else if (output_tensor->has_data()) {
+    //     fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+    //         *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+    //         workspace_tensor, stream);
+    //   }
+    //   break;
+    // }
+    // case NVTE_MXFP8_1D_SCALING: {
+    //   mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+    //       *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+    //       workspace_tensor, stream);
+    //   break;
+    // }
+    case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING: {
+      nvfp4_quantize<IS_ACT, ParamOP, OP>(*input_tensor, &noop_tensor, output_tensor, stream);
+      break;
+    }
+    // case NVTE_BLOCK_SCALING_2D: {
+    //   // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+    //   NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+    //              "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
+    //   bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : true;
+    //   float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
+    //   quantize_transpose_square_blockwise(
+    //       input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
+    //       output_tensor->data, output_tensor->columnwise_data, epsilon,
+    //       /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+    //   break;
+    // }
+    // case NVTE_BLOCK_SCALING_1D: {
+    //   // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+    //   NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+    //              "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
+    //   bool force_pow_2_scales = quant_config_cpp ? quant_config_cpp->force_pow_2_scales : false;
+    //   float epsilon = quant_config_cpp ? quant_config_cpp->amax_epsilon : 0.0f;
+    //   FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
+    //   FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
+    //   if (output_tensor->has_data()) {
+    //     bool rowwise_compact = quant_config_cpp
+    //                                ? quant_config_cpp->float8_block_scale_tensor_format ==
+    //                                      Float8BlockScaleTensorFormat::COMPACT
+    //                                : false;
+    //     rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
+    //                                      : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+    //   }
+    //   if (output_tensor->has_columnwise_data()) {
+    //     bool columnwise_compact = quant_config_cpp
+    //                                   ? quant_config_cpp->float8_block_scale_tensor_format ==
+    //                                         Float8BlockScaleTensorFormat::COMPACT
+    //                                   : false;
+    //     columnwise_option = columnwise_compact
+    //                             ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
+    //                             : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+    //   }
+    //   quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
+    //                                       output_tensor->columnwise_scale_inv, output_tensor->data,
+    //                                       output_tensor->columnwise_data, epsilon, rowwise_option,
+    //                                       columnwise_option, force_pow_2_scales, stream);
+    //   break;
+    // }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
+  }
 }
 
 }  // namespace detail
