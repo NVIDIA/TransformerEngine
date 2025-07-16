@@ -47,9 +47,16 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import reset_rng_states, ModelConfig, dtype_tols, logging_context, get_available_attention_backends
+from utils import (
+    reset_rng_states,
+    ModelConfig,
+    dtype_tols,
+    logging_context,
+    get_available_attention_backends,
+)
 
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()

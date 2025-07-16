@@ -14,6 +14,7 @@ from transformer_engine.pytorch.utils import (
     get_cudnn_version,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
+
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import ModelConfig, get_available_attention_backends

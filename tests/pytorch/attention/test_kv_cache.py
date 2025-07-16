@@ -29,6 +29,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     is_bf16_compatible,
 )
+
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
