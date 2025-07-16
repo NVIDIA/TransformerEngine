@@ -259,7 +259,13 @@ def train_and_evaluate(args):
         fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu,))
-    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)) as mesh:
+    with jax.sharding.Mesh(
+        devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)
+    ) as mesh, te.fp8_autocast(
+        enabled=args.use_fp8,
+        fp8_recipe=fp8_recipe,
+        mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None),
+    ):
 
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -270,17 +276,14 @@ def train_and_evaluate(args):
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(
-            enabled=args.use_fp8,
-            fp8_recipe=fp8_recipe,
-            mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None),
-        ):
+        # Add TE logical axis rules to our Flax logical axis rule context. This must be done inside fp8_autocast
+        sharding_rules = te_flax.extend_logical_axis_rules(tuple())
+        with flax.linen.logical_axis_rules(sharding_rules):
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-            sharding_rules = te_flax.extend_logical_axis_rules(tuple())
             params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
             inputs_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None))
             masks_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None, None, None))

@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
+import warnings
 from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
@@ -117,7 +118,9 @@ def with_sharding_constraint_by_logical_axes(
     x: jnp.array, logical_axis_names: Optional[tuple | list]
 ):
     """
-    A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
+    A wrapper function to flax.linen.with_logical_constraint.
+
+    DEPRECATED USE CASE: If no Flax logical axis rules are available, this function falls back to jax.lax.with_sharding_constraint using a hardcoded logical axis rule table from TE rules, such as BATCH_AXES. This functionality will be removed in the future.
 
     If logical_axis_names = None, this means no sharding constraint is applied.
 
@@ -133,6 +136,28 @@ def with_sharding_constraint_by_logical_axes(
     if not logical_axis_names:
         return x
 
+    try:
+        # Check if Flax logical axis rules are available, if so use them
+        import flax
+
+        flax_rules = flax.linen.get_logical_axis_rules()
+        if len(flax_rules) > 0:
+            return flax.linen.with_logical_constraint(
+                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT
+            )
+    except ImportError:
+        pass
+
+    warnings.warn(
+        "TransformerEngine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated and"
+        " will be removed in a future version. Please use Flax logical axes with a"
+        " flax.linen.logical_axis_rules context and optionally use"
+        " transformer_engine.jax.flax.extend_logical_axis_rules to add BATCH_AXES, etc. to your"
+        " rules.",
+        DeprecationWarning,
+    )
+
+    # If no logical axis rules are available from Flax, fallback to TE's hardcoded logical axis rule table
     assert len(x.shape) == len(logical_axis_names)
     pspec = generate_pspec(logical_axis_names)
     return with_sharding_constraint(x, pspec)
