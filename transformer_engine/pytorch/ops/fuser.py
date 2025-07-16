@@ -11,7 +11,7 @@ import itertools
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe, DelayedScaling
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -344,6 +344,7 @@ class OperationFuser:
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
         self.first_op_requiring_backward = 0
+        self._last_amax_history_len = 0
 
         # Flatten list of parameters
         self._basic_op_params = [list(op.parameters()) for op in self._basic_ops]
@@ -402,10 +403,22 @@ class OperationFuser:
         if fusion_params == (self.recipe_type, self.first_op_requiring_backward):
             return
 
-        # Prepare basic ops for forward if recipe type has changed
+        # Initialize ops if recipe type has changed
         if self.recipe_type != recipe_type:
+            # Check if this is the first iteration
+            if self.recipe_type is None:
+                for op in self._basic_ops:
+                    op.pre_first_fuser_forward()
+            # Inform ops that the recipe type has changed
             for op in self._basic_ops:
-                op.pre_first_forward(recipe=recipe)
+                op.reset_recipe_type(recipe=recipe)
+        # Check if amax history was invalidated
+        elif isinstance(recipe, DelayedScaling):
+            if recipe.amax_history_len != self._last_amax_history_len:
+                raise RuntimeError(
+                    "Detected change of amax history length. "
+                    "Changing the length of amax history is currently not supported."
+                )
 
         # Skip fusing if using a single op, for example if called from BasicOperation.forward
         if len(self._basic_ops) == 1:
@@ -425,6 +438,12 @@ class OperationFuser:
 
         # Save current fusion params
         self.recipe_type, self.first_op_requiring_backward = fusion_params
+
+        # Save amax history length
+        if isinstance(recipe, DelayedScaling):
+            self._last_amax_history_len = recipe.amax_history_len
+        else:
+            self._last_amax_history_len = 0
 
     def __call__(
         self,

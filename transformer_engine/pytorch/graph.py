@@ -740,7 +740,7 @@ def save_fp8_tensors(
                     m.adjust_amax_history_length(fp8_recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
             elif isinstance(m, BasicOperation):
-                m.pre_first_forward(recipe=fp8_recipe)
+                m.reset_recipe_type(recipe=fp8_recipe)
                 module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors
