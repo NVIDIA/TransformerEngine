@@ -105,7 +105,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.7.4.post1")
+    max_version = PkgVersion("2.8.1")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
