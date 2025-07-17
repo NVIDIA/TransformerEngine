@@ -352,6 +352,9 @@ class BlockScalingQuantizeConfig:
         cls.initialize(fp8_recipe)
         cls.AMAX_HISTORY_LEN = 0
 
+        # Use TE GEMM instead of JAX GEMM for better performance
+        tex.manage_primitives(enable_names=["GemmPrimitive"])
+
     @staticmethod
     def finalize() -> None:
         """Reset the block scaling configuration."""
