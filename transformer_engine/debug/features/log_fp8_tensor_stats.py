@@ -238,7 +238,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 )
 
     @api_method
-    def inspect_tensor_all_enabled(
+    def inspect_tensor_enabled(
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
@@ -246,27 +246,27 @@ class LogFp8TensorStats(BaseLogTensorStats):
         return self._check_params(config, layer_name, iteration=iteration)
 
     @api_method
-    def inspect_tensor_all(
+    def inspect_tensor(
         self,
         config: Dict,
         layer_name: str,
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        original_tensor: torch.Tensor,
-        quantized_tensor_rowwise: Optional[torch.Tensor | QuantizedTensor] = None,
-        quantized_tensor_columnwise: Optional[torch.Tensor | QuantizedTensor] = None,
+        tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
+        columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
         """
-        assert quantized_tensor_rowwise is quantized_tensor_columnwise
+        assert rowwise_quantized_tensor is columnwise_quantized_tensor
         assert (
             quantizer is not None
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
 
-        quantized_tensor = quantized_tensor_rowwise
+        quantized_tensor = rowwise_quantized_tensor
         assert isinstance(
             quantized_tensor, QuantizedTensor
         ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."
@@ -304,14 +304,14 @@ class LogFp8TensorStats(BaseLogTensorStats):
             recipe_name=recipe_name,
             quantized_tensor=quantized_tensor,
             quantizer=quantizer,
-            original_tensor=original_tensor,
+            original_tensor=tensor,
             recipes_in_stats=recipes_in_stats,
         ) as aux_dict:
             STATS_BUFFERS.feed(
                 layer_name,
                 tensor_name,
                 options,
-                original_tensor,
+                tensor,
                 iteration,
                 skip_reduction,
                 aux_dict=aux_dict,

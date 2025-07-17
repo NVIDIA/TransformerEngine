@@ -93,35 +93,28 @@ class LogTensorStats(BaseLogTensorStats):
         return BaseLogTensorStats._get_supported_stats_list(None) | {"cur_amax", "dynamic_range"}
 
     @api_method
-    def inspect_tensor_all_enabled(
+    def inspect_tensor_enabled(
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run look_at_tensor_before_process() in the forward."""
         return self._check_params(config, layer_name, iteration=iteration)
 
     @api_method
-    def inspect_tensor_all(
+    def inspect_tensor(
         self,
         config: Dict,
         layer_name: str,
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        original_tensor: Union[torch.Tensor, QuantizedTensor],
-        quantizer: Quantizer,  # pylint: disable=unused-argument
-        quantized_tensor_rowwise: Union[  # pylint: disable=unused-argument
-            Float8Tensor, MXFP8Tensor
-        ],
-        quantized_tensor_columnwise: Union[  # pylint: disable=unused-argument
-            Float8Tensor, MXFP8Tensor
-        ],
+        tensor: Union[torch.Tensor, QuantizedTensor]
     ):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
-            type(original_tensor)
+            type(tensor)
             not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
-            and original_tensor.dtype != torch.uint8
+            and tensor.dtype != torch.uint8
         ), (
             f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be in high precision when using"
             " log_tensor_stats. Use log_fp8_tensor_stats for FP8 tensors."
@@ -152,7 +145,7 @@ class LogTensorStats(BaseLogTensorStats):
         )
 
         STATS_BUFFERS.feed(
-            layer_name, tensor_name, options, original_tensor, iteration, skip_reduction
+            layer_name, tensor_name, options, tensor, iteration, skip_reduction
         )
 
         debug_api.log_message(

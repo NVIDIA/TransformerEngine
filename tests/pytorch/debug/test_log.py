@@ -158,15 +158,15 @@ def test_numerics(fp8_recipe, feature_dirs):
         quantizer = recipe_state.make_quantizers()[0]
         quantized_tensor = quantizer(tensor)
 
-        debug_api.transformer_engine.inspect_tensor_all(
+        debug_api.transformer_engine.inspect_tensor(
             layer_name="layer_name",
             tensor_name="activation",
             iteration=0,
             tp_group=None,
-            original_tensor=tensor,
+            tensor=tensor,
             quantizer=quantizer,
-            quantized_tensor_rowwise=quantized_tensor,
-            quantized_tensor_columnwise=quantized_tensor,
+            rowwise_quantized_tensor=quantized_tensor,
+            columnwise_quantized_tensor=quantized_tensor,
         )
         debug_api.step()
 

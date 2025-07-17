@@ -87,7 +87,6 @@ class DebugQuantizer(Quantizer):
         else:
             (
                 self.inspect_tensor_enabled,
-                self.inspect_tensor_all_enabled,
                 self.inspect_tensor_postquantize_enabled_rowwise,
                 self.inspect_tensor_postquantize_enabled_columnwise,
             ) = self.get_enabled_look_at_tensors()
@@ -141,15 +140,8 @@ class DebugQuantizer(Quantizer):
                 gemm=self.columnwise_gemm_name,
             )
         )
-        inspect_tensor_all_enabled = debug_api.transformer_engine.inspect_tensor_all_enabled(
-            layer_name=self.layer_name,
-            tensor_name=self.tensor_name,
-            iteration=self.iteration,
-        )
-
         return (
             inspect_tensor_enabled,
-            inspect_tensor_all_enabled,
             inspect_tensor_postquantize_enabled_rowwise,
             inspect_tensor_postquantize_enabled_columnwise,
         )
@@ -238,12 +230,19 @@ class DebugQuantizer(Quantizer):
             "tensor_name": self.tensor_name,
             "iteration": debug_api.DEBUG_MANAGER._trainer_iteration_count,
             "tp_group": self.tp_group,
+            "columnwise_quantized_tensor": columnwise_gemm_tensor,
+            "rowwise_quantized_tensor": rowwise_gemm_tensor,
+            "quantizer": self.parent_quantizer,
         }
         if tensor is not None and self.inspect_tensor_enabled:
             debug_api.transformer_engine.inspect_tensor(**args)
 
         if self.output_tensor:
             return
+
+        del args["columnwise_quantized_tensor"]
+        del args["rowwise_quantized_tensor"]
+        del args["quantizer"]
 
         if (
             self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
@@ -260,18 +259,6 @@ class DebugQuantizer(Quantizer):
             args["tensor"] = columnwise_gemm_tensor
             args["rowwise"] = False
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
-
-        if self.inspect_tensor_all_enabled:
-            if "rowwise" in args:
-                del args["rowwise"]
-            if "tensor" in args:
-                del args["tensor"]
-            args["original_tensor"] = tensor
-            args["quantized_tensor_rowwise"] = rowwise_gemm_tensor
-            args["quantized_tensor_columnwise"] = columnwise_gemm_tensor
-            args["quantizer"] = self.parent_quantizer
-            debug_api.transformer_engine.inspect_tensor_all(**args)
-
     def quantize(
         self,
         tensor: torch.Tensor,
@@ -474,7 +461,6 @@ class DebugQuantizer(Quantizer):
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled_rowwise
             or self.inspect_tensor_postquantize_enabled_columnwise
-            or self.inspect_tensor_all_enabled
             or self.rowwise_tensor_plan == API_CALL_MODIFY
             or self.columnwise_tensor_plan == API_CALL_MODIFY
         ):

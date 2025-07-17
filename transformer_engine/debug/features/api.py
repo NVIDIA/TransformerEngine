@@ -91,10 +91,8 @@ required_kwargs = {
     "modify_tensor": ["tensor_name", "gemm"],
     "inspect_tensor": ["tensor_name"],
     "inspect_tensor_postquantize": ["tensor_name"],
-    "inspect_tensor_all": ["tensor_name"],
     "inspect_tensor_enabled": ["tensor_name"],
     "inspect_tensor_postquantize_enabled": ["tensor_name"],
-    "inspect_tensor_all_enabled": ["tensor_name"],
     "default": ["tensor_name", "gemm"],
 }
 
@@ -229,13 +227,13 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor],
+        columnwise_quantized_tensor: Optional[torch.Tensor],
+        quantizer: Optional[Quantizer],
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
         """
-        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
-
-
         The feature is invoked if *inspect_tensor_enabled* returns `True`. It can be used to obtain information on the high precision tensor. For example, it is run by the `LogTensorStats` feature.
 
         Parameters
@@ -248,6 +246,12 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in high precision,
+        rowwise_quantized_tensor: Optional[torch.Tensor]
+            rowwise quantized tensor,
+        columnwise_quantized_tensor: Optional[torch.Tensor]
+            columnwise quantized tensor,
+        quantizer: Optional[Quantizer]
+            quantizer,
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -271,9 +275,6 @@ class TEDefaultFeatures:
         rowwise: bool,
     ) -> None:
         """
-        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
-
-
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
@@ -298,62 +299,6 @@ class TEDefaultFeatures:
         Should return nothing.
         """
 
-    def inspect_tensor_all(
-        self,
-        config: Dict,
-        layer_name: str,
-        tensor_name: str,
-        iteration: int,
-        tp_group: torch.distributed.ProcessGroup,
-        original_tensor: torch.Tensor,
-        quantized_tensor_rowwise: Optional[Union[torch.Tensor, QuantizedTensor]] = None,
-        quantized_tensor_columnwise: Optional[Union[torch.Tensor, QuantizedTensor]] = None,
-        quantizer: Optional[Quantizer] = None,
-    ) -> None:
-        """
-        Similar to *inspect_tensor* and *inspect_tensor_postquantize*. It is run always once per tensor.
-        It allows to inspect both quantized and high precision tensors.
-        The feature LogFp8TensorStats uses this call to collect FP8 statistics after the quantization.
-
-        If tensor and the transpose are quantized differently
-
-        This call is used mainly to collect statistics of the tensor and quantized tensor. It is called
-        by the TE only if *inspect_tensor_all_enabled* returns `True`.
-
-
-        Parameters
-        ----------
-
-        config: Dict
-            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-        layer_name: str
-        tensor_name: str
-            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-        iteration: int
-            iteration number - equal to the number of times `debug_api.step()` was called.
-        tp_group: torch.distributed.ProcessGroup
-            process group for the tensor parallel group. This is used for weight statistics reduction.
-            This is not reduction group from debug_api.
-        original_tensor: torch.Tensor
-            original tensor in high precision,
-        quantized_tensor_rowwise: Optional[Union[torch.Tensor, QuantizedTensor]]
-            quantized tensor in rowwise format. If the tensor is not quantized, then it is `None`.
-            If quantized tensor is instance of `QuantizedTensor` class - for example Float8Tensor or MXFP8Tensor,
-            it contains data in rowwise format, possibly containg also data in columnwise format.
-        quantized_tensor_columnwise: Optional[Union[torch.Tensor, QuantizedTensor]]
-            quantized tensor in columnwise format. If the tensor is not quantized, then it is `None`.
-            If quantized tensor is instance of `QuantizedTensor` class - for example Float8Tensor or MXFP8Tensor,
-            it contains data in columnwise format, possibly containg also data in rowwise format.
-        quantizer: Optional[Quantizer]
-            quantizer used to quantize the tensor. If the tensor is not quantized, then it is `None`.
-
-        Returns
-        -------
-
-        Should return nothing.
-
-        """
-
     def inspect_tensor_enabled(
         self,
         config: Dict,
@@ -366,8 +311,6 @@ class TEDefaultFeatures:
 
         Parameters
         ----------
-        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
-
 
         config: Dict
             dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
@@ -419,37 +362,6 @@ class TEDefaultFeatures:
         """
         return False
 
-    def inspect_tensor_all_enabled(
-        self,
-        config: Dict,
-        layer_name: str,
-        tensor_name: str,
-        iteration: int,
-    ) -> bool:
-        """
-        It is a routing call, which is run at the initialization of the layer.
-        If it returns true, then *inspect_tensor_all* for
-        a given GEMM and tensor will be invoked.
-
-        Parameters
-        ----------
-
-        config: Dict
-            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-        layer_name: str
-        tensor_name: str
-            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-        iteration: int
-            iteration number - equal to the number of times `debug_api.step()` was called.
-
-        Returns
-        -------
-
-        bool - default is False
-        """
-        return False
-
-
 @Registry.register_namespace_api(namespace="transformer_engine")
 class TransformerEngineAPI(BaseNamespaceAPI):
     """
@@ -467,7 +379,6 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "modify_tensor": ["tensor_name", "gemm"],
             "inspect_tensor": ["tensor_name"],
             "inspect_tensor_postquantize": ["tensor_name"],
-            "inspect_tensor_all": ["tensor_name"],
             "inspect_tensor_enabled": ["tensor_name"],
             "inspect_tensor_postquantize_enabled": ["tensor_name"],
             "modify_tensor_enabled": ["tensor_name"],
@@ -481,7 +392,6 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "fp8_gemm_enabled",
             "inspect_tensor",
             "inspect_tensor_postquantize",
-            "inspect_tensor_all",
             "inspect_tensor_enabled",
             "inspect_tensor_postquantize_enabled",
         }
