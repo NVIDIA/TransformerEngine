@@ -90,6 +90,7 @@ class ModelConfig:
         window_size: Tuple[int, int] = (-1, -1),
         total_requests: int = None,
         max_ctx_len: int = None,
+        chunk_size: int = None,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -110,6 +111,7 @@ class ModelConfig:
         self.window_size = window_size
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
+        self.chunk_size = chunk_size
 
 
 @contextmanager
@@ -191,6 +193,7 @@ def _get_attention_backends(
             fp8_meta=fp8_meta,
             is_training=is_training,
             inference_params=inference_params,
+            chunk_size=config.chunk_size,
         )
         (
             use_flash_attention,
@@ -235,6 +238,7 @@ model_configs_base = {
     "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),
     "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),
     "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),
+    "base_7_0": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias", chunk_size=128),
 }
 
 
@@ -748,6 +752,9 @@ model_configs_layout_thd = {
         "no_bias",
         window_size=(4, 0),
     ),
+    "layout_6_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", chunk_size=128
+    ),
 }
 
 
@@ -1072,6 +1079,7 @@ def _run_dot_product_attention(
         k,
         v,
         window_size=config.window_size,
+        chunk_size=config.chunk_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
         max_seqlen_q=config.max_seqlen_q,
@@ -1145,6 +1153,7 @@ model_configs_te_layer = {
     "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
     "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
     "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
+    "te_4_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias", chunk_size=128),
 }
 
 
@@ -1484,6 +1493,7 @@ def _run_transformer_layer(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
+        attn_chunk_size=config.chunk_size,
     )
     if is_training:
         loss = out.sum()

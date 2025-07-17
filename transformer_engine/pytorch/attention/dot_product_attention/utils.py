@@ -191,6 +191,8 @@ class AttentionParams:
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
     window_size: Tuple[int, int], default = None
         Sliding window attention size.
+    chunk_size: int, default = None
+        Chunk size for context parallelism.
     alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
     core_attention_bias_type: str, default = `no_bias`
@@ -230,6 +232,7 @@ class AttentionParams:
     head_dim_v: int = 64
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
+    chunk_size: int = None
     alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
@@ -301,6 +304,7 @@ def get_attention_backend(
     head_dim_v = attention_params.head_dim_v
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
+    chunk_size = attention_params.chunk_size
     alibi_slopes_shape = attention_params.alibi_slopes_shape
     core_attention_bias_type = attention_params.core_attention_bias_type
     core_attention_bias_shape = attention_params.core_attention_bias_shape
@@ -580,6 +584,12 @@ def get_attention_backend(
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " attention bias for THD format"
+                )
+                use_flash_attention = False
+            elif qkv_format == "thd" and chunk_size is not None:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with"
+                    " chunked attention for THD format"
                 )
                 use_flash_attention = False
 
@@ -1823,3 +1833,143 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
         )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def thd_chunkify(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    chunk_size: int,
+    total_seq_len: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Perform chunkification of sequences stored in `thd` format when chunked
+    attention is required.
+
+    The function receives `cu_seqlens` and `cu_seqlens_padded`, which encode
+    the cumulative sequence lengths of the original (unpadded) sequences and
+    of the right-padded sequences, respectively.  It returns the corresponding
+    tensors after the sequences have been partitioned into chunks of size
+    `chunk_size`.
+
+    Example
+    -------
+    Given original sequence lengths `[10, 20]` with three padding tokens
+    appended to the second sequence and `chunk_size = 8`, the sequences are
+    split into `[8, 2]` and `[8, 8, 2 (+3 padding)]`.
+
+        cu_seqlens        : [0, 10, 30]  →  [0, 8, 10, 18, 30]
+        cu_seqlens_padded : [0, 10, 33]  →  [0, 8, 10, 18, 33]
+
+    `total_seq_len` denotes the total number of (padded) tokens in the input
+    tensor—that is, the length of the `t` dimension in `thd` layout.
+    """
+    if cu_seqlens_padded is None:
+        cu_seqlens_padded = cu_seqlens
+    new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify(
+        cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size
+    )
+
+    return new_cu_seqlens, new_cu_seqlens_padded
+
+
+def thd_chunkify_p2p(
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    chunk_size: int,
+    cp_rank: int,
+    cp_size: int,
+    total_seq_len: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens and cu_seqlens_padded for the case when q part on the GPU
+    corresponds to the current pair of the kv part on the GPU - this happens once,
+    at the beginning. In this case returned cu_seqlens will be used both as
+    a cu_seqlens_q and as a cu_seqlens_kv.
+    """
+
+    new_cu_seqlens, new_cu_seqlens_padded = tex.thd_chunkify_p2p(
+        cu_seqlens, cu_seqlens_padded, total_seq_len, chunk_size, cp_rank, cp_size
+    )
+
+    return new_cu_seqlens, new_cu_seqlens_padded
+
+
+def thd_seq_tweak_below_diagonal(
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv_halfs: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    cp_rank_q: int,
+    cp_rank_kv: int,
+    cp_size: int,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens_q and cu_seqlens_kv_halfs for the case when q part on the GPU
+    has bigger index than the kv part on the GPU.
+    """
+    assert cp_rank_q > cp_rank_kv
+
+    new_seqlens_q, new_seqlens_kv_halfs, new_cu_seqlens_q_padded, new_cu_seqlens_kv_padded = (
+        tex.thd_seq_tweak_below_diag(
+            cu_seqlens_q,
+            cu_seqlens_kv_halfs,
+            cu_seqlens_padded,
+            cp_rank_q,
+            cp_rank_kv,
+            cp_size,
+            chunk_size,
+        )
+    )
+
+    new_cu_seqlens_q = torch.cumsum(new_seqlens_q, dim=0, dtype=torch.int32)
+    new_cu_seqlens_kv_halfs = torch.cumsum(new_seqlens_kv_halfs, dim=0, dtype=torch.int32)
+
+    return (
+        new_cu_seqlens_q,
+        new_cu_seqlens_kv_halfs,
+        new_cu_seqlens_q_padded,
+        new_cu_seqlens_kv_padded,
+    )
+
+
+def thd_seq_tweak_above_diagonal(
+    cu_seqlens_q_halfs: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    cp_rank_q: int,
+    cp_rank_kv: int,
+    cp_size: int,
+    chunk_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Utility function used in chunked attention support for thd P2P context parallelism.
+
+    Process cu_seqlens_q_halfs and cu_seqlens_kv for the case when q part on the GPU
+    has smaller index than the kv part on the GPU.
+    """
+    assert cp_rank_q < cp_rank_kv
+
+    new_seqlens_q, new_seqlens_kv, new_cu_seqlens_q_padded, new_cu_seqlens_kv_padded = (
+        tex.thd_seq_tweak_above_diag(
+            cu_seqlens_q_halfs,
+            cu_seqlens_kv,
+            cu_seqlens_padded,
+            cp_rank_q,
+            cp_rank_kv,
+            cp_size,
+            chunk_size,
+        )
+    )
+    new_cu_seqlens_q_halfs = torch.cumsum(new_seqlens_q, dim=0, dtype=torch.int32)
+    new_cu_seqlens_kv = torch.cumsum(new_seqlens_kv, dim=0, dtype=torch.int32)
+
+    return (
+        new_cu_seqlens_q_halfs,
+        new_cu_seqlens_kv,
+        new_cu_seqlens_q_padded,
+        new_cu_seqlens_kv_padded,
+    )
