@@ -29,20 +29,34 @@ class BasePrimitive(metaclass=ABCMeta):
     """
 
     name = None
+    _is_enabled = True  # Default state is enabled
 
     @classmethod
     def enabled(cls):
         """
-        A custom call is marked as disabled if the `cls.__name__` does not fully match the
-        `NVTE_JAX_CUSTOM_CALLS_RE` pattern.
+        Determines if a custom call is enabled based on a state variable and the `NVTE_JAX_CUSTOM_CALLS_RE` environment variable.
+        If the environment variable NVTE_JAX_CUSTOM_CALLS_RE is explicitly set, it overrides any internal state.
         This uses the Python class name of the primitive definitions that inherit from BasePrimitive.
-        By default, `NVTE_JAX_CUSTOM_CALLS_RE` is set to `.*`, which matches and enables all names.
-        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive`.
+        If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `disable_primitives`.
+        By default, the internal state `_is_enabled` is set to `True`, enabling all primitives if no modifications are made.
+        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
         """
-        pattern = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE", r".*")
-        pattern = re.compile(pattern)
-        is_enabled = pattern.fullmatch(cls.__name__) is not None
-        return is_enabled
+        # Check if environment variable is explicitly set
+        pattern_str = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE")
+        if pattern_str is not None:
+            pattern = re.compile(pattern_str)
+            env_enabled = pattern.fullmatch(cls.__name__) is not None
+            return env_enabled
+        
+        # If environment variable is not set, fall back to the internal state
+        return getattr(cls, '_is_enabled', True)
+
+    @classmethod
+    def set_enabled(cls, enabled: bool):
+        """
+        Sets the enabled state for this primitive.
+        """
+        cls._is_enabled = enabled
 
     @staticmethod
     @abstractmethod
@@ -109,11 +123,15 @@ class BasePrimitive(metaclass=ABCMeta):
         return "... -> ..."
 
 
+# Registry to store all registered primitive classes
+_primitive_registry = {}
+
 def register_primitive(cls):
     """
-    register jax primitive
+    Register a JAX primitive and add it to the internal registry.
     """
-
+    _primitive_registry[cls.__name__] = cls
+    
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
@@ -141,6 +159,48 @@ def register_primitive(cls):
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)
     )
     cls.outer_primitive = outer_p
+
+
+def manage_primitives(enable_names=None, disable_names=None, disable_all=False):
+    """
+    Helper function to manage primitive states by name without modifying environment variables.
+    Allows enabling specific primitives, disabling specific primitives, or disabling all primitives.
+    
+    Args:
+        enable_names: List of strings, each representing the name of a primitive class to enable. Defaults to None.
+        disable_names: List of strings, each representing the name of a primitive class to disable. Defaults to None.
+        disable_all: Boolean, if True, disables all primitives before applying enable/disable lists. Defaults to False.
+    
+    Note:
+        - If `disable_all` is True, all primitives are disabled first, then `enable_names` is applied.
+        - Conflicts (a primitive in both enable and disable lists) are resolved by applying disable last.
+    """
+    enable_set = set(enable_names or [])
+    disable_set = set(disable_names or [])
+    
+    if disable_all:
+        for name, cls in _primitive_registry.items():
+            if isinstance(cls, type) and issubclass(cls, BasePrimitive) and cls is not BasePrimitive:
+                cls.set_enabled(False)
+                print(f"Disabled primitive (all): {name}")
+    
+    # Apply enables
+    for name in enable_set:
+        cls = _primitive_registry.get(name)
+        if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
+            cls.set_enabled(True)
+            print(f"Enabled primitive: {name}")
+        else:
+            print(f"Primitive not found in registry: {name}")
+    
+    # Apply disables (overrides enables if there's a conflict)
+    for name in disable_set:
+        cls = _primitive_registry.get(name)
+        if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
+            cls.set_enabled(False)
+            print(f"Disabled primitive: {name}")
+        else:
+            print(f"Primitive not found in registry: {name}")
 
 
 for _name, _value in transformer_engine_jax.registrations().items():
