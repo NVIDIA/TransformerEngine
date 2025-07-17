@@ -474,7 +474,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -482,7 +482,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -490,14 +490,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_with_sp(self):
         """Test Transformer Engine with BF16 + SP"""
         self.args.enable_sp = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp(self):
@@ -506,7 +506,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8_with_sp(self):
@@ -515,14 +515,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_shardy(self):
@@ -531,7 +531,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp_shardy(self):
@@ -541,7 +541,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     @unittest.skipIf(
@@ -553,7 +553,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     @unittest.skipIf(
@@ -566,7 +566,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
 
 if __name__ == "__main__":
