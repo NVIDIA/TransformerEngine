@@ -182,7 +182,7 @@ class UserbuffersForwardLinear(FusedOperation):
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
             if output_quantizer is not None:
-                raise ValueError("FP8 output is not supported")
+                raise ValueError("Quantized output is not supported")
         else:
             input_quantizer = None
             weight_quantizer = None
