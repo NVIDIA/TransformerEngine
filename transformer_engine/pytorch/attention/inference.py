@@ -420,6 +420,8 @@ class NonPagedKVCacheManager(KVCacheManager):
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
+        # whether the batch is the same as previous batch, i.e. same seq_ids
+        self.is_same_batch = False
 
     def allocate_memory(self, layer_number):
         """Allocate memory for the cache"""
@@ -453,6 +455,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         prev_batch_size = len(self.sequences)
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs
+        self.is_same_batch = not (unfinished_seqs == self.sequences.keys() and len(finished_seqs) == 0)
         unfinished_indices = [i for i, j in enumerate(self.sequences) if j in unfinished_seqs]
         finished_indices = [i for i, j in enumerate(self.sequences) if j in finished_seqs]
         self.batch_indices.copy_(
@@ -538,7 +541,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             ctx_len,
             self.max_seqlen,
             1,
-            True,
+            self.is_same_batch,
         )
 
         k_cache = k_cache[:batch_size]
