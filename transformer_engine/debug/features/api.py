@@ -440,7 +440,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
-                
+
     def call_feature(self, call, feat_name, feat_config, layer_name, **kwargs):
         """
         For backward compatibility, remove kwargs that are not needed for the call
