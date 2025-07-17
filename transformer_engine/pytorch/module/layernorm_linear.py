@@ -1470,9 +1470,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         """
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp, fp8_output)
-        
+
         debug = self.validate_debug()
-        
+
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         else:
