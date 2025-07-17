@@ -1283,7 +1283,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -1913,7 +1913,7 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -2198,7 +2198,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
