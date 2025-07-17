@@ -42,7 +42,7 @@ _rng_states = None
 reset_rng_states()
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32, 2, 2, 0.0, "no_mask", "no_bias"),
+    "small": ModelConfig(32, 2, 2, 32, 2, 2),
 }
 
 fp8_recipes = [

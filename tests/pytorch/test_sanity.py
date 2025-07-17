@@ -112,10 +112,10 @@ def is_fp8_supported(config: ModelConfig):
 
 
 model_configs = {
-    "126m": ModelConfig(2, 12, 12, 64, 2048, 2048, 0.0, "no_mask", "no_bias", num_layers=12),
-    "small": ModelConfig(2, 2, 2, 32, 32, 32, 0.0, "no_mask", "no_bias", num_layers=2),
-    "weird": ModelConfig(3, 3, 3, 23, 37, 37, 0.0, "no_mask", "no_bias", num_layers=2),
-    "large": ModelConfig(2, 4, 4, 128, 128, 128, 0.0, "no_mask", "no_bias", num_layers=1),
+    "126m": ModelConfig(2, 12, 12, 64, 2048, 2048, num_layers=12),
+    "small": ModelConfig(2, 2, 2, 32, 32, 32, num_layers=2),
+    "weird": ModelConfig(3, 3, 3, 23, 37, 37, num_layers=2),
+    "large": ModelConfig(2, 4, 4, 128, 128, 128, num_layers=1),
 }
 
 fp8_recipes = [

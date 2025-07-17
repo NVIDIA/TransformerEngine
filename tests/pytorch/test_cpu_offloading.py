@@ -24,12 +24,12 @@ fp8_recipes = [
 ]
 
 model_config = {
-    "model1": ModelConfig(2, 8, 8, 64, 512, 512, 0.0, "no_mask", "no_bias", num_layers=5),
+    "small": ModelConfig(8, 8, 8, 64, 512, 512, num_layers=5, eps=0.1),
 }
-SIZE = model_config["model1"].hidden_size  # 512
-NUM_HEADS = model_config["model1"].num_heads  # 8
-NUM_LAYERS = model_config["model1"].num_layers  # 5
-EPSILON = 0.1
+SIZE = model_config["small"].hidden_size
+NUM_HEADS = model_config["small"].num_heads
+NUM_LAYERS = model_config["small"].num_layers
+EPSILON = model_config["small"].eps
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
@@ -136,7 +136,7 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
 
     if model_key in ["multihead_attention", "transformer_layer"]:
         available_backends, *_ = get_available_attention_backends(
-            model_config["model1"],
+            model_config["small"],
             qkv_dtype=torch.bfloat16,
             qkv_layout="sbhd_sbhd_sbhd",
         )

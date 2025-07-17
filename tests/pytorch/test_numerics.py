@@ -68,11 +68,11 @@ torch._dynamo.config.recompile_limit = 16
 
 
 model_configs = {
-    "small": ModelConfig(1, 8, 8, 16, 128, 128, 0.0, "no_mask", "no_bias", num_layers=4),
-    "126m": ModelConfig(1, 12, 12, 64, 2048, 2048, 0.0, "no_mask", "no_bias", num_layers=12),
+    "small": ModelConfig(1, 8, 8, 16, 128, 128, num_layers=4),
+    "126m": ModelConfig(1, 12, 12, 64, 2048, 2048, num_layers=12),
 }
 model_configs_inference = {
-    "126m": ModelConfig(1, 12, 12, 64, 256, 256, 0.0, "no_mask", "no_bias", num_layers=12),
+    "126m": ModelConfig(1, 12, 12, 64, 256, 256, num_layers=12),
 }
 backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
