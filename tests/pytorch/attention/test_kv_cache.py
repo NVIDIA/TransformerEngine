@@ -34,16 +34,11 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
     ModelConfig,
-    _rng_states,
     reset_rng_states,
     get_available_attention_backends,
 )
 
-# Initialize RNG state
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_rng_states = None
+# Reset RNG states
 reset_rng_states()
 
 param_types = [torch.float16]

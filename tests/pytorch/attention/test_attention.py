@@ -51,7 +51,6 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
-    _rng_states,
     reset_rng_states,
     ModelConfig,
     dtype_tols,
@@ -62,11 +61,8 @@ from utils import (
 # Only run FP8 tests on H100
 fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 
-# Initialize RNG state
 seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_rng_states = None
+# Reset RNG states
 reset_rng_states()
 
 model_configs_base = {
