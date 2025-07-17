@@ -1565,7 +1565,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             qkv_layout=qkv_format.replace("hd", "h3d"),
             is_training=is_training,
         )
-        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+        _, fused_attn_supported, _ = available_backends
         if not fused_attn_supported:
             pytest.skip("No attention backend available.")
 
@@ -1789,7 +1789,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             qkv_layout=qkv_layout,
             is_training=is_training,
         )
-        flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+        _, fused_attn_supported, _ = available_backends
         if not fused_attn_supported:
             pytest.skip("No attention backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
