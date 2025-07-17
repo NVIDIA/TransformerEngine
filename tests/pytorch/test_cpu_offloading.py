@@ -10,6 +10,7 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from utils import ModelConfig, get_available_attention_backends
 
 # Check if FP8 is supported
@@ -143,6 +144,8 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
         _, fused_attn_supported, _ = available_backends
         if not fused_attn_supported:
             pytest.skip("Fused attention backend not available.")
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
 
     without_offloading = _measure_memory_between_forward_and_backward(
         models_list, fp8_recipe, False
