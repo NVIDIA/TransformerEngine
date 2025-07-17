@@ -44,8 +44,9 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
   return create_tensor(shape, dtype, at::empty(shape_int64, opts));
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, at::Tensor data) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
+                                                                  DType dtype,
+                                                                  at::Tensor data) const {
   TensorWrapper out_cpp;
   out_cpp.set_rowwise_data(data.data_ptr(), dtype, shape);
   return {std::move(out_cpp), py::cast(data)};
