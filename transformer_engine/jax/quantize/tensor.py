@@ -136,13 +136,15 @@ class ScaledTensor1x(ScaledTensor):
             self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
         else:
             unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-                    self.data.shape, is_colwise=self.is_colwise, is_padded=False,
-                    flatten_axis=self.flatten_axis
-                    )
+                self.data.shape,
+                is_colwise=self.is_colwise,
+                is_padded=False,
+                flatten_axis=self.flatten_axis,
+            )
             assert self.scale_inv.shape == unpadded_scale_shape, (
-                    f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} but got "
-                    f"{self.scale_inv.shape}."
-                    )
+                "Unpadded inverse scale factor has wrong shape, expected"
+                f" {unpadded_scale_shape} but got {self.scale_inv.shape}."
+            )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
