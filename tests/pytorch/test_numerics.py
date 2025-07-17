@@ -804,7 +804,6 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
         torch.set_rng_state(_cpu_rng_state)
         torch.cuda.set_rng_state(_cuda_rng_state)
 
-
         for p in block.parameters():
             if p.requires_grad:
                 p.grad = param_grads.pop(0)

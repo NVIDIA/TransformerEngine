@@ -128,6 +128,7 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
 # Cached RNG state
 _rng_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
 
+
 def reset_rng_states() -> None:
     """Revert to deterministic RNG state"""
     global _rng_states
