@@ -67,6 +67,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -1278,6 +1279,9 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp, fp8_output)
+
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
@@ -1301,13 +1305,7 @@ class Linear(TransformerEngineBaseModule):
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
 
-            # Get concatenated weight and bias tensors
-            unfused_weights = self._get_weight_tensors()
-            weight_tensor = noop_cat(unfused_weights)
-            if self.use_bias:
-                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            else:
-                bias_tensor = None
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
@@ -1420,6 +1418,95 @@ class Linear(TransformerEngineBaseModule):
             for name, q in zip(names, original_quantizers)
         )
 
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        unfused_weights = [getattr(self, name) for name in self.weight_names]
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                warnings.warn(
+                    "You are using quantized weights without quantized compute. "
+                    "Please make sure this is intentional."
+                )
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+        return unfused_weights
+
+    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Get concatenated weight and bias tensors
+        unfused_weights = self._get_weight_tensors()
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                warnings.warn(
+                    "You are using quantized weights without quantized compute. "
+                    "Please make sure this is intentional."
+                )
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+
+        weight_tensor = noop_cat(unfused_weights)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = None
+
+        return weight_tensor, bias_tensor
+
+    def onnx_forward(
+        self,
+        inp: torch.Tensor,
+        fp8_output: bool,
+    ) -> torch.Tensor:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        from ..export import onnx_gemm
+
+        assert_warmed_up(self)
+        assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export."
+        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        (
+            input_quantizer,
+            weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers(fp8_output, False)
+        inp_dtype = inp.dtype
+
+        if input_quantizer is not None:
+            inp_q = input_quantizer.onnx_quantize(inp)
+            inp = input_quantizer.onnx_dequantize(inp_q)
+            inp = inp.to(inp_dtype)
+
+        if weight_quantizer is not None:
+            weight_q = weight_quantizer.onnx_quantize(weight_tensor)
+            weight_tensor = weight_quantizer.onnx_dequantize(weight_q)
+        if bias_tensor is not None:
+            bias_tensor = bias_tensor.to(inp_dtype)
+        weight_tensor = weight_tensor.to(inp_dtype)
+
+        if self.apply_bias:
+            output = onnx_gemm(weight_tensor, inp, bias_tensor)
+        else:
+            output = onnx_gemm(weight_tensor, inp, None)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+
+        if self.return_bias:
+            return output, bias_tensor
+
+        return output
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
         assert (
@@ -1466,23 +1553,6 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
-        """Get the weight tensors of the module."""
-        unfused_weights = [getattr(self, name) for name in self.weight_names]
-        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
-            if self.fp8:
-                if len(unfused_weights) != 1:
-                    raise RuntimeError(
-                        "Splitting QuantizedTensor into multiple params is not supported"
-                    )
-            else:
-                warnings.warn(
-                    "You are using quantized weights without quantized compute. "
-                    "Please make sure this is intentional."
-                )
-                unfused_weights = [w.dequantize() for w in unfused_weights]
-        return unfused_weights
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
