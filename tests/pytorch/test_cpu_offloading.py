@@ -25,7 +25,7 @@ fp8_recipes = [
 ]
 
 model_config = {
-    "small": ModelConfig(8, 8, 8, 64, 512, 512, num_layers=5, eps=0.1),
+    "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
 }
 SIZE = model_config["small"].hidden_size
 NUM_HEADS = model_config["small"].num_heads

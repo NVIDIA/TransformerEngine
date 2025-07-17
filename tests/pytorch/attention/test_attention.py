@@ -67,18 +67,18 @@ reset_rng_states()
 
 model_configs_base = {
     #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
-    "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_4_0": ModelConfig(8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_4_1": ModelConfig(8, 16, 16, 192, 128, 2048, 0.0, "no_mask", "no_bias"),
-    "base_5_0": ModelConfig(8, 16, 16, 512, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_5_1": ModelConfig(8, 16, 16, 512, 128, 2048, 0.0, "no_mask", "no_bias"),
-    "base_6_0": ModelConfig(8, 16, 16, 1024, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "base_6_1": ModelConfig(8, 16, 16, 1024, 128, 2048, 0.0, "no_mask", "no_bias"),
+    "base_1_0": ModelConfig(8,  128,  16,  64),
+    "base_1_1": ModelConfig(4,  128,  16,  64, max_seqlen_kv= 256),
+    "base_2_0": ModelConfig(2,  2048,  24,  128),
+    "base_2_1": ModelConfig(1,  2048,  24,  128, max_seqlen_kv= 4096),
+    "base_3_0": ModelConfig(8,  1,  16,  128, max_seqlen_kv= 2048),
+    "base_3_1": ModelConfig(8,  1,  16,  256, max_seqlen_kv= 2048),
+    "base_4_0": ModelConfig(8,  1,  16,  192, max_seqlen_kv= 2048),
+    "base_4_1": ModelConfig(8,  128,  16,  192, max_seqlen_kv= 2048),
+    "base_5_0": ModelConfig(8,  1,  16,  512, max_seqlen_kv= 2048),
+    "base_5_1": ModelConfig(8,  128,  16,  512, max_seqlen_kv= 2048),
+    "base_6_0": ModelConfig(8,  1,  16,  1024, max_seqlen_kv= 2048),
+    "base_6_1": ModelConfig(8,  128,  16,  1024, max_seqlen_kv= 2048),
 }
 
 
@@ -257,33 +257,15 @@ def test_dpa_checkpoint(dtype, model_configs, model):
 
 model_configs_mla = {
     #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
-    "mla_1_0": ModelConfig(
-        8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # self , 0
-    "mla_1_1": ModelConfig(
-        4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # cross, 0
-    "mla_1_2": ModelConfig(
-        4, 16, 16, 192, 128, 256, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # cross, 0
-    "mla_2_0": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias", head_dim_v=64
-    ),  # self , 1
-    "mla_2_1": ModelConfig(
-        1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=64
-    ),  # cross, 1
-    "mla_2_2": ModelConfig(
-        1, 24, 24, 192, 2048, 4096, 0.0, "causal", "no_bias", head_dim_v=128
-    ),  # cross, 1
-    "mla_3_0": ModelConfig(
-        8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=64
-    ),  # inference
-    "mla_3_1": ModelConfig(
-        8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # inference
-    "mla_3_2": ModelConfig(
-        8, 16, 16, 192, 1, 2048, 0.0, "no_mask", "no_bias", head_dim_v=128
-    ),  # inference
+    "mla_1_0": ModelConfig(8,  128,  16,  64, head_dim_v=128),  # self , 0
+    "mla_1_1": ModelConfig(4,  128,  16,  64, max_seqlen_kv= 256, head_dim_v=128),  # cross, 0
+    "mla_1_2": ModelConfig(4,  128,  16,  192, max_seqlen_kv= 256, head_dim_v=128),  # cross, 0
+    "mla_2_0": ModelConfig(2,  2048,  24,  128, attn_mask_type="causal", head_dim_v=64),  # self , 1
+    "mla_2_1": ModelConfig(1,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal", head_dim_v=64),  # cross, 1
+    "mla_2_2": ModelConfig(1,  2048,  24,  192, max_seqlen_kv= 4096, attn_mask_type="causal", head_dim_v=128),  # cross, 1
+    "mla_3_0": ModelConfig(8,  1,  16,  128, max_seqlen_kv= 2048, head_dim_v=64),  # inference
+    "mla_3_1": ModelConfig(8,  1,  16,  256, max_seqlen_kv= 2048, head_dim_v=128),  # inference
+    "mla_3_2": ModelConfig(8,  1,  16,  192, max_seqlen_kv= 2048, head_dim_v=128),  # inference
 }
 
 
@@ -298,41 +280,31 @@ def test_dpa_mla(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    "mask_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "mask_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "mask_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "mask_5_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_5_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_5_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_6_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
-    "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_10_0": ModelConfig(
-        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "mask_10_1": ModelConfig(
-        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
+    "mask_1_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="causal"),
+    "mask_1_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="causal"),
+    "mask_1_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal"),
+    "mask_2_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="causal_bottom_right"),
+    "mask_2_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="causal_bottom_right"),
+    "mask_2_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal_bottom_right"),
+    "mask_3_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding"),
+    "mask_3_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding"),
+    "mask_3_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding"),
+    "mask_4_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal"),
+    "mask_4_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal"),
+    "mask_4_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal"),
+    "mask_5_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal_bottom_right"),
+    "mask_5_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal_bottom_right"),
+    "mask_5_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right"),
+    "mask_6_0": ModelConfig(2,  1,  16,  128, max_seqlen_kv= 2048, attn_mask_type="causal"),
+    "mask_6_1": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048, attn_mask_type="causal"),
+    "mask_7_0": ModelConfig(2,  1,  16,  128, max_seqlen_kv= 2048, attn_mask_type="causal_bottom_right"),
+    "mask_7_1": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048, attn_mask_type="causal_bottom_right"),
+    "mask_8_0": ModelConfig(2,  1,  24,  128, max_seqlen_kv= 2048, attn_mask_type="padding"),
+    "mask_8_1": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048, attn_mask_type="padding"),
+    "mask_9_0": ModelConfig(2,  1,  24,  128, max_seqlen_kv= 2048, attn_mask_type="padding_causal"),
+    "mask_9_1": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048, attn_mask_type="padding_causal"),
+    "mask_10_0": ModelConfig(2,  1,  24,  128, max_seqlen_kv= 2048, attn_mask_type="padding_causal_bottom_right"),
+    "mask_10_1": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048, attn_mask_type="padding_causal_bottom_right"),
 }
 
 
@@ -347,44 +319,30 @@ def test_dpa_mask(dtype, model_configs, model):
 
 model_configs_bias = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "bias_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "post_scale_bias"),
-    "bias_1_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "alibi"),  # skipped
-    "bias_1_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "alibi"),  # skipped
-    "bias_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),  # skipped
-    "bias_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "padding", "post_scale_bias"),  # skipped
-    "bias_2_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "padding", "post_scale_bias"
-    ),  # skipped
-    "bias_2_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "post_scale_bias"
-    ),  # skipped
-    "bias_2_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding", "alibi"),  # skipped
-    "bias_2_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "alibi"),  # skipped
-    "bias_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "bias_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "post_scale_bias"),
-    "bias_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),
-    "bias_3_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "causal", "post_scale_bias"
-    ),  # skipped
-    "bias_3_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi"),
-    "bias_3_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "alibi"),  # skipped
-    "bias_4_0": ModelConfig(
-        4, 16, 16, 64, 128, 128, 0.0, "padding_causal", "post_scale_bias"
-    ),  # skipped
-    "bias_4_1": ModelConfig(
-        2, 16, 16, 64, 128, 256, 0.0, "padding_causal", "post_scale_bias"
-    ),  # skipped
-    "bias_4_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "post_scale_bias"
-    ),  # skipped
-    "bias_4_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"
-    ),  # skipped
-    "bias_4_4": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "alibi"),  # skipped
-    "bias_4_5": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "alibi"),  # skipped
+    "bias_1_0": ModelConfig(4,  128,  16,  64, attn_bias_type="post_scale_bias"),
+    "bias_1_1": ModelConfig(2,  128,  16,  64, max_seqlen_kv= 256, attn_bias_type="post_scale_bias"),
+    "bias_1_2": ModelConfig(4,  2048,  24,  128, attn_bias_type="post_scale_bias"),
+    "bias_1_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_bias_type="post_scale_bias"),
+    "bias_1_4": ModelConfig(4,  2048,  24,  128, attn_bias_type="alibi"),  # skipped
+    "bias_1_5": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_bias_type="alibi"),  # skipped
+    "bias_2_0": ModelConfig(4,  128,  16,  64, attn_mask_type="padding", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_2_1": ModelConfig(2,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="padding", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_2_2": ModelConfig(4,  2048,  24,  128, attn_mask_type="padding", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_2_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_2_4": ModelConfig(4,  2048,  24,  128, attn_mask_type="padding", attn_bias_type="alibi"),  # skipped
+    "bias_2_5": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding", attn_bias_type="alibi"),  # skipped
+    "bias_3_0": ModelConfig(4,  128,  16,  64, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "bias_3_1": ModelConfig(2,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "bias_3_2": ModelConfig(4,  2048,  24,  128, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "bias_3_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_3_4": ModelConfig(4,  2048,  24,  128, attn_mask_type="causal", attn_bias_type="alibi"),
+    "bias_3_5": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal", attn_bias_type="alibi"),  # skipped
+    "bias_4_0": ModelConfig(4,  128,  16,  64, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_4_1": ModelConfig(2,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_4_2": ModelConfig(4,  2048,  24,  128, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_4_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),  # skipped
+    "bias_4_4": ModelConfig(4,  2048,  24,  128, attn_mask_type="padding_causal", attn_bias_type="alibi"),  # skipped
+    "bias_4_5": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal", attn_bias_type="alibi"),  # skipped
 }
 
 
@@ -399,34 +357,12 @@ def test_dpa_bias(dtype, model_configs, model):
 
 model_configs_bias_shapes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,
-    "bias_1_0": ModelConfig(
-        4,
-        16,
-        16,
-        64,
-        128,
-        128,
-        0.0,
-        #        mask,                     bias,       bias_shape,
-        "no_mask",
-        "post_scale_bias",
-        bias_shape="11ss",
-    ),
-    "bias_1_1": ModelConfig(
-        2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias", bias_shape="1hss"
-    ),
-    "bias_1_2": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias", bias_shape="b1ss"
-    ),
-    "bias_1_3": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "post_scale_bias", bias_shape="bhss"
-    ),
-    "bias_1_4": ModelConfig(
-        4, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", bias_shape="1hss", alibi_type="custom"
-    ),
-    "bias_1_5": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "causal", "alibi", bias_shape="bhss", alibi_type="custom"
-    ),
+    "bias_1_0": ModelConfig(4,  128,  16,  64, attn_bias_type="post_scale_bias", bias_shape="11ss"),
+    "bias_1_1": ModelConfig(2,  128,  16,  64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
+    "bias_1_2": ModelConfig(4,  2048,  24,  128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
+    "bias_1_3": ModelConfig(2,  2048,  24,  128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
+    "bias_1_4": ModelConfig(4,  2048,  24,  128, attn_mask_type="causal", attn_bias_type="alibi", bias_shape="1hss", alibi_type="custom"),
+    "bias_1_5": ModelConfig(2,  2048,  24,  128, attn_mask_type="causal", attn_bias_type="alibi", bias_shape="bhss", alibi_type="custom"),
 }
 
 
@@ -441,30 +377,24 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 model_configs_swa = {
     #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "swa_1_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "swa_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "swa_3_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "swa_5_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_5_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_5_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "swa_6_1": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "swa_6_2": ModelConfig(
-        2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "swa_6_3": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
+    "swa_1_1": ModelConfig(2,  2048,  16,  64),
+    "swa_1_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4),
+    "swa_1_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096),
+    "swa_2_1": ModelConfig(2,  2048,  16,  64, attn_mask_type="causal"),
+    "swa_2_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4, attn_mask_type="causal"),
+    "swa_2_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal"),
+    "swa_3_1": ModelConfig(2,  2048,  16,  64, attn_mask_type="causal_bottom_right"),
+    "swa_3_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4, attn_mask_type="causal_bottom_right"),
+    "swa_3_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="causal_bottom_right"),
+    "swa_4_1": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding"),
+    "swa_4_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4, attn_mask_type="padding"),
+    "swa_4_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding"),
+    "swa_5_1": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal"),
+    "swa_5_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4, attn_mask_type="padding_causal"),
+    "swa_5_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal"),
+    "swa_6_1": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal_bottom_right"),
+    "swa_6_2": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 4, attn_mask_type="padding_causal_bottom_right"),
+    "swa_6_3": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right"),
 }
 
 
@@ -479,14 +409,10 @@ def test_dpa_sliding_window(dtype, model_configs, model):
 
 model_configs_alibi_slopes = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
-    "alibi_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_1_1": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "causal", "alibi", alibi_type="vanilla"),
-    "alibi_2_0": ModelConfig(
-        2, 24, 24, 128, 1024, 1024, 0.0, "causal", "alibi", alibi_type="custom"
-    ),
-    "alibi_2_1": ModelConfig(
-        1, 24, 24, 128, 1024, 2048, 0.0, "causal", "alibi", alibi_type="custom"
-    ),
+    "alibi_1_0": ModelConfig(2,  128,  16,  64, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="vanilla"),
+    "alibi_1_1": ModelConfig(1,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="vanilla"),
+    "alibi_2_0": ModelConfig(2,  1024,  24,  128, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="custom"),
+    "alibi_2_1": ModelConfig(1,  1024,  24,  128, max_seqlen_kv= 2048, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="custom"),
 }
 
 
@@ -515,16 +441,16 @@ qkv_layouts = [
 
 model_configs_layout = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "layout_0_1": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "layout_0_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding_causal", "post_scale_bias"),
-    "layout_1_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),
-    "layout_1_2": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "post_scale_bias"),
-    "layout_2_0": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),
-    "layout_2_1": ModelConfig(2, 24, 24, 256, 2048, 2048, 0.0, "causal", "post_scale_bias"),
+    "layout_0_0": ModelConfig(2,  128,  16,  64),
+    "layout_0_1": ModelConfig(2,  128,  16,  64, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "layout_0_2": ModelConfig(1,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="padding"),
+    "layout_0_3": ModelConfig(1,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),
+    "layout_1_0": ModelConfig(2,  2048,  24,  128),
+    "layout_1_1": ModelConfig(2,  2048,  24,  128, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "layout_1_2": ModelConfig(1,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding"),
+    "layout_1_3": ModelConfig(1,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"),
+    "layout_2_0": ModelConfig(2,  1,  16,  256, max_seqlen_kv= 2048),
+    "layout_2_1": ModelConfig(2,  2048,  24,  256, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
 }
 
 
@@ -541,58 +467,24 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_0_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "layout_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "layout_2_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "layout_2_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "layout_2_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
-    "layout_3_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
-    ),
-    "layout_3_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
-    ),
-    "layout_3_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
-    ),
-    "layout_4_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
-    "layout_4_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
-    "layout_4_2": ModelConfig(
-        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
-    "layout_5_0": ModelConfig(
-        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
-    ),
-    "layout_5_1": ModelConfig(
-        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
-    ),
-    "layout_5_2": ModelConfig(
-        2,
-        24,
-        24,
-        128,
-        2048,
-        4096,
-        0.0,
-        "padding_causal_bottom_right",
-        "no_bias",
-        window_size=(4, 0),
-    ),
-}
+    "layout_0_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding"),
+    "layout_0_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding"),
+    "layout_0_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding"),
+    "layout_1_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal"),
+    "layout_1_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal"),
+    "layout_1_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal"),
+    "layout_2_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal_bottom_right"),
+    "layout_2_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal_bottom_right"),
+    "layout_2_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right"),
+    "layout_3_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding", window_size=(4, 4)),
+    "layout_3_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding", window_size=(4, 4)),
+    "layout_3_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding", window_size=(4, 4)),
+    "layout_4_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal", window_size=(4, 0)),
+    "layout_4_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal", window_size=(4, 0)),
+    "layout_4_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal", window_size=(4, 0)),
+    "layout_5_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)),
+    "layout_5_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)),
+    "layout_5_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0),}
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
@@ -979,16 +871,16 @@ def _run_dot_product_attention(
 
 model_configs_te_layer = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
-    "te_1_0": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "no_mask", "post_scale_bias"),
-    "te_1_1": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "post_scale_bias"),
-    "te_1_2": ModelConfig(2, 16, 16, 64, 128, 128, 0.0, "padding", "post_scale_bias"),
-    "te_1_3": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "te_2_0": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "te_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "te_2_2": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "te_2_3": ModelConfig(1, 16, 16, 64, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "te_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "alibi"),
-    "te_3_1": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "alibi"),
+    "te_1_0": ModelConfig(2,  128,  16,  64, attn_bias_type="post_scale_bias"),
+    "te_1_1": ModelConfig(4,  128,  16,  64, attn_mask_type="causal", attn_bias_type="post_scale_bias"),
+    "te_1_2": ModelConfig(2,  128,  16,  64, attn_mask_type="padding", attn_bias_type="post_scale_bias"),
+    "te_1_3": ModelConfig(2,  128,  16,  64, max_seqlen_kv= 256, attn_mask_type="padding"),
+    "te_2_0": ModelConfig(1,  2048,  16,  64, attn_mask_type="causal"),
+    "te_2_1": ModelConfig(2,  2048,  16,  64),
+    "te_2_2": ModelConfig(1,  2048,  16,  64, attn_mask_type="padding"),
+    "te_2_3": ModelConfig(1,  2048,  16,  64, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right"),
+    "te_3_0": ModelConfig(4,  128,  16,  64, attn_mask_type="causal", attn_bias_type="alibi"),
+    "te_3_1": ModelConfig(4,  2048,  16,  64, attn_mask_type="causal", attn_bias_type="alibi"),
 }
 
 
@@ -1337,7 +1229,7 @@ def _run_transformer_layer(
 
 
 model_configs_fp8_extra_state = {
-    "large": ModelConfig(2, 4, 4, 128, 128, 128, 0.0, "no_mask", "no_bias", num_layers=1),
+    "large": ModelConfig(2,  128,  4,  128, num_layers=1),
 }
 
 
@@ -1482,18 +1374,18 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_9": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_10": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_11": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "no_mask", "no_bias"),
-    "fp8_12": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_13": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_14": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),
-    "fp8_15": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "fp8_16": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "fp8_17": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding", "no_bias"),
-    "fp8_18": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "fp8_19": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "fp8_20": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding_causal", "no_bias"),
+    "fp8_9": ModelConfig(2,  2048,  16,  128),
+    "fp8_10": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 12),
+    "fp8_11": ModelConfig(1,  8192,  32,  128, num_gqa_groups= 4),
+    "fp8_12": ModelConfig(2,  2048,  16,  128, attn_mask_type="causal"),
+    "fp8_13": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 12, attn_mask_type="causal"),
+    "fp8_14": ModelConfig(1,  8192,  32,  128, num_gqa_groups= 4, attn_mask_type="causal"),
+    "fp8_15": ModelConfig(2,  2048,  16,  128, attn_mask_type="padding"),
+    "fp8_16": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 12, attn_mask_type="padding"),
+    "fp8_17": ModelConfig(1,  8192,  32,  128, num_gqa_groups= 4, attn_mask_type="padding"),
+    "fp8_18": ModelConfig(2,  2048,  16,  128, attn_mask_type="padding_causal"),
+    "fp8_19": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 12, attn_mask_type="padding_causal"),
+    "fp8_20": ModelConfig(1,  8192,  32,  128, num_gqa_groups= 4, attn_mask_type="padding_causal"),
 }
 
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
@@ -1994,14 +1886,14 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
 
 model_configs_fp8 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_1": ModelConfig(1, 1, 1, 64, 512, 512, 0.0, "no_mask", "no_bias"),
-    "fp8_2": ModelConfig(4, 16, 16, 64, 512, 512, 0.0, "no_mask", "no_bias"),
-    "fp8_3": ModelConfig(1, 1, 1, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_4": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_5": ModelConfig(1, 1, 1, 64, 512, 512, 0.0, "causal", "no_bias"),
-    "fp8_6": ModelConfig(4, 16, 16, 64, 512, 512, 0.0, "causal", "no_bias"),
-    "fp8_7": ModelConfig(1, 1, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_8": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "fp8_1": ModelConfig(1,  512,  1,  64),
+    "fp8_2": ModelConfig(4,  512,  16,  64),
+    "fp8_3": ModelConfig(1,  2048,  1,  128),
+    "fp8_4": ModelConfig(2,  2048,  24,  128),
+    "fp8_5": ModelConfig(1,  512,  1,  64, attn_mask_type="causal"),
+    "fp8_6": ModelConfig(4,  512,  16,  64, attn_mask_type="causal"),
+    "fp8_7": ModelConfig(1,  2048,  1,  128, attn_mask_type="causal"),
+    "fp8_8": ModelConfig(2,  2048,  24,  128, attn_mask_type="causal"),
 }
 param_types_fp8 = [torch.float16, torch.bfloat16]
 cudnn_frontend_version = int(os.getenv("NVTE_FUSED_ATTN_FE_VER", "1"))

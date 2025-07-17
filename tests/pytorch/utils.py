@@ -147,26 +147,28 @@ class ModelConfig:
     def __init__(
         self,
         batch_size: int,
-        num_heads: int,
-        num_gqa_groups: int,
-        head_dim_qk: int,
         max_seqlen_q: int,
-        max_seqlen_kv: int,
+        num_heads: int,
+        head_dim_qk: int,
+        max_seqlen_kv: int = None,
+        num_gqa_groups: int = None,
+        head_dim_v: int = None,
         dropout_p: float = 0.0,
         attn_mask_type: str = "no_mask",
         attn_bias_type: str = "no_bias",
-        head_dim_v: int = None,
         alibi_type: str = "none",
-        num_layers: int = 1,
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
         total_requests: int = None,
         max_ctx_len: int = None,
+        num_layers: int = 1,
         eps: float = 1e-5,
     ):
         self.batch_size = batch_size
+        self.max_seqlen_q = max_seqlen_q
+        self.max_seqlen_kv = max_seqlen_q if max_seqlen_kv is None else max_seqlen_kv
         self.num_heads = num_heads
-        self.num_gqa_groups = num_gqa_groups
+        self.num_gqa_groups = num_heads if num_gqa_groups is None else num_gqa_groups
         self.head_dim_qk = head_dim_qk
         self.head_dim_v = head_dim_qk if head_dim_v is None else head_dim_v
         if self.head_dim_qk == self.head_dim_v:
@@ -175,18 +177,16 @@ class ModelConfig:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = num_heads * head_dim_qk
         self.hidden_size_kv = num_gqa_groups * self.head_dim_v
-        self.max_seqlen_q = max_seqlen_q
-        self.max_seqlen_kv = max_seqlen_kv
         self.dropout_p = dropout_p
         self.attn_mask_type = attn_mask_type
         self.attn_bias_type = attn_bias_type
         self.alibi_type = alibi_type
         self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
-        self.num_layers = num_layers
         self.bias_shape = bias_shape
         self.window_size = window_size
         self.total_requests = total_requests
         self.max_ctx_len = max_ctx_len
+        self.num_layers = num_layers
         self.eps = eps
 
 

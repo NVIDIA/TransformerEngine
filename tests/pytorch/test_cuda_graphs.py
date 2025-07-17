@@ -36,7 +36,7 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 reset_rng_states()
 
 model_configs = {
-    "small": ModelConfig(32, 2, 2, 32, 2, 2),
+    "small": ModelConfig(32, 2, 2, 32),
 }
 
 fp8_recipes = [

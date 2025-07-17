@@ -46,13 +46,9 @@ if is_bf16_compatible():
     param_types.append(torch.bfloat16)
 
 model_configs_infer = {
-    # test: b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "infer_0": ModelConfig(
-        4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
-    ),
-    "infer_1": ModelConfig(
-        2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
-    ),
+    #    test:             b, sq, hq, dqk,
+    "infer_0": ModelConfig(4, 64, 16, 128, total_requests=8, max_ctx_len=16),
+    "infer_1": ModelConfig(2, 66, 16, 256, num_gqa_groups=4, total_requests=6, max_ctx_len=16),
 }
 
 qkv_formats = ["bshd", "sbhd", "thd"]
