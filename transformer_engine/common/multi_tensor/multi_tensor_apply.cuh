@@ -52,7 +52,7 @@ class OptionalCUDAGuard {
 
   ~OptionalCUDAGuard() {
     if (device_changed_) {
-      NVTE_CHECK_CUDA(cudaSetDevice(prev_device_));
+      cudaSetDevice(prev_device_);
     }
   }
 

@@ -36,7 +36,6 @@ from ..quantize import (
     Quantizer,
     GroupedQuantizer,
     QuantizeLayout,
-    DelayedScaleQuantizer,
     ScalingMode,
     compute_scale_from_amax,
 )
@@ -489,9 +488,10 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
     ):
         del out_dtype, scale_dtype, is_outer, mesh, result_types
 
+        prefix = "BaseDBiasQuantizePrimitive_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             len(value_types[0].shape),
-            unique_var="BaseDBiasQuantizePrimitive_i",
+            unique_var=prefix + "x",
             flatten_axis=flatten_axis,
         )
 
@@ -499,22 +499,19 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         colwise_scale_inv = scale_rules.colwise_rule
 
         out = x_axes
+        colwise_out = (prefix + "out_colwise",)
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes
-        else:
-            colwise_out = ("j",)
-            colwise_scale_inv = ("k",)
 
-        dbias = x_axes[flatten_axis:] if is_dbias else ("l",)
-        amax = ("m",)
+        dbias = x_axes[flatten_axis:] if is_dbias else (prefix + "dbias",)
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (x_axes, ("…1",)),
             (out, colwise_out, scale_rules.rowwise_rule, colwise_scale_inv, amax, dbias),
-            **scale_rules.factor_sizes,
         )
 
 
@@ -538,11 +535,12 @@ def _jax_quantize(
 
 
 def _jax_dbias(dx: jnp.ndarray, dtype=None, flatten_axis: int = -1):
-    assert flatten_axis < 0
+    sum_axis = dx.ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+    assert sum_axis < dx.ndim, "Flatten axis out of bounds!"
     dtype = dtype or dx.dtype
     dbias = jnp.sum(
         dx.astype(jnp.float32),
-        axis=tuple(range(dx.ndim + flatten_axis)),
+        axis=tuple(range(sum_axis)),
         keepdims=False,
     )
     return dbias.astype(dtype)
@@ -568,6 +566,7 @@ def _quantize_dbias_impl(
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
     flatten_axis: int = -1,
+    noop_scaled_tensor: bool = False,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -577,10 +576,34 @@ def _quantize_dbias_impl(
         quantizer is not None
     ), "quantizer must be provided if dq_dtype is provided"
 
+    # Early-exit for non-quantized call
     dq_dtype = dq_dtype or x.dtype
+    if quantizer is None:
+        dbias = None
+        if is_dbias:
+            dbias = _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
+        if noop_scaled_tensor:
+            # Return a dummy ScaledTensor2x to ensure .get_rowwise_tensor() and .get_colwise_tensor()
+            # always works.
+            return (
+                ScaledTensorFactory.create_2x(
+                    x,
+                    None,
+                    x,
+                    None,
+                    ScalingMode.NO_SCALING,
+                    dq_dtype=x.dtype,
+                    data_layout="NN",
+                    flatten_axis=flatten_axis,
+                ),
+                dbias,
+            )
+        return x, dbias
 
+    # If TE/common custom quantize op is disabled, or if quantizer layout is COLWISE,
+    # fall back on the native-JAX quantize implementation
     PrimitiveClass = DBiasQuantizePrimitive if is_dbias else QuantizePrimitive
-    if not PrimitiveClass.enabled():
+    if quantizer.q_layout == QuantizeLayout.COLWISE or not PrimitiveClass.enabled():
         if is_dbias:
             return _jax_quantize_dbias(
                 x,
@@ -593,22 +616,7 @@ def _quantize_dbias_impl(
             None,
         )
 
-    # TE/common doesn't support colwise only quantization yet
-    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
-        if is_dbias:
-            return _jax_quantize_dbias(
-                x,
-                quantizer=quantizer,
-                dq_dtype=dq_dtype,
-                flatten_axis=flatten_axis,
-            )
-        return (
-            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, flatten_axis=flatten_axis),
-            None,
-        )
-    scale = jnp.empty((), jnp.float32)
-
-    # TE/common dbias_quantize does not support 1x on arch < 100
+    # TE/common custom quantize op does not support dbias fusion with 1x quantization on arch < 100
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
         out, _ = _quantize_dbias_impl(
             x=x,
@@ -620,29 +628,23 @@ def _quantize_dbias_impl(
         dbias = _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
 
-    if quantizer is None:
-        if is_dbias:
-            return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
-        return x, None
-
+    scale = jnp.empty((), jnp.float32)
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Globally reduce amax across all devices for current scaling so we have a single global scale.
         # This differs from the PyTorch implementation which uses a local amax and scale per-device and persists this
         # until the tensor is dequantized (e.g. in the GEMM).
         amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
         scale = compute_scale_from_amax(amax, quantizer.q_dtype)
-
-    if isinstance(quantizer, DelayedScaleQuantizer):
+    elif quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
 
-    is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
     # It is faster to use 1x quantization for tensor scaling
+    is_1x_kernel_supported = not (is_dbias and get_min_device_compute_capability() < 100)
     force_1x_quantization = (
         quantizer.scaling_mode.is_tensor_scaling()
         and quantizer.is_2x2x()
         and is_1x_kernel_supported
     )
-
     q_layout = quantizer.q_layout
     if force_1x_quantization:
         q_layout = QuantizeLayout.ROWWISE
@@ -698,6 +700,7 @@ def quantize(
     x: jnp.ndarray,
     quantizer: Quantizer,
     flatten_axis: int = -1,
+    noop_scaled_tensor: bool = False,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -707,6 +710,8 @@ def quantize(
         quantizer: Quantizer for FP8 quantization of the output.
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
+        noop_scaled_tensor: If True, wraps the output into a dummy ScaledTensor2x when quantizer
+            is None.
 
     Returns:
         A ScaledTensor containing the quantized input tensor.
@@ -715,6 +720,7 @@ def quantize(
         x,
         quantizer=quantizer,
         flatten_axis=flatten_axis,
+        noop_scaled_tensor=noop_scaled_tensor,
     )
     return out
 
@@ -724,6 +730,7 @@ def quantize_dbias(
     quantizer: Quantizer,
     is_dbias: bool = True,
     flatten_axis: int = -1,
+    noop_scaled_tensor: bool = False,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -734,6 +741,8 @@ def quantize_dbias(
         is_dbias: If True, compute bias gradient. Defaults to True.
         flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
+        noop_scaled_tensor: If True, wraps the unquantized output into a dummy ScaledTensor2x when
+            quantizer is None.
 
     Returns:
         A tuple containing:
@@ -743,7 +752,11 @@ def quantize_dbias(
             Shape: (K,) or empty if is_dbias is False.
     """
     return _quantize_dbias_impl(
-        dz, quantizer=quantizer, is_dbias=is_dbias, flatten_axis=flatten_axis
+        dz,
+        quantizer=quantizer,
+        is_dbias=is_dbias,
+        flatten_axis=flatten_axis,
+        noop_scaled_tensor=noop_scaled_tensor,
     )
 
 

@@ -68,6 +68,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantize
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
@@ -447,7 +448,14 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
-                ctx.main_grad = weight.main_grad
+                # This check is needed to ensure that main_grad is not created
+                # during the forward pass when using MCore FSDP as it creates
+                # the main_grad buffer lazily before backprop
+                if hasattr(weight, "__fsdp_param__"):
+                    # MCore FSDP creates main_grad lazily before backward
+                    ctx.main_grad_func = weight.get_main_grad
+                else:
+                    ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -528,7 +536,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
-                ctx.main_grad
+                ctx.main_grad_func()
                 if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
                 else None
             )
@@ -1456,6 +1464,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp, fp8_output)
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
@@ -1479,12 +1489,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = self._get_weight_tensors()
-            weight_tensor = noop_cat(unfused_weights)
-            if self.use_bias:
-                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
@@ -1613,6 +1618,72 @@ class LayerNormLinear(TransformerEngineBaseModule):
             DebugQuantizer(self.name, name, q, self.tp_group)
             for name, q in zip(names, original_quantizers)
         )
+
+    def _get_weight_and_bias_tensors(self):
+        # Get concatenated weight and bias tensors
+        unfused_weights = self._get_weight_tensors()
+
+        weight_tensor = noop_cat(unfused_weights)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = getattr(self, self.bias_names[0])  # Unused
+        return weight_tensor, bias_tensor
+
+    def onnx_forward(
+        self,
+        inp: torch.Tensor,
+        fp8_output: bool,
+    ) -> torch.Tensor:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        from ..export import onnx_layernorm, onnx_gemm
+
+        assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export"
+        assert_warmed_up(self)
+        (
+            input_quantizer,
+            weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers(fp8_output, fp8_grad=False)
+        inp_dtype = inp.dtype
+
+        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        ln_out, ln_out_return = onnx_layernorm(
+            inp,
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            self.eps,
+            self.normalization,
+            self.zero_centered_gamma,
+            inp_dtype,
+            self.return_layernorm_output,
+            input_quantizer,
+        )
+
+        if weight_quantizer is not None:
+            weight_tensor_quantized = weight_quantizer.onnx_quantize(weight_tensor)
+            weight_tensor = weight_quantizer.onnx_dequantize(weight_tensor_quantized)
+        weight_tensor = weight_tensor.to(inp_dtype)
+
+        if bias_tensor is not None:
+            bias_tensor = bias_tensor.to(inp_dtype)
+
+        output = onnx_gemm(weight_tensor, ln_out, bias_tensor if self.apply_bias else None)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+        if self.return_layernorm_output and self.return_bias:
+            return output, bias_tensor.to(inp_dtype), ln_out_return
+        if self.return_layernorm_output:
+            return output, ln_out_return
+        if self.return_bias:
+            return output, bias_tensor.to(inp_dtype)
+        return output
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + layernorm_linear."""
