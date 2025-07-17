@@ -259,6 +259,7 @@ class DebugQuantizer(Quantizer):
             args["tensor"] = columnwise_gemm_tensor
             args["rowwise"] = False
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
+
     def quantize(
         self,
         tensor: torch.Tensor,

@@ -362,6 +362,7 @@ class TEDefaultFeatures:
         """
         return False
 
+
 @Registry.register_namespace_api(namespace="transformer_engine")
 class TransformerEngineAPI(BaseNamespaceAPI):
     """

@@ -107,13 +107,12 @@ class LogTensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: Union[torch.Tensor, QuantizedTensor]
+        tensor: Union[torch.Tensor, QuantizedTensor],
     ):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
-            type(tensor)
-            not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
+            type(tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
             and tensor.dtype != torch.uint8
         ), (
             f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be in high precision when using"
@@ -144,9 +143,7 @@ class LogTensorStats(BaseLogTensorStats):
             reduce_within_microbatch=reduce_within_microbatch,
         )
 
-        STATS_BUFFERS.feed(
-            layer_name, tensor_name, options, tensor, iteration, skip_reduction
-        )
+        STATS_BUFFERS.feed(layer_name, tensor_name, options, tensor, iteration, skip_reduction)
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}, API=look_at_tensor_before_process: {tensor_name}",
