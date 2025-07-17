@@ -40,7 +40,7 @@ class BasePrimitive(metaclass=ABCMeta):
         If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `manage_primitives`.
         By default, the internal state `_is_enabled` is set to `True`, enabling all primitives if no modifications are made.
         For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
-        
+
         Behavior:
             1. Checks if the environment variable `NVTE_JAX_CUSTOM_CALLS_RE` is set.
             2. If set, uses the pattern to determine if the primitive is enabled based on its class name.
@@ -52,9 +52,9 @@ class BasePrimitive(metaclass=ABCMeta):
             pattern = re.compile(pattern_str)
             env_enabled = pattern.fullmatch(cls.__name__) is not None
             return env_enabled
-        
+
         # If environment variable is not set, fall back to the internal state
-        return getattr(cls, '_is_enabled', True)
+        return getattr(cls, "_is_enabled", True)
 
     @classmethod
     def set_enabled(cls, enabled: bool):
@@ -131,12 +131,13 @@ class BasePrimitive(metaclass=ABCMeta):
 # Registry to store all registered primitive classes
 _primitive_registry = {}
 
+
 def register_primitive(cls):
     """
     Register a JAX primitive and add it to the internal registry.
     """
     _primitive_registry[cls.__name__] = cls
-    
+
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
@@ -173,36 +174,37 @@ _default_disable_names = ["GemmPrimitive"]
 # Flag to track if manage_primitives has been called
 _manage_primitives_called = False
 
+
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
     """
     Helper function to manage primitive states by name without modifying environment variables.
     Allows enabling specific primitives, disabling specific primitives, or disabling all primitives.
     This helper is used in the QuantizeConfig.initialize() methods.
-    
+
     Args:
         enable_names: List of strings, each representing the name of a primitive class to enable. Defaults to None.
         disable_names: List of strings, each representing the name of a primitive class to disable. Defaults to None.
         disable_all_first: Boolean, if True, disables all primitives before applying enable/disable lists. Defaults to False.
-    
+
     Note:
         1. If `disable_all_first` is True, all primitives are disabled first, then `enable_names` is applied.
         2. Conflicts (a primitive in both enable and disable lists) are resolved by applying disable last.
         3. Default settings (e.g., disabling GemmPrimitive) are applied on the first and only call to this function.
         4. This function can only be called once in the program; subsequent calls will raise an error.
-    
+
     Raises:
         RuntimeError: If this function is called more than once in the program.
     """
     global _manage_primitives_called
-    
+
     if _manage_primitives_called:
         raise RuntimeError("manage_primitives() can only be called once in the program.")
-    
+
     _manage_primitives_called = True
-    
+
     enable_set = set(enable_names or [])
     disable_set = set(disable_names or [])
-    
+
     # Apply default settings
     for name in _default_disable_names:
         cls = _primitive_registry.get(name)
@@ -211,13 +213,17 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             print(f"Disabled by default: {name}")
         else:
             print(f"Default disable primitive not found in registry: {name}")
-    
+
     if disable_all_first:
         for name, cls in _primitive_registry.items():
-            if isinstance(cls, type) and issubclass(cls, BasePrimitive) and cls is not BasePrimitive:
+            if (
+                isinstance(cls, type)
+                and issubclass(cls, BasePrimitive)
+                and cls is not BasePrimitive
+            ):
                 cls.set_enabled(False)
                 print(f"Disabled primitive (all): {name}")
-    
+
     # Apply enables
     for name in enable_set:
         cls = _primitive_registry.get(name)
@@ -226,7 +232,7 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             print(f"Enabled primitive: {name}")
         else:
             print(f"Primitive not found in registry: {name}")
-    
+
     # Apply disables (overrides enables if there's a conflict)
     for name in disable_set:
         cls = _primitive_registry.get(name)
