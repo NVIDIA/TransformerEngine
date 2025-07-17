@@ -173,6 +173,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("Only fp8 works with fp8_mha=True!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
+    if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently does not support FP8 attention!")
 
     subprocess.run(
         get_bash_arguments(
