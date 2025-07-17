@@ -421,7 +421,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             device=torch.cuda.current_device(),
         )
         # whether reindexing is needed, i.e. when batch seq_ids have changed
-        self.need_reindex = False
+        self.need_reindex = True
 
     def allocate_memory(self, layer_number):
         """Allocate memory for the cache"""
@@ -453,7 +453,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         # step() re-indexes k_cache and v_cache using batch_indices = [0, 2, 3, 1] so that
         # they are contiguous and match the indexing in q
         prev_batch_size = len(self.sequences)
-        prev_seq_ids = self.sequences.keys()
+        prev_seq_ids = set(self.sequences.keys())
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs
         unfinished_indices = [i for i, j in enumerate(self.sequences) if j in unfinished_seqs]
@@ -482,7 +482,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             self.sequences[i] = step_dict[i]
 
         # Whether reindexing is needed
-        self.need_reindex = self.sequences.keys() != prev_seq_ids
+        self.need_reindex = set(self.sequences.keys()) != prev_seq_ids
 
         return self.sequences
 
