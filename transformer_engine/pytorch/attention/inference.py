@@ -482,7 +482,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             self.sequences[i] = step_dict[i]
 
         # Whether reindexing is needed
-        self.need_reindex = self.sequences.keys() != pre_seq_ids
+        self.need_reindex = self.sequences.keys() != prev_seq_ids
 
         return self.sequences
 
