@@ -318,7 +318,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
             )
 
         debug_api.log_message(
-            f"Feature={self.__class__.__name__}, API=inspect_tensor_all: {tensor_name}",
+            f"Feature={self.__class__.__name__}, API=inspect_tensor: {tensor_name}",
             layer_name,
             extra_cachable_args=(tensor_name,),
         )

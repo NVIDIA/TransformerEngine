@@ -30,10 +30,6 @@ if fusions happen. An important remark is that if no feature is used for the lay
 
 .. autoapifunction:: transformer_engine.debug.features.api.TEDefaultFeatures.fp8_gemm_enabled
 
-.. autoapifunction:: transformer_engine.debug.features.api.TEDefaultFeatures.inspect_tensor_all
-
-.. autoapifunction:: transformer_engine.debug.features.api.TEDefaultFeatures.inspect_tensor_all_enabled
-
 .. autoapifunction:: transformer_engine.debug.features.api.TEDefaultFeatures.inspect_tensor
 
 .. autoapifunction:: transformer_engine.debug.features.api.TEDefaultFeatures.inspect_tensor_postquantize

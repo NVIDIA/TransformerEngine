@@ -440,6 +440,19 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
+                
+    def call_feature(self, call, feat_name, feat_config, layer_name, **kwargs):
+        """
+        For backward compatibility, remove kwargs that are not needed for the call
+        """
+        if feat_name == "inspect_tensor":
+            kwargs_copy = kwargs.copy()
+            for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
+                if k not in call.__code__.co_varnames:
+                    kwargs_copy.pop(k)
+        else:
+            kwargs_copy = kwargs
+        return call(feat_config, layer_name, **kwargs_copy)
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""
