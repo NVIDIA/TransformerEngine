@@ -52,6 +52,10 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
   return {std::move(out_cpp), py::cast(data)};
 }
 
+std::pair<TensorWrapper, py::object> NoneQuantizer::coerce_tensor(py::object tensor) const {
+  NVTE_ERROR("Not yet implemented");  /// TODO Implement
+}
+
 void NoneQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
   NVTE_ERROR("Not yet implemented"); /// TODO Implement
 }
@@ -82,7 +86,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   if (with_data) {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-    data.emplace(at::empty(shape_int64, opts));
+    data = at::empty(shape_int64, opts);
   }
 
   // Allocate transpose tensor if needed
@@ -97,7 +101,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
       }
     }
     const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-    transpose.emplace(at::empty(transpose_shape_int64, opts));
+    transpose = at::empty(transpose_shape_int64, opts);
   }
 
   // Allocate scale-inverse tensor
@@ -105,7 +109,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   {
     const std::vector<int64_t> scale_inv_shape = {1};
     const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    scale_inv.emplace(at::empty(scale_inv_shape, opts));
+    scale_inv = at::empty(scale_inv_shape, opts);
   };
 
   // Construct FP8 tensor
@@ -139,7 +143,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
   // Initialize scale-inverse tensor
   if (!scale_inv) {
-    scale_inv.emplace(at::reciprocal(scale));
+    scale_inv = at::reciprocal(scale);
   }
   auto& scale_inv_tensor = *scale_inv;
 
@@ -183,12 +187,111 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<TensorWrapper, py::object> Float8Quantizer::coerce_tensor(py::object tensor) const {
+  NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()), "Float8Quantizer must output to Float8Tensor.");
+
+  // Expected buffers
+  const bool need_data = rowwise_usage || nvte_is_non_tn_fp8_gemm_supported();
+  const bool need_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
+  NVTE_CHECK(need_data || need_transpose, "Invalid quantizer usages.");
+
+  // Extract buffers from Python tensor
+  auto data_py = tensor.attr("_data");
+  auto transpose_py = tensor.attr("_transpose");
+  const bool has_data = !data_py.is_none();
+  const bool has_transpose = !transpose_py.is_none();
+  NVTE_CHECK(has_data || has_transpose, "Tensor has no data.");
+  std::optional<at::Tensor> data_tensor, transpose_tensor;
+  if (has_data) { data_tensor = data_py.cast<at::Tensor>(); }
+  if (has_transpose) { transpose_tensor = transpose_py.cast<at::Tensor>(); }
+  at::Tensor scale_inv_tensor = tensor.attr("_scale_inv").cast<at::Tensor>();
+
+  // Tensor dimensions
+  std::vector<size_t> shape;
+  if (has_transpose) {
+    const auto transpose_shape = getTensorShape(*transpose_tensor);
+    if (transpose_shape.size() > 0) {
+      for (size_t i = 1; i < transpose_shape.size(); ++i) {
+        shape.push_back(transpose_shape[i]);
+      }
+      shape.push_back(transpose_shape.front());
+    }
+    if (has_data) {
+      auto expected_shape = getTensorShape(*data_tensor);
+      NVTE_CHECK(shape == expected_shape,
+                 "FP8 data (shape=", expected_shape, ") and transpose (shape=",
+                 transpose_shape, ") do not match");
+    }
+  } else {  // Already checked has_data == true
+    shape = getTensorShape(*data_tensor);
+  }
+
+  // Coerce data tensor in Python tensor
+  if (has_data && !need_data) {
+    data_tensor.reset();
+    data_py = py::none();
+    tensor.attr("_data") = data_py;
+  } else if (!has_data && need_data) {
+    const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    data_tensor = at::empty(shape_int64, opts);
+    data_py = py::cast(data_tensor);
+    tensor.attr("_data") = data_py;
+  }
+
+  // Coerce transpose tensor
+  if (has_transpose && !need_transpose) {
+    transpose_tensor.reset();
+    transpose_py = py::none();
+    tensor.attr("_transpose") = transpose_py;
+  } else if (!has_transpose && need_transpose) {
+    std::vector<int64_t> transpose_shape_int64;
+    if (shape.size() > 0) {
+      transpose_shape_int64.push_back(shape.back());
+      for (size_t i = 0; i < shape.size(); ++i) {
+        transpose_shape_int64.push_back(shape[i]);
+      }
+    }
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    transpose_tensor = at::empty(transpose_shape_int64, opts);
+    transpose_py = py::cast(transpose_tensor);
+    tensor.attr("_transpose") = transpose_py;
+  }
+  tensor.attr("_transpose_invalid") = !need_transpose;
+
+  // Coerce other attrs
+  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_quantizer") = quantizer;  /// TODO Need to make copy?
+
+  // Construct C++ FP8 tensor
+  TensorWrapper out_cpp;
+  if (data_tensor) {
+    out_cpp.set_rowwise_data(data_tensor->data_ptr(), this->dtype, shape);
+    out_cpp.set_rowwise_scale_inv(scale_inv_tensor.data_ptr(), DType::kFloat32,
+                                  std::vector<size_t>{1});
+  }
+  if (transpose_tensor) {
+    std::vector<size_t> transpose_shape;
+    if (shape.size() > 0) {
+      transpose_shape.push_back(shape.back());
+      for (size_t i = 0; i < shape.size() - 1; ++i) {
+        transpose_shape.push_back(shape[i]);
+      }
+    }
+    out_cpp.set_columnwise_data(transpose_tensor->data_ptr(), this->dtype, transpose_shape);
+    out_cpp.set_columnwise_scale_inv(scale_inv_tensor.data_ptr(), DType::kFloat32,
+                                     std::vector<size_t>{1});
+  }
+  this->set_quantization_params(&out_cpp);
+
+  return {std::move(out_cpp), std::move(tensor)};
+}
+
 void Float8Quantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
-  set_quantization_params(&out);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -318,6 +421,106 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::coerce_tensor(py::object tensor) const {
+  NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()), "Float8CurrentScalingQuantizer must output to Float8Tensor.");
+
+  // Expected buffers
+  const bool need_data = rowwise_usage || nvte_is_non_tn_fp8_gemm_supported();
+  const bool need_transpose = columnwise_usage && !nvte_is_non_tn_fp8_gemm_supported();
+  NVTE_CHECK(need_data || need_transpose, "Invalid quantizer usages.");
+
+  // Extract buffers from Python tensor
+  auto data_py = tensor.attr("_data");
+  auto transpose_py = tensor.attr("_transpose");
+  const bool has_data = !data_py.is_none();
+  const bool has_transpose = !transpose_py.is_none();
+  NVTE_CHECK(has_data || has_transpose, "Tensor has no data.");
+  std::optional<at::Tensor> data_tensor, transpose_tensor;
+  if (has_data) { data_tensor = data_py.cast<at::Tensor>(); }
+  if (has_transpose) { transpose_tensor = transpose_py.cast<at::Tensor>(); }
+  at::Tensor scale_inv_tensor = tensor.attr("_scale_inv").cast<at::Tensor>();
+
+  // Tensor dimensions
+  std::vector<size_t> shape;
+  if (has_transpose) {
+    const auto transpose_shape = getTensorShape(*transpose_tensor);
+    if (transpose_shape.size() > 0) {
+      for (size_t i = 1; i < transpose_shape.size(); ++i) {
+        shape.push_back(transpose_shape[i]);
+      }
+      shape.push_back(transpose_shape.front());
+    }
+    if (has_data) {
+      auto expected_shape = getTensorShape(*data_tensor);
+      NVTE_CHECK(shape == expected_shape,
+                 "FP8 data (shape=", expected_shape, ") and transpose (shape=",
+                 transpose_shape, ") do not match");
+    }
+  } else {  // Already checked has_data == true
+    shape = getTensorShape(*data_tensor);
+  }
+
+  // Coerce data tensor in Python tensor
+  if (has_data && !need_data) {
+    data_tensor.reset();
+    data_py = py::none();
+    tensor.attr("_data") = data_py;
+  } else if (!has_data && need_data) {
+    const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    data_tensor = at::empty(shape_int64, opts);
+    data_py = py::cast(data_tensor);
+    tensor.attr("_data") = data_py;
+  }
+
+  // Coerce transpose tensor
+  if (has_transpose && !need_transpose) {
+    transpose_tensor.reset();
+    transpose_py = py::none();
+    tensor.attr("_transpose") = transpose_py;
+  } else if (!has_transpose && need_transpose) {
+    std::vector<int64_t> transpose_shape_int64;
+    if (shape.size() > 0) {
+      transpose_shape_int64.push_back(shape.back());
+      for (size_t i = 0; i < shape.size(); ++i) {
+        transpose_shape_int64.push_back(shape[i]);
+      }
+    }
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    transpose_tensor = at::empty(transpose_shape_int64, opts);
+    transpose_py = py::cast(transpose_tensor);
+    tensor.attr("_transpose") = transpose_py;
+  }
+  tensor.attr("_transpose_invalid") = !need_transpose;
+
+  // Coerce other attrs
+  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_quantizer") = quantizer;  /// TODO Need to make copy?
+
+  // Construct C++ FP8 tensor
+  TensorWrapper out_cpp;
+  if (data_tensor) {
+    out_cpp.set_rowwise_data(data_tensor->data_ptr(), this->dtype, shape);
+    out_cpp.set_rowwise_scale_inv(scale_inv_tensor.data_ptr(), DType::kFloat32,
+                                  std::vector<size_t>{1});
+  }
+  if (transpose_tensor) {
+    std::vector<size_t> transpose_shape;
+    if (shape.size() > 0) {
+      transpose_shape.push_back(shape.back());
+      for (size_t i = 0; i < shape.size() - 1; ++i) {
+        transpose_shape.push_back(shape[i]);
+      }
+    }
+    out_cpp.set_columnwise_data(transpose_tensor->data_ptr(), this->dtype, transpose_shape);
+    out_cpp.set_columnwise_scale_inv(scale_inv_tensor.data_ptr(), DType::kFloat32,
+                                     std::vector<size_t>{1});
+  }
+  this->set_quantization_params(&out_cpp);
+
+  return {std::move(out_cpp), std::move(tensor)};
+}
+
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
   auto stream = at::cuda::getCurrentCUDAStream();
 
@@ -330,7 +533,6 @@ void Float8CurrentScalingQuantizer::quantize(const TensorWrapper &input, TensorW
   quant_config.set_amax_epsilon(amax_epsilon);
 
   // Compute amax
-  set_quantization_params(&out);
   NVTE_SCOPED_GIL_RELEASE({ nvte_compute_amax(input.data(), out.data(), stream); });
 
   // Perform amax reduction if needed
@@ -469,6 +671,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
+std::pair<TensorWrapper, py::object> Float8BlockQuantizer::coerce_tensor(py::object tensor) const {
+  NVTE_ERROR("Not yet implemented");  /// TODO Implement
+}
+
 void Float8BlockQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
@@ -479,7 +685,6 @@ void Float8BlockQuantizer::quantize(const TensorWrapper &input, TensorWrapper &o
   if (all_gather_usage) {
     quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
   }
-  set_quantization_params(&out);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
@@ -656,12 +861,15 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object tensor) const {
+  NVTE_ERROR("Not yet implemented");  /// TODO Implement
+}
+
 void MXFP8Quantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
-  set_quantization_params(&out);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });
