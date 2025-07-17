@@ -5,7 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -227,6 +227,9 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor],
+        columnwise_quantized_tensor: Optional[torch.Tensor],
+        quantizer: Optional[Quantizer],
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
@@ -243,6 +246,12 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in high precision,
+        rowwise_quantized_tensor: Optional[torch.Tensor]
+            rowwise quantized tensor,
+        columnwise_quantized_tensor: Optional[torch.Tensor]
+            columnwise quantized tensor,
+        quantizer: Optional[Quantizer]
+            quantizer,
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -260,10 +269,10 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        gemm: str,
         tensor: torch.Tensor,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
+        rowwise: bool,
     ) -> None:
         """
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
@@ -278,8 +287,6 @@ class TEDefaultFeatures:
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
         tensor: torch.Tensor
             tensor in fp8 or processed tensor after the modify_tensor call,
-        gemm: str
-            one of [`fprop`, `dgrad`, `wgrad`],
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
@@ -329,6 +336,8 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> bool:
         """
+        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
@@ -431,6 +440,19 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
+
+    def call_feature(self, call, feat_name, feat_config, layer_name, **kwargs):
+        """
+        For backward compatibility, remove kwargs that are not needed for the call
+        """
+        if feat_name == "inspect_tensor":
+            kwargs_copy = kwargs.copy()
+            for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
+                if k not in call.__code__.co_varnames:
+                    kwargs_copy.pop(k)
+        else:
+            kwargs_copy = kwargs
+        return call(feat_config, layer_name, **kwargs_copy)
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""
