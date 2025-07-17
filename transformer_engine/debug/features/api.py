@@ -114,6 +114,10 @@ class TEDefaultFeatures:
         If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
 
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer and gemm.
+        Returning the next enabled iteration can help optimize CPU usage.
+
         Parameters
         ----------
 
@@ -146,7 +150,8 @@ class TEDefaultFeatures:
         It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
         It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
 
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
 
         Parameters
@@ -165,7 +170,7 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        Union[bool, Tuple[bool, int]] - default is (False, float("inf"))
+        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
         """
         return False, float("inf")
 
@@ -314,7 +319,8 @@ class TEDefaultFeatures:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
 
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
 
         Parameters
@@ -348,7 +354,8 @@ class TEDefaultFeatures:
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
 
-        This method may return a tuple (bool, int), where the int indicates the next iteration when the feature will be enabled.
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor name.
         Returning the next enabled iteration can help optimize CPU usage,
         especially when the interval between inspect_tensor_postquantize is large.
 
