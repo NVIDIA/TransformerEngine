@@ -76,11 +76,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-<<<<<<< HEAD
-=======
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ...debug.pytorch.utils import any_feature_enabled
->>>>>>> upstream/main
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["LayerNormMLP"]
