@@ -27,9 +27,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   auto [out_cpp, out_py] = quantizer_cpp->create_tensor(output_shape, fake_dtype);
 
   // Compute activation
-  if (quantizer.is_none()
-      || detail::IsFloat8Quantizers(quantizer.ptr())
-      || detail::IsMXFP8Quantizers(quantizer.ptr())) {
+  if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
+      detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE(
         { act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream()); });
@@ -58,23 +57,25 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   // Construct grad input tensor
   auto quantizer_cpp = convert_quantizer(quantizer);
   const auto input_shape_te = input_cpp.shape();
-  const std::vector<size_t> input_shape(input_shape_te.data, input_shape_te.data + input_shape_te.ndim);
+  const std::vector<size_t> input_shape(input_shape_te.data,
+                                        input_shape_te.data + input_shape_te.ndim);
   auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
   auto [grad_input_cpp, grad_input_py] = quantizer_cpp->create_tensor(input_shape, fake_dtype);
 
   // Compute activation backward
-  if (quantizer.is_none()
-      || detail::IsFloat8Quantizers(quantizer.ptr())
-      || detail::IsMXFP8Quantizers(quantizer.ptr())) {
+  if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
+      detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // Compute activation backward directly
     NVTE_SCOPED_GIL_RELEASE({
-      dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(), at::cuda::getCurrentCUDAStream());
+      dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
     });
   } else {
     // Compute activation backward in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE({
-      dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream());
+      dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
     });
     quantizer_cpp->quantize(temp_cpp, grad_input_cpp);
   }
