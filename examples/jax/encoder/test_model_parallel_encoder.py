@@ -264,8 +264,10 @@ def train_and_evaluate(args):
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
         devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-    ) as mesh, nn_partitioning.axis_rules(
-        ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
+    ) as mesh, te.fp8_autocast(
+        enabled=args.use_fp8,
+        fp8_recipe=fp8_recipe,
+        mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
     ):
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -276,21 +278,20 @@ def train_and_evaluate(args):
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(
-            enabled=args.use_fp8,
-            fp8_recipe=fp8_recipe,
-            mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
-        ):
+        # Get the base axis rules and extend them with TE's rules. This must be done inside fp8_autocast
+        axis_rules = flax.linen.get_logical_axis_rules()
+        axis_rules += ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
+        te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
+
+        with flax.linen.logical_axis_rules(te_extended_axis_rules):
+
+            print(f"Device mesh: {mesh}")
+            print(f"Axis rules: {te_extended_axis_rules}")
+
             encoder = Net(num_embed, args.enable_sp)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
-
-            # Get the base axis rules and extend them with TE's rules.
-            axis_rules = nn_partitioning.get_axis_rules()
-            te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
-            print(f"Device mesh: {mesh}")
-            print(f"Axis rules: {te_extended_axis_rules}")
 
             logical_partition_spec = nn.get_partition_spec(abs_var_collect)
 
@@ -473,7 +474,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -481,7 +482,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -489,14 +490,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_with_sp(self):
         """Test Transformer Engine with BF16 + SP"""
         self.args.enable_sp = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp(self):
@@ -505,7 +506,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8_with_sp(self):
@@ -514,14 +515,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_shardy(self):
@@ -530,7 +531,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_with_sp_shardy(self):
@@ -540,7 +541,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     @unittest.skipIf(
@@ -552,7 +553,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     @unittest.skipIf(
@@ -565,7 +566,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.43 and actual[1] > 0.80
+        assert actual[0] < 0.39 and actual[1] > 0.83
 
 
 if __name__ == "__main__":

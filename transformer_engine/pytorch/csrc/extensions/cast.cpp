@@ -105,7 +105,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       with_fused_kernel = false;
       break;
     }
-    if (nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
+    if (nvte_tensor_data(output_list[i].data()) == nullptr ||
+        nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
       with_fused_kernel = false;
       break;
     }
