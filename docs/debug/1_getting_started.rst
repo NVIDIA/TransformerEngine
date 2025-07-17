@@ -141,7 +141,7 @@ Adjusting Python file
 In the modified code above, the following changes were made:
 
 1. Added an import for ``nvdlfw_inspect.api``.
-2. Initialized the Nvidia-DL-Framework-Inspect by calling ``debug_api.initialize()`` with appropriate configuration, specifying the path to the config file, feature directories, and log directory.
+2. Initialized the Nvidia-DL-Framework-Inspect by calling ``debug_api.initialize()`` with appropriate configuration, specifying the path to the config file, feature directories, and log directory. The directory with Transformer Engine features is located `here <https://github.com/NVIDIA/TransformerEngine/tree/main/transformer_engine/debug/features>`_. The full parameters description could be found in the `documentation <https://github.com/NVIDIA/nvidia-dlfw-inspect/blob/main/docs/getting_started.md#2-initializing-the-tool>`_.
 3. Added ``debug_api.step()`` after each of the forward-backward pass.
 
 Inspecting the logs
