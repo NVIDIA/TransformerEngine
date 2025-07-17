@@ -33,7 +33,6 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    remove_padding_from_scale_inv,
 )
 from .misc import get_padded_spec
 
@@ -399,7 +398,6 @@ class GemmPrimitive(BasePrimitive):
         lhs_transposed, rhs_transposed = _get_gemm_layout(
             (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
         )
-
         lhs_scale_inv = apply_padding_to_scale_inv(
             lhs_scale_inv,
             scaling_mode,
@@ -885,16 +883,6 @@ def gemm_uses_jax_dot() -> bool:
     return not GemmPrimitive.enabled()
 
 
-def _get_scale_inv_without_padding(scaled_tensor):
-    return remove_padding_from_scale_inv(
-        scaled_tensor.scale_inv,
-        scaled_tensor.scaling_mode,
-        scaled_tensor.data.shape,
-        is_colwise=scaled_tensor.is_colwise,
-        flatten_axis=scaled_tensor.flatten_axis,
-    )
-
-
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],
@@ -909,6 +897,7 @@ def _te_gemm(
     grad: bool = False,
     use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
 ) -> Tuple[jax.Array, ...]:
+
     # Prepare non-quantized GEMM operands
     lhs_data = lhs
     rhs_data = rhs
@@ -933,7 +922,7 @@ def _te_gemm(
             lhs_q = lhs_q.get_colwise_tensor() if lhs_is_transposed else lhs_q.get_rowwise_tensor()
         scaling_mode = lhs_q.scaling_mode
         lhs_data = lhs_q.data
-        lhs_scale_inv = _get_scale_inv_without_padding(lhs_q)
+        lhs_scale_inv = lhs_q.scale_inv
         if lhs_q.data_layout == "T":
             lhs_cdims = transpose_dims(lhs_q.ndim, lhs_cdims, flatten_axis=lhs_q.flatten_axis)
             lhs_bdims = transpose_dims(lhs_q.ndim, lhs_bdims, flatten_axis=lhs_q.flatten_axis)
@@ -951,7 +940,7 @@ def _te_gemm(
             f"LHS:{lhs_q.scaling_mode} x RHS:{rhs_q.scaling_mode}."
         )
         rhs_data = rhs_q.data
-        rhs_scale_inv = _get_scale_inv_without_padding(rhs_q)
+        rhs_scale_inv = rhs_q.scale_inv
         if rhs_q.data_layout == "T":
             rhs_cdims = transpose_dims(rhs_q.ndim, rhs_cdims, flatten_axis=rhs_q.flatten_axis)
             rhs_bdims = transpose_dims(rhs_q.ndim, rhs_bdims, flatten_axis=rhs_q.flatten_axis)
@@ -1229,10 +1218,6 @@ def _jax_gemm_mxfp8_1d(
     rhs_3d = _shape_normalization(rhs.data, (rhs_contract, rhs_batch))
     lhs_scale_3d = _shape_normalization(lhs.scale_inv, (lhs_contract, lhs_batch))
     rhs_scale_3d = _shape_normalization(rhs.scale_inv, (rhs_contract, rhs_batch))
-
-    # Slice out the padding as scaled_matmul does not support padded scales yet
-    lhs_scale_3d = jnp.asarray(lhs_scale_3d[:, : lhs_3d.shape[1], : int(lhs_3d.shape[2] / 32)])
-    rhs_scale_3d = jnp.asarray(rhs_scale_3d[:, : rhs_3d.shape[1], : int(rhs_3d.shape[2] / 32)])
 
     # JAX scaled_matmul only supports NT now (TN-gemm)
     # * Expected shape:
