@@ -5,7 +5,6 @@
 import os
 import subprocess
 from pathlib import Path
-
 import pytest
 import torch
 
@@ -20,7 +19,6 @@ import torch
     are run in one test - this reduces the initialization overhead.
 
 """
-
 
 if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")

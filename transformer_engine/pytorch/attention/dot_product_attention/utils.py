@@ -44,6 +44,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 from transformer_engine.pytorch.jit import jit_fuser
 
@@ -105,7 +106,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.7.4.post1")
+    max_version = PkgVersion("2.8.1")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -1140,9 +1141,7 @@ def get_full_mask(
         swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q + window_size[1]
         ).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not(
-        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
-    )
+    swa_mask = torch.logical_not((swa_left <= 0) & ~(swa_right < 0))
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
     else:
@@ -1333,13 +1332,21 @@ def get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+
+    def _get_cu_seqlens(batch_size, max_seqlen, device):
+        return torch.arange(
             0,
             (batch_size + 1) * max_seqlen,
             step=max_seqlen,
             dtype=torch.int32,
             device=device,
+        )
+
+    if is_in_onnx_export_mode():
+        return _get_cu_seqlens(batch_size, max_seqlen, device)
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
+            batch_size, max_seqlen, device
         )
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
@@ -1616,11 +1623,16 @@ def get_qkv_layout(
 
     def run_iteratively(q, k, v):
         # check data pointers
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
-        data_ptr = k.untyped_storage().data_ptr()
-        check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
+        if is_in_onnx_export_mode():
+            check_ptrs_qkv = False
+            check_ptrs_qk = False
+            check_ptrs_kv = False
+        else:
+            data_ptr = q.untyped_storage().data_ptr()
+            check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+            check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
+            data_ptr = k.untyped_storage().data_ptr()
+            check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
 
         # check tensor shapes
         shape = q.shape
@@ -1708,7 +1720,10 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    qkv_layout = run_iteratively(q, k, v)
+    if not is_in_onnx_export_mode():
+        qkv_layout = run_iteratively(q, k, v)
+    else:
+        qkv_layout = "not_supported"
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]

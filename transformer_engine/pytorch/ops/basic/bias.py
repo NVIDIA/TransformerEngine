@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch
 
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
@@ -17,6 +18,8 @@ from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
 )
+from ...fp8 import FP8GlobalStateManager
+from ...tensor import Quantizer
 
 
 class Bias(BasicOperation):
@@ -111,8 +114,8 @@ class Bias(BasicOperation):
             bias = torch.nn.Parameter(bias)
         self.bias = bias
 
-    def pre_forward(self, *args, **kwargs) -> None:
-        super().pre_forward(*args, **kwargs)
+    def pre_first_forward(self, *args, **kwargs) -> None:
+        super().pre_first_forward(*args, **kwargs)
         if self.bias.device.type == "meta":
             self.reset_parameters()
 
@@ -120,11 +123,25 @@ class Bias(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op: Optional[BasicOperation] = None,
-        next_op: Optional[BasicOperation] = None,
+        prev_op_grad_input_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         x = input_
         b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
+
+        # Check if backward pass is needed
+        requires_grad = ctx.requires_grad
+
+        # Check if previous op quantizes its output's gradient
+        grad_input_quantizer = None
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            grad_input_quantizer = prev_op_grad_input_quantizer
+
+        if requires_grad:
+            ctx.with_quantized_compute = with_quantized_compute
+            ctx.grad_input_quantizer = grad_input_quantizer
+
         return x + b
 
     def op_backward(
@@ -134,7 +151,11 @@ class Bias(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
         dy = grad_output
         if dy.dim() > 1:
-            db = dy.sum(tuple(range(dy.dim() - 1)))
+            quantizer = ctx.grad_input_quantizer
+            if ctx.with_quantized_compute and quantizer is not None:
+                db, dy = tex.bgrad_quantize(dy, quantizer)
+            else:
+                db = dy.sum(tuple(range(dy.dim() - 1)))
         else:
             db = dy
         return dy, (db,)
