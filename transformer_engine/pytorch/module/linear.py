@@ -358,9 +358,8 @@ class _Linear(torch.autograd.Function):
                 and own_quantized_input
                 and isinstance(inputmat, QuantizedTensorBase)
             ):
-                if (
-                    ctx.backward_input_needs_gather
-                    and isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+                if ctx.backward_input_needs_gather and isinstance(
+                    quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                 ):
                     # All-gather is not supported with FP8 column-wise data
                     inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -592,9 +591,8 @@ class _Linear(torch.autograd.Function):
                     else:
                         # Quantize input tensor
                         quantizer = ctx.input_quantizer
-                        if (
-                            ctx.backward_input_needs_gather
-                            and isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+                        if ctx.backward_input_needs_gather and isinstance(
+                            quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                         ):
                             # All-gather is not supported with FP8 column-wise data
                             quantizer.set_usage(rowwise=True, columnwise=False)
