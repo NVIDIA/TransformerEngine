@@ -52,6 +52,10 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
   return {std::move(out_cpp), py::cast(data)};
 }
 
+void NoneQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
+  NVTE_ERROR("Not yet implemented"); /// TODO Implement
+}
+
 void Float8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
   tensor->set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
                     getTensorShape(scale));
@@ -179,6 +183,17 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+void Float8Quantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
+  QuantizationConfigWrapper quant_config;
+  if (noop_flag) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+  set_quantization_params(&out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
+  });
+}
+
 Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& quantizer)
     : Quantizer(quantizer) {
   const at::Tensor& scale = quantizer.attr("scale").cast<at::Tensor>();
@@ -303,6 +318,42 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+void Float8CurrentScalingQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  // Quantization configs
+  QuantizationConfigWrapper quant_config;
+  if (noop_flag) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+  quant_config.set_force_pow_2_scales(force_pow_2_scales);
+  quant_config.set_amax_epsilon(amax_epsilon);
+
+  // Compute amax
+  set_quantization_params(&out);
+  NVTE_SCOPED_GIL_RELEASE({ nvte_compute_amax(input.data(), out.data(), stream); });
+
+  // Perform amax reduction if needed
+  if (with_amax_reduction) {
+    // allreduce amax tensor
+    c10d::AllreduceOptions opts;
+    opts.reduceOp = c10d::ReduceOp::MAX;
+    std::vector<at::Tensor> tensors = {amax};
+    NVTE_SCOPED_GIL_RELEASE({ amax_reduction_group->allreduce(tensors, opts)->wait(); });
+  }
+
+  // Compute scaling factor
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_compute_scale_from_amax(out.data(), quant_config, stream);
+  });
+
+  // Cast to FP8
+  out.set_amax(nullptr, DType::kFloat32, out.defaultShape);  // Avoid atomic amax updates
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(input.data(), out.data(), quant_config, stream);
+  });
+}
+
 Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
@@ -416,6 +467,22 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   }
 
   return {std::move(tensor), std::move(ret)};
+}
+
+void Float8BlockQuantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
+  QuantizationConfigWrapper quant_config;
+  if (noop_flag) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+  quant_config.set_force_pow_2_scales(force_pow_2_scales);
+  quant_config.set_amax_epsilon(amax_epsilon);
+  if (all_gather_usage) {
+    quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
+  }
+  set_quantization_params(&out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
+  });
 }
 
 std::vector<size_t> Float8BlockQuantizer::get_scale_shape(const std::vector<size_t>& shape,
@@ -587,6 +654,17 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
+}
+
+void MXFP8Quantizer::quantize(const TensorWrapper &input, TensorWrapper &out, const std::optional<TensorWrapper> &noop_flag) {
+  QuantizationConfigWrapper quant_config;
+  if (noop_flag) {
+    quant_config.set_noop_tensor(noop_flag->data());
+  }
+  set_quantization_params(&out);
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
+  });
 }
 
 std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& shape,
