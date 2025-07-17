@@ -1,0 +1,13 @@
+test:
+  enabled: True
+  layers:
+    layer_name_regex_pattern: .*1
+  transformer_engine:
+    LogTensorStats:
+      enabled: True
+      tensors_struct:
+        - tensor: activation
+          stats: [cur_amax, dynamic_range, mean, std, l1_norm]
+          start_step: 0
+          freq: 100000
+  
