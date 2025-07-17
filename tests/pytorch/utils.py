@@ -23,11 +23,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
-# Initialize RNG state
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
