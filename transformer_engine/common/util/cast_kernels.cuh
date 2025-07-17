@@ -108,6 +108,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
+  const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+  const bool colwise_scale_is_within_bounds = scales_offset_X_colwise < cols;
+
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
@@ -261,7 +264,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      scales_colwise[scale_idx] = biased_exponent;
+      if (colwise_scale_is_within_bounds) {
+        scales_colwise[scale_idx] = biased_exponent;
+      }
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
@@ -404,7 +409,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
       const int stage_scales_offset_X = scales_offset_X_rowwise;
       const int scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      scales_rowwise[scale_idx] = biased_exponent;
+      if (rowwise_scale_is_within_bounds) {
+        scales_rowwise[scale_idx] = biased_exponent;
+      }
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
@@ -625,8 +632,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
 
+  const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
+  const int scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
   const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+
+  const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+  const bool colwise_scale_is_within_bounds = scales_offset_X_colwise < cols;
 
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
@@ -763,7 +775,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const int global_scales_offset_X = scales_offset_X_colwise;
       const int scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      if (global_scales_offset_X < cols) {
+      if (colwise_scale_is_within_bounds) {
         scales_colwise_e8m0[scale_idx] = biased_exponent;
       }
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);

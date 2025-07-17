@@ -133,7 +133,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     ret.type_size_bits = typeToNumBits(DType::kFloat32);
     return {ret, ret};
   }
-  if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+  if ((scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) || (scaling_mode == NVTE_MXFP8_1D_SCALING)) {
     std::vector<size_t> shape_vec;
     for (size_t i = 0; i < shape.ndim; ++i) {
       shape_vec.push_back(shape.data[i]);
@@ -141,28 +141,40 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t first_dim = first_dimension(shape_vec);
     size_t last_dim = last_dimension(shape_vec);
 
-    NVTE_CHECK(last_dim % 2 == 0);
+    if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+      NVTE_CHECK(last_dim % 2 == 0);
+    }
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    auto block_alignment = std::vector<size_t>{128ul, 4ul};
+    const std::vector<size_t> block_alignment = std::vector<size_t>{128ul, 4ul};
     {
-      auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
+      size_t alignment = block_alignment[1];
+      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 1lu), alignment) * alignment;
       alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(16)), alignment) * alignment;
+      size_t scale_dim_1;
+      if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+        scale_dim_1 = DIVUP(DIVUP(last_dim, 16lu), alignment) * alignment;
+      } else {
+        scale_dim_1 = DIVUP(DIVUP(last_dim, 32lu), alignment) * alignment;
+      }
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(32)), alignment) * alignment;
+      size_t alignment = block_alignment[0];
+      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 32lu), alignment) * alignment;
       alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
+      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 1lu), alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
-    ret_rowwise.type = DType::kFloat8E4M3;
+    if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+      ret_rowwise.type = DType::kFloat8E4M3;
+      ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
+    } else {
+      ret_rowwise.type = DType::kFloat8E8M0;
+      ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    }
     ret_colwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
     ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
 
     return {ret_rowwise, ret_colwise};
@@ -177,19 +189,19 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    auto block_alignment = std::vector<size_t>{128ul, 4ul};
+    const std::vector<size_t> block_alignment = std::vector<size_t>{128ul, 4ul};
     {
-      auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
-      alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(32)), alignment) * alignment;
+      size_t alignment = block_alignment[1];
+      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 1lu), alignment) * alignment;
+      alignment = block_alignment[0];
+      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 32lu), alignment) * alignment;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(32)), alignment) * alignment;
-      alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
+      size_t alignment = block_alignment[0];
+      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 32lu), alignment) * alignment;
+      alignment = block_alignment[1];
+      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 1lu), alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat8E8M0;
@@ -210,13 +222,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret_rowwise, ret_colwise;
 
     {
-      auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(128)), 4) * 4;
+      size_t scale_dim_0 = DIVUP(first_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 128lu), 4) * 4;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(DIVUP(first_dim, static_cast<size_t>(128)), 4) * 4;
+      size_t scale_dim_0 = DIVUP(last_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(DIVUP(first_dim, 128lu), 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -236,13 +248,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret_rowwise, ret_colwise;
 
     {
-      auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(first_dim, 4) * 4;
+      size_t scale_dim_0 = DIVUP(last_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(first_dim, 4) * 4;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
-      auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-      auto scale_dim_1 = DIVUP(last_dim, 4) * 4;
+      size_t scale_dim_0 = DIVUP(first_dim, 128lu);
+      size_t scale_dim_1 = DIVUP(last_dim, 4) * 4;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -284,7 +296,8 @@ Tensor::Tensor(const std::string& name,
   NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
+  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING
+      || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // Transpose when tensor scaling
     columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
     for (size_t i = 0; i < shape.ndim - 1; ++i) {
@@ -317,65 +330,64 @@ Tensor::Tensor(const std::string& name,
       std::fill_n(cpu_data_columnwise_.get(), total_size, 0);
     }
   }
-
   if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
-    NVTE_CHECK(isFp8Type(type) && "Invalid data type!");
     tensor_.set_rowwise_data(dptr_rowwise, DType::kFloat4E2M1, shape);
-    tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
-
-    // Used for NVFP4 second stage scaling
-    cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-    cudaMemset(scale, 0, sizeof(float));
-    scale_cpu_data_ = std::make_shared<float>(0);
-    tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape, tensor_.scaling_mode());
-    auto rowwise_scale_size = rowwise_scale_meta.bytes();
-    auto columnwise_scale_size = colwise_scale_meta.bytes();
-    auto scale_shape = rowwise_scale_meta.shape;
-    auto columnwise_scale_shape = colwise_scale_meta.shape;
-    if (rowwise) {
-      cudaMalloc((void **)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
-      cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
-      rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(rowwise_scale_size);
-      std::fill_n(rowwise_scale_inv_cpu_data_.get(), rowwise_scale_size, 0);
-      auto scale_dtype = rowwise_scale_meta.type;
-      tensor_.set_rowwise_scale_inv(rowwise_scale_inv, scale_dtype, scale_shape);
-    }
-    if (columnwise) {
-      cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
-      cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
-      columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(columnwise_scale_size);
-      std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
-      auto scale_dtype = colwise_scale_meta.type;
-      tensor_.set_columnwise_scale_inv(columnwise_scale_inv, scale_dtype, columnwise_scale_shape);
-    }
   } else {
     tensor_.set_rowwise_data(dptr_rowwise, type, shape);
-    tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
-    if (isFp8Type(type) || isFp4Type(type)) {
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-        cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-        cudaMemset(amax, 0, sizeof(float));
+  }
+  tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
+
+  if (isFp8Type(type) || isFp4Type(type)) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
+      cudaMemset(amax, 0, sizeof(float));
+      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
+      cudaMemset(scale, 0, sizeof(float));
+      amax_cpu_data_ = std::make_shared<float>(0);
+      scale_cpu_data_ = std::make_shared<float>(0);
+      tensor_.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
+      tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
+      cudaMalloc((void**)&rowwise_scale_inv, sizeof(float));  // NOLINT(*)
+      if (rowwise) {
+        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
+                                      std::vector<size_t>{1});
+        rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
+        std::fill_n(rowwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
+      }
+      if (columnwise) {
+        tensor_.set_columnwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
+                                          std::vector<size_t>{1});
+        columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
+        std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
+      }
+    } else {
+      if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
+        // Used for NVFP4 second stage scaling
         cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
         cudaMemset(scale, 0, sizeof(float));
-        amax_cpu_data_ = std::make_shared<float>(0);
         scale_cpu_data_ = std::make_shared<float>(0);
-        tensor_.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
         tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-        cudaMalloc((void**)&rowwise_scale_inv, sizeof(float));  // NOLINT(*)
-        if (rowwise) {
-          tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
-                                        std::vector<size_t>{1});
-          rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
-          std::fill_n(rowwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
-        }
-        if (columnwise) {
-          tensor_.set_columnwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
-                                           std::vector<size_t>{1});
-          columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
-          std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
-        }
+      }
+      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape, tensor_.scaling_mode());
+      auto rowwise_scale_size = rowwise_scale_meta.bytes();
+      auto columnwise_scale_size = colwise_scale_meta.bytes();
+      auto scale_shape = rowwise_scale_meta.shape;
+      auto columnwise_scale_shape = colwise_scale_meta.shape;
+      if (rowwise) {
+        cudaMalloc((void **)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
+        cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
+        rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(rowwise_scale_size);
+        std::fill_n(rowwise_scale_inv_cpu_data_.get(), rowwise_scale_size, 0);
+        auto scale_dtype = rowwise_scale_meta.type;
+        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, scale_dtype, scale_shape);
+      }
+      if (columnwise) {
+        cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
+        cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
+        columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(columnwise_scale_size);
+        std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
+        auto scale_dtype = colwise_scale_meta.type;
+        tensor_.set_columnwise_scale_inv(columnwise_scale_inv, scale_dtype, columnwise_scale_shape);
       }
     }
   }
