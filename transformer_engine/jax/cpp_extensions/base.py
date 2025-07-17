@@ -37,9 +37,14 @@ class BasePrimitive(metaclass=ABCMeta):
         Determines if a custom call is enabled based on a state variable and the `NVTE_JAX_CUSTOM_CALLS_RE` environment variable.
         If the environment variable NVTE_JAX_CUSTOM_CALLS_RE is explicitly set, it overrides any internal state.
         This uses the Python class name of the primitive definitions that inherit from BasePrimitive.
-        If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `disable_primitives`.
+        If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `manage_primitives`.
         By default, the internal state `_is_enabled` is set to `True`, enabling all primitives if no modifications are made.
         For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
+        
+        Behavior:
+            1. Checks if the environment variable `NVTE_JAX_CUSTOM_CALLS_RE` is set.
+            2. If set, uses the pattern to determine if the primitive is enabled based on its class name.
+            3. If not set, falls back to the internal state `_is_enabled`.
         """
         # Check if environment variable is explicitly set
         pattern_str = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE")
@@ -165,9 +170,8 @@ def register_primitive(cls):
 # Need to do it this way because there is no other way to disable some primitives for non-FP8 recipes as those do not use the te.fp8_autocast context manager
 _default_disable_names = ["GemmPrimitive"]
 
-# Flag to track if default settings have been applied
-_defaults_applied = False
-
+# Flag to track if manage_primitives has been called
+_manage_primitives_called = False
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
     """
@@ -181,25 +185,32 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
         disable_all_first: Boolean, if True, disables all primitives before applying enable/disable lists. Defaults to False.
     
     Note:
-        - If `disable_all_first` is True, all primitives are disabled first, then `enable_names` is applied.
-        - Conflicts (a primitive in both enable and disable lists) are resolved by applying disable last.
-        - Default settings (e.g., disabling GemmPrimitive) are applied on the first call to this function.
+        1. If `disable_all_first` is True, all primitives are disabled first, then `enable_names` is applied.
+        2. Conflicts (a primitive in both enable and disable lists) are resolved by applying disable last.
+        3. Default settings (e.g., disabling GemmPrimitive) are applied on the first and only call to this function.
+        4. This function can only be called once in the program; subsequent calls will raise an error.
+    
+    Raises:
+        RuntimeError: If this function is called more than once in the program.
     """
-    global _defaults_applied
+    global _manage_primitives_called
+    
+    if _manage_primitives_called:
+        raise RuntimeError("manage_primitives() can only be called once in the program.")
+    
+    _manage_primitives_called = True
     
     enable_set = set(enable_names or [])
     disable_set = set(disable_names or [])
     
-    # Apply default settings on the first call
-    if not _defaults_applied:
-        for name in _default_disable_names:
-            cls = _primitive_registry.get(name)
-            if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
-                cls.set_enabled(False)
-                print(f"Disabled by default: {name}")
-            else:
-                print(f"Default disable primitive not found in registry: {name}")
-        _defaults_applied = True
+    # Apply default settings
+    for name in _default_disable_names:
+        cls = _primitive_registry.get(name)
+        if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
+            cls.set_enabled(False)
+            print(f"Disabled by default: {name}")
+        else:
+            print(f"Default disable primitive not found in registry: {name}")
     
     if disable_all_first:
         for name, cls in _primitive_registry.items():
