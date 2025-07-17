@@ -46,7 +46,7 @@ from transformer_engine.pytorch.module.base import get_multi_stream_cublas_works
 from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states, get_available_attention_backends
+from utils import ModelConfig, _rng_states, reset_rng_states, get_available_attention_backends
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -61,8 +61,8 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 # Record initial RNG state from script run.
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
+_rng_states = None
+reset_rng_states()
 
 torch._dynamo.config.recompile_limit = 16
 
@@ -795,14 +795,15 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
-        global _cpu_rng_state, _cuda_rng_state
         _cpu_rng_state = torch.get_rng_state()
         _cuda_rng_state = torch.cuda.get_rng_state()
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path, weights_only=False))
-        reset_rng_states()
+        torch.set_rng_state(_cpu_rng_state)
+        torch.cuda.set_rng_state(_cuda_rng_state)
+
 
         for p in block.parameters():
             if p.requires_grad:

@@ -23,7 +23,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, _rng_states, reset_rng_states
 
 
 # Check if FP8 is supported.
@@ -38,9 +38,8 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
-
+_rng_states = None
+reset_rng_states()
 
 model_configs = {
     "small": ModelConfig(32, 2, 2, 32, 2, 2, 0.0, "no_mask", "no_bias"),

@@ -34,6 +34,7 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
     ModelConfig,
+    _rng_states,
     reset_rng_states,
     get_available_attention_backends,
 )
@@ -42,9 +43,8 @@ from utils import (
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
-
+_rng_states = None
+reset_rng_states()
 
 param_types = [torch.float16]
 if is_bf16_compatible():

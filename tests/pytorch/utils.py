@@ -27,8 +27,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBacken
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -127,10 +125,20 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
+# Cached RNG state
+_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+
 def reset_rng_states() -> None:
-    """Revert back to initial RNG state"""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
+    """Revert to deterministic RNG state"""
+    global _rng_states
+    if _rng_states is None:
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed(1234)
+        _rng_states = (torch.get_rng_state(), torch.cuda.get_rng_state())
+    else:
+        cpu_rng_state, cuda_rng_state = _rng_states
+        torch.set_rng_state(cpu_rng_state)
+        torch.cuda.set_rng_state(cuda_rng_state)
 
 
 @pytest.fixture(autouse=True)

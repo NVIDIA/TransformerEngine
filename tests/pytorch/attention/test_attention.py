@@ -51,6 +51,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
+    _rng_states,
     reset_rng_states,
     ModelConfig,
     dtype_tols,
@@ -65,9 +66,8 @@ fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
-
+_rng_states = None
+reset_rng_states()
 
 model_configs_base = {
     #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
