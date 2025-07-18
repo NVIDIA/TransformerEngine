@@ -571,7 +571,6 @@ __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float b
 }
 
 #define DIRECT_SCALING_FACTORS_STORE 1
-#define DEBUG_MODE 0
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename OType, bool COLWISE_SCALING, size_t CHUNK_DIM_Y,
@@ -589,16 +588,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool ROWWISE_SCALING = true;
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
       (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
-
-#if DEBUG_MODE
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-#if DIRECT_SCALING_FACTORS_STORE
-    printf("DIRECT_SCALING_FACTORS_STORE\n");
-#else
-    printf("VECTORIZED_SHMEM_SCALING_FACTORS_STORE\n");
-#endif
-  }
-#endif
 
   using IType2 = typename ptx::FPx2<IType>;
 
