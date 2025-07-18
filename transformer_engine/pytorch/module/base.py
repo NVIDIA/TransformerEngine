@@ -26,6 +26,7 @@ from ..fp8 import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    HybridNVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -678,6 +679,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.float8_block_scaling() and isinstance(
                 recipe_state, Float8BlockScalingRecipeState
             ):
+                return
+            if recipe.nvfp4() and isinstance(recipe_state, HybridNVFP4BlockScalingRecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

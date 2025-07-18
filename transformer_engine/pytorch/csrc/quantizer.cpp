@@ -12,6 +12,7 @@
 
 namespace transformer_engine::pytorch {
 
+constexpr size_t NVFP4_BLOCK_SIZE = 16;
 constexpr size_t MXFP8_BLOCK_SIZE = 32;
 
 Quantizer::Quantizer(const py::handle& quantizer) {
@@ -477,11 +478,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
 
   TensorWrapper tensor(NVTE_MXFP8_1D_SCALING);
   at::TensorOptions opts;
-  at::Tensor rowwise_data1, columnwise_data, rowwise_scale_inv,
-      columnwise_scale_inv;  // TODO(pgadzinski) - change
+  at::Tensor data, columnwise_data, rowwise_scale_inv, columnwise_scale_inv;
   opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
 
-  at::Tensor data;
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
       data = std::move(*rowwise_data);
@@ -527,6 +526,98 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
                            "rowwise_scale_inv"_a = rowwise_scale_inv,
                            "columnwise_scale_inv"_a = columnwise_scale_inv,
                            "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+  }
+
+  return {std::move(tensor), std::move(ret)};
+}
+
+HybridNVFP4Quantizer::HybridNVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
+  this->dtype = quantizer.attr("dtype").cast<DType>();
+}
+
+void HybridNVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
+  auto rowwise_data = tensor->get_rowwise_data();
+  rowwise_data.dtype = NVTEDType::kNVTEFloat4E2M1;
+
+  auto columnwise_data = tensor->get_columnwise_data();
+  columnwise_data.dtype = static_cast<NVTEDType>(dtype);
+
+  tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
+                           rowwise_data.shape);
+  tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
+                              columnwise_data.shape);
+}
+
+std::pair<TensorWrapper, py::object> HybridNVFP4Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
+  using namespace pybind11::literals;
+  std::vector<int64_t> torch_shape;
+  size_t numel = 1;
+  for (auto s : shape) {
+    torch_shape.emplace_back(static_cast<int64_t>(s));
+    numel *= s;
+  }
+
+  TensorWrapper tensor(NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
+  at::TensorOptions bit4_opts, bit8_opts, bit32_opts;
+  at::Tensor data, scale_inv, columnwise_data, rowwise_scale_inv, columnwise_scale_inv;
+  bit4_opts = bit4_opts.dtype(torch::kUInt4).device(torch::kCUDA);
+  bit8_opts = bit8_opts.dtype(torch::kUInt8).device(torch::kCUDA);
+  bit32_opts = bit8_opts.dtype(torch::kFloat32).device(torch::kCUDA);
+  auto last_dim = static_cast<size_t>(torch_shape.back());
+
+  NVTE_CHECK(last_dim % NVFP4_BLOCK_SIZE == 0, "Last dim for NVFP4 must be divisble by ",
+             NVFP4_BLOCK_SIZE, " (got dim=", last_dim, ")");
+  NVTE_CHECK((numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
+             "NVFP4 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
+             " (got shape=", torch_shape, ")");
+
+  if (rowwise_usage) {
+    if (rowwise_data.has_value()) {
+      data = std::move(*rowwise_data);
+    } else {
+      data = at::empty(torch_shape, bit4_opts);
+    }
+    auto sinv0 = roundup(numel / last_dim, 128);
+    auto sinv1 = roundup(last_dim / NVFP4_BLOCK_SIZE, 4);
+    rowwise_scale_inv = at::zeros({sinv0, sinv1}, bit8_opts);
+    tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
+    tensor.set_rowwise_scale_inv(
+        rowwise_scale_inv.data_ptr(), DType::kFloat8E4M3,
+        std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
+  }
+
+  if (columnwise_usage) {
+    auto sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    auto sinv1 = roundup(last_dim, 128);
+    columnwise_data = at::empty(torch_shape, bit8_opts);
+    columnwise_scale_inv = at::zeros({sinv0, sinv1}, bit8_opts);
+
+    tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
+    tensor.set_columnwise_scale_inv(
+        columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+        std::vector<size_t>{static_cast<size_t>(sinv0), static_cast<size_t>(sinv1)});
+  }
+  scale_inv = at::zeros({1}, bit32_opts);
+  this->set_quantization_params(&tensor);
+
+  py::object ret;
+  if (internal) {
+    py::handle HybridNVFP4TensorClass(
+        reinterpret_cast<PyObject*>(HybridNVFP4TensorBasePythonClass));
+    ret = HybridNVFP4TensorClass("rowwise_data"_a = data, "columnwise_data"_a = columnwise_data,
+                                 "rowwise_scale_inv"_a = rowwise_scale_inv,
+                                 "columnwise_scale_inv"_a = columnwise_scale_inv,
+                                 "per_tensor_rowwise_scale_inv"_a = scale_inv,
+                                 "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+  } else {
+    py::handle HybridNVFP4TensorClass(reinterpret_cast<PyObject*>(HybridNVFP4TensorPythonClass));
+    ret = HybridNVFP4TensorClass("shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype),
+                                 "rowwise_data"_a = data, "columnwise_data"_a = columnwise_data,
+                                 "rowwise_scale_inv"_a = rowwise_scale_inv,
+                                 "columnwise_scale_inv"_a = columnwise_scale_inv,
+                                 "per_tensor_rowwise_scale_inv"_a = scale_inv,
+                                 "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
   }
 
   return {std::move(tensor), std::move(ret)};

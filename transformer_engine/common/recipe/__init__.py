@@ -4,7 +4,6 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
-import warnings
 import os
 from enum import Enum
 from typing import Literal, Optional, Union, Callable, NamedTuple
@@ -65,6 +64,14 @@ class Recipe:
     """
     Base recipe class.
     """
+
+    def nvfp4(self):
+        """Whether the given recipe has any element of NVFP4 strategy."""
+        return isinstance(self, HybridNVFP4BlockScaling)
+
+    def hybrid_nvfp4(self):
+        """Whether the given recipe has NVFP4 forward and MXFP8 backward strategy."""
+        return isinstance(self, HybridNVFP4BlockScaling)
 
     def mxfp8(self):
         """Whether the given recipe is MXFP8 block scaling."""
@@ -351,3 +358,41 @@ class Float8BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class HybridNVFP4BlockScaling(Recipe):
+    """
+    Use the NVFP4 scaling strategy for the forward pass and MXFP8 scaling
+    strategy for the backward pass.
+
+    This is a 2-level block scaling strategy. In level 1, each group of
+    16 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E4M3 (4 bits of exponent,
+    3 bits of mantissa). In level 2, a global per tensor FP32 scaling
+    factor is used to scale the entire tensor.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.E5M2}, default = Format.E4M3
+                Controls the FP8 data format used during the backward
+                pass.
+    """
+
+    fp8_format: Format = Format.E4M3
+
+    def __post_init__(self) -> None:
+        assert (
+            self.fp8_format != Format.HYBRID
+        ), "Hybrid training requires forward and backward pass in FP8."
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, format={str(self.fp8_format).split('.')[1]}"
