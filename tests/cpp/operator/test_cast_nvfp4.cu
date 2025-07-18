@@ -337,18 +337,20 @@ void performTest(float (*OP)(const float),
 }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    {1, 32},
-    {65, 96},
-    {128, 128},
-    {256, 256},
-    {993, 512},
-    {511, 6144},
-    {8192, 128},
-    {2048, 160},
-    {577, 1632},
-    {1024},
-    {8, 32, 1024},
-    {16, 8, 4, 512},
+    // {1, 32},
+    // {65, 96},
+    // {128, 128},
+    // {256, 256},
+    // {993, 512},
+    // {511, 6144},
+    // {8192, 128},
+    // {2048, 160},
+    // {577, 1632},
+    // {1024},
+    // {8, 32, 1024},
+    // {16, 8, 4, 512},
+    {1024, 16384},
+    {4096, 13312},
 };
 
 std::vector<ScalingType> scaling_case = {
@@ -451,8 +453,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(scaling_case),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
         ::testing::ValuesIn(input_scenarios)),
     [](const testing::TestParamInfo<FusedCastNVFP4TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param));

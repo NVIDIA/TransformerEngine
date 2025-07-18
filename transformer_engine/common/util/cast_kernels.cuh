@@ -566,6 +566,9 @@ compute_decoding_scaling_factor(const float block_amax, const float S_enc) {
   return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
 } 
 
+#define DIRECT_SCALING_FACTORS_STORE 1
+#define DEBUG_MODE 1
+
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename OType, bool COLWISE_SCALING,
           size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
@@ -580,6 +583,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool ROWWISE_SCALING = true;
   constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT = (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
+
+#if DEBUG_MODE
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+  #if DIRECT_SCALING_FACTORS_STORE
+      printf("DIRECT_SCALING_FACTORS_STORE\n");
+  #else
+      printf("VECTORIZED_SHMEM_SCALING_FACTORS_STORE\n");
+  #endif
+  }
+#endif
 
   using IType2 = typename ptx::FPx2<IType>;
 
@@ -908,12 +921,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   
         // 2. Compute E4M3 scaling factor
         const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
-  
+
+#if DIRECT_SCALING_FACTORS_STORE
+        // Check boundaries
+        if (rowwise_scale_is_within_bounds) {
+          const int scales_offset_Y = scales_offset_Y_rowwise + stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+          const int scales_offset_X = scales_offset_X_rowwise;
+          const int scale_idx_global = scales_offset_Y * scale_stride_rowwise + scales_offset_X;
+          scales_rowwise_e4m3[scale_idx_global] = S_dec_b_fp8;
+        }
+#else
         const int shmem_scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise;
         const int shmem_scales_offset_X = tid_X_rowwise;
         const int scale_idx = shmem_scales_offset_Y * NVFP4_SCALING_FACTORS_PER_CHUNK_ROW + shmem_scales_offset_X;
         out_rowwise_scales_sh[scale_idx] = S_dec_b_fp8;
-  
+#endif
         // Compute "correct" per-block encoding scaling factor
         const float block_scale_inverse = __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));  // S_enc_b_fp8
   
@@ -983,6 +1005,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
   }
 
+#if !DIRECT_SCALING_FACTORS_STORE
   // Vectorized store of scaling factors.
   // Each thread stores multiple scaling factors in one store instruction.
   if constexpr (ROWWISE_SCALING) {
@@ -998,6 +1021,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales.store_to(&scales_rowwise_e4m3[scale_idx_global]);
     }
   }
+#endif
 
   float chunk_amax = 0.0f;
   if (amax_ptr != nullptr) {
