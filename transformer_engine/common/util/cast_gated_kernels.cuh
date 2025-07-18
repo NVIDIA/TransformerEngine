@@ -70,7 +70,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   float amax = 0;
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
-  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  // Manually align dynamic SHMEM per TMA requirements using padding
+  // __align__(128) Does not guarantee the pointer to be aligned!
+  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
@@ -351,7 +356,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr int SUBAMAX_BUFF_DIM_Y = ONLY_COLWISE_SCALING ? COLWISE_WAVEFRONT_SIZE - 1 : 1;
   __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
-  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  // Manually align dynamic SHMEM per TMA requirements using padding
+  // __align__(128) Does not guarantee the pointer to be aligned!
+  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
