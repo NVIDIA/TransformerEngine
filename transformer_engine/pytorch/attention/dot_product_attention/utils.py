@@ -609,7 +609,7 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and head_dim_qk != head_dim_v:
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and head_dim_qk != head_dim_v:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
                 " MLA attention"
