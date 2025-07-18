@@ -484,7 +484,8 @@ model_configs_layout_thd = {
     "layout_4_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal", window_size=(4, 0)),
     "layout_5_0": ModelConfig(2,  2048,  16,  64, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)),
     "layout_5_1": ModelConfig(2,  2048,  24,  128, num_gqa_groups= 1, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)),
-    "layout_5_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0),}
+    "layout_5_2": ModelConfig(2,  2048,  24,  128, max_seqlen_kv= 4096, attn_mask_type="padding_causal_bottom_right", window_size=(4, 0)),
+}
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 0, 0), reason="cuDNN 9.0.0+ is required.")
