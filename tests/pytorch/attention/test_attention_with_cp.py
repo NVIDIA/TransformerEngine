@@ -19,6 +19,11 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import ModelConfig, get_available_attention_backends
 
+# Initialize RNG state
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
