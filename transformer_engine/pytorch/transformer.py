@@ -236,14 +236,17 @@ class TransformerLayer(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
-    use_qk_norm: bool, default = 'False'
-                    if set to `True`, L2 normalization is applied to query and key tensors
-                    after RoPE (if applicable) but before attention computation.
-                    This follows the Llama4 approach for QK normalization to improve
+    qk_norm_type: Optional[str], default = None
+                    type of normalization to apply to query and key tensors.
+                    Options: None, 'l2', 'rms'. When None, no normalization is applied.
+                    When 'l2', L2 normalization is applied to query and key tensors.
+                    When 'rms', RMS normalization is applied to query and key tensors.
+                    Normalization is applied after RoPE (if applicable) but before attention computation.
+                    This follows the e.g. Llama4 approach for QK normalization to improve
                     training stability and model performance.
     qk_norm_eps: float, default = 1e-6
-                    epsilon value for L2 normalization of query and key tensors.
-                    Only used when `use_qk_norm` is True.
+                    epsilon value for normalization of query and key tensors.
+                    Only used when `qk_norm_type` is not None.
     """
 
     def __init__(
@@ -293,7 +296,7 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
         name: str = None,
-        use_qk_norm: bool = False,
+        qk_norm_type: Optional[str] = None,
         qk_norm_eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -397,7 +400,7 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
-            use_qk_norm=use_qk_norm,
+            qk_norm_type=qk_norm_type,
             qk_norm_eps=qk_norm_eps,
             name=name + ".self_attention" if name is not None else None,
         )
@@ -413,7 +416,7 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
-                use_qk_norm=use_qk_norm,
+                qk_norm_type=qk_norm_type,
                 qk_norm_eps=qk_norm_eps,
                 name=name + ".inter_attention" if name is not None else None,
             )

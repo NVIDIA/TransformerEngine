@@ -11,7 +11,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.module import LayerNormLinear, Linear
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm
 from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
@@ -175,14 +175,17 @@ class MultiheadAttention(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
-    use_qk_norm: bool, default = 'False'
-                    if set to `True`, L2 normalization is applied to query and key tensors
-                    after RoPE (if applicable) but before attention computation.
-                    This follows the Llama4 approach for QK normalization to improve
+    qk_norm_type: Optional[str], default = None
+                    type of normalization to apply to query and key tensors.
+                    Options: None, 'l2', 'rms'. When None, no normalization is applied.
+                    When 'l2', L2 normalization is applied to query and key tensors.
+                    When 'rms', RMS normalization is applied to query and key tensors.
+                    Normalization is applied after RoPE (if applicable) but before attention computation.
+                    This follows the e.g. Llama4 approach for QK normalization to improve
                     training stability and model performance.
     qk_norm_eps: float, default = 1e-6
-                    epsilon value for L2 normalization of query and key tensors.
-                    Only used when `use_qk_norm` is True.
+                    epsilon value for normalization of query and key tensors.
+                    Only used when `qk_norm_type` is not None.
     seq_length: Optional[int], default = `None`
                     sequence length of input samples. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are used for
@@ -231,7 +234,7 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         qkv_format: str = "sbhd",
         name: str = None,
-        use_qk_norm: bool = False,
+        qk_norm_type: Optional[str] = None,
         qk_norm_eps: float = 1e-6,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
@@ -288,7 +291,6 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
-        self.use_qk_norm = use_qk_norm
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -300,13 +302,30 @@ class MultiheadAttention(torch.nn.Module):
             "device": device,
         }
 
-        # Initialize L2 normalization modules for query and key if enabled
-        if self.use_qk_norm:
-            self.qk_norm = L2Normalization(
+        if qk_norm_type == "l2":
+            l2_norm = L2Normalization(
                 eps=qk_norm_eps,
                 seq_length=seq_length,
                 micro_batch_size=micro_batch_size,
             )
+            self.q_norm = self.k_norm = l2_norm
+        elif qk_norm_type == "rms":
+            self.q_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            self.k_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+        elif qk_norm_type is not None:
+            raise ValueError(f"Unsupported QK norm type: {qk_norm_type}. "
+                           f"Supported types: ['l2', 'rms']")
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
@@ -843,12 +862,12 @@ class MultiheadAttention(torch.nn.Module):
             )
 
         # ===========================
-        # Apply L2 normalization to query and key tensors
+        # Apply normalization to query and key tensors
         # ===========================
 
-        if self.use_qk_norm:
-            query_layer = self.qk_norm(query_layer)
-            key_layer = self.qk_norm(key_layer)
+        if self.q_norm is not None:
+            query_layer = self.q_norm(query_layer)
+            key_layer = self.k_norm(key_layer)
 
         # ===========================
         # Core attention computation
