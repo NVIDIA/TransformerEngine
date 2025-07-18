@@ -65,8 +65,6 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
