@@ -22,6 +22,7 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
+from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 
 
@@ -161,6 +162,8 @@ class RMSNorm(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
+        if is_in_onnx_export_mode():
+            return self.op_onnx_forward(input_)
 
         # Check tensor dims
         weight = self.weight
@@ -236,3 +239,11 @@ class RMSNorm(BasicOperation):
         grad_input = dx.view(grad_output.size())
         grad_weight = dw.view(weight_dims)
         return grad_input, (grad_weight,)
+
+    def op_onnx_forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        """Every operand in this function has a defined ONNX translation."""
+        weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+        return torch.nn.functional.rms_norm(input_, input_.shape[-1:], weight, self.eps)
