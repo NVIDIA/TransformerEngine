@@ -321,8 +321,9 @@ class MultiheadAttention(torch.nn.Module):
                 device=device,
             )
         elif qk_norm_type is not None:
-            raise ValueError(f"Unsupported QK norm type: {qk_norm_type}. "
-                           f"Supported types: ['l2', 'rms']")
+            raise ValueError(
+                f"Unsupported QK norm type: {qk_norm_type}. Supported types: ['l2', 'rms']"
+            )
         else:
             self.q_norm = None
             self.k_norm = None

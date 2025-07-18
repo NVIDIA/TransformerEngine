@@ -32,10 +32,11 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
     if qk_norm_type is not None:
         assert mha.q_norm is not None, "Should have q_norm module when qk_norm_type is not None"
         assert mha.k_norm is not None, "Should have k_norm module when qk_norm_type is not None"
-        
+
         # Check that the modules are of the correct type
         if qk_norm_type == "l2":
             from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
+
             assert isinstance(
                 mha.q_norm, L2Normalization
             ), "q_norm should be an L2Normalization module"
@@ -43,19 +44,20 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
                 mha.k_norm, L2Normalization
             ), "k_norm should be an L2Normalization module"
             # For L2 normalization, q_norm and k_norm should be the same instance (parameter-free)
-            assert mha.q_norm is mha.k_norm, "q_norm and k_norm should be the same instance for L2 normalization"
-            
+            assert (
+                mha.q_norm is mha.k_norm
+            ), "q_norm and k_norm should be the same instance for L2 normalization"
+
         elif qk_norm_type == "rms":
             from transformer_engine.pytorch.module.rmsnorm import RMSNorm
-            assert isinstance(
-                mha.q_norm, RMSNorm
-            ), "q_norm should be an RMSNorm module"
-            assert isinstance(
-                mha.k_norm, RMSNorm
-            ), "k_norm should be an RMSNorm module"
+
+            assert isinstance(mha.q_norm, RMSNorm), "q_norm should be an RMSNorm module"
+            assert isinstance(mha.k_norm, RMSNorm), "k_norm should be an RMSNorm module"
             # For RMS normalization, q_norm and k_norm should be separate instances
-            assert mha.q_norm is not mha.k_norm, "q_norm and k_norm should be separate instances for RMS normalization"
-            
+            assert (
+                mha.q_norm is not mha.k_norm
+            ), "q_norm and k_norm should be separate instances for RMS normalization"
+
         else:
             # For extensibility - just ensure they exist
             assert mha.q_norm is not None, f"q_norm should exist for qk_norm_type={qk_norm_type}"
@@ -243,9 +245,10 @@ def test_qk_norm_transformer_layer_output_difference(qk_norm_type) -> None:
         output_no_norm = transformer_no_norm(hidden_states)
 
     # Outputs should be different when QK normalization is enabled
-    assert not torch.allclose(
-        output_with_norm, output_no_norm, atol=1e-6
-    ), f"QK normalization ({qk_norm_type}) should change the TransformerLayer output, but outputs are identical"
+    assert not torch.allclose(output_with_norm, output_no_norm, atol=1e-6), (
+        f"QK normalization ({qk_norm_type}) should change the TransformerLayer output, but outputs"
+        " are identical"
+    )
 
     # Check that outputs have expected shapes and properties
     assert output_with_norm.shape == (
