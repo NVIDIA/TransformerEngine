@@ -217,7 +217,7 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 }
 
 template <typename T>
-struct FPx2 {
+struct alignas(2 * sizeof(T)) FPx2 {
   T x;
   T y;
 };

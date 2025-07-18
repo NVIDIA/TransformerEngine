@@ -97,12 +97,12 @@ void compute_ref(const ProcessingMethod processing_method,
                         processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
                         elt *= static_cast<float>(grad[idx]);
                     }
+                    thread_dbias[j] += elt;
 
                     // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
                     elt = static_cast<float>(static_cast<InputType>(elt));
 
                     cache_buffer[cache_idx] = elt;
-                    thread_dbias[j] += elt;
                     if (isinf(elt) || isnan(elt)) {
                         continue;
                     }
@@ -502,8 +502,8 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
 
     auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol, true, mismatches_scales_rowwise);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol, true, mismatches_scales_colwise);
+    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol, true, mismatches_elts_rowwise);
+    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol, true, mismatches_elts_colwise);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS
         || processing_method == ProcessingMethod::CAST_DBIAS_DACT)

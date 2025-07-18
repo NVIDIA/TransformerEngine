@@ -689,7 +689,7 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 {
   const size_t N = row_blocks * col_blocks;
   const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
-                                                     std::ceil(N * rel_tolerable_mismatches_limit));
+                                                     std::floor(N * rel_tolerable_mismatches_limit));
   mismatches_num = 0;
   std::vector<int> mismatch_indices;
 

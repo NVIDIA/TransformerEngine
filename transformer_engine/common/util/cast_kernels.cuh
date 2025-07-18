@@ -112,8 +112,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
 
-  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
-
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
@@ -126,6 +124,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t in_mem = elt_input_mem + act_input_mem;
 
   constexpr size_t out_mem_rowwise = (ROWWISE_SCALING ? buff_size_aligned_out : 0);
+
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  // Manually align dynamic SHMEM per TMA requirements using padding
+  // __align__(128) Does not guarantee the pointer to be aligned!
+  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) & ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -228,12 +232,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float act_in_elt = static_cast<float>(act_in_sh[shmem_offset_colwise]);
             elt *= OP(act_in_elt, {});
           }
+          if constexpr (IS_DBIAS) {
+            partial_dbias_colwise += elt;
+          }
           // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
           if constexpr (!std::is_same_v<IType, float>) {
             elt = static_cast<float>(static_cast<IType>(elt));
-          }
-          if constexpr (IS_DBIAS) {
-            partial_dbias_colwise += elt;
           }
           // Cache computed activations to avoid computing them again in the 2nd pass along another dimension
           if constexpr (IS_CACHED_ACT_OP) {
@@ -373,13 +377,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               elt *= OP(act_in_elt, {});
             }
 
-            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
-            if constexpr (!std::is_same_v<IType, float>) {
-              elt = static_cast<float>(static_cast<IType>(elt));
-            }
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
             if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
               thread_dbias_rowwise[j] += elt;
+            }
+            // Numerical truncation: Downcast to IType (BF16/FP16), then upcast it back to FP32
+            if constexpr (!std::is_same_v<IType, float>) {
+              elt = static_cast<float>(static_cast<IType>(elt));
             }
             if constexpr (COMPUTE_ACTIVATIONS) {
               const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
@@ -1112,7 +1116,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
           const size_t out_mem = out_rowwise_mem + out_colwise_mem;
 
-          const size_t dshmem_size = in_mem + out_mem;
+          const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
