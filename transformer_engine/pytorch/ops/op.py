@@ -15,9 +15,6 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
-    MXFP8BlockScalingRecipeState,
-    DelayedScalingRecipeState,
-    Float8BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
     fp8_autocast,
@@ -245,17 +242,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 if self._fp8_metas[mode] is None or fp8_meta_key not in self._fp8_metas[mode]:
                     continue
                 recipe_state = self._fp8_metas[mode][fp8_meta_key]
-                if (
-                    (recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState))
-                    or (
-                        recipe.mxfp8()
-                        and not isinstance(recipe_state, MXFP8BlockScalingRecipeState)
-                    )
-                    or (
-                        recipe.float8_block_scaling()
-                        and not isinstance(recipe_state, Float8BlockScalingRecipeState)
-                    )
-                ):
+                if not isinstance(recipe, type(recipe_state.recipe)):
                     need_to_reset_recipe_state = True
                     break
 
