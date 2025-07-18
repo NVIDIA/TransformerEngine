@@ -129,6 +129,8 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine SYSTEM PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
@@ -157,7 +159,7 @@ if (NVTE_WITH_CUBLASMP)
                  PATH_SUFFIXES lib
                  REQUIRED)
     find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host
+                 NAMES nvshmem_host libnvshmem_host.so.3
                  PATHS ${NVSHMEM_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
