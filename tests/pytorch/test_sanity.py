@@ -104,7 +104,7 @@ def custom_amax_compute(amax_history: torch.Tensor) -> torch.Tensor:
 
 
 def is_fp8_supported(config: ModelConfig):
-    if config.max_seqlen_q * config.batch_size % 16 or config.max_seqlen_q * config.batch_size % 16:
+    if config.max_seqlen_q * config.batch_size % 16 or config.max_seqlen_kv * config.batch_size % 16:
         return False
     if config.hidden_size % 16 or config.hidden_size_kv % 16:
         return False
