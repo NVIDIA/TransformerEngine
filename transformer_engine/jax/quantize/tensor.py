@@ -17,7 +17,6 @@ from jax.tree_util import register_pytree_node_class
 
 from transformer_engine_jax import QuantizeLayout
 
-from .helper import apply_padding_to_scale_inv
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
 from ..sharding import (
@@ -135,14 +134,16 @@ class ScaledTensor1x(ScaledTensor):
 
         if self.scaling_mode == ScalingMode.NO_SCALING:
             self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
-
         else:
-            self.scale_inv = apply_padding_to_scale_inv(
-                self.scale_inv,
-                self.scaling_mode,
+            unpadded_scale_shape = self.scaling_mode.get_scale_shape(
                 self.data.shape,
                 is_colwise=self.is_colwise,
+                is_padded=False,
                 flatten_axis=self.flatten_axis,
+            )
+            assert self.scale_inv.shape == unpadded_scale_shape, (
+                "Unpadded inverse scale factor has wrong shape, expected"
+                f" {unpadded_scale_shape} but got {self.scale_inv.shape}."
             )
 
     def tree_flatten(self):
