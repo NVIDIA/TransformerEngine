@@ -1938,7 +1938,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         quantization: Optional[str],
     ) -> None:
-        """Backward dbias + dact + quantize"""
+        """Backward dact + dbias + quantize"""
 
         # Tensor dimensions
         in_shape = list(out_shape)

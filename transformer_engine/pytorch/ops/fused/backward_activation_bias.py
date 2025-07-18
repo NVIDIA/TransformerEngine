@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Fused backward dbias + dact + quantize."""
+"""Fused backward dact + dbias + quantize."""
 
 from __future__ import annotations
 from typing import Optional
@@ -30,7 +30,7 @@ _fusible_activations = tuple(_fused_activations.keys())
 
 
 class BackwardActivationBias(FusedOperation):
-    """Fused backward dbias + dact + quantize
+    """Fused backward dact + dbias + quantize
 
     Uses the next operation's input quantizer.
 
@@ -86,7 +86,7 @@ def fuse_backward_activation_bias(
     ops: list[tuple[FusibleOperation, list[int]]],
     recipe: Optional[Recipe],
 ) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fused backward dbias + dact + quantize
+    """Fused backward dact + dbias + quantize
 
     Parameters
     ----------

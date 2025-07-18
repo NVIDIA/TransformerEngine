@@ -5,8 +5,8 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
-from collections.abc import Callable
-from typing import Any, Optional, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any, Optional
 import itertools
 
 import torch
@@ -37,7 +37,7 @@ def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
 
 
 # Lazily imported function used in _is_graph_capturing
-_is_graph_capturing_function: Optional[Callable[[], bool]] | None = None
+_is_graph_capturing_function: Optional[Callable[[], bool]] = None
 
 
 def _is_graph_capturing() -> bool:
