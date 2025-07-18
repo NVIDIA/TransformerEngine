@@ -62,7 +62,11 @@ class L2Normalization(BasicOperation):
 
         # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
-            if torch.cuda.is_available() and torch_version() >= (2, 0, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+            if (
+                torch.cuda.is_available()
+                and torch_version() >= (2, 0, 0)
+                and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1")))
+            ):
                 set_jit_fusion_options()
                 # For L2Normalization, we don't know the hidden size until forward pass,
                 # but we can warm up with common sizes. For QK normalization, this will be
