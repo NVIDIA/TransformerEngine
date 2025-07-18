@@ -300,6 +300,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::coerce_tensor(py::object t
 
 void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
                                const std::optional<TensorWrapper>& noop_flag) {
+  if (input.numel() == 0) {
+    return;
+  }
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
@@ -542,6 +545,11 @@ void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorW
                                              const std::optional<TensorWrapper>& noop_flag) {
   auto stream = at::cuda::getCurrentCUDAStream();
 
+  // Nothing to be done if input is empty
+  if (input.numel() == 0) {
+    return;
+  }
+
   // Quantization configs
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
@@ -723,6 +731,9 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::coerce_tensor(py::obj
 
 void Float8BlockQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
                                     const std::optional<TensorWrapper>& noop_flag) {
+  if (input.numel() == 0) {
+    return;
+  }
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
@@ -1015,6 +1026,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object te
 
 void MXFP8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
                               const std::optional<TensorWrapper>& noop_flag) {
+  if (input.numel() == 0) {
+    return;
+  }
   QuantizationConfigWrapper quant_config;
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
