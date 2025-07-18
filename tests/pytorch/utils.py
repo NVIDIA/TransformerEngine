@@ -175,13 +175,13 @@ class ModelConfig:
             self.kv_channels = self.head_dim_qk
         else:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
-        self.hidden_size = num_heads * head_dim_qk
-        self.hidden_size_kv = num_gqa_groups * self.head_dim_v
+        self.hidden_size = self.num_heads * self.head_dim_qk
+        self.hidden_size_kv = self.num_gqa_groups * self.head_dim_v
         self.dropout_p = dropout_p
         self.attn_mask_type = attn_mask_type
         self.attn_bias_type = attn_bias_type
         self.alibi_type = alibi_type
-        self.attn_type = "self" if (max_seqlen_q == max_seqlen_kv) else "cross"
+        self.attn_type = "self" if (self.max_seqlen_q == self.max_seqlen_kv) else "cross"
         self.bias_shape = bias_shape
         self.window_size = window_size
         self.total_requests = total_requests
