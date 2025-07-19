@@ -351,7 +351,6 @@ def _make_graphed_callables(
                     for basic_op in module_group._basic_ops:
                         visited_te_modules.add(basic_op)
 
-
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
         for func_idx, func in zip(warmup_func_idx, warmup_func):
@@ -715,7 +714,7 @@ def _make_graphed_callables(
                                         if m.num_quantizers(mode):
                                             FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                                                 m._fp8_metas[mode],
-                                            )          
+                                            )
                         return graphed(*user_args, **user_kwargs)
                     return orig_fwd(*user_args, **user_kwargs)
 

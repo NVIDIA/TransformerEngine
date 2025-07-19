@@ -280,7 +280,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):
-            if FP8GlobalStateManager.is_fp8_enabled() and self.num_quantizers(mode) and not FP8GlobalStateManager.fp8_graph_capturing():
+            if (
+                FP8GlobalStateManager.is_fp8_enabled()
+                and self.num_quantizers(mode)
+                and not FP8GlobalStateManager.fp8_graph_capturing()
+            ):
                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                     self._fp8_metas[mode],
                 )
