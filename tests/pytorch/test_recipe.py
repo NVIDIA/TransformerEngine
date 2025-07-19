@@ -191,12 +191,6 @@ class TestFP8Recipe:
             amax_compute_algo=amax_compute_algo,
         )
 
-        # Get FP8 meta tensors
-        with te.fp8_autocast(fp8_recipe=recipe):
-            x_fp8_meta = op.get_quantizer("forward", 0)
-            w_fp8_meta = op.get_quantizer("forward", 1)
-            dy_fp8_meta = op.get_quantizer("backward", 0)
-
         # Perform training steps
         x_history = []
         w_history = []
@@ -228,42 +222,36 @@ class TestFP8Recipe:
                 y = op(x)
             y.backward(dy)
 
-            def check_amax_history(
-                fp8_meta: dict,
-                ref_amax_history: Iterable[float],
-            ) -> None:
-                """Check that amax history matches expected values"""
-                if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-amax_history_len:]
+            def check_metas(
+                test_scale: float,
+                test_amax_history: torch.Tensor,
+                ref_amax_history_list: list[float],
+                stage: str,
+            ):
+                """Check that meta tensors match expected values"""
+
+                # Compute amax
+                if len(ref_amax_history_list) > amax_history_len:
+                    ref_amax_history_list = ref_amax_history_list[-(amax_history_len + 1) :]
                 ref_amax_history = torch.tensor(
-                    ref_amax_history,
+                    ref_amax_history_list,
                     dtype=torch.float32,
                     device=device,
                 )
-                test_amax_history = fp8_meta.amax_history[:, 0]
+                if amax_compute_algo == "max":
+                    ref_amax = max(ref_amax_history_list)
+                elif amax_compute_algo == "most_recent":
+                    ref_amax = ref_amax_history_list[-1]
+                else:
+                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
+
+                # Compare amax history
                 tols = dict(rtol=0, atol=0)
                 torch.testing.assert_close(
                     test_amax_history[-(step + 1) :],
                     ref_amax_history[: (step + 1)],
                     **tols,
                 )
-
-            def check_scale(
-                quantizer: Float8Quantizer,
-                ref_amax_history: Iterable[float],
-                stage: str,
-            ):
-                """Check that scale and scale reciprocal match expected values"""
-
-                # Compute amax
-                if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-(amax_history_len + 1) :]
-                if amax_compute_algo == "max":
-                    ref_amax = max(ref_amax_history)
-                elif amax_compute_algo == "most_recent":
-                    ref_amax = ref_amax_history[-1]
-                else:
-                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
 
                 # Compute scale
                 max_val = {
@@ -272,16 +260,26 @@ class TestFP8Recipe:
                 }[stage]
                 ref_scale = (max_val / ref_amax) / (2**margin)
 
-                # Check values in FP8 meta tensors
+                # Compare scale
                 torch.testing.assert_close(
-                    quantizer.scale.item(),
+                    test_scale,
                     ref_scale,
                 )
 
+            # Get scaling factors
+            x_test_scale = op.get_quantizer("forward", 0).scale.item()
+            w_test_scale = op.get_quantizer("forward", 1).scale.item()
+            dy_test_scale = op.get_quantizer("backward", 0).scale.item()
+
+            # Get amax histories
+            x_test_history = op._fp8_metas["forward"][forward_key].amax_history[:, 0]
+            w_test_history = op._fp8_metas["forward"][forward_key].amax_history[:, 1]
+            dy_test_history = op._fp8_metas["backward"][backward_key].amax_history[:, 0]
+
             # Check that results match expected values
-            check_scale(x_fp8_meta, x_history, "forward")
-            check_scale(w_fp8_meta, w_history, "forward")
-            check_scale(dy_fp8_meta, dy_history, "backward")
+            check_metas(x_test_scale, x_test_history, x_history, "forward")
+            check_metas(w_test_scale, w_test_history, w_history, "forward")
+            check_metas(dy_test_scale, dy_test_history, dy_history, "backward")
 
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
