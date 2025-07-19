@@ -35,6 +35,10 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
       return CUDA_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return CUDA_R_8F_E5M2;
+#if CUDA_VERSION >= 12080
+    case DType::kFloat4E2M1:
+      return CUDA_R_4F_E2M1;
+#endif
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -133,6 +137,14 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
+  } else if (is_nvfp_scaling(A.scaling_mode)) {
+    NVTE_CHECK(is_A_transposed, "Incorrect GEMM layout for NVFP4");
+    NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
+    ret.A = A.data.dptr;
+    ret.transA = CUBLAS_OP_T;
+    ret.Atype = A.data.dtype;
+    ret.A_scale_inv = A.scale_inv.dptr;
+    ret.lda = k;
   } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
     // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
@@ -192,6 +204,14 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
+  } else if (is_nvfp_scaling(B.scaling_mode)) {
+    NVTE_CHECK(!is_B_transposed, "Incorrect GEMM layout for NVFP4");
+    NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    ret.B = B.data.dptr;
+    ret.transB = CUBLAS_OP_N;
+    ret.Btype = B.data.dtype;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    ret.ldb = k;
   } else if (B.scaling_mode == NVTE_BLOCK_SCALING_1D || B.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
     // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
@@ -276,6 +296,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+  const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
 
   const cudaDataType_t A_type = get_cuda_dtype(param.Atype);
   const cudaDataType_t B_type = get_cuda_dtype(param.Btype);
@@ -286,16 +307,23 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              "FP8 input to GEMM requires inverse of scale!");
   NVTE_CHECK(!is_fp8_dtype(param.Btype) || param.B_scale_inv != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
+  NVTE_CHECK(!is_fp4_dtype(param.Atype) || param.A_scale_inv != nullptr,
+             "FP4 input to GEMM requires inverse of scale!");
+  NVTE_CHECK(!is_fp4_dtype(param.Btype) || param.B_scale_inv != nullptr,
+             "FP4 input to GEMM requires inverse of scale!");
 
   // check consistency of arguments:
   // if fp8 is desired, context cannot be null
   // fp8 + gelu fusion + fp8 aux is unavailable right now.
-  if (use_fp8 && gelu) {
+  if ((use_fp8 || use_fp4) && gelu) {
     NVTE_CHECK(!is_fp8_dtype(outputPreGelu->data.dtype),
                "fp8 Aux output for gemm + gelu fusion not supported!");
   }
   if (is_fp8_dtype(outputD->data.dtype)) {
     NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
+  }
+  if (is_fp4_dtype(outputD->data.dtype)) {
+    NVTE_ERROR("FP4 GEMM output is not supported!");
   }
 
   float one = 1.0;
@@ -339,12 +367,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                      &math_sm_count, sizeof(math_sm_count)));
   }
 
-  // set fp8 attributes -- input and output types should already be set to fp8 as appropriate
-  // Note: gelu fusion isn't available right now, and we don't need
+  // set fp8/fp4 attributes -- input and output types should already be set to fp8/fp4
+  // as appropriate. Note: gelu fusion isn't available right now, and we don't need
   // amax(D) either (next op is high precision).
-  if (use_fp8) {
-    // Split accumulator.
-    const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
+  if (use_fp8 || use_fp4) {
+    // Fast accumulation is only supported for FP8.
+    const int8_t fastAccuMode = (use_split_accumulator) ? 0 : use_fp8;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                      &fastAccuMode, sizeof(fastAccuMode)));
 
@@ -388,6 +416,17 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
+    } else if ((is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode))) {
+      fp8e4m3 *A_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.A_scale_inv);
+      fp8e4m3 *B_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.B_scale_inv);
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                       &A_scale_inverse, sizeof(A_scale_inverse)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                       &B_scale_inverse, sizeof(B_scale_inverse)));
+      scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+      scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
 #else
       NVTE_ERROR("MXFP8 requires cuBLAS 12.8+, but compile-time cuBLAS version is ",
                  CUBLAS_VERSION);

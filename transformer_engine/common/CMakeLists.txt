@@ -113,8 +113,6 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-
-
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
@@ -192,6 +190,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   set_source_files_properties(activation/gelu.cu
                               activation/relu.cu
                               activation/swiglu.cu
+                              util/cast.cu
                               PROPERTIES
                               COMPILE_OPTIONS "--use_fast_math")
 endif()

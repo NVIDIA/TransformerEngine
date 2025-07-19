@@ -84,8 +84,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  __shared__ alignas(128) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-  __shared__ alignas(128) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
   constexpr int transaction_size = shmem_buff_size;
@@ -166,7 +166,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
-    const float block_scale = exp2f(static_cast<float>(biased_exponent) - FP32_EXPONENT_BIAS);
+    const float block_scale = ptx::exp2f(biased_exponent);
 
     if constexpr (USE_ROWWISE_SCALING) {
       Vec<IType, ELEMS_PER_THREAD> in;
@@ -226,7 +226,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
-static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
@@ -247,7 +247,7 @@ static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t str
   );                      // NOLINT(*)
 }
 
-static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);

@@ -50,6 +50,10 @@ inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
 
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
+inline bool is_nvfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING;
+}
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");
@@ -668,7 +672,8 @@ constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
