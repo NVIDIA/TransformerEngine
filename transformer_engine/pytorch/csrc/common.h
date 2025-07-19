@@ -98,11 +98,18 @@ class Quantizer {
 
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
+  /*! @brief Construct a tensor with uninitialized data */
   virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                              DType dtype) const = 0;
 
+  /*! @brief Load a PyTorch tensor
+   *
+   * The PyTorch tensor's attributes are modified to match the
+   * quantizer's configuration.
+   */
   virtual std::pair<TensorWrapper, py::object> coerce_tensor(py::object tensor) const = 0;
 
+  /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
                         const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
@@ -128,6 +135,7 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
+  /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
@@ -153,6 +161,7 @@ class Float8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
+  /*! @brief Construct a tensor with pre-initialized data */
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      std::optional<at::Tensor> data,
                                                      std::optional<at::Tensor> transpose,
