@@ -19,8 +19,8 @@ namespace {
  * The tensor is interpreted as a 2D matrix by flattening all but the
  * last dimension, and then transposed.
  */
-template <typename T=size_t, typename S=T>
-std::vector<T> make_transpose_shape(const std::vector<S> &shape) {
+template <typename T = size_t, typename S = T>
+std::vector<T> make_transpose_shape(const std::vector<S>& shape) {
   std::vector<T> ret;
   if (shape.size() > 0) {
     ret.push_back(shape.back());
@@ -166,8 +166,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   TensorWrapper out_cpp(this->get_scaling_mode());
   if (with_data) {
     out_cpp.set_rowwise_data(data->data_ptr(), this->dtype, shape);
-    out_cpp.set_rowwise_scale_inv(scale_inv->data_ptr(), DType::kFloat32,
-                                  std::vector<size_t>{1});
+    out_cpp.set_rowwise_scale_inv(scale_inv->data_ptr(), DType::kFloat32, std::vector<size_t>{1});
   }
   if (with_transpose) {
     const auto transpose_shape = make_transpose_shape(shape);

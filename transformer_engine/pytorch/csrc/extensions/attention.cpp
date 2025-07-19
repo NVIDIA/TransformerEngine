@@ -109,8 +109,10 @@ std::vector<py::object> fused_attn_fwd(
     auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
     NVTE_CHECK(O_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
     NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_O, o_python) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te, std::nullopt, std::nullopt, std::nullopt);
-    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
+    std::tie(te_O, o_python) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te, std::nullopt,
+                                                              std::nullopt, std::nullopt);
+    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                              std::nullopt, std::nullopt);
   } else {
     std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
     std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
@@ -300,8 +302,10 @@ std::vector<py::object> fused_attn_bwd(
     auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
     NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
     NVTE_CHECK(dP_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    std::tie(te_dP, dp_python) = dP_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
+    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                              std::nullopt, std::nullopt);
+    std::tie(te_dP, dp_python) = dP_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                                 std::nullopt, std::nullopt);
   } else {
     std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
     std::tie(te_dP, dp_python) = dP_quantizer->create_tensor({0}, DType::kFloat32);
