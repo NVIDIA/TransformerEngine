@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 from typing import Optional
+import os
 
 import torch
 
 from ...utils import clear_tensor_data
+from ... import torch_version
 from .._common import maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...jit import (
@@ -60,7 +62,11 @@ class L2Normalization(BasicOperation):
 
         # JIT warmup for L2Normalization fused operations
         if seq_length and micro_batch_size:
-            if torch.cuda.is_available():
+            if (
+                torch.cuda.is_available()
+                and torch_version() >= (2, 0, 0)
+                and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1")))
+            ):
                 set_jit_fusion_options()
                 # For L2Normalization, we don't know the hidden size until forward pass,
                 # but we can warm up with common sizes. For QK normalization, this will be
@@ -86,16 +92,17 @@ class L2Normalization(BasicOperation):
         # Compute L2 normalization using fused implementation
         # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
         if requires_grad:
-            # Training: use version that returns both output and intermediate values
-            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
+            # Training: use version that returns output and intermediate values for backward pass
+            y, rsqrt_norm, l2_norm_squared_eps = l2normalization_fwd_fused(x, self.eps)
         else:
             # Inference: use lightweight version that only returns output
             y = l2normalization_fused(x, self.eps)
             rsqrt_norm = None  # Not needed for inference
+            l2_norm_squared_eps = None  # Not needed for inference
 
         # Save state for backward pass
         if requires_grad:
-            ctx.save_for_backward(x, rsqrt_norm)
+            ctx.save_for_backward(x, rsqrt_norm, l2_norm_squared_eps)
 
         return y
 
@@ -106,16 +113,17 @@ class L2Normalization(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Saved tensors from forward pass
-        x, rsqrt_norm = ctx.saved_tensors
+        x, rsqrt_norm, l2_norm_squared_eps = ctx.saved_tensors
 
         dy = maybe_dequantize(grad_output)
 
-        # Compute L2 norm backward pass using fused implementation
-        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
+        # Compute L2 norm backward pass using fused implementation with reused forward computations
+        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, l2_norm_squared_eps)
 
         # Clear saved tensors if possible
         clear_tensor_data(x)
         clear_tensor_data(rsqrt_norm)
+        clear_tensor_data(l2_norm_squared_eps)
 
         # No parameters, so empty tuple for param grads
         return dx, ()
