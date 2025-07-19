@@ -816,13 +816,13 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(shape_int64, uint8_tensor_opts);
-    rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    rowwise_scale_inv_tensor = at::zeros(scale_inv_shape_int64, uint8_tensor_opts);
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
                                                      columnwise_scale_inv_shape.end());
     columnwise_data_tensor = at::empty(shape_int64, uint8_tensor_opts);
-    columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, uint8_tensor_opts);
+    columnwise_scale_inv_tensor = at::zeros(scale_inv_shape_int64, uint8_tensor_opts);
   }
 
   // Construct Python MXFP8 tensor
@@ -883,7 +883,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object te
   auto rowwise_scale_inv = get_tensor("_rowwise_scale_inv");
   auto columnwise_data = get_tensor("_columnwise_data");
   auto columnwise_scale_inv = get_tensor("_columnwise_scale_inv");
-  NVTE_CHECK(!rowwise_data || !columnwise_data, "MXFP8Tensor has no data.");
+  NVTE_CHECK(rowwise_data || columnwise_data, "MXFP8Tensor has no data.");
 
   // Tensor dimensions
   std::vector<size_t> shape;
@@ -911,7 +911,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object te
       const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      rowwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      rowwise_scale_inv = at::zeros(scale_inv_shape_int64, opts);
       tensor.attr("_rowwise_scale_inv") = *rowwise_scale_inv;
     }
   } else {  // rowwise_usage == false
@@ -938,7 +938,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object te
       const std::vector<int64_t> scale_inv_shape_int64(scale_inv_shape.begin(),
                                                        scale_inv_shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      columnwise_scale_inv = at::empty(scale_inv_shape_int64, opts);
+      columnwise_scale_inv = at::zeros(scale_inv_shape_int64, opts);
       tensor.attr("_columnwise_scale_inv") = *columnwise_scale_inv;
     }
   } else {  // columnwise_usage == false
