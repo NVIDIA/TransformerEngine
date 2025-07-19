@@ -220,8 +220,9 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   }
   const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
 
-  // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
-  at::Tensor scale_inv = at::reciprocal(scale);
+  // In current scaling, scale_inv is not known but we initialize it as an empty tensor to be filled later.
+  at::Tensor scale_inv =
+      at::empty({1}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
   py::object ret;
   if (internal) {
