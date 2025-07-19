@@ -18,7 +18,7 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 
   auto max_tokens = shape[0];
   auto fcd_size = 1;
-  for (int i = 1; i <= shape.size(); i++) {
+  for (size_t i = 1; i <= shape.size(); i++) {
     fcd_size *= shape[i];
   }
 
@@ -103,8 +103,20 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{q_shape.begin(), q_shape.end()};
   o_shape[o_shape.size() - 1] = v_shape[v_shape.size() - 1];
   py::object o_python, s_python;
-  std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
-  std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
+  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    // Initialize FP8 tensor with scale-inverse
+    auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
+    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
+    NVTE_CHECK(O_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
+    NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
+    std::tie(te_O, o_python) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te, std::nullopt,
+                                                              std::nullopt, std::nullopt);
+    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                              std::nullopt, std::nullopt);
+  } else {
+    std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
+    std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
+  }
   auto o_shape_int64 = std::vector<int64_t>{o_shape.begin(), o_shape.end()};
 
   // construct NVTE tensors
@@ -284,8 +296,20 @@ std::vector<py::object> fused_attn_bwd(
   py::object s_python, dp_python;
   std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
   std::unique_ptr<Quantizer> dP_quantizer = convert_quantizer(dp_quantizer);
-  std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  std::tie(te_dP, dp_python) = dP_quantizer->create_tensor({0}, DType::kFloat32);
+
+  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
+    auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
+    NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
+    NVTE_CHECK(dP_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
+    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                              std::nullopt, std::nullopt);
+    std::tie(te_dP, dp_python) = dP_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                                 std::nullopt, std::nullopt);
+  } else {
+    std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
+    std::tie(te_dP, dp_python) = dP_quantizer->create_tensor({0}, DType::kFloat32);
+  }
 
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
@@ -374,9 +398,22 @@ std::vector<py::object> fused_attn_bwd(
     default:
       NVTE_ERROR("QKV layout not supported!");
   }
-  std::tie(te_dQ, py_dQ) = dQKV_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
-  std::tie(te_dK, py_dK) = dQKV_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
-  std::tie(te_dV, py_dV) = dQKV_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
+  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
+    NVTE_CHECK(fp8_quantizer != nullptr, "Expected Float8Quantizer when dtype is FP8");
+    std::tie(te_dQ, py_dQ) =
+        fp8_quantizer->create_tensor(q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
+    std::tie(te_dK, py_dK) =
+        fp8_quantizer->create_tensor(k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
+    std::tie(te_dV, py_dV) =
+        fp8_quantizer->create_tensor(v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
+  } else {
+    auto *none_quantizer = dynamic_cast<NoneQuantizer *>(dQKV_quantizer.get());
+    NVTE_CHECK(none_quantizer != nullptr, "Expected NoneQuantizer when dtype is not FP8");
+    std::tie(te_dQ, py_dQ) = none_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
+    std::tie(te_dK, py_dK) = none_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
+    std::tie(te_dV, py_dV) = none_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
+  }
 
   // construct NVTE tensors
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
