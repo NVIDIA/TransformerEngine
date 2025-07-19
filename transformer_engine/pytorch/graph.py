@@ -21,6 +21,8 @@ from .fp8 import (
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
 from .ops.op import BasicOperation
+from .ops import Sequential
+from .ops.fuser import OperationFuser
 from .utils import make_weak_ref
 
 __all__ = ["make_graphed_callables"]
@@ -338,6 +340,17 @@ def _make_graphed_callables(
     def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
         if isinstance(module, TransformerEngineBaseModule):
             visited_te_modules.add(module)
+        # If forward is called on a BasicOperation directly the hook will run
+        elif isinstance(module, BasicOperation):
+            visited_te_modules.add(module)
+        # If forward is called on a te.ops.Sequential it is not called on its constituent ops
+        elif isinstance(module, Sequential):
+            assert module._module_groups is not None, "Should have been initialized by warmup"
+            for module_group in module._module_groups:
+                if isinstance(module_group, OperationFuser):
+                    for basic_op in module_group._basic_ops:
+                        visited_te_modules.add(basic_op)
+
 
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
@@ -674,31 +687,35 @@ def _make_graphed_callables(
                     # run the graph, otherwise run the original forward method
                     if func.training == graph_training_state:
                         # Set the FP8 group from global amax reduction.
-                        for m in func.modules():
-                            if (
-                                isinstance(m, TransformerEngineBaseModule)
-                                and FP8GlobalStateManager.is_fp8_enabled()
-                            ):
+                        if FP8GlobalStateManager.is_fp8_enabled():
+                            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+                            for m in func.modules():
                                 if m not in visited_te_modules:
                                     # Only Set the FP8 meta for the modules included by forward
                                     continue
-                                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                                from transformer_engine.pytorch.attention.dot_product_attention import (
-                                    DotProductAttention,
-                                )
+                                if isinstance(m, TransformerEngineBaseModule):
+                                    from transformer_engine.pytorch.attention.dot_product_attention import (
+                                        DotProductAttention,
+                                    )
 
-                                if (
-                                    isinstance(m, DotProductAttention)
-                                    and not fp8_recipe.fp8_mha
-                                    and not fp8_recipe.fp8_dpa
-                                ):
-                                    # Don't need to update FP8 meta for non-FP8 DPA
-                                    continue
-                                m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
-                                m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-                                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                                    m.fp8_meta,
-                                )
+                                    if (
+                                        isinstance(m, DotProductAttention)
+                                        and not fp8_recipe.fp8_mha
+                                        and not fp8_recipe.fp8_dpa
+                                    ):
+                                        # Don't need to update FP8 meta for non-FP8 DPA
+                                        continue
+                                    m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+                                    m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+                                    FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                                        m.fp8_meta,
+                                    )
+                                elif isinstance(m, BasicOperation):
+                                    for mode in ("forward", "backward"):
+                                        if m.num_quantizers(mode):
+                                            FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                                                m._fp8_metas[mode],
+                                            )          
                         return graphed(*user_args, **user_kwargs)
                     return orig_fwd(*user_args, **user_kwargs)
 
