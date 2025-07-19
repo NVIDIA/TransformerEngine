@@ -5,7 +5,7 @@
 import os
 import torch
 from typing import Tuple
-from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
+from tests.pytorch.utils import ModelConfig
 from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state
