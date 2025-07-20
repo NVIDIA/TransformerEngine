@@ -1270,7 +1270,9 @@ class TestGroupedDense:
         ref_out = []
         dim_num = (contracting_dims, ((), ()))
         for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
-            out_i = jax.lax.dot_general(lhs_i, rhs_i, dim_num) + jnp.expand_dims(bias_i, axis=0)
+            out_i = jax.lax.dot_general(
+                lhs_i, rhs_i, dim_num, precision=jax.lax.Precision.HIGHEST
+            ) + jnp.expand_dims(bias_i, axis=0)
             ref_out.append(jnp.squeeze(out_i))
         return ref_out
 
