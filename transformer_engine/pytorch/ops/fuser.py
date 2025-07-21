@@ -420,21 +420,13 @@ class OperationFuser:
                     "Changing the length of amax history is currently not supported."
                 )
 
-        # Skip fusing if using a single op, for example if called from BasicOperation.forward
-        if len(self._basic_ops) == 1:
-            self._forward_ops = [(self._basic_ops[0], [0])]
-            if first_op_requiring_backward == 0:
-                self._backward_ops = [(self._basic_ops[0], [0])]
-            else:
-                self._backward_ops = []
-        else:
-            # Prepare basic op lists for fusions
-            forward_ops = [(op, [idx]) for idx, op in enumerate(self._basic_ops)]
-            backward_ops = list(reversed(forward_ops[first_op_requiring_backward:]))
+        # Prepare basic op lists for fusions
+        forward_ops = [(op, [idx]) for idx, op in enumerate(self._basic_ops)]
+        backward_ops = list(reversed(forward_ops[first_op_requiring_backward:]))
 
-            # Fuse ops
-            self._forward_ops = self._fuse_forward_ops(forward_ops, recipe)
-            self._backward_ops = self._fuse_backward_ops(backward_ops, recipe)
+        # Fuse ops
+        self._forward_ops = self._fuse_forward_ops(forward_ops, recipe)
+        self._backward_ops = self._fuse_backward_ops(backward_ops, recipe)
 
         # Save current fusion params
         self.recipe_type, self.first_op_requiring_backward = fusion_params
