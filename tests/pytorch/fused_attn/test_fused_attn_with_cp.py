@@ -77,6 +77,11 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
+    if config.chunk_size is not None and cp_comm_type != "p2p":
+        pytest.skip(
+            "Chunked attention with context parallelism is supported only for p2p communication"
+            " type."
+        )
 
     subprocess.run(
         get_bash_arguments(
@@ -99,6 +104,9 @@ model_configs_fused_attn = {
     "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
     "cp_1_4": ModelConfig(
         2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+    ),  # MHA
+    "cp_1_5": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", chunk_size=1024
     ),  # MHA
     "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
     "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
@@ -175,6 +183,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
+    if config.chunk_size is not None and qkv_format != "thd":
+        pytest.skip("Chunk size with context parallelism is only supported for thd format!")
 
     subprocess.run(
         get_bash_arguments(

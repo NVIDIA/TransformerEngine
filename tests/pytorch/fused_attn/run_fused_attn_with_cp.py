@@ -95,6 +95,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        chunk_size=config.chunk_size,
     )
     core_attn = core_attn.cuda()
 
