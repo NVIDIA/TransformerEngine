@@ -33,8 +33,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
-  if (getDeviceComputeCapability() < blackwellComputeCapability && use_cudnn) {
-    GTEST_SKIP() << "cuDNN normalizations not supported on pre-Blackwell GPUs yet!";
+  if (getDeviceComputeCapability() < hopperComputeCapability && use_cudnn) {
+    GTEST_SKIP() << "cuDNN normalizations not supported on pre-Hopper GPUs yet!";
   }
 
   using WeightType = InputType;
