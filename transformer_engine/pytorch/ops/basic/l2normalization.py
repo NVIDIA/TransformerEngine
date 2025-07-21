@@ -93,16 +93,15 @@ class L2Normalization(BasicOperation):
         # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
         if requires_grad:
             # Training: use version that returns output and intermediate values for backward pass
-            y, rsqrt_norm, l2_norm_squared_eps = l2normalization_fwd_fused(x, self.eps)
+            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
         else:
             # Inference: use lightweight version that only returns output
             y = l2normalization_fused(x, self.eps)
             rsqrt_norm = None  # Not needed for inference
-            l2_norm_squared_eps = None  # Not needed for inference
 
         # Save state for backward pass
         if requires_grad:
-            ctx.save_for_backward(x, rsqrt_norm, l2_norm_squared_eps)
+            ctx.save_for_backward(x, rsqrt_norm)
 
         return y
 
@@ -113,17 +112,16 @@ class L2Normalization(BasicOperation):
     ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Saved tensors from forward pass
-        x, rsqrt_norm, l2_norm_squared_eps = ctx.saved_tensors
+        x, rsqrt_norm = ctx.saved_tensors
 
         dy = maybe_dequantize(grad_output)
 
-        # Compute L2 norm backward pass using fused implementation with reused forward computations
-        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, l2_norm_squared_eps)
+        # Compute L2 norm backward pass using fused implementation - recalculates l2_norm_squared_eps
+        dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
 
         # Clear saved tensors if possible
         clear_tensor_data(x)
         clear_tensor_data(rsqrt_norm)
-        clear_tensor_data(l2_norm_squared_eps)
 
         # No parameters, so empty tuple for param grads
         return dx, ()

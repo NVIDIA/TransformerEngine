@@ -145,7 +145,7 @@ def l2normalization_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
 @jit_fuser
 def l2normalization_fwd_fused_(
     x: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """L2 normalization fused - training version that returns intermediate values"""
     x_fp32 = x.float()
     x_squared = x_fp32.pow(2)
@@ -154,7 +154,7 @@ def l2normalization_fwd_fused_(
     rsqrt_norm = torch.rsqrt(l2_norm_squared_eps)
     y_fp32 = x_fp32 * rsqrt_norm
     y = y_fp32.to(x.dtype)
-    return y, rsqrt_norm, l2_norm_squared_eps
+    return y, rsqrt_norm
 
 
 @jit_fuser
@@ -162,13 +162,15 @@ def l2normalization_backward_fused_(
     grad_output: torch.Tensor,
     x: torch.Tensor,
     rsqrt_norm: torch.Tensor,
-    l2_norm_squared_eps: torch.Tensor,
+    eps: float,
 ) -> torch.Tensor:
     """L2 normalization backward fused"""
     x_fp32 = x.float()
     grad_output_fp32 = grad_output.float()
     x_dy_sum = (x_fp32 * grad_output_fp32).sum(dim=-1, keepdim=True)
-    x_norm_squared = l2_norm_squared_eps  # reuse from forward pass
+    x_squared = x_fp32.pow(2)
+    l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
+    x_norm_squared = l2_norm_squared + eps
     dx_fp32 = rsqrt_norm * (grad_output_fp32 - x_fp32 * x_dy_sum / x_norm_squared)
     return dx_fp32.to(x.dtype)
 
@@ -199,7 +201,7 @@ def l2normalization_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 def l2normalization_fwd_fused(
     x: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Disable native AMP for l2normalization_fwd_fused_ - training version"""
     with gpu_autocast_ctx(enabled=False):
         return l2normalization_fwd_fused_(x, eps)
@@ -209,11 +211,11 @@ def l2normalization_backward_fused(
     grad_output: torch.Tensor,
     x: torch.Tensor,
     rsqrt_norm: torch.Tensor,
-    l2_norm_squared_eps: torch.Tensor,
+    eps: float,
 ) -> torch.Tensor:
     """Disable native AMP for l2normalization_backward_fused_"""
     with gpu_autocast_ctx(enabled=False):
-        return l2normalization_backward_fused_(grad_output, x, rsqrt_norm, l2_norm_squared_eps)
+        return l2normalization_backward_fused_(grad_output, x, rsqrt_norm, eps)
 
 
 def bias_dropout_add(
@@ -364,10 +366,10 @@ def warmup_jit_l2normalization(
         for _ in range(5):
             if input_grad:
                 # Test training version that returns intermediate values
-                output, rsqrt_norm, l2_norm_squared_eps = l2normalization_fwd_fused_(inp, eps)
+                output, rsqrt_norm = l2normalization_fwd_fused_(inp, eps)
                 # Test backward pass as well
                 grad_out = torch.rand_like(output)
-                _ = l2normalization_backward_fused_(grad_out, inp, rsqrt_norm, l2_norm_squared_eps)
+                _ = l2normalization_backward_fused_(grad_out, inp, rsqrt_norm, eps)
             else:
                 # Test inference version
                 output = l2normalization_fused_(inp, eps)
