@@ -1318,6 +1318,15 @@ L0_jax_wheel--L40_1GPU:
     - .L0_test
     - .L40_1GPU
 
+L0_cppunittest--L40_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [core-py3-devel-amd64]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
 L0_cppunittest--A100_1GPU:
     variables:
       FRAMEWORK: core
