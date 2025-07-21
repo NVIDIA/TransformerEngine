@@ -146,20 +146,24 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     scale_inv = at::reciprocal(scale);
   }
 
+  // Make shallow copy of quantizer so in-place ops aren't influenced
+  // by future usage changes
+  auto quantizer_py = this->quantizer.attr("copy")();
+
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
     out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = *scale_inv,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer);
+                               "quantizer"_a = quantizer_py);
   } else {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     out_py = Float8TensorClass("shape"_a = shape_int64, "dtype"_a = GetATenDType(dtype),
                                "data"_a = data_py, "fp8_scale_inv"_a = *scale_inv,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer);
+                               "quantizer"_a = quantizer_py);
   }
 
   // Construct C++ FP8 tensor
@@ -250,7 +254,6 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::coerce_tensor(py::object t
 
   // Coerce other attrs
   tensor.attr("_fp8_dtype") = dtype;
-  tensor.attr("_quantizer") = quantizer;  /// TODO Need to make copy?
 
   // Construct C++ FP8 tensor
   TensorWrapper out_cpp;
@@ -360,6 +363,10 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     scale_inv_tensor = at::empty(scale_inv_shape, opts);
   }
 
+  // Make shallow copy of quantizer so in-place ops aren't influenced
+  // by future usage changes
+  auto quantizer_py = this->quantizer.attr("copy")();
+
   // Construct Python FP8 tensor
   py::object out_py;
   py::object data_py = with_data ? py::cast(data_tensor) : py::none();
@@ -368,14 +375,14 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
     out_py = Float8TensorClass("data"_a = data_py, "fp8_scale_inv"_a = scale_inv_tensor,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer);
+                               "quantizer"_a = quantizer_py);
   } else {
     py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
     out_py = Float8TensorClass("shape"_a = shape_int64, "dtype"_a = GetATenDType(dtype),
                                "data"_a = data_py, "fp8_scale_inv"_a = scale_inv_tensor,
                                "fp8_dtype"_a = this->dtype, "data_transpose"_a = transpose_py,
-                               "quantizer"_a = this->quantizer);
+                               "quantizer"_a = quantizer_py);
   }
 
   // Construct C++ FP8 tensor
@@ -469,7 +476,6 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::coerce_tenso
 
   // Coerce other attrs
   tensor.attr("_fp8_dtype") = dtype;
-  tensor.attr("_quantizer") = quantizer;  /// TODO Need to make copy?
 
   // Construct C++ FP8 tensor
   TensorWrapper out_cpp;
@@ -618,6 +624,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   }
   this->set_quantization_params(&tensor);
 
+  // Make shallow copy of quantizer so in-place ops aren't influenced
+  // by future usage changes
+  auto quantizer_py = this->quantizer.attr("copy")();
+
   py::object ret;
   if (internal) {
     py::handle Float8BlockwiseQTensorClass(
@@ -625,7 +635,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     ret = Float8BlockwiseQTensorClass(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
-        "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
+        "fp8_dtype"_a = this->dtype, "quantizer"_a = quantizer_py,
         "is_2D_scaled"_a = (block_scaling_dim == 2), "data_format"_a = data_format);
   } else {
     py::handle Float8BlockwiseQTensorClass(
@@ -634,7 +644,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype), "rowwise_data"_a = data_rowwise,
         "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = scale_inv_rowwise,
         "columnwise_scale_inv"_a = scale_inv_colwise, "fp8_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer, "is_2D_scaled"_a = (block_scaling_dim == 2),
+        "quantizer"_a = quantizer_py, "is_2D_scaled"_a = (block_scaling_dim == 2),
         "data_format"_a = data_format);
   }
 
@@ -824,22 +834,28 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     columnwise_scale_inv_tensor = at::zeros(scale_inv_shape_int64, uint8_tensor_opts);
   }
 
-  // Construct Python MXFP8 tensor
-  py::object out_py;
+  // Convert tensors to Python
   auto py_cast = [](at::Tensor& tensor, bool need_cast) -> py::object {
     return need_cast ? py::cast(tensor) : py::none();
   };
-  py::object rowwise_data_py = py_cast(rowwise_data_tensor, rowwise_usage);
-  py::object rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
-  py::object columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
-  py::object columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
+  auto rowwise_data_py = py_cast(rowwise_data_tensor, rowwise_usage);
+  auto rowwise_scale_inv_py = py_cast(rowwise_scale_inv_tensor, rowwise_usage);
+  auto columnwise_data_py = py_cast(columnwise_data_tensor, columnwise_usage);
+  auto columnwise_scale_inv_py = py_cast(columnwise_scale_inv_tensor, columnwise_usage);
+
+  // Make shallow copy of quantizer so in-place ops aren't influenced
+  // by future usage changes
+  auto quantizer_py = this->quantizer.attr("copy")();
+
+  // Construct Python MXFP8 tensor
+  py::object out_py;
   if (internal) {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorBasePythonClass));
     out_py = MXFP8TensorClass("rowwise_data"_a = rowwise_data_py,
                               "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
                               "columnwise_scale_inv"_a = columnwise_scale_inv_py,
-                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+                              "fp8_dtype"_a = this->dtype, "quantizer"_a = quantizer_py);
   } else {
     py::handle MXFP8TensorClass(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass));
     out_py = MXFP8TensorClass("shape"_a = shape_int64, "dtype"_a = GetATenDType(dtype),
@@ -847,7 +863,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
                               "columnwise_data"_a = columnwise_data_py,
                               "rowwise_scale_inv"_a = rowwise_scale_inv_py,
                               "columnwise_scale_inv"_a = columnwise_scale_inv_py,
-                              "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+                              "fp8_dtype"_a = this->dtype, "quantizer"_a = quantizer_py);
   }
 
   // Construct C++ MXFP8 tensor
@@ -953,7 +969,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object te
 
   // Coerce other attrs
   tensor.attr("_fp8_dtype") = dtype;
-  tensor.attr("_quantizer") = quantizer;  /// TODO Need to make copy?
 
   // Construct C++ MXFP8 tensor
   TensorWrapper out_cpp(NVTE_MXFP8_1D_SCALING);
