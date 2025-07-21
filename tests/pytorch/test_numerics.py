@@ -172,6 +172,12 @@ def assert_allclose(
             raise AssertionError(msg)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    fp8.FP8GlobalStateManager.reset()
+
+
 class TorchScaledMaskedSoftmax(nn.Module):
     def __init__(self) -> None:
         super().__init__()

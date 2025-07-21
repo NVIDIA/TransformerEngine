@@ -52,6 +52,12 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    fp8.FP8GlobalStateManager.reset()
+
+
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:
     """Check that two lists of tensors match exactly."""
     assert len(l1) == len(l2), "Unequal number of outputs."

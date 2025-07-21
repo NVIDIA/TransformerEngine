@@ -154,6 +154,12 @@ def _disable_wgrads(block):
         p.requires_grad = False
 
 
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    FP8GlobalStateManager.reset()
+
+
 def _test_sanity_e2e_cuda_graph(block, dtype, config, fp8_recipe, skip_wgrad):
     # Initialize loss function and optimizer.
     loss_fn = torch.nn.MSELoss()

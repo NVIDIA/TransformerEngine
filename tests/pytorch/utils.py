@@ -137,12 +137,6 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
-@pytest.fixture(autouse=True)
-def reset_global_fp8_state():
-    yield
-    fp8.FP8GlobalStateManager.reset()
-
-
 class ModelConfig:
     def __init__(
         self,

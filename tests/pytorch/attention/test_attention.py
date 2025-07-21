@@ -65,6 +65,13 @@ seed = 1234
 # Reset RNG states
 reset_rng_states()
 
+
+@pytest.fixture(autouse=True)
+def reset_global_fp8_state():
+    yield
+    fp8.FP8GlobalStateManager.reset()
+
+
 model_configs_base = {
     #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
     "base_1_0": ModelConfig(8, 128, 16, 64),
