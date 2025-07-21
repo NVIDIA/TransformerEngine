@@ -2015,6 +2015,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].all_gather_usage = True
 
+    def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
+        self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
+        self.fc1_weight.skip_wgrad_accumulation_and_reduce = True
+        self.fc2_weight.skip_wgrad_accumulation_and_reduce = True
+        if self.use_bias:
+            self.fc1_bias.skip_wgrad_accumulation_and_reduce = True
+            self.fc2_bias.skip_wgrad_accumulation_and_reduce = True
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -2052,3 +2060,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
+            if self.wgrad_accumulation_and_reduce_func is not None:
+                self.fc1_weight.skip_wgrad_accumulation_and_reduce = False
+                self.fc2_weight.skip_wgrad_accumulation_and_reduce = False
+                self.wgrad_accumulation_and_reduce_func(self.fc2_weight)()
+                self.wgrad_accumulation_and_reduce_func(self.fc1_weight)()
+                if self.use_bias:
+                    self.fc1_bias.skip_wgrad_accumulation_and_reduce = False
+                    self.fc2_bias.skip_wgrad_accumulation_and_reduce = False
+                    self.wgrad_accumulation_and_reduce_func(self.fc1_bias)()
+                    self.wgrad_accumulation_and_reduce_func(self.fc2_bias)()

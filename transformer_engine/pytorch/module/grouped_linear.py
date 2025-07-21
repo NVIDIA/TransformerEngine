@@ -739,6 +739,14 @@ class GroupedLinear(TransformerEngineBaseModule):
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
 
+    def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
+        self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
+        for i in range(self.num_gemms):
+            weight_param = getattr(self, f"weight{i}")
+            weight_param.skip_wgrad_accumulation_and_reduce = True
+            bias_param = getattr(self, f"bias{i}")
+            bias_param.skip_wgrad_accumulation_and_reduce = True
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -749,19 +757,25 @@ class GroupedLinear(TransformerEngineBaseModule):
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
+            weight_params = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+            bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
-                    weight_param = getattr(self, f"weight{i}")
-                    if weight_param.grad is None:
-                        weight_param.grad = wgrad_list[i].to(weight_param.dtype)
+                    if weight_params[i].grad is None:
+                        weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
             if self.use_bias:
                 for i in range(self.num_gemms):
-                    bias_param = getattr(self, f"bias{i}")
-                    if bias_param.grad is None:
-                        bias_param.grad = grad_biases_[i].to(bias_param.dtype)
+                    if bias_params[i].grad is None:
+                        bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
             del grad_biases_
             del wgrad_list
             del tensor_list
+            if self.wgrad_accumulation_and_reduce_func is not None:
+                for i in range(self.num_gemms):
+                    weight_params[i].skip_wgrad_accumulation_and_reduce = False
+                    self.wgrad_accumulation_and_reduce_func(weight_params[i])()
+                    bias_params[i].skip_wgrad_accumulation_and_reduce = False
+                    self.wgrad_accumulation_and_reduce_func(bias_params[i])()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
