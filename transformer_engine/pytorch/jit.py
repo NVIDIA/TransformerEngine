@@ -143,9 +143,7 @@ def l2normalization_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 @jit_fuser
-def l2normalization_fwd_fused_(
-    x: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor]:
+def l2normalization_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
     """L2 normalization fused - training version that returns intermediate values"""
     x_fp32 = x.float()
     x_squared = x_fp32.pow(2)
@@ -199,9 +197,7 @@ def l2normalization_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
         return l2normalization_fused_(x, eps)
 
 
-def l2normalization_fwd_fused(
-    x: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor]:
+def l2normalization_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
     """Disable native AMP for l2normalization_fwd_fused_ - training version"""
     with gpu_autocast_ctx(enabled=False):
         return l2normalization_fwd_fused_(x, eps)
