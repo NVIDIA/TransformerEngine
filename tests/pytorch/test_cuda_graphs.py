@@ -55,7 +55,7 @@ if is_bf16_compatible():  # bf16 requires sm_80 or higher
 @pytest.fixture(autouse=True)
 def reset_global_fp8_state():
     yield
-    fp8.FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.reset()
 
 
 def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None) -> bool:

@@ -175,7 +175,7 @@ def assert_allclose(
 @pytest.fixture(autouse=True)
 def reset_global_fp8_state():
     yield
-    fp8.FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.reset()
 
 
 class TorchScaledMaskedSoftmax(nn.Module):
