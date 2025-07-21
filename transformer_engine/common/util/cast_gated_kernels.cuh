@@ -943,8 +943,8 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
-          const size_t shmem_size =
-              grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
+                                    (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
