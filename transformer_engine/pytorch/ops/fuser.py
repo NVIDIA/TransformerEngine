@@ -103,7 +103,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Mark input tensors as not deletable in backward
         for tensor in (input_,) + params_and_extra_inputs:
-            tensor.do_not_clear = True
+            tensor._do_not_clear = True
 
         # Unflatten list of parameters and extra tensor inputs
         extra_inputs = params_and_extra_inputs[-fuser._num_extra_inputs :]
