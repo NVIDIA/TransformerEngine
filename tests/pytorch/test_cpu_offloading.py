@@ -18,7 +18,6 @@ EPSILON = 0.1
 # Disable garbage collection to tests if there are reference cycles.
 # We do not want them, because they can result in CUDA out of memory errors.
 import gc
-
 gc.disable()
 
 
@@ -584,6 +583,19 @@ class TestTELayers:
 
         init_cuda_memory = Utils.get_cuda_memory_mb()
 
+        # run layer without offload
+        inp = Utils.create_tensor("high precision")
+        with recipe_ctx():
+            out = layer(inp, is_first_microbatch=True, **m_splits)
+        out = sync_function(out)
+        with recipe_ctx():
+            out = out + 1
+        out = sync_function(out)
+
+        cuda_memory_no_offload = Utils.get_cuda_memory_mb()
+
+        out.sum().backward()
+
         # run layer with offload
         inp = Utils.create_tensor("high precision")
         with offload_ctx, recipe_ctx():
@@ -593,6 +605,12 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        offloaded_memory_cpu = offload_ctx.offload_synchronizer.get_offloaded_total_size_mb()
+
+        # This assertion verifies that the memory used by tensors on the CPU matches the memory saved from a layer.
+        # It helps catch cases where an offloaded tensor still has a live pointer, which would
+        # cause an unnecessary copy to the CPU and prevent GPU memory from being released.
+        assert Utils.get_cuda_memory_mb() + offloaded_memory_cpu == pytest.approx(cuda_memory_no_offload, 0.1)
         out.sum().backward()
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())

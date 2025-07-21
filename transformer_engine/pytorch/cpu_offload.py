@@ -29,7 +29,12 @@ def mark_is_weight(*tensors: torch.Tensor):
     """Marks tensors as weights to prevent them from being offloaded."""
     for tensor in tensors:
         if tensor is not None:
-            setattr(tensor, "is_weight", True)
+            if hasattr(tensor, "get_data_tensors"):
+                data_tensors = tensor.get_data_tensors(scales=True)
+                for data_tensor in data_tensors:
+                    setattr(data_tensor, "is_weight", True)
+            else:
+                setattr(tensor, "is_weight", True)
 
 
 def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor: bool = False):
@@ -84,6 +89,7 @@ class TensorGroupProcessor:
             # which may result in wait for a free SM needed to process .contiguous() call.
             # It's better to call .contiguous() on compute stream before it is offloaded.
             if not tensor.is_contiguous():
+                warnings.warn("Non-contiguous tensor is offloaded - .contiguous() is called. Reloaded tensor will have different memory layout.")
                 tensor = tensor.contiguous()
         return tensor
 
@@ -397,11 +403,17 @@ class OffloadSynchronizer:
         offloaded_tensor_group = TensorGroup()
         for tensor_id, tensor in enumerate(tensor_group.tensor_list):
             assert tensor.is_contiguous()
+<<<<<<< HEAD
             # empty_like is defined also for QuantizedTensors
             offloaded_tensor = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
+=======
+            # empty_like is defined also for QuantizedTensors, if it is defined on cpu,
+            # then scaling factors are left on GPU to avoid unnecessary copy of small tensors.
+>>>>>>> 8f54ebdb (fixes)
             self.offload_stream.wait_event(tensor_group.events[tensor_id])  # type: ignore[arg-type]
 
             with torch.cuda.stream(self.offload_stream):
+                offloaded_tensor = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
                 offloaded_tensor.copy_(tensor, non_blocking=True)
             offloaded_tensor_group.tensor_list.append(offloaded_tensor)
         offloaded_tensor_group.aux = aux

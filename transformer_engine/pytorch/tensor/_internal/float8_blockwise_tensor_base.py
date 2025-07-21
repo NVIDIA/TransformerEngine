@@ -124,9 +124,12 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scales: bool = False):
         """Get this Tensor's data."""
-        return self._rowwise_data, self._columnwise_data
+        if scales:
+            return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
+        else:
+            return self._rowwise_data, self._columnwise_data
 
     def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
         """Set this Tensor's data."""
