@@ -5,7 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union
+from typing import Dict, Union, Tuple
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -101,12 +101,22 @@ required_kwargs = {
 class TEDefaultFeatures:
     """Transformer Engine API calls default behavior."""
 
-    def fp8_gemm_enabled(self, config: Dict, layer_name: str, gemm: str, iteration: int) -> bool:
+    def fp8_gemm_enabled(
+        self,
+        config: Dict,
+        layer_name: str,
+        gemm: str,
+        iteration: int,
+    ) -> bool | Tuple[bool, int | float]:
         """
         If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
         then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
         If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
+
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer and gemm.
+        Returning the next enabled iteration can help optimize CPU usage.
 
         Parameters
         ----------
@@ -124,7 +134,9 @@ class TEDefaultFeatures:
 
         bool - default is True
         """
-        return True  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
+        return True, float(
+            "inf"
+        )  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
         self,
@@ -133,9 +145,14 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, int | float]:
         """
-        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
+        It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor.
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
 
         Parameters
         ----------
@@ -153,9 +170,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
         """
-        return False
+        return False, float("inf")
 
     def modify_tensor(
         self,
@@ -167,7 +184,7 @@ class TEDefaultFeatures:
         default_quantizer: Quantizer,
         iteration: int,
         out: Union[torch.Tensor, QuantizedTensor],
-    ) -> Union[torch.Tensor, QuantizedTensor, None]:
+    ) -> torch.Tensor | QuantizedTensor | None:
         """
         It allows tensor modification.
         For example, feature `FakeQuant` uses it to emulate casting to FP8.
@@ -298,9 +315,13 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, int | float]:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
+
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer and tensor.
+        Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
 
         Parameters
         ----------
@@ -316,9 +337,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
         """
-        return False
+        return False, float("inf")
 
     def inspect_tensor_postquantize_enabled(
         self,
@@ -327,11 +348,16 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool:
+    ) -> bool | Tuple[bool, int | float]:
         """
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
+
+        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
+        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor name.
+        Returning the next enabled iteration can help optimize CPU usage,
+        especially when the interval between inspect_tensor_postquantize is large.
 
         Parameters
         ----------
@@ -349,9 +375,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is False
+        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
         """
-        return False
+        return False, float("inf")
 
 
 @Registry.register_namespace_api(namespace="transformer_engine")
@@ -420,7 +446,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
     def output_assertions_hook(self, api_name, ret, **kwargs):
         """Output hooks used to check correctness of the outputs of the API calls."""
         if "enabled" in api_name or api_name == "fp8_gemm":
-            assert isinstance(ret, bool)
+            assert isinstance(ret, (bool, tuple))
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modify_tensor":
@@ -431,6 +457,36 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             ):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
+
+    def handle_multi_feature_output(
+        self, api_name, multi_feature_outputs, features_to_invoke, **kwargs
+    ):
+        """
+        Handle multi-tensor output of the API calls.
+        """
+        if "enabled" in api_name:
+            # *_enabled feature calls can return bool, or tuple (bool, int | float).
+            # If any of them returns bool, then we return bool - this means that we cannot state anything
+            # about enablement in the next steps.
+            # If all of them return a tuple (bool, int | float), we return the minimum value,
+            # representing the number of steps after the feature will be enabled next time.
+            all_ret_tuple = all(
+                isinstance(feature_output, tuple)
+                for feature_output in multi_feature_outputs.values()
+            )
+            if all_ret_tuple:
+                run_current = any(
+                    feature_output[0] for feature_output in multi_feature_outputs.values()
+                )
+                next_iter = min(
+                    feature_output[1] for feature_output in multi_feature_outputs.values()
+                )
+                return run_current, next_iter
+            run_current = any(feature_output for feature_output in multi_feature_outputs.values())
+            return run_current, None
+        return super().handle_multi_feature_output(
+            api_name, multi_feature_outputs, features_to_invoke, **kwargs
+        )
 
     def step(self):
         """This function is called by the nvidia-dlframework-inspect after every debug_api.step()"""

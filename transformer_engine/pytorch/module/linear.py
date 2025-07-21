@@ -70,7 +70,6 @@ from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTens
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.utils import any_feature_enabled
 
 __all__ = ["Linear"]
 
@@ -139,6 +138,12 @@ class _Linear(torch.autograd.Function):
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug:  # turn off userbuffers in debug mode
+            ub_overlap_rs_fprop = False
+            ub_overlap_ag_fprop = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_obj = None
         ub_type = None
         if ub_overlap_rs_fprop:
@@ -1063,9 +1068,6 @@ class Linear(TransformerEngineBaseModule):
         self.save_original_input = save_original_input
         self.name = name
 
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if device == "meta":
@@ -1322,9 +1324,7 @@ class Linear(TransformerEngineBaseModule):
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp, fp8_output)
 
-        debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+        debug = self.validate_debug()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1352,14 +1352,11 @@ class Linear(TransformerEngineBaseModule):
                 if not debug
                 else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
-            if debug:
-                if not any_feature_enabled(quantizers):
-                    # If no feature is used, then run faster implementation with debug = False.
-                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
-                    debug = False
 
-                if isinstance(weight_tensor, QuantizedTensor):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+            if debug:
+                if self.no_debug_features_active(quantizers):
+                    debug = False
+                    quantizers = self._get_quantizers(fp8_output, fp8_grad)
 
             (
                 input_quantizer,
