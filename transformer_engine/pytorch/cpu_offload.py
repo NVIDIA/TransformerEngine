@@ -403,13 +403,8 @@ class OffloadSynchronizer:
         offloaded_tensor_group = TensorGroup()
         for tensor_id, tensor in enumerate(tensor_group.tensor_list):
             assert tensor.is_contiguous()
-<<<<<<< HEAD
             # empty_like is defined also for QuantizedTensors
             offloaded_tensor = torch.empty_like(tensor, device=torch.device("cpu"), pin_memory=True)
-=======
-            # empty_like is defined also for QuantizedTensors, if it is defined on cpu,
-            # then scaling factors are left on GPU to avoid unnecessary copy of small tensors.
->>>>>>> 8f54ebdb (fixes)
             self.offload_stream.wait_event(tensor_group.events[tensor_id])  # type: ignore[arg-type]
 
             with torch.cuda.stream(self.offload_stream):
