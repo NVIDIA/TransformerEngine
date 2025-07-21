@@ -102,7 +102,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
-NVTE_TEST_NVINSPECT_ENABLED = os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False)
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
 
 if NVTE_TEST_NVINSPECT_ENABLED:
     # The numerics of all the layers should work the same,
@@ -1055,8 +1055,11 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False):
+def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False, recipe=None):
     reset_rng_states()
+    fp8 = recipe is not None
+    if fp8:
+        FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
         (config.seq_len, bs, config.hidden_size),
@@ -1066,9 +1069,10 @@ def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False)
     )
     inp_hidden_states.retain_grad()
 
-    out = block(inp_hidden_states)
-    if isinstance(out, (List, Tuple)):
-        out = out[0]
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+        out = block(inp_hidden_states)
+        if isinstance(out, (List, Tuple)):
+            out = out[0]
     loss = out.sum()
     loss.backward()
     if delay_wgrad_compute:
@@ -1258,6 +1262,64 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
     te_outputs_ref = _test_granular_accuracy(
         te_linear_ref, bs, dtype, config, delay_wgrad_compute=False
     )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+def test_linear_accuracy_save_original_input(dtype, model, recipe):
+    bs = 1
+    fuse_wgrad_accumulation = True
+    fp8_model_params = False
+    fp8 = recipe is not None
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        te_linear_ref = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            save_original_input=False,
+        ).eval()
+
+        te_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            save_original_input=True,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        te_linear_ref.weight = Parameter(te_linear.weight.clone())
+        if fuse_wgrad_accumulation:
+            weight = getattr(te_linear, f"weight")
+            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+            te_linear_ref.weight.main_grad = weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, recipe=recipe)
+    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, recipe=recipe)
 
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
@@ -1764,6 +1826,111 @@ def test_grouped_linear_accuracy(
             device="cuda",
             fuse_wgrad_accumulation=fuse_wgrad_accumulation,
             delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=False,
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=bias,
+                    params_dtype=dtype,
+                    parallel_mode=parallel_mode,
+                    device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if fuse_wgrad_accumulation:
+                weight_i = getattr(grouped_linear, f"weight{i}")
+                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", [False])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("delay_wgrad_compute", [True])
+def test_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
+    parallel_mode=None,
+):
+    fp8 = recipe is not None
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=True,
         ).eval()
         sequential_linear = torch.nn.ModuleList(
             [
@@ -1938,7 +2105,14 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, parallel_mode=None
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -1973,6 +2147,84 @@ def test_padding_grouped_linear_accuracy(
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
+            save_original_input=False,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        inner_grouped_linear = grouped_linear.linear_fn
+        for i in range(num_gemms):
+            setattr(
+                ref_grouped_linear,
+                f"weight{i}",
+                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
+            )
+
+    outputs = _test_padding_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+    outputs_ref = _test_padding_grouped_linear_accuracy(
+        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", [False])
+def test_padding_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
+):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = TorchGroupedLinearWithPadding(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            fp8=fp8,
+        ).eval()
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        ref_grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            save_original_input=True,
         ).eval()
 
     # Share params
@@ -2322,9 +2574,9 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     if (
         backend == "FusedAttention"
         and get_device_compute_capability() == (8, 9)
-        and get_cudnn_version() < (9, 11, 0)
+        and get_cudnn_version() < (9, 12, 0)
     ):
-        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.11")
+        pytest.skip("Skip KV cache for sm89 and cuDNN < 9.12")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"

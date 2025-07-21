@@ -516,8 +516,11 @@ def test_linear():
         {"return_bias": True},
         {"params_dtype": torch.float16},
         {"delay_wgrad_compute": True},
+        {"save_original_input": True},
     ]
     for kwargs in kwargs_list:
+        if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)

@@ -5,7 +5,6 @@
 import os
 import subprocess
 from pathlib import Path
-
 import pytest
 import torch
 
@@ -21,7 +20,6 @@ import torch
 
 """
 
-
 if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")
 
@@ -34,6 +32,6 @@ def test_debug_distributed(feature_dirs):
     test_path = TEST_ROOT / "run_distributed.py"
     test_cmd = LAUNCH_CMD + [str(test_path), f"--feature_dirs={feature_dirs[0]}"]
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=os.environ, check=False, text=True)
     if result.returncode != 0:
-        raise AssertionError(result.stderr.decode())
+        raise AssertionError(f"torchrun exited with {result.returncode}")

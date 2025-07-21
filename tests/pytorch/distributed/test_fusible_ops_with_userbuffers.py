@@ -21,7 +21,6 @@ import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
@@ -32,6 +31,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions
@@ -370,7 +370,7 @@ def _test_linear(
     if quantized_compute:
         tols = dtype_tols(
             model[0].weight._fp8_dtype
-            if is_float8_tensor(model[0].weight)
+            if isinstance(model[0].weight, Float8Tensor)
             else tex.DType.kFloat8E4M3
         )
 
