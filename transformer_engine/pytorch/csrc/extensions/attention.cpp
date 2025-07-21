@@ -684,67 +684,68 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
    * Support BSHD, SBHD, and THD formats for Context Parallel: Out correction in forward
    **************************************************************************************************/
 
-   at::Tensor fused_out_correction(std::vector<at::Tensor> &out_per_step, const at::Tensor &lse,
-    const std::vector<at::Tensor> &lse_per_step,
-    const py::object &cu_seqlens, std::string qkv_format, int cp_size,
-    int rank, bool causal, bool softmax_lse_in_packed_format) {
-// in-place optimization: use out_per_step[0] as the final output to avoid extra allocation
-at::Tensor &out = out_per_step[0];
+at::Tensor fused_out_correction(std::vector<at::Tensor> &out_per_step, const at::Tensor &lse,
+                                const std::vector<at::Tensor> &lse_per_step,
+                                const py::object &cu_seqlens, std::string qkv_format, int cp_size,
+                                int rank, bool causal, bool softmax_lse_in_packed_format) {
+  // in-place optimization: use out_per_step[0] as the final output to avoid extra allocation
+  at::Tensor &out = out_per_step[0];
 
-// convert auxiliary tensors from forward to NVTETensors
-NVTETensorPack nvte_out_per_step_tensor_pack, nvte_lse_per_step_tensor_pack;
-nvte_tensor_pack_create(&nvte_out_per_step_tensor_pack);
-nvte_tensor_pack_create(&nvte_lse_per_step_tensor_pack);
-nvte_out_per_step_tensor_pack.size = out_per_step.size();
-nvte_lse_per_step_tensor_pack.size = lse_per_step.size();
+  // convert auxiliary tensors from forward to NVTETensors
+  NVTETensorPack nvte_out_per_step_tensor_pack, nvte_lse_per_step_tensor_pack;
+  nvte_tensor_pack_create(&nvte_out_per_step_tensor_pack);
+  nvte_tensor_pack_create(&nvte_lse_per_step_tensor_pack);
+  nvte_out_per_step_tensor_pack.size = out_per_step.size();
+  nvte_lse_per_step_tensor_pack.size = lse_per_step.size();
 
-NVTE_CHECK(nvte_out_per_step_tensor_pack.size == nvte_lse_per_step_tensor_pack.size,
-"out_per_step and lse_per_step must have the same size");
-for (size_t i = 0; i < nvte_out_per_step_tensor_pack.size; ++i) {
-{
-const std::vector<int64_t> &signed_shape = out_per_step[i].sizes().vec();
-const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
+  NVTE_CHECK(nvte_out_per_step_tensor_pack.size == nvte_lse_per_step_tensor_pack.size,
+             "out_per_step and lse_per_step must have the same size");
+  for (size_t i = 0; i < nvte_out_per_step_tensor_pack.size; ++i) {
+    {
+      const std::vector<int64_t> &signed_shape = out_per_step[i].sizes().vec();
+      const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
 
-NVTEBasicTensor temp_data = {
-out_per_step[i].data_ptr(),
-static_cast<NVTEDType>(GetTransformerEngineDType(out_per_step[i].scalar_type())),
-nvte_make_shape(tmp.data(), tmp.size())};
-nvte_set_tensor_param(&nvte_out_per_step_tensor_pack.tensors[i], kNVTERowwiseData,
-&temp_data);
-}
-{
-const std::vector<int64_t> &signed_shape = lse_per_step[i].sizes().vec();
-const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
+      NVTEBasicTensor temp_data = {
+          out_per_step[i].data_ptr(),
+          static_cast<NVTEDType>(GetTransformerEngineDType(out_per_step[i].scalar_type())),
+          nvte_make_shape(tmp.data(), tmp.size())};
+      nvte_set_tensor_param(&nvte_out_per_step_tensor_pack.tensors[i], kNVTERowwiseData,
+                            &temp_data);
+    }
+    {
+      const std::vector<int64_t> &signed_shape = lse_per_step[i].sizes().vec();
+      const std::vector<size_t> tmp(signed_shape.begin(), signed_shape.end());
 
-NVTEBasicTensor temp_data = {
-lse_per_step[i].data_ptr(),
-static_cast<NVTEDType>(GetTransformerEngineDType(lse_per_step[i].scalar_type())),
-nvte_make_shape(tmp.data(), tmp.size())};
+      NVTEBasicTensor temp_data = {
+          lse_per_step[i].data_ptr(),
+          static_cast<NVTEDType>(GetTransformerEngineDType(lse_per_step[i].scalar_type())),
+          nvte_make_shape(tmp.data(), tmp.size())};
 
-nvte_set_tensor_param(&nvte_lse_per_step_tensor_pack.tensors[i], kNVTERowwiseData,
-&temp_data);
-}
-}
+      nvte_set_tensor_param(&nvte_lse_per_step_tensor_pack.tensors[i], kNVTERowwiseData,
+                            &temp_data);
+    }
+  }
 
-TensorWrapper te_cu_seqlens;
+  TensorWrapper te_cu_seqlens;
 
-if (qkv_format == "thd") {
-te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens.cast<at::Tensor>());
-}
+  if (qkv_format == "thd") {
+    te_cu_seqlens = makeTransformerEngineTensor(cu_seqlens.cast<at::Tensor>());
+  }
 
-auto te_out = makeTransformerEngineTensor(out);
-auto te_lse = makeTransformerEngineTensor(lse);
+  auto te_out = makeTransformerEngineTensor(out);
+  auto te_lse = makeTransformerEngineTensor(lse);
 
-std::unordered_map<std::string, NVTE_QKV_Format> format_map = {
-{"sbhd", NVTE_QKV_Format::NVTE_SBHD},
-{"bshd", NVTE_QKV_Format::NVTE_BSHD},
-{"thd", NVTE_QKV_Format::NVTE_THD}};
+  std::unordered_map<std::string, NVTE_QKV_Format> format_map = {
+      {"sbhd", NVTE_QKV_Format::NVTE_SBHD},
+      {"bshd", NVTE_QKV_Format::NVTE_BSHD},
+      {"thd", NVTE_QKV_Format::NVTE_THD}};
 
-nvte_cp_fused_out_correction(te_out.data(), &nvte_out_per_step_tensor_pack, te_lse.data(),
-   &nvte_lse_per_step_tensor_pack, te_cu_seqlens.data(), format_map[qkv_format],
-   cp_size, rank, causal, softmax_lse_in_packed_format, at::cuda::getCurrentCUDAStream());
+  nvte_cp_fused_out_correction(te_out.data(), &nvte_out_per_step_tensor_pack, te_lse.data(),
+                               &nvte_lse_per_step_tensor_pack, te_cu_seqlens.data(),
+                               format_map[qkv_format], cp_size, rank, causal,
+                               softmax_lse_in_packed_format, at::cuda::getCurrentCUDAStream());
 
-return out;
+  return out;
 }
 
 /***************************************************************************************************

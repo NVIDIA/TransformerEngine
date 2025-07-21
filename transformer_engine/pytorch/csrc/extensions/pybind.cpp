@@ -308,8 +308,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &transformer_engine::pytorch::thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fused_out_correction", &transformer_engine::pytorch::fused_out_correction, "fused out correction after qkv calculation",
-        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_out_correction", &transformer_engine::pytorch::fused_out_correction,
+        "fused out correction after qkv calculation", py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
   m.def("init_nvshmem_backend", &transformer_engine::pytorch::init_nvshmem_backend,

@@ -524,7 +524,6 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
   }
 }
 
-
 /***************************************************************************************************
  * Support THD format for Context Parallel: Gradients correction in backward
  **************************************************************************************************/
@@ -738,24 +737,24 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
   * Support BSHD, SBHD, and THD formats for Context Parallel: Fused out correction in forward
   **************************************************************************************************/
 
-  #define DISPATCH_SBHD_BSHD_AND_THD(TYPE, LEVEL, NAME, ...)                    \
-  switch (TYPE) {                                                             \
-    case NVTE_QKV_Format::NVTE_SBHD: {                                        \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_SBHD;           \
-      __VA_ARGS__;                                                            \
-      break;                                                                  \
-    }                                                                         \
-    case NVTE_QKV_Format::NVTE_BSHD: {                                        \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_BSHD;           \
-      __VA_ARGS__;                                                            \
-      break;                                                                  \
-    }                                                                         \
-    case NVTE_QKV_Format::NVTE_THD: {                                         \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_THD;            \
-      __VA_ARGS__;                                                            \
-      break;                                                                  \
-    }                                                                         \
-    default:                                                                  \
+#define DISPATCH_SBHD_BSHD_AND_THD(TYPE, LEVEL, NAME, ...)                   \
+  switch (TYPE) {                                                            \
+    case NVTE_QKV_Format::NVTE_SBHD: {                                       \
+      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_SBHD;          \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    case NVTE_QKV_Format::NVTE_BSHD: {                                       \
+      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_BSHD;          \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    case NVTE_QKV_Format::NVTE_THD: {                                        \
+      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_THD;           \
+      __VA_ARGS__;                                                           \
+      break;                                                                 \
+    }                                                                        \
+    default:                                                                 \
       NVTE_ERROR("only implemented for NVTE_THD, NVTE_BSHD and NVTE_SBHD "); \
   }
 
@@ -873,7 +872,6 @@ void fused_out_correction(Tensor &out, const NVTETensorPack *out_per_step, const
                                                           cu_seqlens, qkv_format, cp_size, rank,
                                                           softmax_lse_in_packed_format, stream););)
 }
-
 
 /***************************************************************************************************
  * Support THD format for Context Parallel: Gradients correction in backward
@@ -1032,17 +1030,17 @@ void nvte_cp_thd_read_second_half_lse(const NVTETensor &lse, const NVTETensor &c
 }
 
 void nvte_cp_fused_out_correction(NVTETensor out, const NVTETensorPack *out_per_step,
-  const NVTETensor &lse, const NVTETensorPack *lse_per_step,
-  const NVTETensor &cu_seqlens, NVTE_QKV_Format qkv_format, int cp_size,
-  int rank, bool causal, bool softmax_lse_in_packed_format,
-  cudaStream_t stream) {
-NVTE_API_CALL(nvte_fused_out_correction);
-using namespace transformer_engine;
+                                  const NVTETensor &lse, const NVTETensorPack *lse_per_step,
+                                  const NVTETensor &cu_seqlens, NVTE_QKV_Format qkv_format,
+                                  int cp_size, int rank, bool causal,
+                                  bool softmax_lse_in_packed_format, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_out_correction);
+  using namespace transformer_engine;
 
-context_parallel::fused_out_correction(*convertNVTETensorCheck(out), out_per_step,
-         *convertNVTETensorCheck(lse), lse_per_step,
-         *convertNVTETensorCheck(cu_seqlens), qkv_format, cp_size,
-         rank, causal, softmax_lse_in_packed_format, stream);
+  context_parallel::fused_out_correction(*convertNVTETensorCheck(out), out_per_step,
+                                         *convertNVTETensorCheck(lse), lse_per_step,
+                                         *convertNVTETensorCheck(cu_seqlens), qkv_format, cp_size,
+                                         rank, causal, softmax_lse_in_packed_format, stream);
 }
 
 void nvte_cp_thd_grad_correction(NVTETensor grad, const NVTETensor &grad_per_step,
