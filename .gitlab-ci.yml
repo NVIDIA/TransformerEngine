@@ -21,10 +21,10 @@ variables:
       value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel-arm64  # Last build with main branch (nightly build)
     JAX_AMD64_IMAGE:
       description: Base Docker container for JAX build
-      value: ghcr.io/nvidia/jax:jax-2025-04-18
+      value: ghcr.io/nvidia/jax:jax-2025-07-21
     JAX_ARM64_IMAGE:
       description: Base Docker container for JAX build
-      value: ghcr.io/nvidia/jax:jax-2025-05-18
+      value: ghcr.io/nvidia/jax:jax-2025-07-21
 
     # variables that may be overridden by the pipeline vars
     GH_BRANCH:
@@ -1314,6 +1314,15 @@ L0_jax_wheel--L40_1GPU:
       FRAMEWORK: jax
       ARCH: amd64
     needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .L40_1GPU
+
+L0_cppunittest--L40_1GPU:
+    variables:
+      FRAMEWORK: core
+      ARCH: amd64
+    needs: [core-py3-devel-amd64]
     extends:
     - .L0_test
     - .L40_1GPU
