@@ -70,7 +70,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   float amax = 0;
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
-  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  // Manually align dynamic SHMEM per TMA requirements using padding
+  // __align__(128) Does not guarantee the pointer to be aligned!
+  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
@@ -351,7 +356,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr int SUBAMAX_BUFF_DIM_Y = ONLY_COLWISE_SCALING ? COLWISE_WAVEFRONT_SIZE - 1 : 1;
   __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][CHUNK_DIM_X];
 
-  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  // Manually align dynamic SHMEM per TMA requirements using padding
+  // __align__(128) Does not guarantee the pointer to be aligned!
+  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
@@ -934,7 +944,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
           const size_t shmem_size =
-              grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem);
+              grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
@@ -1062,7 +1072,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           size_t out_mem = out_act_mem + out_gate_mem;
           if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
 
-          const size_t shmem_size = in_mem + out_mem;
+          const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
