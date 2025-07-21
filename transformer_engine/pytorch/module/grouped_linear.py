@@ -808,6 +808,13 @@ class GroupedLinear(TransformerEngineBaseModule):
         return out
 
     def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
+        """
+        This method is used to manually control the weight gradient accumulation and reduce.
+        This method should be called before the backward() method.
+        Set the skip_wgrad_accumulation_and_reduce to True to skip the weight gradient accumulation
+        and reduce in backward();
+        And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
+        """
         self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
         for i in range(self.num_gemms):
             weight_param = getattr(self, f"weight{i}")
