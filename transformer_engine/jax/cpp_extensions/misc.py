@@ -19,7 +19,7 @@ from jax.interpreters.mlir import dtype_to_ir_type
 import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
-from ..quantize import ScalingMode, ScaledTensorFactory, QuantizeLayout
+from ..quantize import ScaledTensorFactory, QuantizeLayout
 
 TEDType = transformer_engine_jax.DType
 
@@ -183,6 +183,16 @@ def get_xla_flag(flag: str, default=None, cast=str):
     return default
 
 
+def get_min_device_compute_capability():
+    """
+    Returns the minimum compute capability of all local devices.
+    """
+    return min(
+        transformer_engine_jax.get_device_compute_capability(local_gpu_id)
+        for local_gpu_id in range(len(jax.local_devices()))
+    )
+
+
 def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quantizer=None):
     """
     Fused dbias is not supported for arch < 100 for 1x quantization, so we need to apply a workaround to
@@ -215,9 +225,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     @return: the output of 'f' with the colwise output calculated
     """
     should_apply_war = (
-        quantizer is not None
-        and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        and quantizer.is_2x2x()
+        quantizer is not None and quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x()
     )
     if not should_apply_war:
         return None

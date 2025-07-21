@@ -89,8 +89,7 @@ class ActLuPrimitive(BasePrimitive):
         6,
         7,
         8,
-        9,
-    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, scale_shapes, is_outer
+    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -105,19 +104,23 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
         te_act_lu_p abstract
         """
-        del act_enum, scale_shapes
+        del act_enum
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
         assert x_aval.shape[-2] == act_len, (
             "activation input should be replicated by act_len in the -2 axis, got input shape"
             f" {x_aval.shape} and act_len {act_len}"
+        )
+
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not yet supported for fused activation and quantization."
+            " Please do activation in higher-precision then quantize with current tensor scaling."
         )
 
         out_shape = (*x_aval.shape[:-2], x_aval.shape[-1])  # Exclude act dim
@@ -151,13 +154,12 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
         te_gated_act_lu_p lowering rules
         """
-        del out_dtype, scale_dtype, scale_shapes, act_len, is_outer
+        del out_dtype, scale_dtype, act_len, is_outer
         x_aval, scale_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
@@ -177,7 +179,6 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
@@ -196,7 +197,6 @@ class ActLuPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_outer=False,
             )
         )
@@ -225,7 +225,6 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
     ):
         """
@@ -248,7 +247,6 @@ class ActLuPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
             ),
             out_bdims,
         )
@@ -261,7 +259,6 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         arg_infos,
@@ -272,7 +269,6 @@ class ActLuPrimitive(BasePrimitive):
             result_infos,
             act_enum,
             scale_dtype,
-            scale_shapes,
             act_len,
             is_outer,
         )  # Unused.
@@ -326,7 +322,6 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         arg_infos,
@@ -387,7 +382,6 @@ class ActLuPrimitive(BasePrimitive):
                     scaling_mode=scaling_mode,
                     is_2x=is_2x,
                     scale_dtype=scale_dtype,
-                    scale_shapes=scale_shapes,
                     is_outer=True,
                 )
             )
@@ -415,17 +409,16 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_outer,
         mesh,
         value_types,
         result_types,
     ):
-        del out_dtype, act_enum, act_len, scale_dtype, scale_shapes, is_outer, mesh, result_types
+        del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
 
         x_rank = len(value_types[0].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var="i", flatten_axis=-2
+            x_rank - 1, unique_var="ActLuPrimitive_i", flatten_axis=-2
         )
         x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
         out = (*x_axes[:-2], x_axes[-1])
@@ -460,15 +453,15 @@ register_primitive(ActLuPrimitive)
 
 
 # TODO(Jeremy): replace is_2x with q_layout
-class DActLuDBiasQuantizePrimitive(BasePrimitive):
+class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
     """
     DActLu DBias Cast Transpose Primitive
     """
 
     name = "te_dact_dbias_quantize_ffi"
     multiple_results = True
-    # out_dtype, scaling_mode, is_2x, scale_dtype, scale_shapes, is_dbias, act_enum, act_len, is_outer
-    impl_static_args = (3, 4, 5, 6, 7, 8, 9, 10, 11)
+    # out_dtype, scaling_mode, is_2x, scale_dtype, is_dbias, act_enum, act_len, is_outer
+    impl_static_args = (3, 4, 5, 6, 7, 8, 9, 10)
     inner_primitive = None
     outer_primitive = None
 
@@ -482,7 +475,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -491,7 +483,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p abstract
         """
-        del act_enum, scale_shapes
+        del act_enum
         dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
         assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_dtype
@@ -500,9 +492,18 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             f" {x_aval.shape} and act_len {act_len}"
         )
         assert scale_aval.dtype == jnp.float32
+
+        assert scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value, (
+            "Current tensor scaling is not supported for fused dact and quantization. Please do"
+            " dact in higher-precision then quantize with current tensor scaling."
+        )
+
         ir_hidden_size = dz_aval.shape[-1]
         gi_hidden_size = act_len * x_aval.shape[-1]
         assert act_len * ir_hidden_size == gi_hidden_size
+        assert (
+            x_aval.shape[:-2] == dz_aval.shape[:-1]
+        ), "dz and x should have the same leading dimensions"
         out_shape = x_aval.shape
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
 
@@ -512,7 +513,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
                 colwise_out_shape = out_shape
@@ -560,7 +561,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p outer abstract
         """
         (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
-            DActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
+            BaseDActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
         )
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
 
@@ -575,7 +576,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -584,12 +584,12 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         te_dact_dbias_quantize_p lowering rules
         """
-        del out_dtype, scale_dtype, scale_shapes, act_len, is_outer
+        del out_dtype, scale_dtype, act_len, is_outer
         dz_aval, x_aval, scale_aval = ctx.avals_in
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_aval.dtype
         assert scale_aval.dtype == jnp.float32
-        return ffi.ffi_lowering(DActLuDBiasQuantizePrimitive.name)(
+        return ffi.ffi_lowering(BaseDActLuDBiasQuantizePrimitive.name)(
             ctx,
             dz,
             x,
@@ -609,7 +609,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -619,9 +618,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p impl
         """
         del is_outer
-        assert DActLuDBiasQuantizePrimitive.inner_primitive is not None
+        assert BaseDActLuDBiasQuantizePrimitive.inner_primitive is not None
         (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
-            DActLuDBiasQuantizePrimitive.inner_primitive.bind(
+            BaseDActLuDBiasQuantizePrimitive.inner_primitive.bind(
                 dz,
                 x,
                 scale,
@@ -629,7 +628,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
                 act_enum=act_enum,
                 act_len=act_len,
@@ -658,7 +656,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -669,7 +666,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         del is_outer
         check_valid_batch_dims(batch_dims)
-        assert DActLuDBiasQuantizePrimitive.outer_primitive is not None
+        assert BaseDActLuDBiasQuantizePrimitive.outer_primitive is not None
         dz, x, scale = batched_args
         _, x_bdim, scale_bdim = batch_dims
 
@@ -682,7 +679,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             x_bdim,  # dbias
         )
         return (
-            DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+            BaseDActLuDBiasQuantizePrimitive.outer_primitive.bind(
                 dz,
                 x,
                 scale,
@@ -690,7 +687,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
                 act_enum=act_enum,
                 act_len=act_len,
@@ -704,7 +700,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -714,12 +709,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del out_dtype, result_infos, act_enum
-        del scale_dtype, scale_shapes, act_len, is_outer
+        del scale_dtype, act_len, is_outer
         x_spec = get_padded_spec(arg_infos[1])
         scale_spec = get_padded_spec(arg_infos[2])
 
+        assert (
+            scaling_mode != ScalingMode.CURRENT_TENSOR_SCALING.value
+        ), "Partitioned current tensor scaling is not yet supported."
+
         out_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+            mesh, PartitionSpec(*x_spec), desc="BaseDActLuDBiasQuantizePrimitive.out"
         )
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
@@ -729,14 +728,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         else:
             colwise_x_spec = (None,)
         colwise_out_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+            mesh,
+            PartitionSpec(*colwise_x_spec),
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_out",
         )
 
         dbias_spec = x_spec[-2:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DActLuDBiasQuantizePrimitive.dbias",
+            desc="BaseDActLuDBiasQuantizePrimitive.dbias",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -749,15 +750,15 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="BaseDActLuDBiasQuantizePrimitive.scale_inv"
         )
         amax_sharding = NamedSharding(
-            mesh, PartitionSpec(*amax_spec), desc="DActLuDBiasQuantizePrimitive.amax"
+            mesh, PartitionSpec(*amax_spec), desc="BaseDActLuDBiasQuantizePrimitive.amax"
         )
         colwise_scale_inv_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_scale_inv_spec),
-            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv",
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_scale_inv",
         )
         return (
             out_sharding,
@@ -774,7 +775,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -788,7 +788,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scale_spec = get_padded_spec(arg_infos[2])
 
         out_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+            mesh, PartitionSpec(*x_spec), desc="BaseDActLuDBiasQuantizePrimitive.out"
         )
 
         if is_2x:
@@ -799,14 +799,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         else:
             colwise_x_spec = (None,)
         colwise_out_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+            mesh,
+            PartitionSpec(*colwise_x_spec),
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_out",
         )
 
         dbias_spec = x_spec[-2:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DActLuDBiasQuantizePrimitive.dbias",
+            desc="BaseDActLuDBiasQuantizePrimitive.dbias",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -826,8 +828,14 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
         )
 
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        # Ensure dz and x are partitioned the same way.
+        arg_shardings[0] = NamedSharding(
+            mesh,
+            PartitionSpec(*x_spec[:-2], x_spec[-1]),
+            desc="BaseDActLuDBiasQuantizePrimitive.dz",
+        )
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
@@ -839,7 +847,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
 
         def sharded_impl(dz, x, scale):
             (out, colwise_out, scale_inv, colwise_scale_inv, local_amax, local_dbias) = (
-                DActLuDBiasQuantizePrimitive.impl(
+                BaseDActLuDBiasQuantizePrimitive.impl(
                     dz,
                     x,
                     scale,
@@ -847,7 +855,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
                     scaling_mode=scaling_mode,
                     is_2x=is_2x,
                     scale_dtype=scale_dtype,
-                    scale_shapes=scale_shapes,
                     is_dbias=is_dbias,
                     act_enum=act_enum,
                     act_len=act_len,
@@ -874,7 +881,6 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         act_enum,
         act_len,
@@ -883,11 +889,11 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, scale_shapes, act_enum, act_len, is_outer, mesh, result_types
+        del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
 
         x_rank = len(value_types[1].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank, unique_var="i", flatten_axis=-2
+            x_rank, unique_var="BaseDActLuDBiasQuantizePrimitive_i", flatten_axis=-2
         )
         x_axes = scale_rules.input_spec
         out = x_axes
@@ -909,7 +915,15 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
 
-register_primitive(DActLuDBiasQuantizePrimitive)
+register_primitive(BaseDActLuDBiasQuantizePrimitive)
+
+
+class DActLuDBiasQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for DBias and fused activation quantization. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
+
+
+class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS_RE."""
 
 
 def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
@@ -1020,10 +1034,19 @@ def act_lu(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
-            scale_shapes=((), ()),
             is_outer=True,
         )
         out = out.reshape(output_shape)
+        return out
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out = act_lu(
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            quantizer=None,
+        )
+        out, _ = _quantize_dbias_impl(out, is_dbias=False, quantizer=quantizer, dq_dtype=x.dtype)
         return out
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1044,8 +1067,6 @@ def act_lu(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        # output does not have act axis
-        scale_shapes=quantizer.get_scale_shapes(output_shape, flatten_axis=-1),
         is_outer=True,
     )
 
@@ -1092,7 +1113,8 @@ def quantize_dact_dbias(
         f" {x.shape} and act_len {act_len}"
     )
 
-    if not DActLuDBiasQuantizePrimitive.enabled():
+    PrimitiveClass = DActLuDBiasQuantizePrimitive if is_dbias else DActLuQuantizePrimitive
+    if not PrimitiveClass.enabled():
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support colwise-only quantization yet
@@ -1101,8 +1123,12 @@ def quantize_dact_dbias(
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
-        out = dact_lu(dz, x, activation_type, quantizer=None)
-        return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
+        out = dact_lu(
+            dz.astype(jnp.float32), x.astype(jnp.float32), activation_type, quantizer=None
+        )
+        return _quantize_dbias_impl(
+            out, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+        )
 
     is_gated = act_len == 2
     # TE/common does not support DelayedScaling2x for gated-act yet
@@ -1124,7 +1150,7 @@ def quantize_dact_dbias(
     act_type_id = ActivationEnum[activation_type]
 
     if quantizer is None:
-        output, _, _, _, _, _ = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+        output, _, _, _, _, _ = PrimitiveClass.outer_primitive.bind(
             dz,
             x,
             scale,
@@ -1134,7 +1160,6 @@ def quantize_dact_dbias(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,  # unused
             scale_dtype=jnp.float32,  # unused
-            scale_shapes=((), ()),  # unused
             is_dbias=False,
             act_enum=act_type_id,
             act_len=act_len,
@@ -1144,6 +1169,19 @@ def quantize_dact_dbias(
         if is_dbias:
             dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
         return output.astype(x.dtype), dbias
+
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
+        out = dact_lu(
+            dz=dz.astype(jnp.float32),
+            x=x.astype(jnp.float32),
+            activation_type=activation_type,
+            quantizer=None,
+        )
+        out, dbias = _quantize_dbias_impl(
+            out, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
+        )
+        return out, dbias
 
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
@@ -1158,8 +1196,6 @@ def quantize_dact_dbias(
         )
         return out, dbias
 
-    out_shape = x.shape
-
     (
         rowwise_casted_output,
         colwise_casted_output,
@@ -1167,7 +1203,7 @@ def quantize_dact_dbias(
         colwise_scale_inv,
         updated_amax,
         dbias,
-    ) = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+    ) = PrimitiveClass.outer_primitive.bind(
         dz,
         x,
         scale,
@@ -1175,8 +1211,6 @@ def quantize_dact_dbias(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        # output has act axis
-        scale_shapes=quantizer.get_scale_shapes(out_shape, flatten_axis=-2),
         is_dbias=is_dbias,
         act_enum=act_type_id,
         act_len=act_len,
@@ -1184,7 +1218,7 @@ def quantize_dact_dbias(
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

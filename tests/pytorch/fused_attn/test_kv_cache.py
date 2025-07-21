@@ -11,6 +11,12 @@ import math
 import pytest
 import torch
 
+from test_fused_attn import (
+    ModelConfig,
+    reset_rng_states,
+    _get_attention_backends,
+)
+
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
@@ -18,19 +24,14 @@ from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
-from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.attention import DotProductAttention, InferenceParams
+from transformer_engine.pytorch.attention.dot_product_attention.utils import (
+    FlashAttentionUtils as fa_utils,
+)
 from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
     is_bf16_compatible,
-)
-from test_fused_attn import (
-    ModelConfig,
-    reset_rng_states,
-    _get_attention_backends,
 )
 
 # Initialize RNG state
@@ -51,7 +52,7 @@ model_configs_infer = {
         4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
     ),
     "infer_1": ModelConfig(
-        2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
+        2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
     ),
 }
 
@@ -369,12 +370,24 @@ def generate_args(
         ]
 
 
-def get_tols(module, backend, dtype):
+def get_tols(config, module, backend, dtype):
     if module == "TransformerLayer":
-        tols = {
-            torch.half: (5e-3, 5e-3),
-            torch.bfloat16: (3.5e-2, 3.5e-2),
-        }
+        if config.head_dim_qk <= 128:
+            tols = {
+                torch.half: (5e-3, 5e-3),
+                torch.bfloat16: (3.5e-2, 3.5e-2),
+            }
+        else:
+            if backend == "UnfusedAttention":
+                tols = {
+                    torch.half: (1.6e-2, 1.6e-2),
+                    torch.bfloat16: (1.2e-1, 1e-1),
+                }
+            else:
+                tols = {
+                    torch.half: (1e-2, 1e-2),
+                    torch.bfloat16: (8e-2, 7e-2),
+                }
     if module == "DotProductAttention":
         tols = {
             torch.half: (1e-3, 1e-3),
@@ -661,7 +674,9 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
         incremental_output = incremental_output[0]
 
         # compare results
-        atol, rtol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
+        atol, rtol = get_tols(
+            config, module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn
+        )
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":

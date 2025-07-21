@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
+from dataclasses import dataclass
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -19,7 +20,21 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data
+try:
+    import torch.distributed._symmetric_memory as symm_mem
+
+    HAS_TORCH_SYMMETRIC = True
+except ImportError:
+    HAS_TORCH_SYMMETRIC = False
+
+import transformer_engine_torch as tex
+
+from . import torch_version
+from .utils import (
+    is_non_tn_fp8_gemm_supported,
+    safely_set_viewless_tensor_data,
+    needs_quantized_gemm,
+)
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -29,6 +44,8 @@ from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from .tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -259,17 +276,36 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-    )
+    if torch_version() >= (2, 4, 0):
+        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
+        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_ctx = torch.amp.autocast(
+            "cuda",
+            enabled=gpu_autocast_enabled,
+            dtype=gpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-    )
+        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+        cpu_autocast_ctx = torch.amp.autocast(
+            "cpu",
+            enabled=cpu_autocast_enabled,
+            dtype=cpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
+    else:
+        gpu_autocast_enabled = torch.is_autocast_enabled()
+        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
+            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
+
+        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
+        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+        cpu_autocast_ctx = torch.cpu.amp.autocast(
+            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
@@ -553,7 +589,9 @@ def has_te_modules(network):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [
@@ -885,8 +923,10 @@ def _all_gather_fp8(
     # Note: We cannot directly all-gather the transposed FP8 tensor,
     # so temporarily modify quantizer to avoid creating FP8 transpose.
     if not isinstance(inp, Float8TensorBase):
-        if quantizer is None:
-            raise ValueError("Input tensor is not FP8 and no quantizer was provided")
+        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+        # we cannot directly gather the transposed fp8 tensor
+        # so we need to disable columnwise usage for the quantizer
+        # and then set it back to the original value after quantizing
         init_rowwise_usage = quantizer.rowwise_usage
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(rowwise=True, columnwise=False)
@@ -907,7 +947,7 @@ def _all_gather_fp8(
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
     elif isinstance(inp, Float8Tensor):
         out = inp.make_like(inp, shape=out_shape)
-        out._data = torch.empty_like(
+        out._data = torch.empty(
             out_shape,
             dtype=torch.uint8,
             device=inp.device,
@@ -930,7 +970,7 @@ def _all_gather_fp8(
 
     # Make sure FP8 transpose is populated if needed
     needs_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
     )
     if needs_transpose:
         if handle is not None:
@@ -939,6 +979,67 @@ def _all_gather_fp8(
         out._create_transpose()
 
     return out, handle
+
+
+def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
+    """Make quantizer compact"""
+    _quantizer = quantizer
+    if isinstance(quantizer, DebugQuantizer):
+        _quantizer = quantizer.parent_quantizer
+    if isinstance(_quantizer, Float8BlockQuantizer):
+        _quantizer.all_gather_usage = compact
+
+
+def _post_process_fp8_blockwise_gather(
+    out: Float8BlockwiseQTensorBase,
+    quantizer: Float8BlockQuantizer,
+    handle: Optional[torch.distributed.Work] = None,
+) -> Float8BlockwiseQTensorBase:
+    """Post-process FP8 blockwise gather."""
+    if handle is not None:
+        handle.wait()
+        handle = None
+
+    if out._is_gemm_ready_format():
+        return out
+
+    needs_columnwise_data_transpose = (
+        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
+    )
+    need_rowwise_scale_transpose = (
+        quantizer is not None and quantizer.rowwise_usage and not is_non_tn_fp8_gemm_supported()
+    )
+
+    # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
+    # columnwise compact format means doing 128x1 quantization of it
+    # so quantized tensor is 256x1024, scale inv is 2x1024
+    # If we were doing GEMM_READY format, then it's equivalent to do 1x128 quantization
+    # on a transposed 1024x256 tensor, so scale inv is 1024x2, cublas requries 2x1024
+    # Thereforce, it turns out we don't need to transpose the scale inv, only columnwise data
+    if needs_columnwise_data_transpose:
+        out._transpose_columnwise_data()
+    if need_rowwise_scale_transpose:
+        out._rowwise_scale_inv = out._rowwise_scale_inv.transpose(-2, -1).contiguous()
+    out._data_format = tex.Float8BlockScaleTensorFormat.GEMM_READY
+    return out
+
+
+@dataclass
+class _FP8BlockwiseAllGatherAsyncHandle:
+    """Handle for asynchronous FP8 blockwise all-gather."""
+
+    tensor: Float8BlockwiseQTensorBase
+    quantizer: Float8BlockQuantizer
+    async_handle: torch.distributed.Work
+    _synchronized: bool = False
+
+    def wait(self) -> None:
+        """Wait for the async operation to complete and post-process the tensor."""
+        if self._synchronized:
+            return
+        self.async_handle.wait()
+        _post_process_fp8_blockwise_gather(self.tensor, self.quantizer)
+        self._synchronized = True
 
 
 def _all_gather_fp8_blockwise(
@@ -954,8 +1055,9 @@ def _all_gather_fp8_blockwise(
 
     Returns: quantizer(gather(inp))
 
-    NOTE: The implementation is not sophisticated enough to honor async_op=True.
-    In some cases it falls back to synchronous gather and invokes the quantizer.
+    NOTE: The implementation is only going to honor async_op=True for FP8 gather case.
+    In the case where tensor shape is not divisible by 128, the implementation will fall back
+    to synchronous gather and invoke the quantizer.
     """
 
     # Input tensor attributes
@@ -991,7 +1093,11 @@ def _all_gather_fp8_blockwise(
         out_shape[0] *= world_size
 
     # Doing BF16 gather for now as baseline because it's simpler
-    if not isinstance(inp, Float8BlockwiseQTensorBase) and quantizer is not None:
+    if (
+        not isinstance(inp, Float8BlockwiseQTensorBase)
+        and quantizer is not None
+        and not quantizer.is_quantizable(inp)
+    ):
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -999,14 +1105,93 @@ def _all_gather_fp8_blockwise(
             memory_format=torch.contiguous_format,
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
+        orig_all_gather_usage = quantizer.all_gather_usage
+        quantizer.all_gather_usage = False
         out = quantizer(out)
+        quantizer.all_gather_usage = orig_all_gather_usage
         return out, None
+
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
-    # * Refer to scaffold code when implementing at:
-    # https://github.com/kwyss-nvidia/TransformerEngine/commit/6659ee9dc84fb515d1d47699d8bfd20a72b76477
-    raise NotImplementedError("fp8 blockwise allgather not yet implemented")
+
+    # Cast input tensor to Float8BlockwiseQTensor with required data
+    # Set to compact usage in case the quantizer is not correctly configured
+    orig_all_gather_usage = quantizer.all_gather_usage
+    quantizer.all_gather_usage = True
+    if not isinstance(inp, Float8BlockwiseQTensorBase):
+        inp = quantizer(inp)
+    elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
+        quantizer.columnwise_usage and inp._columnwise_data is None
+    ):
+        warnings.warn(
+            "Input and quantizer do not have matching usages. "
+            "Dequantizing and requantizing to Float8BlockwiseQTensor."
+        )
+        inp = quantizer(inp.dequantize())
+    quantizer.all_gather_usage = orig_all_gather_usage
+
+    # Begin to do network communication, need to make sure compact format
+    if inp._data_format != tex.Float8BlockScaleTensorFormat.COMPACT:
+        raise RuntimeError(
+            "All-gather with FP8 block-wise quantized tensor requires compact data format, "
+            f"but found data_format={inp._data_format}"
+        )
+
+    # Construct Float8BlockwiseQTensor output tensor
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
+    # Coalesce NCCL collectives
+    with torch.distributed._coalescing_manager(
+        group=process_group,
+        device=device,
+        async_ops=async_op,
+    ) as coalescing_manager:
+
+        # Gather Float8BlockwiseQTensor data for row-wise usage
+        if quantizer.rowwise_usage:
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_scale_inv,
+                inp._rowwise_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_data,
+                inp._rowwise_data,
+                group=process_group,
+            )
+
+        # Gather Float8BlockwiseQTensor data for column-wise usage
+        if quantizer.columnwise_usage:
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out._columnwise_scale_inv,
+                inp._columnwise_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._columnwise_data,
+                inp._columnwise_data,
+                group=process_group,
+            )
+
+    handle = coalescing_manager if async_op else None
+
+    # Unlike MXFP8, this fp8 blockwise tensor primarily works with Hopper
+    # This means that we need to transpose the gathered columnwise data
+    # Example usage is grad_output tensor, ie. dY in linear backward
+    # We want to gather two FP8 tensors (rowwise and columnwise) along dim0
+    # and then transpose the columnwise data to match the rowwise data
+    # Make sure FP8 transpose is populated if needed
+
+    if async_op:
+        handle = _FP8BlockwiseAllGatherAsyncHandle(out, quantizer, handle)
+    else:
+        # if it's a sync op, we need to do the transpose here as post processing step
+        _post_process_fp8_blockwise_gather(out, quantizer, handle)
+
+    return out, handle
 
 
 def _all_gather_mxfp8(
@@ -1029,11 +1214,11 @@ def _all_gather_mxfp8(
         dtype = inp.dtype
     elif isinstance(inp, MXFP8TensorBase):
         if inp._rowwise_data is not None:
-            in_shape = inp._rowwise_data.device.size()
+            in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
             dtype = inp._rowwise_data.dtype
         elif inp._columnwise_data is not None:
-            in_shape = inp._columnwise_data.device.size()
+            in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
             dtype = inp._columnwise_data.dtype
         else:
@@ -1195,6 +1380,34 @@ def gather_along_first_dim(
             out_shape=out_shape,
         )
 
+    # Debug case - call gather_along_first_dim on each tensor
+    if isinstance(inp, DebugQuantizedTensor):
+        out_obj = inp
+        rowwise = inp.get_tensor(False)
+        columnwise = inp.get_tensor(True)
+        final_quantizer = (
+            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
+        )
+        # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+        if isinstance(rowwise, Float8BlockwiseQTensorBase):
+            rowwise = inp._original_tensor
+        rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
+        out_obj.rowwise_gemm_tensor = rowwise_total
+        if rowwise is not columnwise:
+            final_quantizer_columnwise = (
+                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
+            )
+            # Temporary fix for TP communication of Float8BlockwiseQTensorBase
+            if isinstance(columnwise, Float8BlockwiseQTensorBase):
+                columnwise = inp._original_tensor
+            columnwise_total, _ = gather_along_first_dim(
+                columnwise, process_group, False, final_quantizer_columnwise
+            )
+            out_obj.columnwise_gemm_tensor = columnwise_total
+        else:
+            out_obj.rowwise_gemm_tensor = out_obj.rowwise_gemm_tensor
+        return out_obj, None
+
     # High-precision communication for quantized tensors
     if quantizer is not None:
         warnings.warn(
@@ -1203,6 +1416,9 @@ def gather_along_first_dim(
         )
         if isinstance(inp, QuantizedTensor):
             inp = inp.dequantize()
+        # Falling back to high-precision all-gather for Float8BlockQuantizer
+        # means that it should directly output GEMM_READY format
+        _set_quantizer_format(quantizer, compact=False)
         out = torch.empty(
             out_shape,
             dtype=inp.dtype,
@@ -1235,6 +1451,152 @@ def gather_along_first_dim(
         async_op=async_op,
     )
     return out, handle
+
+
+# Global cache to store symmetric memory tensors
+symmetric_mem_cache = {}
+
+
+def get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group, tag=None):
+    """
+    Gets or creates a symmetric memory tensor with specified properties.
+
+    Reuses cached tensors when available to avoid redundant creation and rendezvous operations.
+
+    Note: This function always returns a 1D tensor.
+
+    Parameters
+    ----------
+    tensor_numel : int
+        Number of elements in the tensor.
+    tensor_dtype : torch.dtype
+        Data type of the tensor.
+    tensor_device : torch.device
+        Device on which to allocate the tensor.
+    tp_group : dist_group_type
+        Process group for rendezvous operation.
+    tag : Any, optional
+        Optional identifier to further distinguish tensors.
+
+    Returns
+    -------
+    torch.Tensor
+        A symmetric memory tensor with the specified properties.
+    """
+    # Create a cache key based on tensor properties and group
+    cache_key = (tensor_numel, tensor_dtype, tensor_device, tp_group.group_name, tag)
+
+    # Check if we already have a symmetric memory tensor for this configuration
+    if cache_key not in symmetric_mem_cache:
+        # Create a new symmetric memory tensor if not in cache
+        msg = symm_mem.empty(
+            tensor_numel,
+            dtype=tensor_dtype,
+            device=tensor_device,
+        )
+        # Perform the rendezvous once for this tensor
+        symm_mem.rendezvous(msg, group=tp_group)
+        # Store in cache
+        symmetric_mem_cache[cache_key] = msg
+    else:
+        # Reuse the existing symmetric memory tensor
+        msg = symmetric_mem_cache[cache_key]
+
+    return msg
+
+
+def symmetric_all_reduce(
+    inp: torch.Tensor,
+    tp_group: Optional[dist_group_type] = None,
+    async_op: bool = False,
+    all_reduce_type: str = "multimem_all_reduce",
+):
+    """
+    Performs an all-reduce operation across multiple processes using symmetric memory.
+    If the input tensor is already in the symmetric memory cache we can avoid copy
+    overheads by just directly using the input tensor for all reduce.  Externally
+    created symmetric memory tensors not in the cache currently will not be able to
+    avoid the extra copies.
+
+    Parameters
+    ----------
+    inp : torch.Tensor
+        The input tensor to be reduced. The operation is performed in-place.
+
+    tp_group : Optional[dist_group_type], default=None
+        The process group over which to perform the all-reduce operation.
+        If None, the default process group is used.
+
+    async_op : bool, default=False
+        Whether to perform the operation asynchronously.
+        Note: Currently only synchronous operations are supported for symmetric memory variants.
+
+    all_reduce_type : str, default="multimem_all_reduce"
+        The type of all-reduce implementation to use. Options include:
+        - "nccl": Standard PyTorch distributed all-reduce
+        - "multimem_all_reduce": multimem symmetric all-reduce
+        - "two_shot": Two-shot symmetric all-reduce
+        - "one_shot": One-shot symmetric all-reduce
+
+    Returns
+    -------
+    Tuple[torch.Tensor, Optional[torch.distributed.Work]]
+        - The first element is the input tensor with the all-reduce result.
+        - The second element is the async work handle if async_op=True,
+          otherwise None.
+    """
+    assert async_op is False, "Async symmetric ops no supported yet"
+    assert HAS_TORCH_SYMMETRIC, "Could not import symetric memory from torch"
+
+    if get_distributed_world_size(tp_group) == 1:
+        return inp, None
+
+    if all_reduce_type == "nccl":
+        # Standard all-reduce implementation
+        handle = torch.distributed.all_reduce(inp, group=tp_group, async_op=async_op)
+        return inp, handle
+
+    all_reduce_impl = None
+    if all_reduce_type == "multimem_all_reduce":
+        all_reduce_impl = torch.ops.symm_mem.multimem_all_reduce_
+    elif all_reduce_type == "two_shot":
+        all_reduce_impl = torch.ops.symm_mem.two_shot_all_reduce_
+    elif all_reduce_type == "one_shot":
+        all_reduce_impl = torch.ops.symm_mem.one_shot_all_reduce
+    else:
+        raise TypeError(f"All reduce type {all_reduce_type} is not supported.")
+
+    group_name = tp_group.group_name
+    tensor_shape = inp.shape
+    tensor_numel = inp.numel()
+    tensor_dtype = inp.dtype
+    tensor_device = inp.device
+
+    input_id = id(inp)
+    is_cached = any(id(cached_tensor) == input_id for cached_tensor in symmetric_mem_cache.values())
+    # Check if the input tensor is already in the symmetric memory cache. If it is we can avoid copy overheads.
+    if is_cached:
+        all_reduce_impl(
+            inp,
+            "sum",
+            group_name,
+        )
+    else:
+        # Get symmetric memory tensor. Build or retrieve from cache.
+        msg = get_symmetric_memory_tensor(tensor_numel, tensor_dtype, tensor_device, tp_group)
+
+        msg.copy_(inp.reshape(-1))
+
+        all_reduce_impl(
+            msg,
+            "sum",
+            group_name,
+        )
+
+        # Copy the result back to the input tensor
+        inp.copy_(msg.reshape(tensor_shape))
+
+    return inp, None
 
 
 def allreduce(
@@ -1298,7 +1660,9 @@ def _is_te_module(module):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [

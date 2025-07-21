@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import combine_masks
 from jax import nn as jax_nn
 from jax import random as jax_random
@@ -595,8 +594,16 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
+        if qkv_layout.is_separate():
+            head_dim_qk = query.shape[-1]
+            head_dim_v = value.shape[-1]
+        else:
+            head_dim_qk = self.head_dim
+            head_dim_v = self.head_dim
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(
+            # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
+            not deterministic,
             self.dtype,
             self.dtype,
             qkv_layout,
@@ -607,7 +614,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             self.num_gqa_groups,
             seqlen_q,
             seqlen_kv,
-            self.head_dim,
+            head_dim_qk,
+            head_dim_v,
             self.window_size,
         )
 
@@ -620,7 +628,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Please try to update the cuDNN and TE to the latest version.\n"
                 f"{self.dtype=}\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{self.head_dim=}\n"
+                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
             )
 
         dropout_rng = None
@@ -628,7 +636,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
         if self.scale_factor is None:
-            scale_factor = 1.0 / sqrt(self.head_dim)
+            scale_factor = 1.0 / sqrt(head_dim_qk)
         else:
             scale_factor = self.scale_factor
         del self.scale_factor
@@ -1503,12 +1511,11 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
         rp_bucket += np.where(rpb_is_small, negative_rp, rpb_val_if_large)
 
         # Compute relative attention bias
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, self.embedding_axes),
             (self.num_attention_heads, self.num_buckets),
             self.dtype,
-            axes=self.embedding_axes,
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)

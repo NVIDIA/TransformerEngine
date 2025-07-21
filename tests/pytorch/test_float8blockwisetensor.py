@@ -176,7 +176,40 @@ class TestFloat8BlockwiseTensor:
     )
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
     @pytest.mark.parametrize("dq_columnwise", [True, False])
+    @pytest.mark.parametrize("all_gather_usage", [True, False])
     def test_quantize_dequantize_dims(
+        self,
+        dims: DimsType,
+        block_scaling_dim: int,
+        dq_columnwise: bool,
+        all_gather_usage: bool,
+    ) -> None:
+        if all_gather_usage and block_scaling_dim != 1:
+            pytest.skip("all_gather_usage only implemented for 1D block quantization.")
+        atol = _tols[tex.DType.kFloat8E4M3]["atol"]
+        rtol = _tols[tex.DType.kFloat8E4M3]["rtol"]
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=dq_columnwise,
+            block_scaling_dim=block_scaling_dim,
+            all_gather_usage=all_gather_usage,
+        )
+        self._test_quantize_dequantize(
+            quantizer=quantizer,
+            dims=dims,
+            atol=atol,
+            rtol=rtol,
+            dequant_columnwise=dq_columnwise,
+        )
+
+    @pytest.mark.parametrize(
+        "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
+    )
+    @pytest.mark.parametrize("block_scaling_dim", [1, 2])
+    @pytest.mark.parametrize("dq_columnwise", [True, False])
+    @pytest.mark.xfail(raises=NotImplementedError)
+    def test_quantize_dequantize_compact_format(
         self, dims: DimsType, block_scaling_dim: int, dq_columnwise: bool
     ) -> None:
         atol = _tols[tex.DType.kFloat8E4M3]["atol"]
@@ -186,6 +219,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=dq_columnwise,
             block_scaling_dim=block_scaling_dim,
+            all_gather_usage=True,
         )
         self._test_quantize_dequantize(
             quantizer=quantizer,
@@ -250,8 +284,13 @@ class TestFloat8BlockwiseTensor:
 
     @pytest.mark.parametrize("dims", [[256, 512], [250, 500]])
     @pytest.mark.parametrize("block_scaling_dim", [1, 2])
-    def test_serialization(self, dims: DimsType, block_scaling_dim: int) -> None:
+    @pytest.mark.parametrize("all_gather_usage", [True, False])
+    def test_serialization(
+        self, dims: DimsType, block_scaling_dim: int, all_gather_usage: bool
+    ) -> None:
         """Test serialization of Float8BlockwiseQTensor"""
+        if all_gather_usage and block_scaling_dim != 1:
+            pytest.skip("all_gather_usage only implemented for 1D block quantization.")
         device = "cuda"
         dtype = torch.bfloat16
         x_hp = torch.rand(_to_list(dims), dtype=dtype, device=device)
@@ -260,6 +299,7 @@ class TestFloat8BlockwiseTensor:
             rowwise=True,
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
+            all_gather_usage=all_gather_usage,
         )
 
         # Create FP8 tensor
@@ -283,6 +323,7 @@ class TestFloat8BlockwiseTensor:
         assert x_fp8_loaded._is_2D_scaled == x_fp8._is_2D_scaled
         assert x_fp8_loaded.dtype == x_fp8.dtype
         assert x_fp8_loaded._fp8_dtype == x_fp8._fp8_dtype
+        assert x_fp8_loaded._data_format == x_fp8._data_format
 
         # Test that dequantized values match
         x_fp8_dequant = x_fp8.dequantize()
@@ -391,6 +432,110 @@ class TestFloat8BlockwiseTensor:
         # Make sure we are not trivially passing tests
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_view.dequantize(), -x_hp, **_tols[fp8_dtype])
+
+    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=str)
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
+    @pytest.mark.parametrize(
+        "dims", [[16, 16, 512], [16, 16, 512, 16], [12, 7, 11], [13, 14, 16], [2, 3, 5]]
+    )
+    def test_view_and_reshape_1D(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]
+    ) -> None:
+        """Test view operations that preserve tensor shape"""
+        device = "cuda"
+
+        def is_bitwise_equal(a, b):
+            if a.numel() != b.numel():
+                return False
+            a_flat = a.reshape(-1).view(torch.uint8)
+            b_flat = b.reshape(-1).view(torch.uint8)
+            return torch.all((a_flat ^ b_flat) == 0)
+
+        x_hp = torch.rand(dims, dtype=dtype, device=device)
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=1,
+        )
+        x_fp8 = quantizer.make_empty(x_hp.shape, dtype=dtype, device=device)
+        quantizer.update_quantized(x_hp.clone(), x_fp8)
+
+        # Test view, high dimension tensor -> 2D tensor
+        x_hp_view = x_hp.view(-1, dims[-1]).contiguous()
+        x_fp8_view = x_fp8.view(-1, dims[-1])
+        # Check the dequantized result
+        torch.testing.assert_close(
+            x_fp8_view.dequantize().contiguous(), x_hp_view, **_tols[fp8_dtype]
+        )
+        # Check the bitwise equality of the inner data
+        assert is_bitwise_equal(x_fp8_view._rowwise_data, x_fp8._rowwise_data)
+        assert is_bitwise_equal(x_fp8_view._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
+        # Check the data ptr
+        assert x_fp8_view._rowwise_data.data_ptr() == x_fp8._rowwise_data.data_ptr()
+        assert x_fp8_view._rowwise_scale_inv.data_ptr() == x_fp8._rowwise_scale_inv.data_ptr()
+
+        # Test reshape high dimension tensor -> 2D tensor
+        x_hp_reshape = x_hp.reshape(-1, dims[-1]).contiguous()
+        x_fp8_reshape = x_fp8.reshape(-1, dims[-1])
+        # Check the dequantized result
+        torch.testing.assert_close(
+            x_fp8_reshape.dequantize().contiguous(), x_hp_reshape, **_tols[fp8_dtype]
+        )
+        # Check the bitwise equality of the inner data
+        assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
+        assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
+
+    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2], ids=str)
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=str)
+    @pytest.mark.parametrize("dims", [[16, 16, 512, 16], [2, 512, 512, 128], [3, 13, 14, 16]])
+    def test_view_and_reshape_2D(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: List[int]
+    ) -> None:
+        """Test view operations that preserve tensor shape"""
+        device = "cuda"
+
+        def is_bitwise_equal(a, b):
+            if a.numel() != b.numel():
+                return False
+            a_flat = a.reshape(-1).view(torch.uint8)
+            b_flat = b.reshape(-1).view(torch.uint8)
+            return torch.all((a_flat ^ b_flat) == 0)
+
+        x_hp = torch.rand(dims, dtype=dtype, device=device)
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=fp8_dtype,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=2,
+        )
+        x_fp8 = quantizer.make_empty(x_hp.shape, dtype=dtype, device=device)
+        quantizer.update_quantized(x_hp.clone(), x_fp8)
+
+        # Test view, high dimension tensor -> 2D tensor
+        x_hp_view = x_hp.view(-1, dims[-2], dims[-1]).contiguous()
+        x_fp8_view = x_fp8.view(-1, dims[-2], dims[-1])
+        # Check the dequantized result
+        torch.testing.assert_close(
+            x_fp8_view.dequantize().contiguous(), x_hp_view, **_tols[fp8_dtype]
+        )
+        # Check the bitwise equality of the inner data
+        assert is_bitwise_equal(x_fp8_view._rowwise_data, x_fp8._rowwise_data)
+        assert is_bitwise_equal(x_fp8_view._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
+        # Check the data ptr
+        assert x_fp8_view._rowwise_data.data_ptr() == x_fp8._rowwise_data.data_ptr()
+        assert x_fp8_view._rowwise_scale_inv.data_ptr() == x_fp8._rowwise_scale_inv.data_ptr()
+
+        # Test reshape high dimension tensor -> 2D tensor
+        x_hp_reshape = x_hp.reshape(-1, dims[-2], dims[-1]).contiguous()
+        x_fp8_reshape = x_fp8.reshape(-1, dims[-2], dims[-1])
+        # Check the dequantized result
+        torch.testing.assert_close(
+            x_fp8_reshape.dequantize().contiguous(), x_hp_reshape, **_tols[fp8_dtype]
+        )
+        # Check the bitwise equality of the inner data
+        assert is_bitwise_equal(x_fp8_reshape._rowwise_data, x_fp8._rowwise_data)
+        assert is_bitwise_equal(x_fp8_reshape._rowwise_scale_inv, x_fp8._rowwise_scale_inv)
 
     @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
     @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)

@@ -288,7 +288,9 @@ def train_and_evaluate(args):
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
@@ -312,11 +314,15 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -441,6 +447,14 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.535 and actual[1] > 0.73
 
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.535 and actual[1] > 0.73
+
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
@@ -466,6 +480,15 @@ class TestEncoder(unittest.TestCase):
         assert actual[0] < 0.535 and actual[1] > 0.73
 
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+
+    @unittest.skipIf(not is_fp8_supported, fp8_reason)
+    def test_te_current_scaling_fp8_shardy(self):
+        """Test Transformer Engine with CurrentScaling FP8"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "Float8CurrentScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.535 and actual[1] > 0.73
 
 
 if __name__ == "__main__":

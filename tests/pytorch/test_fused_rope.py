@@ -1,11 +1,11 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import math
-import pytest
-import torch
 from typing import Callable, Tuple, Union
-from transformer_engine.pytorch.dot_product_attention.rope import (
+import math
+import torch
+import pytest
+from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
 )
@@ -22,6 +22,7 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
     return torch.sum(output * t)
 
 
+@pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096])
 @pytest.mark.parametrize("hidden_size", [128, 256])
@@ -43,7 +44,17 @@ def test_fused_rope(
     loss_func: Callable,
     cp_size: int,
     interleaved: bool,
+    start_positions: bool,
 ) -> None:
+    if margin == 0 and start_positions == True:
+        # This makes sure that the `start_positions` offsets being applied
+        # are with the maximum length of the rope embeddings.
+        pytest.skip("Skipping test with margin=0 and start_positions=True")
+
+    if start_positions == True and cp_size > 1:
+        # `start_positions` is only supported for `cp_size=1` and inference.
+        pytest.skip("Skipping test with cp_size>1 and start_positions=True")
+
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     t = torch.rand(
@@ -51,6 +62,14 @@ def test_fused_rope(
         dtype=dtype,
         device=device,
     )
+
+    # Get arbitrary offsets to be used with RoPE for all the sequences
+    start_positions = (
+        torch.randint(0, margin, (batch_size,), dtype=torch.int32, device=device)
+        if start_positions
+        else None
+    )
+
     if tensor_format == "bshd":
         t = t.transpose(0, 1).contiguous()
     if transpose:
@@ -69,14 +88,18 @@ def test_fused_rope(
             t.float(),
             emb,
             tensor_format=tensor_format,
+            start_positions=start_positions,
             interleaved=interleaved,
             fused=False,
             cp_size=cp_size,
             cp_rank=cp_rank,
         ).to(dtype)
         loss_unfused = loss_func(output_unfused)
-        loss_unfused.backward()
-        grad_unfused = t.grad.detach().clone()
+
+        if not isinstance(start_positions, torch.Tensor):
+            loss_unfused.backward()
+            grad_unfused = t.grad.detach().clone()
+
         t.grad = None
 
         # fused
@@ -84,21 +107,29 @@ def test_fused_rope(
             t,
             emb,
             tensor_format=tensor_format,
+            start_positions=start_positions,
             interleaved=interleaved,
             fused=True,
             cp_size=cp_size,
             cp_rank=cp_rank,
         )
         loss_fused = loss_func(output_fused)
-        loss_fused.backward()
-        grad_fused = t.grad.detach().clone()
+
+        if not isinstance(start_positions, torch.Tensor):
+            loss_fused.backward()
+            grad_fused = t.grad.detach().clone()
         t.grad = None
 
         torch.testing.assert_close(output_fused, output_unfused)
-        torch.testing.assert_close(grad_fused, grad_unfused)
+
+        if not isinstance(start_positions, torch.Tensor):
+            torch.testing.assert_close(grad_fused, grad_unfused)
+
         assert output_fused.is_contiguous()
 
 
+@pytest.mark.parametrize("margin", [10])
+@pytest.mark.parametrize("start_positions", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("rotary_percent", [0.5, 1.0])
@@ -114,10 +145,25 @@ def test_fused_rope_thd(
     loss_func: Callable,
     cp_size: int,
     interleaved: bool,
+    start_positions: bool,
+    margin: int,
 ) -> None:
+
+    if start_positions == True and cp_size > 1:
+        # `start_positions` is only supported for `cp_size=1` and inference.
+        pytest.skip("Skipping test with cp_size>1 and start_positions=True")
+
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
     cu_seqlens = [0, 400, 542, 711, 727, 752, 1270, 1426, 1450, 1954, 2044, 2048]
+
+    # Get arbitrary offsets to be used with RoPE for all the sequences
+    start_positions = (
+        torch.randint(0, margin, (len(cu_seqlens) - 1,), dtype=torch.int32, device=device)
+        if start_positions
+        else None
+    )
+
     if cp_size > 1:
         cu_seqlens_padded = [0]
         for i in range(1, len(cu_seqlens)):
@@ -152,6 +198,7 @@ def test_fused_rope_thd(
         output_unfused = apply_rotary_pos_emb(
             t.float(),
             emb,
+            start_positions=start_positions,
             tensor_format="thd",
             interleaved=interleaved,
             fused=False,
@@ -160,14 +207,17 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         ).to(dtype)
         loss_unfused = loss_func(output_unfused)
-        loss_unfused.backward()
-        grad_unfused = t.grad.detach().clone()
+
+        if not isinstance(start_positions, torch.Tensor):
+            loss_unfused.backward()
+            grad_unfused = t.grad.detach().clone()
         t.grad = None
 
         # fused
         output_fused = apply_rotary_pos_emb(
             t,
             emb,
+            start_positions=start_positions,
             interleaved=interleaved,
             fused=True,
             tensor_format="thd",
@@ -176,9 +226,15 @@ def test_fused_rope_thd(
             cp_rank=cp_rank,
         )
         loss_fused = loss_func(output_fused)
-        loss_fused.backward()
-        grad_fused = t.grad.detach().clone()
+
+        if not isinstance(start_positions, torch.Tensor):
+            loss_fused.backward()
+            grad_fused = t.grad.detach().clone()
         t.grad = None
 
         torch.testing.assert_close(output_fused, output_unfused)
-        torch.testing.assert_close(grad_fused, grad_unfused)
+
+        if not isinstance(start_positions, torch.Tensor):
+            torch.testing.assert_close(grad_fused, grad_unfused)
+
+        assert output_fused.is_contiguous()

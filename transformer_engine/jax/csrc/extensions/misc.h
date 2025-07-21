@@ -44,6 +44,7 @@ enum class JAXX_Scaling_Mode : int64_t {
   NO_SCALING = 0,
   DELAYED_TENSOR_SCALING = 1,
   MXFP8_1D_SCALING = 2,
+  CURRENT_TENSOR_SCALING = 3,
 };
 
 static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
@@ -57,11 +58,25 @@ static NVTEScalingMode get_nvte_scaling_mode(const JAXX_Scaling_Mode &mode) {
     case JAXX_Scaling_Mode::MXFP8_1D_SCALING:
       return NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
       break;
+    case JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING:
+      return NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING;
+      break;
     default:
       NVTE_ERROR("Invalid Scaling Mode ", static_cast<int>(mode));
       break;
   }
 }
+
+constexpr struct BlockSize {
+  size_t x;
+  size_t y;
+} MXFP8_BLOCK_SIZE{1, 32};
+constexpr struct Alignment {
+  size_t x;
+  size_t y;
+} MXFP8_ALIGNMENT{128, 4};
+
+std::vector<size_t> get_mxfp8_scale_shape(size_t M, size_t N, bool is_colwise);
 
 }  // namespace jax
 }  // namespace transformer_engine

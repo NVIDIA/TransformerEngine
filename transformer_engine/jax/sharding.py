@@ -13,11 +13,12 @@ import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, Optional
 from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
+import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
@@ -112,9 +113,22 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     return jax.lax.with_sharding_constraint(x, pspec)
 
 
-def with_sharding_constraint_by_logical_axes(x: jnp.array, logical_axis_names: tuple | list):
+def with_sharding_constraint_by_logical_axes(
+    x: jnp.array, logical_axis_names: Optional[tuple | list]
+):
     """
     A wrapper function to jax.lax.with_sharding_constraint to accept logical axes.
+
+    If logical_axis_names = None, this means no sharding constraint is applied.
+
+    If logical_axis_names = (None, None, ...), this means a sharding constraint is applied and the tensor is replicated across all devices.
+
+    Args:
+        x: Input tensor to apply sharding constraint
+        logical_axis_names: Logical axis names to apply sharding constraint
+    Returns:
+        Tensor with sharding constraint applied, or the original tensor if no logical axes are provided.
+
     """
     if not logical_axis_names:
         return x
@@ -186,6 +200,31 @@ def get_mesh_axis_rank(axis: str, mesh=None):
         return 0
     _, axis_name = _get_mesh_info(axis, mesh)
     return jax.lax.axis_index(axis_name)
+
+
+def get_mesh_axis_rank_host(axis, mesh) -> int:
+    """
+    Same as get_mesh_axis_rank(), but return a host value instead of a
+    traced device value.
+    """
+    if axis not in mesh.axis_names:
+        raise ValueError(f"Axis {axis} not found in mesh axis names: {mesh.axis_names}")
+
+    axis_index = mesh.axis_names.index(axis)
+
+    # Convert mesh.devices (ndarray of Device objects) to flat list
+    devices = mesh.devices
+    local_device = jax.devices()[jax.process_index()]  # Pick one device on this host
+
+    # Find index of local_device in mesh.devices
+    coords = np.argwhere(devices == local_device)
+    if coords.size == 0:
+        raise ValueError(f"Local device {local_device} not found in mesh.devices.")
+    coords = tuple(coords[0])  # Coordinates in the mesh array
+
+    # Get the mesh rank along the specified axis
+    rank = coords[axis_index]
+    return int(rank)
 
 
 @dataclass
@@ -321,7 +360,9 @@ class ShardingType(Enum):
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
 
 
-def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
+def get_non_contracting_logical_axes(
+    ndim, logical_axes: tuple[Optional[str]], contracting_dims
+) -> tuple[Optional[str]]:
     """Get logical axes for non-contracting dimensions.
 
     Args:
@@ -332,11 +373,8 @@ def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
     Returns:
         Tuple of logical axes for non-contracting dimensions.
     """
-    if not logical_axes:
-        logical_axes = (None,) * ndim
-    elif len(logical_axes) < ndim:
-        logical_axes = logical_axes + (None,) * (ndim - len(logical_axes))
-    assert len(logical_axes) == ndim
+    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
+    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
 
     non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
     non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)

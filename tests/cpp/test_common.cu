@@ -45,7 +45,7 @@ bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2) {
   return true;
 }
 
-size_t typeToSize(DType type) {
+size_t typeToNumBits(DType type) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(type, T,
   {
       return TypeInfo<T>::size;
@@ -62,7 +62,8 @@ const std::string &typeName(DType type) {
     {DType::kBFloat16, "bfloat16"},
     {DType::kFloat8E4M3, "float8e4m3"},
     {DType::kFloat8E5M2, "float8e5m2"},
-    {DType::kFloat8E8M0, "float8e8m0"}};
+    {DType::kFloat8E8M0, "float8e8m0"},
+    {DType::kFloat4E2M1, "float4e2m1"}};
   return name_map.at(type);
 }
 
@@ -109,11 +110,18 @@ size_t DIVUP(const size_t &x, const size_t &y){
 struct scale_inv_meta {
   std::vector<size_t> shape;
   DType type;
-  size_t type_size;
+  size_t type_size_bits;
+  size_t bytes() const noexcept {
+    return (product(shape) * type_size_bits) / 8;
+  }
 };
 
-NVTEShape convertShape(const std::vector<size_t>& shape) {
-  return {shape.data(), shape.size()};
+size_t bytes(const NVTEShape& shape, const DType type) {
+  return (product(shape) * typeToNumBits(type)) / 8;
+}
+
+NVTEShape convertShape(const std::vector<size_t>& s) {
+  return nvte_make_shape(s.data(), s.size());
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
@@ -122,7 +130,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     scale_inv_meta ret;
     ret.shape = {1};
     ret.type = DType::kFloat32;
-    ret.type_size = sizeof(float);
+    ret.type_size_bits = typeToNumBits(DType::kFloat32);
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
@@ -152,8 +160,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat8E8M0;
     ret_colwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size = sizeof(uint8_t);
-    ret_colwise.type_size = sizeof(uint8_t);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -179,8 +187,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat32;
     ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size = sizeof(float);
-    ret_colwise.type_size = sizeof(float);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
 
     return {ret_rowwise, ret_colwise};
   }
@@ -205,8 +213,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     ret_rowwise.type = DType::kFloat32;
     ret_colwise.type = DType::kFloat32;
-    ret_rowwise.type_size = sizeof(float);
-    ret_colwise.type_size = sizeof(float);
+    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat32);
+    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat32);
     return {ret_rowwise, ret_colwise};
   }
 
@@ -222,8 +230,7 @@ Tensor::Tensor(const std::string& name,
   gen_.seed(seed);
   rowwise_ = rowwise;
   columnwise_ = columnwise;
-  size_t s = typeToSize(type);
-  size_t total_size = product(shape) * s;
+  size_t total_size = bytes(shape, type);
   void *dptr_rowwise = nullptr;
   void *dptr_columnwise = nullptr;
   cpu_data_rowwise_ = nullptr;
@@ -240,7 +247,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape{nullptr, 0};
+  NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -257,8 +264,7 @@ Tensor::Tensor(const std::string& name,
   }
 
   if (columnwise) {
-    columnwise_shape.data = columnwise_shape_vec.data();
-    columnwise_shape.ndim = columnwise_shape_vec.size();
+    columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
   }
 
   tensor_ = TensorWrapper(scaling_mode);
@@ -306,8 +312,8 @@ Tensor::Tensor(const std::string& name,
     } else {
       auto [rowwise_scale_meta, colwise_scale_meta] =
           get_scales(normalized_shape, tensor_.scaling_mode());
-      auto rowwise_scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
-      auto columnwise_scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
+      auto rowwise_scale_size = rowwise_scale_meta.bytes();
+      auto columnwise_scale_size = colwise_scale_meta.bytes();
       auto scale_shape = rowwise_scale_meta.shape;
       auto columnwise_scale_shape = colwise_scale_meta.shape;
       if (rowwise) {
@@ -332,7 +338,7 @@ Tensor::Tensor(const std::string& name,
 
 void Tensor::to_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = product(s) * typeToSize(tensor_.dtype());
+  const size_t size = bytes(s, tensor_.dtype());
   if (rowwise_) {
     cudaMemcpy(cpu_data_rowwise_.get(),
                tensor_.get_rowwise_data().data_ptr,
@@ -361,14 +367,14 @@ void Tensor::to_cpu() const {
     auto [rowwise_scale_meta, colwise_scale_meta] =
         get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
-      auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
+      auto scale_size = rowwise_scale_meta.bytes();
       cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
                  tensor_.get_rowwise_scale_inv().data_ptr,
                  scale_size,
                  cudaMemcpyDeviceToHost);
     }
     if (columnwise_) {
-      auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
+      auto scale_size = colwise_scale_meta.bytes();
       cudaMemcpy(columnwise_scale_inv_cpu_data_.get(),
                  tensor_.get_columnwise_scale_inv().data_ptr,
                  scale_size,
@@ -379,34 +385,32 @@ void Tensor::to_cpu() const {
 
 void Tensor::from_cpu() const {
   const NVTEShape s = tensor_.shape();
-  const size_t size = product(s) * typeToSize(tensor_.dtype());
+  const size_t size = bytes(s, tensor_.dtype());
   if (rowwise_) {
-    cudaMemcpy(tensor_.get_rowwise_data().data_ptr,
-               cpu_data_rowwise_.get(), size, cudaMemcpyHostToDevice);
+    cudaMemcpy(tensor_.get_rowwise_data().data_ptr, cpu_data_rowwise_.get(), size,
+               cudaMemcpyHostToDevice);
   }
   if (columnwise_) {
-    cudaMemcpy(tensor_.get_columnwise_data().data_ptr,
-               cpu_data_columnwise_.get(), size, cudaMemcpyHostToDevice);
+    cudaMemcpy(tensor_.get_columnwise_data().data_ptr, cpu_data_columnwise_.get(), size,
+               cudaMemcpyHostToDevice);
   }
   if (isFp8Type(dtype())) {
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
-        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
-                  cudaMemcpyHostToDevice);
+        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
       }
-      cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
-                 cudaMemcpyHostToDevice);
+      cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
     }
     auto [rowwise_scale_meta, colwise_scale_meta] =
         get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
-      auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
+      auto scale_size = rowwise_scale_meta.bytes();
       cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
                  rowwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
     }
     if (columnwise_) {
-      auto scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
+      auto scale_size = colwise_scale_meta.bytes();
       cudaMemcpy(tensor_.get_columnwise_scale_inv().data_ptr,
                  columnwise_scale_inv_cpu_data_.get(), scale_size,
                  cudaMemcpyHostToDevice);
@@ -695,6 +699,19 @@ std::pair<double, double> getTolerances(const DType type) {
 
 template <typename T>
 void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
+  // Check how many RNG calls are required to generate one uniform random value
+  int rng_calls_per_val = 0;
+  {
+    std::mt19937 gen1 = *gen, gen2 = *gen;
+    std::uniform_real_distribution<> dis(-2.0, 1.0);
+    const float _ = dis(gen1);
+    while (gen2 != gen1) {
+      auto _ = gen2();
+      ++rng_calls_per_val;
+    }
+  }
+
+  // Generate uniform random values in parallel
   #pragma omp parallel proc_bind(spread)
   {
     std::mt19937 gen_local = *gen;
@@ -703,14 +720,14 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
     const int chunk_size = (size + threads_num - 1) / threads_num;
     const int idx_min = chunk_size * thread_ID;
     const int idx_max = std::min(chunk_size * (thread_ID + 1), static_cast<int>(size));
-    gen_local.discard(idx_min);
+    gen_local.discard(idx_min * rng_calls_per_val);
     std::uniform_real_distribution<> dis(-2.0, 1.0);
 
     for (int i = idx_min; i < idx_max; ++i) {
       data[i] = static_cast<T>(dis(gen_local));
     }
   }
-  gen->discard(size);
+  gen->discard(size * rng_calls_per_val);
 }
 
 void fillUniform(Tensor *t) {
@@ -739,8 +756,6 @@ void fillUniform(Tensor *t) {
 template<typename InputEncoding, InputsFillCase Case>
 void fillCase_special(Tensor *t) {
   const size_t size = product(t->rowwise_shape());
-  const size_t rows = t->rowwise_shape().data[0];
-  const size_t cols = t->rowwise_shape().data[1];
 
   if constexpr (Case == InputsFillCase::zeros) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
@@ -760,16 +775,13 @@ void fillCase_special(Tensor *t) {
     std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
       InputType *data = t->rowwise_cpu_dptr<InputType>();
-      for (size_t i = 0; i < rows; ++i) {
-        for (size_t j = 0; j < cols; ++j) {
-          const size_t idx = i * cols + j;
-          const bool is_negative = (dis_sign(t->gen()) < 0.0);
-          double val = dis(t->gen());
-          if (is_negative) {
-            val = -val;
-          }
-          data[idx] = static_cast<InputType>(val);
+      for (size_t idx = 0; idx < size; ++idx) {
+        const bool is_negative = (dis_sign(t->gen()) < 0.0);
+        double val = dis(t->gen());
+        if (is_negative) {
+          val = -val;
         }
+        data[idx] = static_cast<InputType>(val);
       }
     });
   }

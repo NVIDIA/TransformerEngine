@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -25,6 +25,7 @@ pybind11::dict Registrations() {
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
+  dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -68,6 +69,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
   m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+  m.def("get_num_compute_streams", &nvte_get_num_compute_streams);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
   m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
   m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
@@ -142,6 +144,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
       .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
       .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
+      .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING)
       .export_values();
 
   pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",

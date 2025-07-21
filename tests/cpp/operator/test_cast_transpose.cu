@@ -47,8 +47,8 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input("input", { N, H }, itype);
-  Tensor output("output", { N, H }, otype, true, true);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor output("output", std::vector<size_t>{ N, H }, otype, true, true);
 
   std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(N * H);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(N * H);

@@ -7,35 +7,43 @@ import jax.numpy as jnp
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
+from typing import Union
 import operator
 
 from utils import (
     assert_allclose,
-    assert_tree_like_allclose,
     pytest_parametrize_wrapper,
 )
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu, _jax_quantize_dact_dbias
-from transformer_engine.jax.cpp_extensions.normalization import _jax_layernorm, _jax_rmsnorm
+from transformer_engine.jax.cpp_extensions.normalization import (
+    _jax_layernorm,
+    _jax_rmsnorm,
+    is_norm_zero_centered_gamma_in_weight_dtype,
+)
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
 )
+from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.quantize import (
     DelayedScaleQuantizer,
     ScaledTensor,
+    ScaledTensor1x,
+    ScaledTensor2x,
+    GroupedScaledTensor1x,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
+    noop_quantizer_set,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -47,13 +55,14 @@ GEMM_CASES = [
 FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(256, 128), (128, 256)]
 DTYPES = [jnp.bfloat16, jnp.float32]
-is_fp8_supported, reason = helper.is_fp8_available()
-is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+is_fp8_supported, fp8_unsupported_reason = helper.is_fp8_available()
+is_mxfp8_supported, mxfp8_unsupported_reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 supported_scaling_modes = []
 """ Find supported scaling modes"""
 if is_fp8_supported:
     supported_scaling_modes.append(ScalingMode.DELAYED_TENSOR_SCALING)
+    supported_scaling_modes.append(ScalingMode.CURRENT_TENSOR_SCALING)
 if is_mxfp8_supported:
     supported_scaling_modes.append(ScalingMode.MXFP8_1D_SCALING)
 
@@ -71,8 +80,19 @@ def is_shape_supported_by_mxfp8(input_shape):
 
 def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
     if isinstance(a, ScaledTensor1x) and isinstance(b, ScaledTensor1x):
+        assert a.scaling_mode == b.scaling_mode
+        assert a.scale_inv.dtype == b.scale_inv.dtype
+        if a.scaling_mode.is_tensor_scaling():
+            # Assert in dq_dtype as some unfused codepaths have an intermediate cast
+            # to an input dtype which reduces precision compared to everything in fp32
+            assert_allclose(a.scale_inv, b.scale_inv, dtype=a.dq_dtype)
+        elif a.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+            # Compare MXFP8 scales as uint8
+            assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+        else:
+            raise ValueError(f"Unsupported scaling mode {a.scaling_mode}")
         assert_allclose(a.data, b.data)
-        assert_allclose(a.scale_inv.astype(jnp.uint8), b.scale_inv.astype(jnp.uint8))
+
     elif isinstance(a, ScaledTensor2x) and isinstance(b, ScaledTensor2x):
         assert_bitwise_scaled_tensors(a.rowwise_tensor, b.rowwise_tensor)
         assert_bitwise_scaled_tensors(a.colwise_tensor, b.colwise_tensor)
@@ -89,10 +109,42 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
     elif isinstance(a, ScaledTensor2x):
-        assert_dequantized_scaled_tensor(a.get_rowwise_tensor(), b)
-        assert_dequantized_scaled_tensor(a.get_colwise_tensor(), b)
+        assert_dequantized_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_scaled_tensor(a.colwise_tensor, b)
     else:
         pytest.fail("a must be a ScaledTensor object")
+
+
+def assert_dequantized_grouped_scaled_tensor(
+    a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
+):
+    if isinstance(a, GroupedScaledTensor1x):
+        assert a.group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        dq_a = a.dequantize()
+        for dq_a_i, b_i in zip(dq_a, b):
+            if len(dq_a_i) == 0:
+                continue
+            if a.data_layout == "T":
+                data_ndim = len(a.original_shape)
+                flatten_axis = a.flatten_axis
+                if b_i.shape[0] == 1:
+                    b_i = jnp.transpose(
+                        b_i, (0, *range(flatten_axis, data_ndim), *range(1, flatten_axis))
+                    )
+                else:
+                    b_i = jnp.transpose(
+                        b_i, (*range(flatten_axis, data_ndim), *range(flatten_axis))
+                    )
+            dq_a_i = dq_a_i.reshape(b_i.shape)
+            assert_allclose(dq_a_i, b_i, dtype=a.data.dtype)
+    elif isinstance(a, ScaledTensor2x):
+        assert isinstance(a.rowwise_tensor, GroupedScaledTensor1x)
+        assert isinstance(a.colwise_tensor, GroupedScaledTensor1x)
+        assert_dequantized_grouped_scaled_tensor(a.rowwise_tensor, b)
+        assert_dequantized_grouped_scaled_tensor(a.colwise_tensor, b)
+    else:
+        pytest.fail("a must be a GroupedScaledTensor object")
 
 
 ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
@@ -155,11 +207,16 @@ class TestActivation:
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
         assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    def test_act_grad_with_delayed_scaling_fp8(self, random_inputs, activation_type, output_type):
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_act_grad_with_tensor_scaling_fp8(
+        self, random_inputs, activation_type, output_type, scaling_mode
+    ):
         x = random_inputs
         x = jnp.expand_dims(x, axis=-2)
         x = jnp.repeat(x, len(activation_type), axis=-2)
@@ -170,7 +227,7 @@ class TestActivation:
         )
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_dtype=output_type,
             q_layout=QuantizeLayout.ROWWISE,
         )
@@ -181,15 +238,18 @@ class TestActivation:
         assert_allclose(prim_out, ref_out, dtype=output_type)
         assert_allclose(prim_grad, ref_grad, dtype=output_type)
 
-    @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_act_forward_with_delayed_scaling_fp8(
-        self, random_inputs, activation_type, output_type, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_act_forward_with_tensor_scaling_fp8(
+        self, random_inputs, activation_type, output_type, q_layout, scaling_mode
     ):
         x = random_inputs
         x = jnp.expand_dims(x, axis=-2)
@@ -198,7 +258,7 @@ class TestActivation:
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
             n_quantizers=2,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_dtype=output_type,
             q_layout=q_layout,
         )
@@ -208,7 +268,7 @@ class TestActivation:
 
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
-    @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
     @pytest_parametrize_wrapper("shape", [(2, 64, 1, 256)])
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
@@ -329,14 +389,26 @@ class TestNorm:
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer=None
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_norm_grad_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_norm_grad_with_tensor_scaling_fp8(
+        self,
+        n,
+        hidden,
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        inp_dtype,
+        out_dtype,
+        q_layout,
+        scaling_mode,
     ):
         """
         Test transformer_engine.jax.layernorm.layernorm
@@ -345,9 +417,7 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
-            q_dtype=out_dtype,
-            q_layout=q_layout,
+            scaling_mode=scaling_mode, q_dtype=out_dtype, q_layout=q_layout
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -395,19 +465,65 @@ class TestNorm:
             )
             ref_mu = None
 
-        assert_bitwise_scaled_tensors(output, ref_out)
+        precise_comparison = True
+
+        if get_cudnn_version() < (9, 10, 0) and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+            # Reduce precision of test as we don't use fused norm below this version CuDNN for MXFP8 and instead
+            # do an unfused norm and quantize with an intermediate cast into in_dtype which can reduce precision
+            precise_comparison = False
+        elif is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode):
+            # Larger tolerances as our JAX implementation _jax_*norm uses the compute dtype float32
+            # for zero-centered gamma always
+            precise_comparison = False
+        elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING and inp_dtype != jnp.float32:
+            # Current implementation of Current Tensor Scaling performs unfused layernorm and quantization
+            # and writes intermediate results into the input dtype, which will slightly reduce precision
+            # if the input dtype is not float32
+            precise_comparison = False
+
+        if precise_comparison:
+            assert_bitwise_scaled_tensors(output, ref_out)
+        else:
+            if isinstance(ref_out, ScaledTensor1x):
+                assert_allclose(output.dequantize(), ref_out.dequantize(), dtype=out_dtype)
+            elif isinstance(ref_out, ScaledTensor2x):
+                assert_allclose(
+                    output.rowwise_tensor.dequantize(),
+                    ref_out.rowwise_tensor.dequantize(),
+                    dtype=out_dtype,
+                )
+                assert_allclose(
+                    output.colwise_tensor.dequantize(),
+                    ref_out.colwise_tensor.dequantize(),
+                    dtype=out_dtype,
+                )
+            else:
+                pytest.fail("Unsupported output type")
+
         assert_allclose(rsigma, ref_rsigma, dtype=inp_dtype)
         if norm_type == "layernorm":
             assert_allclose(mu, ref_mu, dtype=inp_dtype)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_norm_forward_with_delayed_scaling_fp8(
-        self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_norm_forward_with_tensor_scaling_fp8(
+        self,
+        n,
+        hidden,
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        inp_dtype,
+        out_dtype,
+        q_layout,
+        scaling_mode,
     ):
         if norm_type == "rmsnorm" and zero_centered_gamma is True:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
@@ -420,11 +536,11 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             q_layout=q_layout,
         )
 
-    @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
     @pytest.mark.parametrize("out_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     def test_norm_forward_with_block_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype
@@ -447,17 +563,24 @@ QUANTIZE_OUTPUT_DTYPES = {
     "L2": [jnp.float8_e4m3fn, jnp.float8_e5m2],
 }
 
-ALL_QUANTIZE_TEST_SHAPES = [
-    (32, 64),
-    (2, 64, 32),
+ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = [
+    ((32, 64), -1),
+    ((2, 64, 32), -1),
+    ((64, 2, 32), -2),
+    ((32, 256, 128), -1),
+    ((32, 256, 128), -2),
+    ((64, 32, 32, 256), -1),
+    ((64, 32, 32, 256), -2),
+    ((64, 32, 32, 256), -3),
 ]
 
-QUANTIZE_TEST_SHAPES = {
+QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES = {
     "L0": [
-        (32, 256, 128),
-        (64, 32, 32, 256),
+        ((32, 64), -1),
+        ((2, 64, 32), -1),
+        ((64, 2, 32), -2),
     ],
-    "L2": ALL_QUANTIZE_TEST_SHAPES,
+    "L2": ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES,
 }
 
 QUANTIZATION_INPUT_DTYPE = {
@@ -466,12 +589,11 @@ QUANTIZATION_INPUT_DTYPE = {
 }
 
 
-@pytest.mark.skipif(not is_fp8_supported, reason=reason)
+@pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-@pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
+@pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
@@ -489,9 +611,6 @@ class TestQuantize:
             q_dtype=q_dtype,
             q_layout=q_layout,
         )
-        # Adding dimension to test if padding is done correctly when flatten 3D to 2D
-        if flatten_axis == -2:
-            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
 
         n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
@@ -505,8 +624,6 @@ class TestQuantize:
     ):
 
         key = jax.random.PRNGKey(0)
-        if flatten_axis == -2:
-            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
@@ -519,17 +636,71 @@ class TestQuantize:
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
 
+@pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
+@pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
+@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
+@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
+@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+@pytest_parametrize_wrapper("flatten_axis", [-1])
+@pytest_parametrize_wrapper("with_group_sizes", [True, False])
+@pytest_parametrize_wrapper(
+    "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE, QuantizeLayout.COLWISE]
+)
+class TestGroupedQuantize:
+    def test_grouped_qdq(
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+    ):
+        n_groups, m, n = input_shape
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 2)
+
+        # *32 so that the input shapes works for MXFP8
+        input_shape = (m * 32, n)
+
+        if with_group_sizes:
+            group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+            group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+            group_sizes = jnp.diff(group_sizes)
+            assert group_sizes.sum() == m
+            assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
+            group_sizes = group_sizes * 32
+        else:
+            group_sizes = None
+            input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
+
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
+
+        grouped_quantizer = QuantizerFactory.create(
+            scaling_mode=scaling_mode,
+            q_dtype=q_dtype,
+            q_layout=q_layout,
+            n_groups=n_groups,
+        )
+
+        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
+        scaled_tensor = tex.grouped_quantize(
+            x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
+        )
+
+        assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
+
+
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 class TestFusedQuantize:
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("input_shape", QUANTIZE_TEST_SHAPES)
+    @pytest_parametrize_wrapper("input_shape,flatten_axis", QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
     def test_quantize_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, flatten_axis
     ):
@@ -624,28 +795,31 @@ class TestFusedQuantize:
             q_layout=QuantizeLayout.ROWWISE,
         )
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
     @pytest_parametrize_wrapper(
-        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_quantize_dact_dbias_delayed_scaling(
-        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
+    @pytest_parametrize_wrapper(
+        "scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING]
+    )
+    def test_quantize_dact_dbias_tensor_scaling(
+        self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout, scaling_mode
     ):
         self._test_quantize_dact_dbias(
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
+            scaling_mode=scaling_mode,
             activation_type=activation_type,
             is_dbias=is_dbias,
             q_layout=q_layout,
         )
 
-    @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper(
         "input_shape", [s for s in ALL_ACTIVATION_SHAPES if is_shape_supported_by_mxfp8(s)]
@@ -714,7 +888,7 @@ class TestDense:
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
@@ -756,7 +930,7 @@ class TestDense:
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=jnp.bfloat16)
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp.bfloat16)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
@@ -820,7 +994,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 
 
 class TestFusedDense:
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
@@ -830,7 +1004,10 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        ):
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -902,7 +1079,7 @@ class TestFusedDense:
         if beta is not None:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=q_dtype)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
@@ -916,7 +1093,10 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        ):
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -1027,24 +1207,6 @@ class TestFusedDense:
         assert_allclose(prim_x_grad, ref_x_grad, dtype=q_dtype)
 
 
-# This function is modified from transformer_engine/jax/cpp_extensions/gemm.py::_jax_gemm()
-def _quantize_gemm_pair(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer):
-    ((lhs_contract_dim,), (rhs_contract_dim,)) = contracting_dims
-    lhs_is_rowwise = lhs_contract_dim == lhs.ndim - 1
-    rhs_is_rowwise = rhs_contract_dim == rhs.ndim - 1
-    lhs_q = lhs_quantizer.quantize(
-        lhs,
-        is_rowwise=lhs_is_rowwise,
-        is_colwise=not lhs_is_rowwise,
-    )
-    rhs_q = rhs_quantizer.quantize(
-        rhs,
-        is_rowwise=rhs_is_rowwise,
-        is_colwise=not rhs_is_rowwise,
-    )
-    return lhs_q, rhs_q
-
-
 # E5M2 * E5M2 is not supported
 fwd_bwd_dtypes = [
     [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
@@ -1052,218 +1214,215 @@ fwd_bwd_dtypes = [
     [jnp.float8_e5m2, jnp.float8_e4m3fn],
 ]
 
+GROUPED_DENSE_INPUT_SHAPES = [
+    # (n_groups, m, n, k), the actual m will be multiplied by 32
+    (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
+    (8, 64, 32, 128),
+    (8, 64, 128, 256),
+]
 
-@pytest_parametrize_wrapper(
-    "shape_list", [[(512, 128, 256), (256, 128, 256), (256, 128, 128), (512, 256, 128)]]
-)
+
+@pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
-    def _ref_grouped_gemm_with_jnp_dot(self, lhs_list, rhs_list, contracting_dims_list):
-        ref_out_list = []
-        for lhs, rhs, contracting_dims in zip(lhs_list, rhs_list, contracting_dims_list):
-            dim_nums = (contracting_dims, ((), ()))
-            ref_out_list.append(jax.lax.dot_general(lhs, rhs, dim_nums))
-        return ref_out_list
+    def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
+        lhs_contract_dim, _ = contracting_dims
+        assert len(lhs_contract_dim) == 1 and lhs.ndim == 2 and rhs.ndim == 3
+        if bias is None:
+            bias = jnp.zeros((rhs.shape[0], rhs.shape[2]), dtype=lhs.dtype)
+        else:
+            assert bias.ndim == 2 and bias.shape == (rhs.shape[0], rhs.shape[2])
+        remaining_axis = (set(range(lhs.ndim)) - set(lhs_contract_dim)).pop()
+        lhs = jnp.split(lhs, jnp.cumulative_sum(group_sizes)[:-1], axis=remaining_axis)
+        rhs = jnp.split(rhs, rhs.shape[0], axis=0)
+        bias = jnp.split(bias, bias.shape[0], axis=0)
+        ref_out = []
+        dim_num = (contracting_dims, ((), ()))
+        for lhs_i, rhs_i, bias_i in zip(lhs, rhs, bias):
+            out_i = jax.lax.dot_general(lhs_i, rhs_i, dim_num) + jnp.expand_dims(bias_i, axis=0)
+            ref_out.append(jnp.squeeze(out_i))
+        return ref_out
 
-    def _generate_grouped_gemm_input(self, dtype, shape_list, layout_list):
+    def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
         key = jax.random.PRNGKey(0)
-        subkeys = jax.random.split(key, len(shape_list) * 2)
+        subkeys = jax.random.split(key, 4)
+        n_groups, m, n, k = input_shape
 
-        lhs_list, rhs_list, contracting_dims_list = [], [], []
-        for i, ((m, n, k), data_layout) in enumerate(zip(shape_list, layout_list)):
-            lhs = jax.random.uniform(
-                subkeys[2 * i],
-                (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
-                dtype=dtype,
-            )
-            rhs = jax.random.uniform(
-                subkeys[2 * i + 1],
-                (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
-                dtype=dtype,
-            )
-            lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
-            rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
-            contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+        group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
+        group_sizes = jnp.concatenate([jnp.array([0]), group_sizes, jnp.array([m])])
+        group_sizes = jnp.diff(group_sizes)
+        # Make one empty input lhs to test empty GEMM handling
+        group_sizes = group_sizes.at[0].set(group_sizes[0] + group_sizes[1])
+        group_sizes = group_sizes.at[1].set(0)
+        assert group_sizes.sum() == m
 
-            lhs_list.append(lhs)
-            rhs_list.append(rhs)
-            contracting_dims_list.append(contracting_dims)
+        # *32 to make sure that input shape works for MXFP8
+        group_sizes = group_sizes * 32
+        m = m * 32
 
-        return lhs_list, rhs_list, contracting_dims_list
+        lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
+        rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
+        bias_shape = (n_groups, n)
+
+        lhs = jax.random.uniform(subkeys[1], lhs_shape, dtype=dtype)
+        rhs = jax.random.uniform(subkeys[2], rhs_shape, dtype=dtype)
+        bias = jax.random.uniform(subkeys[3], bias_shape, dtype=dtype) if with_bias else None
+
+        lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+        rhs_contracting_dim = (1,) if data_layout[1] == "N" else (2,)
+        contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+
+        return lhs, rhs, group_sizes, contracting_dims, bias
+
+    def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
+        assert out.dtype == ref_list[0].dtype
+        out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
+        for i in range(len(ref_list)):
+            assert_allclose(out_list[i], ref_list[i], dtype=dtype)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    @pytest_parametrize_wrapper("layout_list", [["NN", "TN", "NT", "TT"]])
-    def test_grouped_gemm_fp16(self, dtype, shape_list, layout_list):
-        lhs_list, rhs_list, contracting_dims_list = self._generate_grouped_gemm_input(
-            dtype, shape_list, layout_list
+    @pytest_parametrize_wrapper("layout", ["NN"])
+    def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            dtype, input_shape, layout
         )
-        ref_out = self._ref_grouped_gemm_with_jnp_dot(lhs_list, rhs_list, contracting_dims_list)
-        primitive_out = tex.grouped_gemm(lhs_list, rhs_list, contracting_dims_list)
-        for i in range(len(shape_list)):
-            assert_allclose(primitive_out[i], ref_out[i], dtype=dtype)
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
+        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
+        # disable cudaGraph, then use the following jitted function
+
+        # jitting grouped_gemm
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+        #     lhs, rhs, group_sizes, contracting_dims,
+        # )
+
+        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("layout_list", [["NN", "TN", "NT", "TT"]])
-    def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list, layout_list):
+    @pytest_parametrize_wrapper("layout", ["NN"])
+    def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=False
+            scaling_mode=scaling_mode,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=False,
+            n_groups=input_shape[0],
         )
+
+        # quantizer_set.{x, kernel} has fwd_dtype, while quantizer_set.grad has bwd_dtype
+        # We want to test E4M3 * E5M2, manually set the quantizer_set.kernel.q_dtype to bwd_dtype
+        quantizer_set.kernel.q_dtype = bwd_dtype
+        for quantizer in quantizer_set.kernel.quantizers:
+            quantizer.q_dtype = bwd_dtype
 
         out_dtype = jnp.bfloat16
-        lhs_list, rhs_list, contracting_dims_list = self._generate_grouped_gemm_input(
-            out_dtype, shape_list, layout_list
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            out_dtype, input_shape, layout
         )
-        q_lhs_list = []
-        q_rhs_list = []
-        for lhs, rhs, contracting_dims in zip(lhs_list, rhs_list, contracting_dims_list):
-            # quantizer_set.x and quantizer_set.kernel have the same q_dtype, we want to
-            # test the case where lhs and rhs have different q_dtypes
-            q_lhs, q_rhs = _quantize_gemm_pair(
-                lhs, rhs, contracting_dims, quantizer_set.x, quantizer_set.dgrad
-            )
-            q_lhs_list.append(q_lhs)
-            q_rhs_list.append(q_rhs)
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        ref_out = self._ref_grouped_gemm_with_jnp_dot(lhs_list, rhs_list, contracting_dims_list)
-        primitive_out = tex.grouped_gemm(q_lhs_list, q_rhs_list, contracting_dims_list)
+        # jitting grouped_gemm
+        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
+        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        #         )
+
+        prim_out = tex.grouped_gemm(
+            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        )
 
         allclose_dtype = jnp.float8_e4m3fn
-        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
+        if jnp.float8_e5m2 in fwd_bwd_dtype:
             allclose_dtype = jnp.float8_e5m2
-        for i in range(len(shape_list)):
-            assert_allclose(primitive_out[i], ref_out[i], dtype=allclose_dtype)
+
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, allclose_dtype)
+
+    def _ref_sum_grouped_dense(self, x, kernel, bias, group_sizes, contracting_dims):
+        out_list = self._ref_grouped_dense(x, kernel, bias, group_sizes, contracting_dims)
+        # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
+        # and prevent them from being clamp to zero in FP8. / sqrt(x.size) is used to
+        # normalize the output and prevent the gradient from being too large for FP8.
+        out_sum_list = [jnp.sum(out) for out in out_list]
+        return jnp.sum(jnp.asarray(out_sum_list)) / jnp.sqrt(x.size)
+
+    def _primitive_sum_grouped_dense(
+        self, x, kernel, bias, group_sizes, contracting_dims, quantizer_set=noop_quantizer_set
+    ):
+        out = grouped_dense(
+            x, kernel, group_sizes, contracting_dims, bias=bias, quantizer_set=quantizer_set
+        )
+        return jnp.sum(jnp.asarray(out)) / jnp.sqrt(x.size)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    def test_grouped_dense_grad_fp16(self, dtype, shape_list):
-        group_size = len(shape_list)
-        layout_list = ["NN" for _ in range(group_size)]
-
-        x_list, kernel_list, contracting_dims_list = self._generate_grouped_gemm_input(
-            dtype, shape_list, layout_list
-        )
-        bias_list = []
-        key = jax.random.PRNGKey(1)
-        for shape in shape_list:
-            n = shape[1]
-            bias = jax.random.uniform(key, n, dtype=dtype)
-            bias_list.append(bias)
-
-        def ref_func(x_list, kernel_list, bias_list, contracting_dims_list):
-            out_list = []
-            for i in range(len(x_list)):
-                out_list.append(
-                    dense(
-                        x_list[i],
-                        kernel_list[i],
-                        bias_list[i],
-                        contracting_dims=contracting_dims_list[i],
-                    )
-                )
-            # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
-            # and prevent them from being clamp to zero
-            out_sum_list = [jnp.sum(out) for out in out_list]
-            return jnp.sum(jnp.asarray(out_sum_list))
-
-        def primitive_func(x_list, kernel_list, bias_list, contracting_dims_list):
-            out_list = grouped_dense(x_list, kernel_list, bias_list, contracting_dims_list)
-            out_sum_list = [jnp.sum(out) for out in out_list]
-            return jnp.sum(jnp.asarray(out_sum_list))
-
-        value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
-        value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
-
-        ref_out_mean, (ref_dgrad_list, ref_wgrad_list, ref_dbias_list) = value_n_grad_ref_func(
-            x_list, kernel_list, bias_list, contracting_dims_list
-        )
-        primitive_out_mean, (primitive_dgrad_list, primitive_wgrad_list, primitive_dbias_list) = (
-            value_n_grad_primitive_func(x_list, kernel_list, bias_list, contracting_dims_list)
+    def test_grouped_dense_grad_fp16(self, dtype, input_shape):
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype,
+            input_shape,
+            with_bias=True,
         )
 
-        assert_allclose(primitive_out_mean, ref_out_mean, dtype=dtype)
-        for i in range(group_size):
-            assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=dtype)
-            assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=dtype)
-            assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=dtype)
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+        # jitting the grouped_dense
+        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
+        #                              static_argnums=(4,))
+        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
 
-    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims
+        )
+
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=dtype)
+        assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
+    @pytest.mark.parametrize(
+        "fwd_bwd_dtype",
+        [(jnp.float8_e4m3fn, jnp.float8_e4m3fn), (jnp.float8_e4m3fn, jnp.float8_e5m2)],
+    )
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list):
-        group_size = len(shape_list)
-        layout_list = ["NN" for _ in range(group_size)]
+    def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
-        if fwd_dtype == jnp.float8_e5m2:
-            pytest.skip("We never use E5M2 for fwd_dtype in training")
-
-        # Question: should we use different quantizers for different groups?
-        ref_quantizer_set_list = []
-        quantizer_set_list = []
-        for _ in range(group_size):
-            ref_quantizer_set = QuantizerFactory.create_set(
-                scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=True
-            )
-            ref_quantizer_set_list.append(ref_quantizer_set)
-            quantizer_set = QuantizerFactory.create_set(
-                scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=True
-            )
-            quantizer_set_list.append(quantizer_set)
-
-        out_dtype = jnp.bfloat16
-        x_list, kernel_list, contracting_dims_list = self._generate_grouped_gemm_input(
-            out_dtype, shape_list, layout_list
-        )
-        bias_list = []
-        key = jax.random.PRNGKey(1)
-        for shape in shape_list:
-            n = shape[1]
-            bias = jax.random.uniform(key, n, dtype=out_dtype)
-            bias_list.append(bias)
-
-        def ref_func(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
-            out_list = []
-            for i in range(len(x_list)):
-                out_list.append(
-                    dense(
-                        x_list[i],
-                        kernel_list[i],
-                        bias_list[i],
-                        contracting_dims=contracting_dims_list[i],
-                        quantizer_set=quantizer_set_list[i],
-                    )
-                )
-            # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
-            # and prevent them from being clamp to zero
-            out_sum_list = [jnp.sum(out) for out in out_list]
-            return jnp.sum(jnp.asarray(out_sum_list))
-
-        def primitive_func(
-            x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
-        ):
-            out_list = grouped_dense(
-                x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
-            )
-            out_sum_list = [jnp.sum(out) for out in out_list]
-            return jnp.sum(jnp.asarray(out_sum_list))
-
-        value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
-        value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
-
-        ref_out_mean, (ref_dgrad_list, ref_wgrad_list, ref_dbias_list) = value_n_grad_ref_func(
-            x_list, kernel_list, bias_list, contracting_dims_list, ref_quantizer_set_list
-        )
-        primitive_out_mean, (primitive_dgrad_list, primitive_wgrad_list, primitive_dbias_list) = (
-            value_n_grad_primitive_func(
-                x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
-            )
+        dtype = jnp.bfloat16
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+            dtype,
+            input_shape,
+            with_bias=True,
         )
 
-        allclose_dtype = jnp.float8_e4m3fn
-        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
-            allclose_dtype = jnp.float8_e5m2
-        assert_allclose(primitive_out_mean, ref_out_mean, dtype=allclose_dtype)
-        for i in range(group_size):
-            assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=allclose_dtype)
-            assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=allclose_dtype)
-            assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=allclose_dtype)
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=scaling_mode,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=True,
+            n_groups=group_sizes.size,
+        )
+        value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
+
+        # jitting the grouped_dense
+        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
+        #                              static_argnums=(4,))
+        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+
+        ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
+            x,
+            kernel,
+            bias,
+            group_sizes,
+            contracting_dims,
+        )
+        prim_out_sum, (prim_dgrad, prim_wgrad, prim_dbias) = value_n_grad_prim_func(
+            x, kernel, bias, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        )
+
+        assert_allclose(prim_out_sum, ref_out_sum, dtype=fwd_dtype)
+        assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
+        assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
+        assert_allclose(prim_dbias, ref_dbias, dtype=dtype)

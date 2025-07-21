@@ -32,8 +32,10 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
   auto dbias_tensor = makeTransformerEngineTensor(dbias);
   // Query workspace size and allocate workspace
   transformer_engine::TensorWrapper workspace;
-  nvte_quantize_dbias(input_tensor.data(), out_tensor.data(), dbias_tensor.data(), workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_dbias(input_tensor.data(), out_tensor.data(), dbias_tensor.data(),
+                        workspace.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   void* workspace_data_ptr = nullptr;
   if (workspace.shape().ndim > 0) {
@@ -46,7 +48,9 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
   if (detail::IsFloat8CurrentScalingQuantizers(py_quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer.get());
-    nvte_compute_amax(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_amax(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+    });
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
@@ -61,12 +65,17 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
     QuantizationConfigWrapper quant_config;
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(out_tensor.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_scale_from_amax(out_tensor.data(), quant_config,
+                                   at::cuda::getCurrentCUDAStream());
+    });
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     out_tensor.set_amax(nullptr, DType::kFloat32, out_tensor.defaultShape);
   }
-  nvte_quantize_dbias(input_tensor.data(), out_tensor.data(), dbias_tensor.data(), workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_quantize_dbias(input_tensor.data(), out_tensor.data(), dbias_tensor.data(),
+                        workspace.data(), at::cuda::getCurrentCUDAStream());
+  });
 
   return {py::cast(dbias), out};
 }

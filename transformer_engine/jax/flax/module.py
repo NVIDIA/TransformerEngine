@@ -11,7 +11,6 @@ from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 import numpy as np
 import jax.numpy as jnp
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
@@ -65,6 +64,7 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
 
 
 def _create_layernorm_parameters(
+    module,
     norm_type,
     shape,
     scale_init,
@@ -74,13 +74,21 @@ def _create_layernorm_parameters(
     input_dtype,
     dtype,
 ):
-    scale = nn_partitioning.param_with_axes("scale", scale_init, shape, dtype, axes=scale_axes)
-    scale = scale.astype(input_dtype)
+    scale = module.param(
+        "scale",
+        nn.with_logical_partitioning(scale_init, scale_axes),
+        shape,
+        dtype,
+    ).astype(input_dtype)
 
     norm_type = canonicalize_norm_type(norm_type)
     if norm_type == "layernorm":
-        bias = nn_partitioning.param_with_axes("ln_bias", bias_init, shape, dtype, axes=bias_axes)
-        bias = jnp.asarray(bias, input_dtype)
+        bias = module.param(
+            "ln_bias",
+            nn.with_logical_partitioning(bias_init, bias_axes),
+            shape,
+            dtype,
+        ).astype(input_dtype)
     else:
         assert norm_type == "rmsnorm"
         bias = None
@@ -308,6 +316,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
 
         features = x.shape[-1]
         scale, ln_bias = _create_layernorm_parameters(
+            self,
             self.layernorm_type,
             (features,),
             self.scale_init,
@@ -467,16 +476,22 @@ class DenseGeneral(TransformerEngineBase):
                 "Expected len(kernel_shape) to match len(kernel_axes),"
                 f"got kernel_shape {kernel_shape} and kernel_axes {self.kernel_axes}"
             )
-        kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
+        kernel = self.param(
+            "kernel",
+            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+            kernel_shape,
+            self.dtype,
         )
 
         if not QuantizeConfig.is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
+            bias = self.param(
+                "bias",
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes),
+                features,
+                self.dtype,
             ).astype(input_dtype)
         else:
             bias = None
@@ -499,25 +514,21 @@ class DenseGeneral(TransformerEngineBase):
                 self.low_rank_adaptation_dim,
             )
             lora_a_kernel_axes = (None,) * len(lora_a_kernel_shape)
-            lora_a_kernel = nn_partitioning.param_with_axes(
+            lora_a_kernel = self.param(
                 "lora_a_kernel",
-                self.kernel_init,
+                nn.with_logical_partitioning(self.kernel_init, lora_a_kernel_axes),
                 lora_a_kernel_shape,
                 self.dtype,
-                axes=lora_a_kernel_axes,
-            )
-            lora_a_kernel = lora_a_kernel.astype(input_dtype)
+            ).astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
-            lora_b_kernel = nn_partitioning.param_with_axes(
+            lora_b_kernel = self.param(
                 "lora_b_kernel",
-                nn.initializers.zeros,
+                nn.with_logical_partitioning(nn.initializers.zeros, lora_b_kernel_axes),
                 lora_b_kernel_shape,
                 self.dtype,
-                axes=lora_b_kernel_axes,
-            )
-            lora_b_kernel = lora_b_kernel.astype(input_dtype)
+            ).astype(input_dtype)
 
             y += _apply_low_rank_adaptation(
                 inputs, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -695,6 +706,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
             features = inputs.shape[-1]
             scale, ln_bias = _create_layernorm_parameters(
+                self,
                 self.layernorm_type,
                 (features,),
                 self.scale_init,
@@ -730,8 +742,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         axis = _normalize_axes(axis, y.ndim)
 
         kernel_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
-        kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
+        kernel = self.param(
+            "kernel",
+            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+            kernel_shape,
+            self.dtype,
         )
         if not QuantizeConfig.is_fp8_enabled():
             kernel = kernel.astype(input_dtype)
@@ -770,25 +785,21 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 self.low_rank_adaptation_dim,
             )
             lora_a_kernel_axes = (None,) * len(lora_a_kernel_shape)
-            lora_a_kernel = nn_partitioning.param_with_axes(
+            lora_a_kernel = self.param(
                 "lora_a_kernel",
-                self.kernel_init,
+                nn.with_logical_partitioning(self.kernel_init, lora_a_kernel_axes),
                 lora_a_kernel_shape,
                 self.dtype,
-                axes=lora_a_kernel_axes,
-            )
-            lora_a_kernel = lora_a_kernel.astype(input_dtype)
+            ).astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
-            lora_b_kernel = nn_partitioning.param_with_axes(
+            lora_b_kernel = self.param(
                 "lora_b_kernel",
-                nn.initializers.zeros,
+                nn.with_logical_partitioning(nn.initializers.zeros, lora_b_kernel_axes),
                 lora_b_kernel_shape,
                 self.dtype,
-                axes=lora_b_kernel_axes,
-            )
-            lora_b_kernel = lora_b_kernel.astype(input_dtype)
+            ).astype(input_dtype)
 
             z += _apply_low_rank_adaptation(
                 y, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -796,8 +807,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 
         bias = None
         if self.use_bias:
-            bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
+            bias = self.param(
+                "bias",
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes),
+                features,
+                self.dtype,
             ).astype(input_dtype)
 
         if bias is not None:
@@ -1028,6 +1042,7 @@ class LayerNormMLP(TransformerEngineBase):
             features = inputs.shape[-1]
 
             scale, ln_bias = _create_layernorm_parameters(
+                self,
                 self.layernorm_type,
                 (features,),
                 self.scale_init,
@@ -1067,14 +1082,13 @@ class LayerNormMLP(TransformerEngineBase):
         axis = _canonicalize_tuple(self.axis)
         axis = _normalize_axes(axis, y.ndim)
         kernel_1_each_shape = (np.prod([inputs.shape[ax] for ax in axis]), self.intermediate_dim)
-        kernel_1 = nn_partitioning.param_with_axes(
+        kernel_1 = self.param(
             "wi_kernel",
-            kernel_1_init,
+            nn.with_logical_partitioning(kernel_1_init, self.kernel_axes_1),
             num_activations,
             -2,
             kernel_1_each_shape,
             self.dtype,
-            axes=self.kernel_axes_1,
         )
 
         if not QuantizeConfig.is_fp8_enabled():
@@ -1083,12 +1097,11 @@ class LayerNormMLP(TransformerEngineBase):
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
-        kernel_2 = nn_partitioning.param_with_axes(
+        kernel_2 = self.param(
             "wo_kernel",
-            self.kernel_init,
+            nn.with_logical_partitioning(self.kernel_init, self.kernel_axes_2),
             kernel_2_shape,
             self.dtype,
-            axes=self.kernel_axes_2,
         )
         if not QuantizeConfig.is_fp8_enabled():
             kernel_2 = kernel_2.astype(input_dtype)
@@ -1097,21 +1110,19 @@ class LayerNormMLP(TransformerEngineBase):
 
         if self.use_bias:
             bias_1_shape = (num_activations, self.intermediate_dim)
-            bias_1 = nn_partitioning.param_with_axes(
+            bias_1 = self.param(
                 "wi_bias",
-                self.bias_init,
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes_1),
                 bias_1_shape,
                 self.dtype,
-                axes=self.bias_axes_1,
             ).astype(input_dtype)
 
             bias_2_shape = (hidden_size,)
-            bias_2 = nn_partitioning.param_with_axes(
+            bias_2 = self.param(
                 "wo_bias",
-                self.bias_init,
+                nn.with_logical_partitioning(self.bias_init, self.bias_axes_2),
                 bias_2_shape,
                 self.dtype,
-                axes=self.bias_axes_2,
             ).astype(input_dtype)
         else:
             bias_1 = None
@@ -1168,11 +1179,15 @@ class LayerNormMLP(TransformerEngineBase):
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
-            dot_1_output_axes = (
-                *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                *get_non_contracting_logical_axes(kernel_1.ndim, self.kernel_axes_1, contract_ind),
-            )
-            x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
+
+            if self.dot_1_input_axes is not None and self.kernel_axes_1 is not None:
+                dot_1_output_axes = (
+                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
+                    *get_non_contracting_logical_axes(
+                        kernel_1.ndim, self.kernel_axes_1, contract_ind
+                    ),
+                )
+                x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (
@@ -1180,16 +1195,14 @@ class LayerNormMLP(TransformerEngineBase):
                     self.low_rank_adaptation_dim,
                 )
                 wi_lora_a_kernel_axes = (None,) * len(wi_lora_a_kernel_each_shape + 1)
-                wi_lora_a_kernel = nn_partitioning.param_with_axes(
+                wi_lora_a_kernel = self.param(
                     "wi_lora_a_kernel",
-                    kernel_1_init,
+                    nn.with_logical_partitioning(kernel_1_init, wi_lora_a_kernel_axes),
                     num_activations,
                     -2,
                     wi_lora_a_kernel_each_shape,
                     self.dtype,
-                    axes=wi_lora_a_kernel_axes,
-                )
-                wi_lora_a_kernel = wi_lora_a_kernel.astype(input_dtype)
+                ).astype(input_dtype)
 
                 wi_lora_b_kernel_shape = (
                     num_activations,
@@ -1197,14 +1210,12 @@ class LayerNormMLP(TransformerEngineBase):
                     self.intermediate_dim,
                 )
                 wi_lora_b_kernel_axes = (None,) * len(wi_lora_b_kernel_shape)
-                wi_lora_b_kernel = nn_partitioning.param_with_axes(
+                wi_lora_b_kernel = self.param(
                     "wi_lora_b_kernel",
-                    nn.initializers.zeros,
+                    nn.with_logical_partitioning(nn.initializers.zeros, wi_lora_b_kernel_axes),
                     wi_lora_b_kernel_shape,
                     self.dtype,
-                    axes=wi_lora_b_kernel_axes,
-                )
-                wi_lora_b_kernel = wi_lora_b_kernel.astype(input_dtype)
+                ).astype(input_dtype)
 
                 x += _apply_low_rank_adaptation(
                     y,
@@ -1253,25 +1264,21 @@ class LayerNormMLP(TransformerEngineBase):
             if self.enable_low_rank_adaptation:
                 wo_lora_a_kernel_shape = (self.intermediate_dim, self.low_rank_adaptation_dim)
                 wo_lora_a_kernel_axes = (None,) * len(wo_lora_a_kernel_shape)
-                wo_lora_a_kernel = nn_partitioning.param_with_axes(
+                wo_lora_a_kernel = self.param(
                     "wo_lora_a_kernel",
-                    self.kernel_init,
+                    nn.with_logical_partitioning(self.kernel_init, wo_lora_a_kernel_axes),
                     wo_lora_a_kernel_shape,
                     self.dtype,
-                    axes=wo_lora_a_kernel_axes,
-                )
-                wo_lora_a_kernel = wo_lora_a_kernel.astype(input_dtype)
+                ).astype(input_dtype)
 
                 wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
                 wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
-                wo_lora_b_kernel = nn_partitioning.param_with_axes(
+                wo_lora_b_kernel = self.param(
                     "wo_lora_b_kernel",
-                    nn.initializers.zeros,
+                    nn.with_logical_partitioning(nn.initializers.zeros, wo_lora_b_kernel_axes),
                     wo_lora_b_kernel_shape,
                     self.dtype,
-                    axes=wo_lora_b_kernel_axes,
-                )
-                wo_lora_b_kernel = wo_lora_b_kernel.astype(input_dtype)
+                ).astype(input_dtype)
 
                 out += _apply_low_rank_adaptation(
                     z,

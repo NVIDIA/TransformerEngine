@@ -18,159 +18,16 @@
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
+#include "test_normalization.h"
 
 using namespace transformer_engine;
 using namespace test;
 
 namespace {
 
-enum NormType {
-  LayerNorm,
-  RMSNorm
-};
-
-std::map<NormType, std::string> normToString = {
-  {NormType::LayerNorm, "LayerNorm"},
-  {NormType::RMSNorm, "RmsNorm"}
-};
-
-template <typename InputType>
-void compute_ref_stats(NormType norm_type,
-                       const InputType *data, float *mu, float *rsigma,
-                       const size_t N, const size_t H, const double epsilon){
-  using compute_t = float;
-  compute_t current, m;
-  for (size_t i = 0; i < N; ++i) {
-    compute_t sum = 0;
-    for (size_t j = 0; j < H; ++j) {
-      sum += static_cast<compute_t>(data[i * H + j]);
-    }
-    if (norm_type == LayerNorm){
-      mu[i] = sum / H;
-      m = mu[i];
-    } else { m = 0;}
-
-    compute_t sum_sq = 0;
-    for (size_t j = 0; j < H; ++j) {
-      current = static_cast<compute_t>(data[i * H + j]);
-      sum_sq += (current - m) * (current - m);
-    }
-    rsigma[i] = rsqrtf((sum_sq / H) + epsilon);
-  }
-}
-
-// For now, cudnn does static_cast<compute_t>(gamma + static_cast<input_t>(1.0))
-// This will be changed in the future release
-template <typename InputType>
-inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn){
-
-  using compute_t = float;
-  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
-    compute_t g = static_cast<compute_t>(gamma);
-    if (zero_centered_gamma) {
-      g += static_cast<compute_t>(1.f);
-    }
-    return g;
-  } else {
-    if (use_cudnn){
-      compute_t g = static_cast<compute_t>(0.f);
-      InputType gi = gamma;
-      if (zero_centered_gamma) {
-        gi = gi + static_cast<InputType>(1.f);
-      }
-      g = static_cast<compute_t>(gi);
-      return g;
-    } else {
-      compute_t g = static_cast<compute_t>(gamma);
-      if (zero_centered_gamma) {
-        g += static_cast<compute_t>(1.f);
-      }
-      return g;
-    }
-  }
-}
-
-template <typename InputType, typename OutputType>
-void compute_ref_output(NormType norm_type,
-                        const InputType *data, const InputType *gamma, const InputType *beta,
-                        OutputType* output,
-                        const float *mu, const float *rsigma,
-                        const size_t N, const size_t H,
-                        float *amax, float scale, const bool zero_centered_gamma, const bool use_cudnn) {
-  using compute_t = float;
-  compute_t current_max = -1e100;
-  for (size_t i = 0; i < N; ++i) {
-    for (size_t j = 0; j < H; ++j) {
-      compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-
-      compute_t tmp;
-      if (norm_type == LayerNorm) {
-        tmp = (current - mu[i]) * rsigma[i] * g + static_cast<compute_t>(beta[j]);
-      } else { // RMSNorm
-        tmp = current * rsigma[i] * g;
-      }
-
-      output[i * H + j] = static_cast<OutputType>(tmp * scale);
-      current_max = fmaxf(current_max, fabsf(tmp));
-    }
-  }
-  *amax = current_max;
-}
-
-
-template <typename InputType, typename OutputType>
-void compute_ref_backward(const NormType norm_type, const OutputType *output_grad, const InputType *data,
-                          const float *mu, const float *rsigma,
-                          const InputType *gamma,
-                          InputType *data_grad,
-                          InputType *gamma_grad, InputType *beta_grad,
-                          const size_t N, const size_t H,
-                          const bool zero_centered_gamma, const bool use_cudnn) {
-  using compute_t = float;
-  std::vector<compute_t> dgamma(H, 0.f);
-  std::vector<compute_t> dbeta(H, 0.f);
-
-  for (size_t i = 0 ; i < N; ++i) {
-    // Reductions
-    auto local_mu = (norm_type == LayerNorm) ? mu[i] : 0.;
-    compute_t mdy = 0, mdyy = 0;
-    for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-      const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
-      const compute_t dy = g * dz;
-      dgamma[j] += y * dz;
-      if (norm_type == LayerNorm) {
-        dbeta[j] += dz;
-        mdy += dy;
-      }
-      mdyy += dy * y;
-    }
-    mdy /= H;
-    mdyy /= H;
-
-    // Input grads
-    for (size_t j = 0; j < H; ++j) {
-      const compute_t x = static_cast<compute_t>(data[i * H + j]);
-      const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
-      const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
-      const compute_t dy = g * dz;
-      const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
-      data_grad[i * H + j] = static_cast<InputType>(dx);
-    }
-  }
-
-  // Weight grads
-  for (size_t j = 0; j < H; ++j) gamma_grad[j] = static_cast<InputType>(dgamma[j]);
-  if (norm_type == LayerNorm) for (size_t j = 0; j < H; ++j) beta_grad[j] = static_cast<InputType>(dbeta[j]);
-}
-
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
-                 NormType norm_type, bool use_cudnn) {
+                 NormType norm_type, bool use_cudnn, const bool zero_centered_gamma_in_weight_dtype) {
   if (sizeof(InputType) < sizeof(OutputType)) {
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
     return;
@@ -191,16 +48,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
-  Tensor input("input", { N, H }, itype);
-  Tensor z("z", { N, H }, otype);
-  Tensor gamma("gamma", { H }, wtype);
-  Tensor beta("beta", { H }, wtype);
-  Tensor mu("mu", { N }, DType::kFloat32);
-  Tensor rsigma("rsigma", { N }, DType::kFloat32);
-  Tensor dz("dz", { N, H }, wtype);
-  Tensor dx("dx", { N, H }, itype);
-  Tensor dgamma("dgamma", { H }, wtype);
-  Tensor dbeta("dbeta", { H }, wtype);
+  Tensor input("input", std::vector<size_t>{ N, H }, itype);
+  Tensor z("z", std::vector<size_t>{ N, H }, otype);
+  Tensor gamma("gamma", std::vector<size_t>{ H }, wtype);
+  Tensor beta("beta", std::vector<size_t>{ H }, wtype);
+  Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
+  Tensor dz("dz", std::vector<size_t>{ N, H }, wtype);
+  Tensor dx("dx", std::vector<size_t>{ N, H }, itype);
+  Tensor dgamma("dgamma", std::vector<size_t>{ H }, wtype);
+  Tensor dbeta("dbeta", std::vector<size_t>{ H }, wtype);
   Tensor workspace_fwd, workspace_bwd;
 
   fillUniform(&input);
@@ -219,9 +76,22 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
+  if ((!use_cudnn || !zero_centered_gamma) && zero_centered_gamma_in_weight_dtype) {
+    // Skip duplicate tests when zero_centered_gamma_in_weight_dtype is true and won't affect the implementation
+    GTEST_SKIP() << "Zero-centered gamma in weight dtype is only supported with cuDNN backend";
+  }
+
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);
+
+
+    // Zero-centered gamma in weight dtype only supported by CuDNN backend currently
+    if (zero_centered_gamma_in_weight_dtype) {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(true);
+    } else {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+    }
   }
 
   // Forward kernel
@@ -269,6 +139,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(false);
     nvte_enable_cudnn_norm_bwd(false);
+
+    // Zero-centered gamma in weight dtype only supported by CuDNN backend currently
+    if (zero_centered_gamma_in_weight_dtype) {
+      nvte_enable_zero_centered_gamma_in_weight_dtype(false);
+    }
   }
 
   // Reference implementations
@@ -289,14 +164,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      &ref_amax,
                      ref_scale,
                      zero_centered_gamma,
-                     use_cudnn);
+                     use_cudnn,
+                     zero_centered_gamma_in_weight_dtype);
   compute_ref_backward(norm_type, dz.rowwise_cpu_dptr<WeightType>(),
                        input.rowwise_cpu_dptr<InputType>(),
                        mu.rowwise_cpu_dptr<float>(), rsigma.rowwise_cpu_dptr<float>(),
                        gamma.rowwise_cpu_dptr<WeightType>(),
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(),
                        N, H, zero_centered_gamma,
-                       use_cudnn);
+                       use_cudnn,
+                       zero_centered_gamma_in_weight_dtype);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -341,6 +218,7 @@ NormType,
 transformer_engine::DType,
                                                                transformer_engine::DType,
                                                                std::pair<size_t, size_t>,
+                                                               bool,
                                                                bool>> {};
 
 TEST_P(NormTestSuite, TestNorm) {
@@ -353,10 +231,11 @@ TEST_P(NormTestSuite, TestNorm) {
     const DType output_type = std::get<3>(GetParam());
     const auto size = std::get<4>(GetParam());
     const bool zero_centered_gamma = std::get<5>(GetParam());
+    const bool cudnn_zero_centered_gamm_in_weight_dtype = std::get<6>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, use_cudnn);
+        performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, use_cudnn, cudnn_zero_centered_gamm_in_weight_dtype);
       );
     );
 }
@@ -370,6 +249,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
+    ::testing::Values(false, true),
     ::testing::Values(false, true)),
   [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
@@ -380,6 +260,7 @@ INSTANTIATE_TEST_SUITE_P(
       test::typeName(std::get<3>(info.param)) + "X" +
       std::to_string(std::get<4>(info.param).first) + "X" +
       std::to_string(std::get<4>(info.param).second) + "X" +
-      std::to_string(std::get<5>(info.param));
+      std::to_string(std::get<5>(info.param)) + "X" +
+      std::to_string(std::get<6>(info.param));
     return name;
   });
