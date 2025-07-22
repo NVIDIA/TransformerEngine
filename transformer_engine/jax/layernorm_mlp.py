@@ -345,7 +345,7 @@ def _layernorm_mlp_fwd_rule(
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    sequence_dim = get_sequence_parallel_dim(norm_input_axes, x_contracting_dims, (x_bdim, ))
+    sequence_dim = get_sequence_parallel_dim(norm_input_axes, x_contracting_dims, (x_bdim,))
     dot_2_output = tex.gemm(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),

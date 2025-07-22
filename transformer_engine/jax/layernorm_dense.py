@@ -325,7 +325,7 @@ def _layernorm_dense_bwd_rule(
     )
 
     # NT GEMM
-    sequence_dim = get_sequence_parallel_dim(input_axes, x_contracting_dims_in_fwd, (x_bdim, ))
+    sequence_dim = get_sequence_parallel_dim(input_axes, x_contracting_dims_in_fwd, (x_bdim,))
     dgrad = tex.gemm(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel,

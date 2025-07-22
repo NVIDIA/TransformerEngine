@@ -73,8 +73,15 @@ def dense(
             output += jnp.reshape(bias, bias_new_shape)
     else:
         output = _dense(
-            x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first,
-            sequence_parallel_output, quantizer_set
+            x,
+            kernel,
+            bias,
+            contracting_dims,
+            input_axes,
+            kernel_axes,
+            batch_first,
+            sequence_parallel_output,
+            quantizer_set,
         )
     return output
 
@@ -89,7 +96,7 @@ def _dense(
     kernel_axes,
     batch_first,
     sequence_parallel_output,
-    quantizer_set
+    quantizer_set,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
 
@@ -112,8 +119,15 @@ def _dense(
         Transformed output tensor
     """
     output, _ = _dense_fwd_rule(
-        x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first,
-        sequence_parallel_output, quantizer_set
+        x,
+        kernel,
+        bias,
+        contracting_dims,
+        input_axes,
+        kernel_axes,
+        batch_first,
+        sequence_parallel_output,
+        quantizer_set,
     )
     return output
 
@@ -127,7 +141,7 @@ def _dense_fwd_rule(
     kernel_axes,
     batch_first,
     sequence_parallel_output,
-    quantizer_set
+    quantizer_set,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -249,7 +263,7 @@ def _dense_bwd_rule(
     )
 
     # Get sequence-parallel dimension of the FWD input (if it exists)
-    sequence_dim = get_sequence_parallel_dim(input_axes, fwd_x_contracting_dims, (x_bdim, ))
+    sequence_dim = get_sequence_parallel_dim(input_axes, fwd_x_contracting_dims, (x_bdim,))
     dgrad = tex.gemm(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,

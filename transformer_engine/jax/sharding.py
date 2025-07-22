@@ -118,6 +118,7 @@ def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
     if with_flax_rules:
         try:
             import flax
+
             rules = dict(flax.linen.get_logical_axis_rules())
         except ImportError:
             pass

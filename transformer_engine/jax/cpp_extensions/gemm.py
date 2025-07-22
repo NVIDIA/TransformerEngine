@@ -182,7 +182,10 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
-        del sequence_parallel_output, sequence_dim,
+        del (
+            sequence_parallel_output,
+            sequence_dim,
+        )
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -609,8 +612,10 @@ class GemmPrimitive(BasePrimitive):
         if reduce_output:
             # When reducing GEMM output, require non-batched non-contracting dims of the RHS
             # operand to be unsharded (i.e. FSDP)
-            rhs_specs = tuple(None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
-                              for i in range(rhs_ndim))
+            rhs_specs = tuple(
+                None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
+                for i in range(rhs_ndim)
+            )
         else:
             # Otherwise, require contracting dims of both operands to be unsharded
             lhs_specs = tuple(None if i in lhs_cdims else lhs_specs[i] for i in range(lhs_ndim))
@@ -666,10 +671,14 @@ class GemmPrimitive(BasePrimitive):
         )
         del use_split_accumulator, result_infos
 
-        (
-            _, (out_specs, dbias_specs, pre_gelu_specs), *_
-        ) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, batched_dims, sequence_parallel_output, sequence_dim,
+        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
+            GemmPrimitive._parse_operand_output_specs(
+                arg_infos,
+                contracting_dims,
+                batched_dims,
+                sequence_parallel_output,
+                sequence_dim,
+            )
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -711,7 +720,11 @@ class GemmPrimitive(BasePrimitive):
             reduce_spec,
             scatter_dim,
         ) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, batched_dims, sequence_parallel_output, sequence_dim,
+            arg_infos,
+            contracting_dims,
+            batched_dims,
+            sequence_parallel_output,
+            sequence_dim,
         )
 
         # Assemble argument shardings
