@@ -282,7 +282,7 @@ class UserbuffersForwardLinear(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
@@ -307,21 +307,17 @@ class UserbuffersForwardLinear(FusedOperation):
         weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
 
         # Quantization metadata
+        input_quantizer = linear_op.get_quantizer("forward", 0)
+        weight_quantizer = linear_op.get_quantizer("forward", 1)
+        grad_output_quantizer = linear_op.get_quantizer("backward", 0)
+        grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        input_quantizer = None
-        weight_quantizer = None
-        grad_output_quantizer = None
-        grad_input_quantizer = None
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             if not any((recipe.delayed(), recipe.float8_current_scaling(), recipe.mxfp8())):
                 raise RuntimeError(
                     f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
                 )
-            input_quantizer = linear_op.get_quantizer("forward", 0)
-            weight_quantizer = linear_op.get_quantizer("forward", 1)
-            grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            grad_input_quantizer = prev_op_grad_input_quantizer
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -356,19 +352,19 @@ class UserbuffersForwardLinear(FusedOperation):
         w = extra_outputs["weight"]
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local, w)
-        linear_op_ctx.with_quantized_compute = with_quantized_compute
-        linear_op_ctx.input_quantizer = input_quantizer
-        linear_op_ctx.weight_quantizer = weight_quantizer
-        linear_op_ctx.grad_output_quantizer = grad_output_quantizer
-        linear_op_ctx.grad_input_quantizer = grad_input_quantizer
-        linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_dims = input_.size()
-        linear_op_ctx.input_requires_grad = input_requires_grad
-        linear_op_ctx.weight_requires_grad = weight_requires_grad
-        if bias_op is not None:
-            bias_op_ctx.with_quantized_compute = with_quantized_compute
-            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_input_quantizer()
+        if linear_op_ctx.requires_grad:
+            linear_op_ctx.save_for_backward(x_local, w)
+            linear_op_ctx.with_quantized_compute = with_quantized_compute
+            linear_op_ctx.input_quantizer = input_quantizer
+            linear_op_ctx.weight_quantizer = weight_quantizer
+            linear_op_ctx.grad_output_quantizer = grad_output_quantizer
+            linear_op_ctx.grad_input_quantizer = grad_input_quantizer
+            linear_op_ctx.dtype = dtype
+            linear_op_ctx.input_dims = input_.size()
+            linear_op_ctx.input_requires_grad = input_requires_grad
+            linear_op_ctx.weight_requires_grad = weight_requires_grad
+        if bias_op is not None and bias_op_ctx.requires_grad:
+            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
