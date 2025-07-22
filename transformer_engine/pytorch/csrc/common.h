@@ -107,7 +107,8 @@ class Quantizer {
    * The PyTorch tensor's attributes are modified to match the
    * quantizer's configuration.
    */
-  virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const = 0;
+  virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(
+      py::object tensor) const = 0;
 
   /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
