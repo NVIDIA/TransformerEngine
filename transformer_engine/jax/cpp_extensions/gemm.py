@@ -592,19 +592,27 @@ class GemmPrimitive(BasePrimitive):
         # 2. Otherwise
         #   - Require contracting dimensions of both LHS and RHS to be unsharded.
         #   - Require non-batched non-contracting dims of LHS to be unsharded.
-        reduce_output = lhs_cspec is not None and lhs_cspec == rhs_cspec
+        reduce_output = rhs_cspec is not None and lhs_cspec == rhs_cspec
         reduce_spec = scatter_dim = None
         if reduce_output:
-            reduce_spec = lhs_cspec
+            reduce_spec = rhs_cspec
             if sequence_parallel_output:
+                # If the sequence dimension is not specified, assume it to be the first
+                # non-batched non-contracting dimension of the LHS operand.
                 scatter_dim = sequence_dim if sequence_dim is not None else lhs_ldims[0]
 
         # Always require the non-batched non-contracting dims of LHS to be unsharded
+        # NOTE: This will all-gather sequence-parallel inputs and preserve tensor-parallel params.
         lhs_specs = tuple(
             lhs_specs[i] if i in set(lhs_bdims + lhs_cdims) else None for i in range(lhs_ndim)
         )
-        if not reduce_output:
-            # Require contracting dims to be unsharded if there is no reduction
+        if reduce_output:
+            # When reducing GEMM output, require non-batched non-contracting dims of the RHS
+            # operand to be unsharded (i.e. FSDP)
+            rhs_specs = tuple(None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
+                              for i in range(rhs_ndim))
+        else:
+            # Otherwise, require contracting dims of both operands to be unsharded
             lhs_specs = tuple(None if i in lhs_cdims else lhs_specs[i] for i in range(lhs_ndim))
             rhs_specs = tuple(None if i in rhs_cdims else rhs_specs[i] for i in range(rhs_ndim))
 
