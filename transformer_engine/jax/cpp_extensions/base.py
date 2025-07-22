@@ -29,7 +29,14 @@ class BasePrimitive(metaclass=ABCMeta):
     """
 
     name = None
-    _is_enabled = True  # Default state is enabled
+
+    # Default list of primitives to disable by default
+    # Need to do it this way because there is no other way to disable some primitives for non-FP8 recipes as those do not use the te.fp8_autocast context manager
+    _default_disable_names = ["GemmPrimitive"]
+
+    def __init__(self):
+        # Set default enabled state for every instance
+        self._is_enabled = self.__class__.__name__ not in self._default_disable_names
 
     @classmethod
     def enabled(cls):
@@ -51,9 +58,11 @@ class BasePrimitive(metaclass=ABCMeta):
         if pattern_str is not None:
             pattern = re.compile(pattern_str)
             env_enabled = pattern.fullmatch(cls.__name__) is not None
+            print(f"Primtive {cls.__name__} is {env_enabled}")
             return env_enabled
 
         # If environment variable is not set, fall back to the internal state
+        print(f"Primtive {cls.__name__} is {getattr(cls, '_is_enabled', True)}")
         return getattr(cls, "_is_enabled", True)
 
     @classmethod
@@ -167,12 +176,8 @@ def register_primitive(cls):
     cls.outer_primitive = outer_p
 
 
-# Default list of primitives to disable by default
-# Need to do it this way because there is no other way to disable some primitives for non-FP8 recipes as those do not use the te.fp8_autocast context manager
-_default_disable_names = ["GemmPrimitive"]
-
-# Flag to track if manage_primitives has been called
-_manage_primitives_called = False
+for _name, _value in transformer_engine_jax.registrations().items():
+    ffi.register_ffi_target(_name, _value, platform="CUDA")
 
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
@@ -195,24 +200,9 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
     Raises:
         RuntimeError: If this function is called more than once in the program.
     """
-    global _manage_primitives_called
-
-    if _manage_primitives_called:
-        raise RuntimeError("manage_primitives() can only be called once in the program.")
-
-    _manage_primitives_called = True
 
     enable_set = set(enable_names or [])
     disable_set = set(disable_names or [])
-
-    # Apply default settings
-    for name in _default_disable_names:
-        cls = _primitive_registry.get(name)
-        if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
-            cls.set_enabled(False)
-            print(f"Disabled by default: {name}")
-        else:
-            print(f"Default disable primitive not found in registry: {name}")
 
     if disable_all_first:
         for name, cls in _primitive_registry.items():
@@ -241,7 +231,3 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             print(f"Disabled primitive: {name}")
         else:
             print(f"Primitive not found in registry: {name}")
-
-
-for _name, _value in transformer_engine_jax.registrations().items():
-    ffi.register_ffi_target(_name, _value, platform="CUDA")
