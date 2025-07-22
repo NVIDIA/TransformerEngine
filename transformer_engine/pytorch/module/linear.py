@@ -153,7 +153,6 @@ class _Linear(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
         inputmat = inp  # Input tensor to save for backward (maybe sharded)
         inputmat_total = None  # Input tensor to pass to GEMM (gathered)
-        start_offload_if_offload_enabled(inputmat)
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
@@ -207,6 +206,8 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
+        
+        start_offload_if_offload_enabled(inputmat)
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
         # ------------------------------------------------------
         # Input tensor is ready for GEMM...

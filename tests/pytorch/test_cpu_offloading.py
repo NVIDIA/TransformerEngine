@@ -5,6 +5,7 @@
 import random
 import contextlib
 import pytest
+import os
 import torch
 from typing import Optional
 from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, OffloadSynchronizer
@@ -22,11 +23,11 @@ gc.disable()
 
 
 class Utils:
-    tensor1 = torch.randn((1000, 1000), device="cuda")
-    _B = 16
+    tensor1 = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
+    _B = 64
     _S = 256
     _H = 4
-    _D = 1024
+    _D = 256
 
     @staticmethod
     def long_job(stream: Optional[torch.cuda.Stream] = None):
@@ -75,18 +76,18 @@ class Utils:
     @staticmethod
     def create_layer(layer_type: str):
         if layer_type == "linear":
-            return te.Linear(Utils._D, Utils._D)
+            return te.Linear(Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "layernorm_linear":
-            return te.LayerNormLinear(Utils._D, Utils._D)
+            return te.LayerNormLinear(Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "layernorm_mlp":
-            return te.LayerNormMLP(Utils._D, Utils._D)
+            return te.LayerNormMLP(Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "multihead_attention":
-            return te.MultiheadAttention(Utils._D, Utils._H, attention_dropout=0.0)
+            return te.MultiheadAttention(Utils._D, Utils._H, attention_dropout=0.0, params_dtype=torch.bfloat16)
         elif layer_type == "grouped_linear":
-            return te.GroupedLinear(Utils._H, Utils._D, Utils._D)
+            return te.GroupedLinear(Utils._H, Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "transformer_layer":
             return te.TransformerLayer(
-                Utils._D, Utils._D, Utils._H, attention_dropout=0.0, hidden_dropout=0.0
+                Utils._D, Utils._D, Utils._H, attention_dropout=0.0, hidden_dropout=0.0, params_dtype=torch.bfloat16
             )
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
@@ -104,7 +105,7 @@ class Utils:
     @staticmethod
     def create_tensor(recipe_name: str, requires_grad: bool = False) -> torch.Tensor:
         shape = (Utils._B, Utils._S, Utils._D)
-        tensor = torch.randn(shape, device="cuda")
+        tensor = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         if recipe_name == "high precision":
             tensor = tensor.requires_grad_() if requires_grad else tensor
             return tensor
@@ -160,11 +161,12 @@ class Utils:
 
     @staticmethod
     def get_tensor_size_mb(tensor):
-        if type(tensor) == torch.Tensor:
-            return tensor.numel() * tensor.element_size() / (1024**2)
+        if tensor is None:
+            return 0
+        if isinstance(tensor, te.tensor.quantized_tensor.QuantizedTensorBase):
+            return sum(Utils.get_tensor_size_mb(t) for t in tensor.get_data_tensors())
         else:
-            # 1 byte for rowwise, 1 byte for columnwise
-            return tensor.numel() * 2 / (1024**2)
+            return tensor.numel() * tensor.element_size() / (1024**2)
 
     @staticmethod
     def memory_leak_check():
@@ -581,17 +583,16 @@ class TestTELayers:
             out = layer(inp, is_first_microbatch=True, **m_splits)
         out.sum().backward()
 
+        del inp
         init_cuda_memory = Utils.get_cuda_memory_mb()
 
         # run layer without offload
         inp = Utils.create_tensor("high precision")
         with recipe_ctx():
-            out = layer(inp, is_first_microbatch=True, **m_splits)
-        out = sync_function(out)
+            out = layer(inp, is_first_microbatch=False, **m_splits)
         with recipe_ctx():
             out = out + 1
-        out = sync_function(out)
-
+        del inp
         cuda_memory_no_offload = Utils.get_cuda_memory_mb()
 
         out.sum().backward()
@@ -604,6 +605,7 @@ class TestTELayers:
         with offload_ctx, recipe_ctx():
             out = out + 1
         out = sync_function(out)
+        del inp
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
         offloaded_memory_cpu = offload_ctx.offload_synchronizer.get_offloaded_total_size_mb()
 
@@ -675,3 +677,100 @@ class TestTELayers:
 
         # 3 bwd
         pp3_2_out.sum().backward()
+    
+    @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
+    @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
+    @pytest.mark.parametrize("use_cuda_graphs", [True, False])
+    @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
+    @pytest.mark.parametrize("backend", ["FlashAttention", "FusedAttention", "UnfusedAttention"])
+    def test_numerics(self, recipe_name, layer_type, use_cuda_graphs, retain_pinned_cpu_buffers, backend):
+        recipe_ctx = Utils.create_recipe_ctx(recipe_name)
+        Utils.skip_if_recipe_not_supported(recipe_name)
+
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+
+        if backend == "FlashAttention":
+            os.environ["NVTE_FLASH_ATTN"] = "1"
+        elif backend == "FusedAttention":
+            os.environ["NVTE_FUSED_ATTN"] = "1"
+        elif backend == "UnfusedAttention":
+            os.environ["NVTE_UNFUSED_ATTN"] = "1"
+
+        if use_cuda_graphs and not retain_pinned_cpu_buffers:
+            pytest.skip("Cuda graphs are not compatible with retain_pinned_cpu_buffers=False")
+
+        offload_ctx, sync_function = get_cpu_offload_context(
+            enabled=True,
+            num_layers=1,
+            model_layers=2,
+            offload_activations=True,
+            offload_weights=False,
+            retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
+        )
+
+        layers = torch.nn.ModuleList([Utils.create_layer(layer_type) for _ in range(2)])
+        
+        class Callable(torch.nn.Module):
+            def __init__(self, use_offload=True):
+                super().__init__()
+                self.layers = layers
+                self.sync_function = sync_function
+                self.offload_ctx = offload_ctx if use_offload else contextlib.nullcontext()
+                self.use_offload = use_offload
+                
+            def forward(self, x):
+                m_splits = (
+                    {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
+                    if layer_type == "grouped_linear"
+                    else {}
+                )
+                for layer in self.layers:
+                    with self.offload_ctx, recipe_ctx():
+                        x = layer(x, **m_splits)
+                    if self.use_offload:
+                        x = self.sync_function(x)
+                return x
+        
+        callable_offload = Callable(use_offload=True)
+        callable_no_offload = Callable(use_offload=False)
+
+        x = Utils.create_tensor("high precision")
+
+        if use_cuda_graphs:
+            callable_offload = te.make_graphed_callables(
+                callable_offload, (x,),
+                fp8_enabled=recipe_name != "high precision", 
+                fp8_recipe=Utils.create_recipe_ctx(recipe_name) if recipe_name != "high precision" else None
+            )
+
+        # warm up (for example to compute sf for delayed scaling)
+        for _ in range(4):
+            out = callable_offload(x)
+            out.sum().backward()
+            out = callable_no_offload(x)
+            out.sum().backward()
+
+        callable_offload.zero_grad(set_to_none=True) 
+        out_offload = callable_offload(x)
+        out_offload.sum().backward()
+        
+        # save out and gradients
+        offload_outs = [out_offload]
+        for param in callable_offload.parameters():
+            offload_outs.append(param.detach().clone())
+        
+        out_no_offload = callable_offload(x)
+        out_no_offload.sum().backward()
+    
+        # collect gradients
+        no_offload_outs = [out_no_offload]
+        for param in callable_no_offload.parameters():
+            no_offload_outs.append(param.detach().clone())
+
+        # check if tensors are the same
+        for i in range(len(offload_outs)):
+            assert torch.allclose(offload_outs[i], no_offload_outs[i]), f"Error in tensor {i}."
+        
+        torch.cuda.synchronize()

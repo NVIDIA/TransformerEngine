@@ -47,6 +47,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
@@ -1119,6 +1120,16 @@ class FusedAttnFunc(torch.autograd.Function):
             cu_seqlens_kv_padded,
             *other_tensors,
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+
+
+        if is_cpu_offload_enabled():
+            # Offloading supports interleaved tensor offload for multihead attention 
+            # (look for start_offload_if_offload_enabled() in multi_head_attention.py),
+            # but sometimes one uses DotProductAttention directly with interleaved tensors.
+            # They become contiguous after the reload, so the attention layout needs to be changed.
+            if q.is_contiguous() and k.is_contiguous() and v.is_contiguous():
+                # if q, k, v become contiguous, they stopped being views of the original qkv tensor
+                ctx.qkv_layout = "bshd_bshd_bshd"
 
         aux_ctx_tensors = other_tensors
 
