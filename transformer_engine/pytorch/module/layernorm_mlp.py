@@ -1740,7 +1740,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop").is_fp8_ubuf():
                 fp8_output = True
 
-        with torch.cuda.device(inp.device), self.prepare_forward(inp, num_gemms=2) as inp:
+        with torch.cuda.device(getattr(self, list(self.named_parameters())[0][0]).device), self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
                 self._get_quantizers(fp8_output)
