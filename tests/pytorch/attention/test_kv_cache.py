@@ -5,17 +5,13 @@
 from collections import OrderedDict
 from typing import List
 import os
+import sys
+import pathlib
 import logging
 import math
 
 import pytest
 import torch
-
-from test_fused_attn import (
-    ModelConfig,
-    reset_rng_states,
-    _get_attention_backends,
-)
 
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
@@ -34,26 +30,25 @@ from transformer_engine.pytorch.utils import (
     is_bf16_compatible,
 )
 
-# Initialize RNG state
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import (
+    ModelConfig,
+    reset_rng_states,
+    get_available_attention_backends,
+)
 
+# Reset RNG states
+reset_rng_states()
 
 param_types = [torch.float16]
 if is_bf16_compatible():
     param_types.append(torch.bfloat16)
 
 model_configs_infer = {
-    # test: b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "infer_0": ModelConfig(
-        4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
-    ),
-    "infer_1": ModelConfig(
-        2, 16, 4, 256, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
-    ),
+    #    test:             b, sq, hq, dqk,
+    "infer_0": ModelConfig(4, 64, 16, 128, total_requests=8, max_ctx_len=16),
+    "infer_1": ModelConfig(2, 66, 16, 256, num_gqa_groups=4, total_requests=6, max_ctx_len=16),
 }
 
 qkv_formats = ["bshd", "sbhd", "thd"]
@@ -470,7 +465,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
         qkv_layout = "paged_kv_" + qkv_layout
-    available_backends, _, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
