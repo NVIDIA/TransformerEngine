@@ -595,7 +595,7 @@ class _Linear(torch.autograd.Function):
                             # All-gather is not supported with FP8 column-wise data
                             quantizer.set_usage(rowwise=True, columnwise=False)
                         else:
-                            quantizer.set_usage(rowwise=False, columnwise=True)
+                            quantizer.set_usage(rowwise=True, columnwise=True)
                         inputmat = quantizer(inputmat)
                 else:
                     if isinstance(inputmat, QuantizedTensorBase):
