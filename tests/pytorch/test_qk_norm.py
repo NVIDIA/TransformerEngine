@@ -300,7 +300,9 @@ def test_qk_norm_before_after_rope(qk_norm_type) -> None:
         device="cuda",
     ).cuda()
 
-    hidden_states = torch.randn(seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float32)
+    hidden_states = torch.randn(
+        seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float32
+    )
 
     # Create RoPE embeddings
     head_dim = hidden_size // num_attention_heads
@@ -316,7 +318,12 @@ def test_qk_norm_before_after_rope(qk_norm_type) -> None:
 
     # Check output shapes and properties
     expected_shape = (seq_len, batch_size, hidden_size)
-    for output in [output_after_rope, output_before_rope, output_after_no_rope, output_before_no_rope]:
+    for output in [
+        output_after_rope,
+        output_before_rope,
+        output_after_no_rope,
+        output_before_no_rope,
+    ]:
         assert output.shape == expected_shape, f"Output shape mismatch: {output.shape}"
         assert not torch.isnan(output).any(), "Output contains NaN"
         assert not torch.isinf(output).any(), "Output contains Inf"

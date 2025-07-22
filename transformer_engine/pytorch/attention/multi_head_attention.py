@@ -182,7 +182,7 @@ class MultiheadAttention(torch.nn.Module):
                     When 'RMSNorm', RMS normalization is applied to query and key tensors.
                     When 'LayerNorm', layer normalization is applied to query and key tensors.
                     Normalization is applied after RoPE (if applicable) but before attention computation
-                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach 
+                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach
                     for QK normalization to improve training stability and model performance.
     qk_norm_eps: float, default = 1e-6
                     epsilon value for normalization of query and key tensors.
@@ -190,7 +190,7 @@ class MultiheadAttention(torch.nn.Module):
     qk_norm_before_rope: bool, default = `False`
                     if set to `True`, query and key normalization is applied before rotary position
                     embedding. When `False` (default), normalization is applied after RoPE.
-                    This parameter allows supporting different architectural variants that apply 
+                    This parameter allows supporting different architectural variants that apply
                     QK normalization at different points.
     seq_length: Optional[int], default = `None`
                     sequence length of input samples. Needed for JIT Warmup, a technique where jit
@@ -503,7 +503,7 @@ class MultiheadAttention(torch.nn.Module):
         else:
             raise ValueError(
                 f"Unsupported QK norm type: {qk_norm_type}. "
-                f"Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
+                "Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
             )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:

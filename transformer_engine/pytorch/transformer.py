@@ -251,7 +251,7 @@ class TransformerLayer(torch.nn.Module):
     qk_norm_before_rope: bool, default = `False`
                     if set to `True`, query and key normalization is applied before rotary position
                     embedding. When `False` (default), normalization is applied after RoPE.
-                    This parameter allows supporting different architectural variants that apply 
+                    This parameter allows supporting different architectural variants that apply
                     QK normalization at different points.
     """
 
