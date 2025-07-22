@@ -23,7 +23,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-
+from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -32,27 +32,12 @@ fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
 )
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
+# Reset RNG states.
+reset_rng_states()
 
-# Record initial RNG state.
-seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
-
-
-@dataclass
-class ModelConfig:
-    """Data tensor dimensions within Transformer model"""
-
-    sequence_length: int
-    batch_size: int
-    hidden_size: int
-    num_heads: int
-    kv_channels: int
-
-
-model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
+model_configs = {
+    "small": ModelConfig(32, 2, 2, 32),
+}
 
 fp8_recipes = [
     recipe.DelayedScaling(),
@@ -65,12 +50,6 @@ fp8_recipes = [
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
 if is_bf16_compatible():  # bf16 requires sm_80 or higher
     dtypes.append(torch.bfloat16)
-
-
-def reset_rng_states() -> None:
-    """Revert to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +86,7 @@ def generate_data(
     """Generate synthetic data."""
     gen_func = torch.ones if warmup else torch.randn
     return gen_func(
-        model_config.sequence_length,
+        model_config.max_seqlen_q,
         model_config.batch_size,
         model_config.hidden_size,
         device="cuda",
@@ -389,7 +368,7 @@ def generate_data_for_dot_product_attention(
     gen_func = torch.ones if warmup else torch.randn
     return [
         gen_func(
-            model_config.sequence_length,
+            model_config.max_seqlen_q,
             model_config.batch_size,
             model_config.num_heads,
             model_config.kv_channels,
@@ -483,8 +462,8 @@ def _test_cuda_graphs_with_kwargs(
             (
                 model_config.batch_size,
                 1,
-                model_config.sequence_length,
-                model_config.sequence_length,
+                model_config.max_seqlen_q,
+                model_config.max_seqlen_kv,
             ),
             dtype=torch.bool,
             device="cuda",
@@ -510,8 +489,8 @@ def _test_cuda_graphs_with_kwargs(
                 (
                     model_config.batch_size,
                     1,
-                    model_config.sequence_length,
-                    model_config.sequence_length,
+                    model_config.max_seqlen_q,
+                    model_config.max_seqlen_kv,
                 ),
                 dtype=torch.bool,
                 device="cuda",
