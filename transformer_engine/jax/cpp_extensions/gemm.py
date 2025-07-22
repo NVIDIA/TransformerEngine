@@ -34,6 +34,7 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
 )
+from ..sharding import global_mesh_resource
 from .misc import get_padded_spec
 
 
@@ -155,7 +156,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     inner_primitive = None
     outer_primitive = None
 
@@ -177,8 +178,11 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
+        del sequence_parallel_output, sequence_dim,
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -343,8 +347,12 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
     ):
         del batched_dims, lhs_quantized_colwise, rhs_quantized_colwise, out_dtype
+        del sequence_parallel_output, sequence_dim
+
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
@@ -393,6 +401,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
     ):
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
@@ -430,6 +440,8 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
+            sequence_parallel_output=sequence_parallel_output,
+            sequence_dim=sequence_dim,
         )
         return outputs[:-3]  # discard workspace arrays
 
@@ -447,6 +459,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
     ):
         assert GemmPrimitive.outer_primitive is not None
         lhs, _, rhs, *_ = batched_args
@@ -489,6 +503,8 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
+                sequence_parallel_output=sequence_parallel_output,
+                sequence_dim=sequence_dim,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -510,7 +526,13 @@ class GemmPrimitive(BasePrimitive):
         return bspecs, lspecs, cspecs
 
     @staticmethod
-    def _parse_operand_output_specs(arg_infos, contracting_dims, batched_dims):
+    def _parse_operand_output_specs(
+        arg_infos,
+        contracting_dims,
+        batched_dims,
+        sequence_parallel_output,
+        sequence_dim,
+    ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims, lhs_bdims, rhs_bdims = map(
@@ -561,91 +583,51 @@ class GemmPrimitive(BasePrimitive):
             (lhs_lspec_not_none, rhs_lspec_not_none, lhs_cspec_not_none, rhs_cspec_not_none),
         )
 
-        # Reproducing jax.nn.scaled_matmul() custom partitioning for arbitrary GEMM layouts
-        # with row-wise LHS:(B, M, K1) and row-wise RHS:(B, N, K2) operands.
-        # 1. K1 == K2 != None and N == None
-        #    LHS: (B, M, K)
-        #    RHS: (B, None, K)
-        #    OUT: (B, M, None) --(AR)-> (B, M, None)
-        # 2. K1 == K2 != None and M == N != None
-        #    LHS: (B, M, K)
-        #    RHS: (B, N, K)--(AG)->(B, None, K)
-        #    OUT: (B, M, None) --(RS)--> (B, M, N)
-        # 3. M == N
-        #    LHS: (B, M, K)--(AG)->(B, M, None)
-        #    RHS: (B, M, K)--(AG)->(B, None, None)
-        #    OUT: (B, M, None)
-        # 4. M != N
-        #    LHS: (B, M, K)--(AG)->(B, M, None)
-        #    RHS: (B, N, K)--(AG)->(B, N, None)
-        #    OUT: (B, M, N)
-        reduce_flag = lhs_cspec is not None and lhs_cspec == rhs_cspec
-        all_reduce_output = reduce_flag and rhs_lspec is None
-        reduce_scatter_output = reduce_flag and lhs_lspec is not None and lhs_lspec == rhs_lspec
-        all_reduce_spec = reduce_scatter_spec = scatter_dim = None
+        # Partitioning rules:
+        # ([B], M, K1) x ([B], N, K2)^T = ([B], M, N)
+        # 1. K1 == K2 != None
+        #   - Require non-batched non-contracting dims of both LHS and RHS to be unsharded.
+        #   - If `sequence_parallel_output=True`, then reduce-scatter the output.
+        #   - Otherwise, all-reduce the output.
+        # 2. Otherwise
+        #   - Require contracting dimensions of both LHS and RHS to be unsharded.
+        #   - Require non-batched non-contracting dims of LHS to be unsharded.
+        reduce_output = lhs_cspec is not None and lhs_cspec == rhs_cspec
+        reduce_spec = scatter_dim = None
+        if reduce_output:
+            reduce_spec = lhs_cspec
+            if sequence_parallel_output:
+                scatter_dim = sequence_dim if sequence_dim is not None else lhs_ldims[0]
 
+        # Always require the non-batched non-contracting dims of LHS to be unsharded
+        lhs_specs = tuple(
+            lhs_specs[i] if i in set(lhs_bdims + lhs_cdims) else None for i in range(lhs_ndim)
+        )
+        if not reduce_output:
+            # Require contracting dims to be unsharded if there is no reduction
+            lhs_specs = tuple(None if i in lhs_cdims else lhs_specs[i] for i in range(lhs_ndim))
+            rhs_specs = tuple(None if i in rhs_cdims else rhs_specs[i] for i in range(rhs_ndim))
+
+        # Combine modified LHS and RHS specs into the output
         lhs_non_contracting_specs, rhs_non_contracting_specs = map(
             lambda specs, cdims: tuple(specs[i] for i in range(len(specs)) if i not in cdims),
             (lhs_specs, rhs_specs),
             (lhs_cdims, rhs_cdims),
         )
-        out_specs = (*lhs_non_contracting_specs, *rhs_non_contracting_specs)
-        if reduce_scatter_output:
-            # All-gather (if necessary) the non-batch non-contracting dimension of RHS
-            # (B, N, K) --(AG)-> (B, None, K)
-            # (B, M, K) x (B, None, K)^T = (B, M, None) --(RS)-> (B, M, N)
-            rhs_spec = tuple(
-                rhs_spec[i] if i in set(rhs_bdims + rhs_cdims) else None for i in range(rhs_ndim)
-            )
-            reduce_scatter_spec = lhs_cspec
-            scatter_dim = out_specs.index(rhs_lspec)
+        out_specs = [*lhs_non_contracting_specs, *rhs_non_contracting_specs]
 
-        elif all_reduce_output:
-            # Set all output trailing dimensions to zero
-            out_specs = (
-                *lhs_non_contracting_specs,
-                *[None for _ in range(len(rhs_non_contracting_specs))],
-            )
-            all_reduce_spec = lhs_cspec
-        else:
-            # All-gather (if necessary) the non-batch contracting dimensions
-            # (B, M, K) --(AG)-> (B, M, None)
-            # (B, N, K) --(AG)-> (B, N, None)
-            # (B, M, None) x (B, N, None)^T = (B, M, N)
-            lhs_specs = tuple(
-                None if i in lhs_cdims and i not in lhs_bdims else lhs_specs[i]
-                for i in range(lhs_ndim)
-            )
-            rhs_specs = tuple(
-                None if i in rhs_cdims and i not in rhs_bdims else rhs_specs[i]
-                for i in range(rhs_ndim)
-            )
-            # Check if RHS non-contracting spec also appears in the LHS non-contracting specs
-            if rhs_lspec is not None and rhs_lspec in tuple(
-                lhs_specs[i] for i in range(lhs_ndim) if i not in lhs_cdims
-            ):
-                # All-gather (if necessary) the non-batch non-contracting dimensions of RHS
-                # (B, N, None) --(AG)-> (B, None, None)
-                # (B, M, None) x (B, None, None)^T = (B, M, None)
-                rhs_specs = tuple(
-                    None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
-                    for i in range(rhs_ndim)
-                )
-                # Set all output trailing dimensions to zero
-                out_specs = (
-                    *lhs_non_contracting_specs,
-                    *[None for _ in range(len(rhs_non_contracting_specs))],
-                )
+        # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
+        bias_specs = tuple(list(out_specs[len(lhs_non_contracting_specs) :]).copy())
+        gelu_specs = tuple(list(out_specs).copy())
 
-        # Bias and Pre-GeLU sharding is based on GEMM output
-        bias_specs = out_specs[len(lhs_non_contracting_specs) :]
-        gelu_specs = out_specs
+        # Set output scatter dim to the tensor-parallel spec
+        if sequence_parallel_output:
+            out_specs[scatter_dim] = reduce_spec
 
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
             (out_specs, bias_specs, gelu_specs),
-            all_reduce_spec,
-            reduce_scatter_spec,
+            reduce_spec,
             scatter_dim,
         )
 
@@ -661,6 +643,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
         mesh,
         arg_infos,
         result_infos,
@@ -674,8 +658,10 @@ class GemmPrimitive(BasePrimitive):
         )
         del use_split_accumulator, result_infos
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, batched_dims)
+        (
+            _, (out_specs, dbias_specs, pre_gelu_specs), *_
+        ) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, batched_dims, sequence_parallel_output, sequence_dim,
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -703,6 +689,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
         mesh,
         arg_infos,
         result_infos,
@@ -712,10 +700,11 @@ class GemmPrimitive(BasePrimitive):
         (
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
-            all_reduce_spec,
-            reduce_scatter_spec,
+            reduce_spec,
             scatter_dim,
-        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, batched_dims)
+        ) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, batched_dims, sequence_parallel_output, sequence_dim,
+        )
 
         # Assemble argument shardings
         # NOTE: Block scale inverses match their operands, but tensor scale inverses are unsharded.
@@ -770,20 +759,17 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
+                sequence_parallel_output=sequence_parallel_output,
+                sequence_dim=sequence_dim,
             )
 
             # All-Reduce/Reduce-Scatter GEMM output
-            if all_reduce_spec is not None:
-                outputs[0] = jax.lax.psum(outputs[0], all_reduce_spec)
-                if fuse_gelu and not grad:
-                    outputs[2] = jax.lax.psum(outputs[2], all_reduce_spec)
-            elif reduce_scatter_spec is not None:
-                outputs[0] = jax.lax.psum_scatter(
-                    outputs[0], reduce_scatter_spec, scatter_dimension=scatter_dim, tiled=True
-                )
-                if fuse_gelu and not grad:
-                    outputs[2] = jax.lax.psum_scatter(
-                        outputs[2], reduce_scatter_spec, scatter_dimension=scatter_dim, tiled=True
+            if reduce_spec is not None:
+                if scatter_dim is None:
+                    outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
+                else:
+                    outputs[0] = jax.lax.psum_scatter(
+                        outputs[0], reduce_spec, scatter_dimension=scatter_dim, tiled=True
                     )
 
             return outputs
@@ -802,12 +788,14 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        sequence_parallel_output,
+        sequence_dim,
         mesh,
         operand_types,
         result_types,
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype, grad, use_split_accumulator
-        del mesh, result_types
+        del sequence_parallel_output, sequence_dim, mesh, result_types
 
         prefix = "GemmPrimitive_"
 
@@ -896,6 +884,8 @@ def _te_gemm(
     fuse_gelu: bool = False,
     grad: bool = False,
     use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
+    sequence_parallel_output: bool = False,
+    sequence_dim: int = None,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -969,6 +959,8 @@ def _te_gemm(
         fuse_gelu=fuse_gelu,
         grad=grad,
         use_split_accumulator=use_split_accumulator,
+        sequence_parallel_output=sequence_parallel_output,
+        sequence_dim=sequence_dim,
     )
 
 
@@ -1328,6 +1320,14 @@ def gemm(
     use_split_accumulator: bool, default = True
         Enable promoting some intermediate sums to higher precision when accumulating the result in
         the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
+    sequence_parallel_output: bool, default = False
+        Produces an output with the first non-batched non-contracting dimension sharded with the
+        same spec as operand contracting dimensions. This effectively converts the `jax.lax.psum`
+        for the GEMM output into a `jax.lax.psum_scatter`.
+    sequence_dim: int, default = None
+        Index of the sequence dimension for the LHS operand. This controls which dimension of the
+        GEMM output is scattered when `sequence_parallel_output=True`. When `None`, the first
+        non-batched non-contracting dimension is assumed to be the sequence dimension.
 
     Returns
     -------
