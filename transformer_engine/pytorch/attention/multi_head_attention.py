@@ -11,7 +11,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
 from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
@@ -177,9 +177,10 @@ class MultiheadAttention(torch.nn.Module):
                     `fuse_wgrad_accumulation`.
     qk_norm_type: Optional[str], default = None
                     type of normalization to apply to query and key tensors.
-                    Options: None, 'L2Normalization', 'RMSNorm'. When None, no normalization is applied.
+                    Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'. When None, no normalization is applied.
                     When 'L2Normalization', L2 normalization is applied to query and key tensors.
                     When 'RMSNorm', RMS normalization is applied to query and key tensors.
+                    When 'LayerNorm', layer normalization is applied to query and key tensors.
                     Normalization is applied after RoPE (if applicable) but before attention computation.
                     This follows the e.g. Llama4 approach for QK normalization to improve
                     training stability and model performance.
@@ -302,31 +303,9 @@ class MultiheadAttention(torch.nn.Module):
             "device": device,
         }
 
-        if qk_norm_type == "L2Normalization":
-            l2_norm = L2Normalization(
-                eps=qk_norm_eps,
-                seq_length=seq_length,
-                micro_batch_size=micro_batch_size,
-            )
-            self.q_norm = self.k_norm = l2_norm
-        elif qk_norm_type == "RMSNorm":
-            self.q_norm = RMSNorm(
-                normalized_shape=self.hidden_size_per_attention_head,
-                eps=qk_norm_eps,
-                device=device,
-            )
-            self.k_norm = RMSNorm(
-                normalized_shape=self.hidden_size_per_attention_head,
-                eps=qk_norm_eps,
-                device=device,
-            )
-        elif qk_norm_type is not None:
-            raise ValueError(
-                f"Unsupported QK norm type: {qk_norm_type}. Supported types: ['L2Normalization', 'RMSNorm']"
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = self._create_qk_norm_modules(
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+        )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
@@ -446,6 +425,79 @@ class MultiheadAttention(torch.nn.Module):
             name=name + ".proj" if name is not None else None,
             **common_gemm_kwargs,
         )
+
+    def _create_qk_norm_modules(
+        self,
+        qk_norm_type: Optional[str],
+        qk_norm_eps: float,
+        device: Union[torch.device, str],
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
+    ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
+        """
+        Create query and key normalization modules based on the specified normalization type.
+
+        Parameters
+        ----------
+        qk_norm_type : Optional[str]
+            Type of normalization to apply. Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'
+        qk_norm_eps : float
+            Epsilon value for numerical stability
+        device : Union[torch.device, str]
+            Device to place the normalization modules on
+        seq_length : Optional[int], default = None
+            Sequence length for L2Normalization optimization
+        micro_batch_size : Optional[int], default = None
+            Micro batch size for L2Normalization optimization
+
+        Returns
+        -------
+        Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]
+            Query and key normalization modules (q_norm, k_norm)
+        """
+        if qk_norm_type is None:
+            return None, None
+
+        if qk_norm_type == "L2Normalization":
+            l2_norm = L2Normalization(
+                eps=qk_norm_eps,
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+            )
+            # L2Normalization is parameter-free, so we can share the same instance
+            return l2_norm, l2_norm
+
+        elif qk_norm_type == "RMSNorm":
+            q_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            k_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            return q_norm, k_norm
+
+        elif qk_norm_type == "LayerNorm":
+            q_norm = LayerNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            k_norm = LayerNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            return q_norm, k_norm
+
+        else:
+            raise ValueError(
+                f"Unsupported QK norm type: {qk_norm_type}. "
+                f"Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
+            )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
