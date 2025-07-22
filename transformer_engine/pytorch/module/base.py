@@ -150,7 +150,7 @@ def initialize_ub(
              ```
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
-             "fc2_fprop", "fc2_dgrad"]`.
+             "fc2_fprop", "fc2_wgrad"]`.
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -249,16 +249,18 @@ def initialize_ub(
         "qkv_fprop",
         "qkv_dgrad",
         "proj_dgrad",
+        "proj_wgrad",
         "fc1_fprop",
         "fc1_dgrad",
         "fc2_dgrad",
+        "fc2_wgrad",
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
         "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
+        "pipeline": ["proj_fprop", "fc2_fprop", "proj_wgrad", "fc2_wgrad"],
         "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
 
