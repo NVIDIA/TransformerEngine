@@ -74,7 +74,7 @@ std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vec
   return {std::move(out_cpp), py::cast(data)};
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::coerce_tensor(py::object tensor) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::convert_and_update_tensor(py::object tensor) const {
   auto tensor_pyt = tensor.cast<at::Tensor>();
   TensorWrapper out_cpp;
   out_cpp.set_rowwise_data(tensor_pyt.data_ptr(),
@@ -179,7 +179,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return {std::move(out_cpp), std::move(out_py)};
 }
 
-std::pair<TensorWrapper, py::object> Float8Quantizer::coerce_tensor(py::object tensor) const {
+std::pair<TensorWrapper, py::object> Float8Quantizer::convert_and_update_tensor(py::object tensor) const {
   NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()), "Float8Quantizer must output to Float8Tensor.");
 
   // Expected buffers
@@ -395,7 +395,7 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   return {std::move(out_cpp), std::move(out_py)};
 }
 
-std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::coerce_tensor(
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsFloat8Tensor(tensor.ptr()),
              "Float8CurrentScalingQuantizer must output to Float8Tensor.");
@@ -639,7 +639,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
-std::pair<TensorWrapper, py::object> Float8BlockQuantizer::coerce_tensor(py::object tensor) const {
+std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_tensor(py::object tensor) const {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
 
@@ -867,7 +867,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   return {std::move(out_cpp), std::move(out_py)};
 }
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::coerce_tensor(py::object tensor) const {
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::convert_and_update_tensor(py::object tensor) const {
   NVTE_CHECK(detail::IsMXFP8Tensor(tensor.ptr()), "MXFP8Quantizer must output to MXFP8Tensor.");
 
   // Extract buffers from Python tensor

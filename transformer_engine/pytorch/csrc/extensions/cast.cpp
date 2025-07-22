@@ -47,7 +47,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
     const auto fake_dtype = input_cpp.dtype();
     std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
   } else {
-    std::tie(output_cpp, output_py) = quantizer_cpp->coerce_tensor(output);
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
   // Initialize no-op flag

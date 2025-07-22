@@ -102,12 +102,12 @@ class Quantizer {
   virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                              DType dtype) const = 0;
 
-  /*! @brief Load a PyTorch tensor
+  /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
    *
    * The PyTorch tensor's attributes are modified to match the
    * quantizer's configuration.
    */
-  virtual std::pair<TensorWrapper, py::object> coerce_tensor(py::object tensor) const = 0;
+  virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const = 0;
 
   /*! @brief Convert to a quantized data format */
   virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
@@ -139,7 +139,7 @@ class NoneQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
                                                      at::Tensor data) const;
 
-  std::pair<TensorWrapper, py::object> coerce_tensor(py::object tensor) const override;
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
@@ -167,7 +167,7 @@ class Float8Quantizer : public Quantizer {
                                                      std::optional<at::Tensor> transpose,
                                                      std::optional<at::Tensor> scale_inv) const;
 
-  std::pair<TensorWrapper, py::object> coerce_tensor(py::object shape) const override;
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
@@ -193,7 +193,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> coerce_tensor(py::object shape) const override;
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
@@ -231,7 +231,7 @@ class Float8BlockQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> coerce_tensor(py::object shape) const override;
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
@@ -252,7 +252,7 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> coerce_tensor(py::object shape) const override;
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
