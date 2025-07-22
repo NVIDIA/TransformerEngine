@@ -197,6 +197,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
             func_ctx.with_quantized_compute = with_quantized_compute
 
+        # Mark output tensors as not deletable in backward
+        for tensor in [x] + extra_outputs_flat:
+            tensor.do_not_clear = True
+
         x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
         if extra_outputs_flat:
