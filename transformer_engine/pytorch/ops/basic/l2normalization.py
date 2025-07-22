@@ -76,7 +76,6 @@ class L2Normalization(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
         # Use input directly - torch.compile can handle multi-dimensional tensors
         x = maybe_dequantize(input_)
@@ -97,7 +96,6 @@ class L2Normalization(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rsqrt_norm)
-            ctx.has_prev_op = not is_first_op
 
         return y
 
@@ -116,8 +114,7 @@ class L2Normalization(BasicOperation):
         dx = l2normalization_backward_fused(dy, x, rsqrt_norm, self.eps)
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
         clear_tensor_data(rsqrt_norm)
 
         # No parameters, so empty tuple for param grads

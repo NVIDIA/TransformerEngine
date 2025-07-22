@@ -392,7 +392,7 @@ class BasicLinear(BasicOperation):
             Bias tensor
         device: torch.device, default = default CUDA device
             Tensor device
-        dtype: torch.dtype, default = default dtype
+        dtype: torch.dtype, default = infer from out or weight
             Tensor datatype
         out: torch.Tensor, optional
             Output tensor
@@ -439,8 +439,14 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype if out is None else out.dtype
-        dtype = canonicalize_dtype(dtype)
+            if out is not None and isinstance(out, torch.Tensor):
+                dtype = out.dtype
+            elif weight is not None and isinstance(out, torch.Tensor):
+                dtype = weight.dtype
+            else:
+                raise ValueError(
+                    "Could not infer dtype from weight nor out and dtype was not provided"
+                )
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
         if out is not None and out.dtype != dtype:
@@ -890,7 +896,6 @@ class BasicLinear(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Check which grads are required
@@ -920,9 +925,10 @@ class BasicLinear(BasicOperation):
             weight_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = self.weight.dtype
 
         # Linear forward
         output, x_local, w = BasicLinear._functional_forward(
@@ -950,7 +956,6 @@ class BasicLinear(BasicOperation):
         ctx.dtype = dtype
         ctx.input_requires_grad = input_requires_grad
         ctx.weight_requires_grad = weight_requires_grad
-        ctx.has_prev_op = not is_first_op
 
         return output
 
@@ -1001,8 +1006,7 @@ class BasicLinear(BasicOperation):
         )
 
         # Clear input tensor if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x_local)
+        clear_tensor_data(x_local)
 
         if accumulate_into_main_grad:
             grad_weight = None

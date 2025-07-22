@@ -922,17 +922,20 @@ template <typename ParamOP, float (*ActOP)(float, const ParamOP &)>
 void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
   CheckInputTensor(input, "gated_act_input");
   CheckOutputTensor(*output, "gated_act_output");
-  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
-  NVTE_CHECK(input.data.shape[0] == output->data.shape[0],
-             "Input shape[0] must be equal to output shape[0].");
-  NVTE_CHECK(input.data.shape[1] == output->data.shape[1] * 2,
-             "Input shape[1] must be 2x larger than output shape[1].");
+  NVTE_CHECK(output->flat_first_dim() == input.flat_first_dim(),
+             "Wrong output shape. Expected (after flattening) [", input.flat_first_dim(),
+             ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
+  NVTE_CHECK(input.flat_last_dim() % 2 == 0,
+             "Wrong input shape. Expected (after flattening) last dimension to be even, ", "got [",
+             input.flat_first_dim(), ", ", input.flat_last_dim(), "].");
+  NVTE_CHECK(output->flat_last_dim() == input.flat_last_dim() / 2,
+             "Wrong output shape. Expected (after flattening) [*, ", input.flat_last_dim() / 2,
+             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType,
+      input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType,
+          output->dtype(), OType,
 
           if (!is_fp8_dtype(output->data.dtype) ||
               is_delayed_tensor_scaling(output->scaling_mode)) {
@@ -942,8 +945,8 @@ void cast_gated(const Tensor &input, Tensor *output, cudaStream_t stream) {
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), output->data.shape[0],
-                output->data.shape[1], {}, stream);
+                reinterpret_cast<fp32 *>(output->scale_inv.dptr), input.flat_first_dim(),
+                output->flat_last_dim(), {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)

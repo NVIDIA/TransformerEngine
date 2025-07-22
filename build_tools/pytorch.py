@@ -13,13 +13,8 @@ from typing import List
 
 
 def install_requirements() -> List[str]:
-    """Install dependencies for TE/JAX extensions."""
-    reqs = ["torch>=2.1", "einops"]
-    reqs.append(
-        "nvdlfw-inspect @"
-        " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
-    )
-    return reqs
+    """Install dependencies for TE/PyTorch extensions."""
+    return ["torch>=2.1", "einops", "onnxscript==0.3.1", "onnx"]
 
 
 def test_requirements() -> List[str]:

@@ -25,7 +25,6 @@ class Identity(BasicOperation):
         input_: torch.Tensor,
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
         return input_
 

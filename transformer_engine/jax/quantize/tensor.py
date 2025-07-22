@@ -56,6 +56,11 @@ class ScaledTensor(ABC):
         """
         return cls(*children, *aux_data)
 
+    @property
+    @abstractmethod
+    def ndim(self):
+        """Number of dimensions of the underlying quantized array."""
+
     @abstractmethod
     def dequantize(self):
         """Dequantizes the tensor back to its original precision.
@@ -127,24 +132,18 @@ class ScaledTensor1x(ScaledTensor):
             0 < self.flatten_axis < len(self.data.shape)
         ), f"flatten_axis {self.flatten_axis} is out of bounds for shape {self.data.shape}"
 
-        expected_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=True, flatten_axis=self.flatten_axis
-        )
-        expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=False, flatten_axis=self.flatten_axis
-        )
-        if self.scale_inv.shape != expected_scale_shape:
-            assert self.scale_inv.shape == expected_unpadded_scale_shape, (
-                f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-                f" scale_inv or {expected_unpadded_scale_shape} for unpadded scale_inv, got"
-                f" {self.scale_inv.shape}"
+        if self.scaling_mode == ScalingMode.NO_SCALING:
+            self.scale_inv = jnp.empty((0,), dtype=jnp.float32)
+        else:
+            unpadded_scale_shape = self.scaling_mode.get_scale_shape(
+                self.data.shape,
+                is_colwise=self.is_colwise,
+                is_padded=False,
+                flatten_axis=self.flatten_axis,
             )
-            pad_width = tuple(
-                (0, a - b) for a, b in zip(expected_scale_shape, expected_unpadded_scale_shape)
-            )
-            # padding with the smallest number it can present
-            self.scale_inv = jnp.pad(
-                self.scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127
+            assert self.scale_inv.shape == unpadded_scale_shape, (
+                "Unpadded inverse scale factor has wrong shape, expected"
+                f" {unpadded_scale_shape} but got {self.scale_inv.shape}."
             )
 
     def tree_flatten(self):
@@ -163,6 +162,10 @@ class ScaledTensor1x(ScaledTensor):
             self.flatten_axis,
         )
         return (children, aux_data)
+
+    @property
+    def ndim(self):
+        return self.data.ndim
 
     def dequantize(self):
         """Dequantizes the tensor using the stored dequantization function.
@@ -346,6 +349,11 @@ class ScaledTensor2x(ScaledTensor):
         children = (self.rowwise_tensor, self.colwise_tensor)
         aux_data = ()
         return (children, aux_data)
+
+    @property
+    def ndim(self):
+        """Number of dimensions of the underlying row-wise tensor."""
+        return self.rowwise_tensor.ndim
 
     def dequantize(self):
         """Dequantizes the tensor using the row-wise component's dequantization.

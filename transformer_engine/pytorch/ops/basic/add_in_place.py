@@ -61,7 +61,6 @@ class AddInPlace(BasicOperation):
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_input_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         output = basic_op_extra_inputs[0][0].detach()
@@ -79,4 +78,4 @@ class AddInPlace(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
-        return grad_output, [], [(grad_output,)]
+        return grad_output, [()], [(grad_output,)]

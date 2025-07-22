@@ -43,7 +43,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip cudnn9-cuda-12
-          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops
+          pip install cmake torch ninja pydantic importlib-metadata>=1.0 packaging pybind11 numpy einops onnxscript
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -83,7 +83,7 @@ jobs:
       options: --user root
     steps:
       - name: 'Dependencies'
-        run: pip install torch pybind11[global] einops
+        run: pip install torch pybind11[global] einops onnxscript
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
