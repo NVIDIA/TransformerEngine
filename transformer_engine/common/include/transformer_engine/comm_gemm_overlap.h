@@ -133,6 +133,11 @@ class CommOverlapCore {
                                 cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void bulk_overlap_columnwise_ag(const TensorWrapper &input,
+                                          CommOverlapCore *overlap_gemm) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -198,6 +203,11 @@ class CommOverlapBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &rs_output,
                         cudaStream_t stream_main) override;
+
+  void bulk_overlap_columnwise_ag(const TensorWrapper &input,
+                                  CommOverlapCore *overlap_gemm) override {
+    NVTE_ERROR("Operation not supported.");
+  }
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {
@@ -277,6 +287,13 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &rs_output,
                         cudaStream_t stream_main) override;
+
+  /*
+  ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.
+  ** The gemm for overlap_gemm is assumed to have been previously started.
+  */
+  void bulk_overlap_columnwise_ag(const TensorWrapper &input,
+                                  CommOverlapCore *overlap_gemm) override;
 };  // CommOverlapP2PBase
 
 }  // namespace transformer_engine

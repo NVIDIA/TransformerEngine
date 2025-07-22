@@ -1116,4 +1116,22 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   _ub_comm->sms = ori_sms;
 }
 
+void CommOverlapP2PBase::bulk_overlap_columnwise_ag(const TensorWrapper &input,
+                                                    CommOverlapCore *overlap_gemm) {
+  auto *overlap_gemm_p2p = static_cast<CommOverlapP2PBase *>(overlap_gemm);
+  int comm_bytes = input.numel() * input.element_size();
+  assert(comm_bytes % _tp_size == 0);
+  int comm_bytes_per_rank = comm_bytes / _tp_size;
+  // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
+  userbuffers_send_all(_ub_reg, 0, _ub_reg, comm_bytes, comm_bytes_per_rank, _ub_comm,
+                       overlap_gemm_p2p->_stream_send[0]);
+  userbuffers_recv_all(_ub_reg, 0, _ub_reg, comm_bytes, comm_bytes_per_rank, _ub_comm,
+                       overlap_gemm_p2p->_stream_recv);
+
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, overlap_gemm_p2p->_stream_send[0]));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_main, _stop_send, 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, overlap_gemm_p2p->_stream_recv));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_main, _stop_recv, 0));
+}
+
 }  // namespace transformer_engine
