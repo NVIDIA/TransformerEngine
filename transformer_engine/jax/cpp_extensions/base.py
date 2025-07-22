@@ -30,13 +30,11 @@ class BasePrimitive(metaclass=ABCMeta):
 
     name = None
 
+    _is_enabled = True
+
     # Default list of primitives to disable by default
     # Need to do it this way because there is no other way to disable some primitives for non-FP8 recipes as those do not use the te.fp8_autocast context manager
     _default_disable_names = ["GemmPrimitive"]
-
-    def __init__(self):
-        # Set default enabled state for every instance
-        self._is_enabled = self.__class__.__name__ not in self._default_disable_names
 
     @classmethod
     def enabled(cls):
@@ -47,7 +45,7 @@ class BasePrimitive(metaclass=ABCMeta):
         If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `manage_primitives`.
         By default, the internal state `_is_enabled` is set to `True`, enabling all primitives if no modifications are made.
         For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
-
+        
         Behavior:
             1. Checks if the environment variable `NVTE_JAX_CUSTOM_CALLS_RE` is set.
             2. If set, uses the pattern to determine if the primitive is enabled based on its class name.
@@ -58,12 +56,13 @@ class BasePrimitive(metaclass=ABCMeta):
         if pattern_str is not None:
             pattern = re.compile(pattern_str)
             env_enabled = pattern.fullmatch(cls.__name__) is not None
-            print(f"Primtive {cls.__name__} is {env_enabled}")
+            print(f"Primitive {cls.__name__} is {env_enabled}")
             return env_enabled
 
         # If environment variable is not set, fall back to the internal state
-        print(f"Primtive {cls.__name__} is {getattr(cls, '_is_enabled', True)}")
-        return getattr(cls, "_is_enabled", True)
+        enabled_state = getattr(cls, '_is_enabled', True)
+        print(f"Primitive {cls.__name__} is {enabled_state}")
+        return enabled_state
 
     @classmethod
     def set_enabled(cls, enabled: bool):
@@ -146,7 +145,12 @@ def register_primitive(cls):
     Register a JAX primitive and add it to the internal registry.
     """
     _primitive_registry[cls.__name__] = cls
-
+    
+    # Set default enabled state at class level based on _default_disable_names
+    if cls.__name__ in BasePrimitive._default_disable_names:
+        cls.set_enabled(False)
+        print(f"Disabled {cls.__name__} by default during registration")
+    
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
