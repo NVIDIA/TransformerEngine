@@ -57,7 +57,7 @@ class BasePrimitive(metaclass=ABCMeta):
             return env_enabled
 
         # If environment variable is not set, fall back to the internal state
-        enabled_state = getattr(cls, '_is_enabled', True)
+        enabled_state = getattr(cls, "_is_enabled", True)
         return enabled_state
 
     @classmethod
