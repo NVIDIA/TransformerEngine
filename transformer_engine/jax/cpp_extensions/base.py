@@ -45,7 +45,7 @@ class BasePrimitive(metaclass=ABCMeta):
         If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `manage_primitives`.
         By default, the internal state `_is_enabled` is set to `True`, enabling all primitives if no modifications are made.
         For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
-        
+
         Behavior:
             1. Checks if the environment variable `NVTE_JAX_CUSTOM_CALLS_RE` is set.
             2. If set, uses the pattern to determine if the primitive is enabled based on its class name.
@@ -60,7 +60,7 @@ class BasePrimitive(metaclass=ABCMeta):
             return env_enabled
 
         # If environment variable is not set, fall back to the internal state
-        enabled_state = getattr(cls, '_is_enabled', True)
+        enabled_state = getattr(cls, "_is_enabled", True)
         print(f"Primitive {cls.__name__} is {enabled_state}")
         return enabled_state
 
@@ -145,12 +145,12 @@ def register_primitive(cls):
     Register a JAX primitive and add it to the internal registry.
     """
     _primitive_registry[cls.__name__] = cls
-    
+
     # Set default enabled state at class level based on _default_disable_names
     if cls.__name__ in BasePrimitive._default_disable_names:
         cls.set_enabled(False)
         print(f"Disabled {cls.__name__} by default during registration")
-    
+
     def name_of_wrapper_p():
         return cls.name + "_wrapper"
 
