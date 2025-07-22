@@ -23,6 +23,7 @@ from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
 from .scaling_modes import ScalingMode
 from .. import cpp_extensions as tex
+from ..cpp_extensions.base import manage_primitives
 from .device_utils import get_device_compute_capability
 
 __all__ = [
@@ -353,7 +354,7 @@ class BlockScalingQuantizeConfig:
         cls.AMAX_HISTORY_LEN = 0
 
         # Use TE GEMM instead of JAX GEMM for better performance
-        tex.manage_primitives(enable_names=["GemmPrimitive"])
+        tex.base.manage_primitives(enable_names=["GemmPrimitive"])
 
     @staticmethod
     def finalize() -> None:
