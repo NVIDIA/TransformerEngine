@@ -34,7 +34,6 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
 )
-from ..sharding import global_mesh_resource
 from .misc import get_padded_spec
 
 
@@ -581,9 +580,9 @@ class GemmPrimitive(BasePrimitive):
         )
 
         # Extract single leading and contracting dimension specs
-        (lhs_lspec, rhs_lspec, lhs_cspec, rhs_cspec) = map(
+        (lhs_cspec, rhs_cspec) = map(
             lambda specs: None if len(specs) == 0 else specs[0],
-            (lhs_lspec_not_none, rhs_lspec_not_none, lhs_cspec_not_none, rhs_cspec_not_none),
+            (lhs_cspec_not_none, rhs_cspec_not_none),
         )
 
         # Partitioning rules:
