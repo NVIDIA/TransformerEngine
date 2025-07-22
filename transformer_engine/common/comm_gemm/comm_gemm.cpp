@@ -467,9 +467,9 @@ void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                           cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_all_gather_gemm);
   cublasmp_gemm(AgGemmInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
-                convertNVTETensorCheck(b), convertNVTETensorCheck(d),
-                convertNVTETensorCheck(bias), convertNVTETensorCheck(pre_act_out), transa,
-                transb, grad, accumulate, comm_sm_count, main_stream);
+                convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
+                convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
+                comm_sm_count, main_stream);
 }
 
 void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
@@ -479,9 +479,9 @@ void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                               cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_gemm_reduce_scatter);
   cublasmp_gemm(GemmRsInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
-                convertNVTETensorCheck(b), convertNVTETensorCheck(d),
-                convertNVTETensorCheck(bias), convertNVTETensorCheck(pre_act_out), transa,
-                transb, grad, accumulate, comm_sm_count, main_stream);
+                convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
+                convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
+                comm_sm_count, main_stream);
 }
 
 void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
@@ -491,9 +491,9 @@ void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                           cublasMpMatmulAlgoType_t algo) {
   NVTE_API_CALL(nvte_gemm_all_reduce);
   cublasmp_gemm(GemmArInitMatrices, ctx, algo, m, n, k, convertNVTETensorCheck(a),
-                convertNVTETensorCheck(b), convertNVTETensorCheck(d),
-                convertNVTETensorCheck(bias), convertNVTETensorCheck(pre_act_out), transa,
-                transb, grad, accumulate, comm_sm_count, main_stream);
+                convertNVTETensorCheck(b), convertNVTETensorCheck(d), convertNVTETensorCheck(bias),
+                convertNVTETensorCheck(pre_act_out), transa, transb, grad, accumulate,
+                comm_sm_count, main_stream);
 }
 
 int64_t nvte_comm_gemm_numroc(CommGemmCtx* ctx, int64_t global_size) {
