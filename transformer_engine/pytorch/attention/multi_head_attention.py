@@ -177,9 +177,9 @@ class MultiheadAttention(torch.nn.Module):
                     `fuse_wgrad_accumulation`.
     qk_norm_type: Optional[str], default = None
                     type of normalization to apply to query and key tensors.
-                    Options: None, 'l2', 'rms'. When None, no normalization is applied.
-                    When 'l2', L2 normalization is applied to query and key tensors.
-                    When 'rms', RMS normalization is applied to query and key tensors.
+                    Options: None, 'L2Normalization', 'RMSNorm'. When None, no normalization is applied.
+                    When 'L2Normalization', L2 normalization is applied to query and key tensors.
+                    When 'RMSNorm', RMS normalization is applied to query and key tensors.
                     Normalization is applied after RoPE (if applicable) but before attention computation.
                     This follows the e.g. Llama4 approach for QK normalization to improve
                     training stability and model performance.
@@ -302,14 +302,14 @@ class MultiheadAttention(torch.nn.Module):
             "device": device,
         }
 
-        if qk_norm_type == "l2":
+        if qk_norm_type == "L2Normalization":
             l2_norm = L2Normalization(
                 eps=qk_norm_eps,
                 seq_length=seq_length,
                 micro_batch_size=micro_batch_size,
             )
             self.q_norm = self.k_norm = l2_norm
-        elif qk_norm_type == "rms":
+        elif qk_norm_type == "RMSNorm":
             self.q_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
@@ -322,7 +322,7 @@ class MultiheadAttention(torch.nn.Module):
             )
         elif qk_norm_type is not None:
             raise ValueError(
-                f"Unsupported QK norm type: {qk_norm_type}. Supported types: ['l2', 'rms']"
+                f"Unsupported QK norm type: {qk_norm_type}. Supported types: ['L2Normalization', 'RMSNorm']"
             )
         else:
             self.q_norm = None

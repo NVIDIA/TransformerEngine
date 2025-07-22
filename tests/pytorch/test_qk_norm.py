@@ -8,7 +8,7 @@ import pytest
 import torch
 
 
-@pytest.mark.parametrize("qk_norm_type", [None, "l2", "rms"])
+@pytest.mark.parametrize("qk_norm_type", [None, "L2Normalization", "RMSNorm"])
 @pytest.mark.parametrize("attention_type", ["self", "cross"])
 @pytest.mark.parametrize("qk_norm_eps", [1e-6, 1e-5])
 def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> None:
@@ -34,7 +34,7 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
         assert mha.k_norm is not None, "Should have k_norm module when qk_norm_type is not None"
 
         # Check that the modules are of the correct type
-        if qk_norm_type == "l2":
+        if qk_norm_type == "L2Normalization":
             from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 
             assert isinstance(
@@ -48,7 +48,7 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
                 mha.q_norm is mha.k_norm
             ), "q_norm and k_norm should be the same instance for L2 normalization"
 
-        elif qk_norm_type == "rms":
+        elif qk_norm_type == "RMSNorm":
             from transformer_engine.pytorch.module.rmsnorm import RMSNorm
 
             assert isinstance(mha.q_norm, RMSNorm), "q_norm should be an RMSNorm module"
@@ -113,7 +113,7 @@ def test_qk_norm_functionality(qk_norm_type, attention_type, qk_norm_eps) -> Non
         assert not torch.isinf(output_with_rope).any(), "RoPE output contains Inf"
 
 
-@pytest.mark.parametrize("qk_norm_type", ["l2", "rms"])
+@pytest.mark.parametrize("qk_norm_type", ["L2Normalization", "RMSNorm"])
 def test_qk_norm_output_difference(qk_norm_type) -> None:
     """Test that QK normalization actually changes the output compared to no normalization."""
     hidden_size = 256
@@ -163,7 +163,7 @@ def test_qk_norm_output_difference(qk_norm_type) -> None:
     ), f"QK normalization ({qk_norm_type}) should change the output, but outputs are identical"
 
 
-@pytest.mark.parametrize("qk_norm_type", ["l2", "rms"])
+@pytest.mark.parametrize("qk_norm_type", ["L2Normalization", "RMSNorm"])
 def test_qk_norm_with_fused_qkv(qk_norm_type) -> None:
     """Test QK normalization works with fused QKV parameters."""
     hidden_size = 256
@@ -195,7 +195,7 @@ def test_qk_norm_with_fused_qkv(qk_norm_type) -> None:
     ), f"Output shape mismatch: {output.shape}"
 
 
-@pytest.mark.parametrize("qk_norm_type", ["l2", "rms"])
+@pytest.mark.parametrize("qk_norm_type", ["L2Normalization", "RMSNorm"])
 def test_qk_norm_transformer_layer_output_difference(qk_norm_type) -> None:
     """Test that QK normalization actually changes TransformerLayer output compared to no normalization."""
     from transformer_engine.pytorch import TransformerLayer
@@ -277,7 +277,7 @@ def test_different_qk_norm_types_produce_different_outputs() -> None:
     mha_l2 = MultiheadAttention(
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
-        qk_norm_type="l2",
+        qk_norm_type="L2Normalization",
         bias=False,
         device="cuda",
     ).cuda()
@@ -290,7 +290,7 @@ def test_different_qk_norm_types_produce_different_outputs() -> None:
     mha_rms = MultiheadAttention(
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
-        qk_norm_type="rms",
+        qk_norm_type="RMSNorm",
         bias=False,
         device="cuda",
     ).cuda()

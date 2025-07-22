@@ -238,9 +238,9 @@ class TransformerLayer(torch.nn.Module):
                     `fuse_wgrad_accumulation`.
     qk_norm_type: Optional[str], default = None
                     type of normalization to apply to query and key tensors.
-                    Options: None, 'l2', 'rms'. When None, no normalization is applied.
-                    When 'l2', L2 normalization is applied to query and key tensors.
-                    When 'rms', RMS normalization is applied to query and key tensors.
+                    Options: None, 'L2Normalization', 'RMSNorm'. When None, no normalization is applied.
+                    When 'L2Normalization', L2 normalization is applied to query and key tensors.
+                    When 'RMSNorm', RMS normalization is applied to query and key tensors.
                     Normalization is applied after RoPE (if applicable) but before attention computation.
                     This follows the e.g. Llama4 approach for QK normalization to improve
                     training stability and model performance.
