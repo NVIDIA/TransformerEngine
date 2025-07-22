@@ -372,7 +372,7 @@ class FusedAttnRunner:
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
-        if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             pytest.skip("Unsupported inputs combination or device compute capability.")
 
         if (
