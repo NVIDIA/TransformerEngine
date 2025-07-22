@@ -354,8 +354,9 @@ TEST_P(GemmAr, Gemm) {
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
   const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
   std::ostringstream ss;
-  ss << to_string(a_type) << "_" << to_string(b_type) << "_" << to_string(d_type) << "_"
-     << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m << "x" << n << "x" << k;
+  ss << static_cast<int>(a_type) << "_" << static_cast<int>(b_type) << "_"
+     << static_cast<int>(d_type) << "_" << (transa ? "T" : "N") << (transb ? "T" : "N") << "_" << m
+     << "x" << n << "x" << k;
   return ss.str();
 }
 
@@ -407,10 +408,10 @@ INSTANTIATE_TEST_SUITE_P(
                            64 * 4, 64 * 4, 5e-2},
                     Params{DType::kBFloat16, DType::kBFloat16, DType::kBFloat16, true, false, 64,
                            64 * 4, 64 * 4, 5e-2},
-                    Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat16, true, false, 128,
-                           128 * 4, 128 * 4, 5e-2},
-                    Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false, 128,
-                           128 * 4, 128 * 4, 5e-2},
-                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false, 128,
-                           128 * 4, 128 * 4, 5e-2}),
+                    Params{DType::kFloat8E5M2, DType::kFloat8E4M3, DType::kFloat16, true, false,
+                           128, 128 * 4, 128 * 4, 5e-2},
+                    Params{DType::kFloat8E4M3, DType::kFloat8E5M2, DType::kFloat16, true, false,
+                           128, 128 * 4, 128 * 4, 5e-2},
+                    Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
+                           128, 128 * 4, 128 * 4, 5e-2}),
     &ParamSuffix);
