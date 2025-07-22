@@ -474,7 +474,7 @@ class MultiheadAttention(torch.nn.Module):
             # L2Normalization is parameter-free, so we can share the same instance
             return l2_norm, l2_norm
 
-        elif qk_norm_type == "RMSNorm":
+        if qk_norm_type == "RMSNorm":
             q_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
@@ -487,7 +487,7 @@ class MultiheadAttention(torch.nn.Module):
             )
             return q_norm, k_norm
 
-        elif qk_norm_type == "LayerNorm":
+        if qk_norm_type == "LayerNorm":
             q_norm = LayerNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
@@ -500,11 +500,10 @@ class MultiheadAttention(torch.nn.Module):
             )
             return q_norm, k_norm
 
-        else:
-            raise ValueError(
-                f"Unsupported QK norm type: {qk_norm_type}. "
-                "Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
-            )
+        raise ValueError(
+            f"Unsupported QK norm type: {qk_norm_type}. "
+            "Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
+        )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
