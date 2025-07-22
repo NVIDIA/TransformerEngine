@@ -181,12 +181,17 @@ class MultiheadAttention(torch.nn.Module):
                     When 'L2Normalization', L2 normalization is applied to query and key tensors.
                     When 'RMSNorm', RMS normalization is applied to query and key tensors.
                     When 'LayerNorm', layer normalization is applied to query and key tensors.
-                    Normalization is applied after RoPE (if applicable) but before attention computation.
-                    This follows the e.g. Llama4 approach for QK normalization to improve
-                    training stability and model performance.
+                    Normalization is applied after RoPE (if applicable) but before attention computation
+                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach 
+                    for QK normalization to improve training stability and model performance.
     qk_norm_eps: float, default = 1e-6
                     epsilon value for normalization of query and key tensors.
                     Only used when `qk_norm_type` is not None.
+    qk_norm_before_rope: bool, default = `False`
+                    if set to `True`, query and key normalization is applied before rotary position
+                    embedding. When `False` (default), normalization is applied after RoPE.
+                    This parameter allows supporting different architectural variants that apply 
+                    QK normalization at different points.
     seq_length: Optional[int], default = `None`
                     sequence length of input samples. Needed for JIT Warmup, a technique where jit
                     fused functions are warmed up before training to ensure same kernels are used for
@@ -237,6 +242,7 @@ class MultiheadAttention(torch.nn.Module):
         name: str = None,
         qk_norm_type: Optional[str] = None,
         qk_norm_eps: float = 1e-6,
+        qk_norm_before_rope: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
     ) -> None:
@@ -268,6 +274,7 @@ class MultiheadAttention(torch.nn.Module):
             qkv_weight_interleaved = False
         self.qkv_weight_interleaved = qkv_weight_interleaved
         self.rotary_pos_interleaved = rotary_pos_interleaved
+        self.qk_norm_before_rope = qk_norm_before_rope
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
         if layer_number is not None:
@@ -861,6 +868,14 @@ class MultiheadAttention(torch.nn.Module):
             )
             query_layer = query_layer.view(*new_tensor_shape)
 
+        # ===========================
+        # Apply normalization to query and key tensors (before RoPE if configured)
+        # ===========================
+
+        if self.q_norm is not None and self.qk_norm_before_rope:
+            query_layer = self.q_norm(query_layer)
+            key_layer = self.k_norm(key_layer)
+
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
@@ -915,10 +930,10 @@ class MultiheadAttention(torch.nn.Module):
             )
 
         # ===========================
-        # Apply normalization to query and key tensors
+        # Apply normalization to query and key tensors (after RoPE if not applied before)
         # ===========================
 
-        if self.q_norm is not None:
+        if self.q_norm is not None and not self.qk_norm_before_rope:
             query_layer = self.q_norm(query_layer)
             key_layer = self.k_norm(key_layer)
 

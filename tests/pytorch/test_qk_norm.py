@@ -272,6 +272,60 @@ def test_qk_norm_transformer_layer_output_difference(qk_norm_type) -> None:
     assert not torch.isinf(output_no_norm).any(), "Output without QK norm contains Inf"
 
 
+@pytest.mark.parametrize("qk_norm_type", ["L2Normalization", "RMSNorm", "LayerNorm"])
+def test_qk_norm_before_after_rope(qk_norm_type) -> None:
+    """Test that QK normalization before and after RoPE works without errors."""
+    hidden_size = 256
+    num_attention_heads = 8
+    seq_len = 64
+    batch_size = 2
+
+    # Create model with QK norm after RoPE (default)
+    mha_after = MultiheadAttention(
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        qk_norm_type=qk_norm_type,
+        qk_norm_before_rope=False,
+        bias=False,
+        device="cuda",
+    ).cuda()
+
+    # Create model with QK norm before RoPE
+    mha_before = MultiheadAttention(
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        qk_norm_type=qk_norm_type,
+        qk_norm_before_rope=True,
+        bias=False,
+        device="cuda",
+    ).cuda()
+
+    hidden_states = torch.randn(seq_len, batch_size, hidden_size, device="cuda", dtype=torch.float32)
+
+    # Create RoPE embeddings
+    head_dim = hidden_size // num_attention_heads
+    rotary_dim = head_dim // 2
+    rotary_pos_emb = torch.randn(seq_len, 1, 1, rotary_dim, device="cuda", dtype=torch.float32)
+
+    with torch.no_grad():
+        output_after_rope = mha_after(hidden_states, rotary_pos_emb=rotary_pos_emb)
+        output_before_rope = mha_before(hidden_states, rotary_pos_emb=rotary_pos_emb)
+
+        output_after_no_rope = mha_after(hidden_states)
+        output_before_no_rope = mha_before(hidden_states)
+
+    # Check output shapes and properties
+    expected_shape = (seq_len, batch_size, hidden_size)
+    for output in [output_after_rope, output_before_rope, output_after_no_rope, output_before_no_rope]:
+        assert output.shape == expected_shape, f"Output shape mismatch: {output.shape}"
+        assert not torch.isnan(output).any(), "Output contains NaN"
+        assert not torch.isinf(output).any(), "Output contains Inf"
+
+    assert output_after_rope.shape == output_before_rope.shape, "Outputs should have same shape"
+    assert mha_after.qk_norm_before_rope == False, "mha_after should have qk_norm_before_rope=False"
+    assert mha_before.qk_norm_before_rope == True, "mha_before should have qk_norm_before_rope=True"
+
+
 def test_different_qk_norm_types_produce_different_outputs() -> None:
     """Test that different QK normalization types produce different outputs."""
     hidden_size = 256
