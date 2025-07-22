@@ -1353,7 +1353,9 @@ class Linear(TransformerEngineBaseModule):
             if get_ub(self.ub_name + "_dgrad").is_fp8_ubuf():
                 fp8_grad = True
 
-        with torch.cuda.device(getattr(self, list(self.named_parameters())[0][0]).device), self.prepare_forward(
+        with torch.cuda.device(
+            getattr(self, list(self.named_parameters())[0][0]).device
+        ), self.prepare_forward(
             inp,
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
