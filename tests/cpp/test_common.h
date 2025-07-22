@@ -413,7 +413,12 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  if (biased_exp == 0) {
+    return 1.0f;
+  }
+  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
+  float fp32_val = *reinterpret_cast<float*>(&int_val);
+  return fp32_val;
 }
 
 inline float identity(const float x) { return x; }
@@ -445,15 +450,18 @@ size_t last_dimension(const std::vector<size_t> &shape);
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
 void compareResults(const std::string &name, const Tensor &test, const void *ref,
-                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true);
+                    bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
+                    const size_t tolerable_mismatches_limit = 0);
 void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t N);
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
+                                  size_t& mismatches_num,
+                                  const size_t scale_diff_abs_tolerance = 0,
+                                  const double abs_tolerable_mismatches_limit = 0,
+                                  const double rel_tolerable_mismatches_limit = 0);
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
