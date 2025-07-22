@@ -689,7 +689,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
             # Float8Tensor attributes
             self._data = tensor._data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._scale_inv = tensor._scale_inv
             self._transpose = tensor._transpose
