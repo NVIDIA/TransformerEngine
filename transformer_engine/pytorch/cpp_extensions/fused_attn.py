@@ -280,10 +280,10 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    print('tex',
-        softmax_offset.data_ptr(),
-        softmax_offset,
-        )
+#    print('tex',
+#        softmax_offset.data_ptr(),
+#        softmax_offset,
+#        )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,

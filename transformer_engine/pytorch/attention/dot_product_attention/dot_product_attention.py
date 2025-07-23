@@ -11,7 +11,7 @@ import warnings
 import logging
 
 import torch
-from torch.nn.parameter import Parameter
+#from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version, get_default_init_method
@@ -319,14 +319,17 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.softmax_type = softmax_type
         if self.softmax_type == "learnable":
-            softmax_offset = Parameter(torch.ones(1, self.num_attention_heads // self.tp_size, 1, 1))
-            self.register_parameter(
-                    "softmax_offset",
-                    softmax_offset,
-                    #init_fn=get_default_init_method(),
-                    #get_rng_state_tracker=self.rng_states_tracker,
-                    )
-            print('params', softmax_offset)
+            self.softmax_offset = torch.nn.Parameter(torch.randn(1, self.num_attention_heads // self.tp_size, 1, 1)) #, device="cuda"))
+            #softmax_offset = torch.empty([1, 100, 1, 1]).to(device="cuda")
+            #print('params', softmax_offset.max())
+            #self.softmax_offset = torch.nn.Parameter(softmax_offset[0,:16])
+            #self.register_parameter(
+            #        "softmax_offset",
+            #        softmax_offset,
+            #        #init_fn=get_default_init_method(),
+            #        #get_rng_state_tracker=self.get_rng_state_tracker,
+            #        )
+            #print('params', self.softmax_offset)
             #self.softmax_offset = self.softmax_offset
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.ones(1, self.num_attention_heads // self.tp_size, 1, 1, device="cuda")
