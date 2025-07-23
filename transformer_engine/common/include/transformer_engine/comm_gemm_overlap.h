@@ -26,6 +26,8 @@ namespace transformer_engine {
  */
 bool ubuf_built_with_mpi();
 
+enum class CommOverlapMethod { BULK = 0, PIPELINE = 1, RING_EXCHANGE = 2 };
+
 enum class CommOverlapType { RS = 0, AG = 1 };
 
 enum class CommOverlapAlgo {

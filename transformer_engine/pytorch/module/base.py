@@ -171,6 +171,7 @@ def initialize_ub(
     assert _ub_communicators is None, "UB communicators are already initialized."
     _ub_communicators = {}
 
+    helper = None
     if tex.ubuf_built_with_mpi():
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
         # an MPI_Init() here by creating a new MPI process group...
@@ -185,10 +186,15 @@ def initialize_ub(
         ), "torch.distributed must be initialized before Userbuffers"
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
-            if torch.distributed.is_mpi_available():
-                bootstrap_backend = "mpi"
-            elif torch.distributed.is_gloo_available():
-                bootstrap_backend = "gloo"
+            if not tex.nvte_built_with_cublasmp():
+                if torch.distributed.is_mpi_available():
+                    bootstrap_backend = "mpi"
+                elif torch.distributed.is_gloo_available():
+                    bootstrap_backend = "gloo"
+        elif tex.nvte_built_with_cublasmp():
+            assert bootstrap_backend == "nccl", (
+                "Comm+GEMM overlap w/ cuBlasMp needs `bootstrap_backend=\"nccl\"`."
+            )
         else:
             assert bootstrap_backend in [
                 "gloo",
@@ -216,14 +222,20 @@ def initialize_ub(
             local_rank = torch.distributed.get_rank(tp_domain_group)
             tp_domain_ranks = torch.distributed.get_process_group_ranks(tp_domain_group)
 
-            helper = tex.CommOverlapHelper(world_group, tp_domain_group)
+            if tex.nvte_built_with_cublasmp():
+                helper = tex.CommOverlapHelper(tp_domain_group)
+            else:
+                helper = tex.CommOverlapHelper(world_group, tp_domain_group)
         else:
             # TP model on single NVLink domain, no replication, no data-parallelism
             mydomain_idx = 0
             local_rank = world_rank
             tp_domain_ranks = list(range(world_size))
 
-            helper = tex.CommOverlapHelper(world_group)
+            if tex.nvte_built_with_cublasmp():
+                helper = tex.CommOverlapHelper(world_group)
+            else:
+                helper = tex.CommOverlapHelper(world_group, world_group)
 
         if world_rank == 0:
             print(f"!!! [UB] Number of TP domains: {num_domains}\n", end="", flush=True)
@@ -347,41 +359,24 @@ def initialize_ub(
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
-        buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
-        if method == "ring_exchange":
-            ub_obj = tex.CommOverlapP2P(
-                shape,  # Communication buffer shape
-                buffer_dtype,  # Communication buffer data type
-                helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
-                tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
-                num_max_streams=_NUM_MAX_UB_STREAMS,
-                comm_cga_size=cga_size,
-                num_comm_sm=num_sm,
-                set_sm_margin=set_sm_margin,
-                atomic_gemm=atomic_gemm,
-                use_ce=use_ce,
-                aggregate=aggregate,
-                gemm_priority=gemm_priority,
-                comm_priority=comm_priority,
-            )
-        else:
-            ub_obj = tex.CommOverlap(
-                shape,  # Communication buffer shape
-                buffer_dtype,  # Communication buffer data type
-                helper,  # Helper for torch.distributed callbacks during bootstrapping
-                tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_splits=num_splits,
-                num_max_streams=_NUM_MAX_UB_STREAMS,
-                comm_cga_size=cga_size,
-                num_comm_sm=num_sm,
-                set_sm_margin=set_sm_margin,
-                atomic_gemm=atomic_gemm,
-                gemm_priority=gemm_priority,
-                comm_priority=comm_priority,
-                rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
-            )
-        _ub_communicators[name] = ub_obj
+        _ub_communicators[name] = tex.CommOverlapManager(
+            method,
+            tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
+            shape,
+            torch.uint8 if (use_fp8 and fp8_buf) else dtype,
+            helper,
+            tp_size,
+            num_splits=num_splits,
+            num_max_streams=_NUM_MAX_UB_STREAMS,
+            comm_cga_size=cga_size,
+            gemm_priority=gemm_priority,
+            comm_priority=comm_priority,
+            num_comm_sm=num_sm,
+            set_sm_margin=set_sm_margin,
+            atomic_gemm=atomic_gemm,
+            aggregate_ag=aggregate,
+            rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
+        )
 
     if ub_cfgs is not None:
         for name in dgrad_reduce_scatter_overlap:
@@ -439,6 +434,16 @@ def fill_userbuffers_buffer_for_all_gather(
     tensor's metadata, e.g. scaling factors.
 
     """
+    # cuBlasMp handles AG for the scaling factor so we just need the local tensor here
+    if tex.nvte_built_with_cublasmp():
+        tensor_is_quantized = isinstance(local_tensor, QuantizedTensorBase)
+        if quantizer is None and tensor_is_quantized:
+            # Dequantize quantized tensor if quantizer is None
+            local_tensor = local_tensor.dequantize()
+        elif quantizer is not None and not tensor_is_quantized:
+            # Quantize unquantized tensor if quantizer is not None
+            local_tensor = quantizer(local_tensor)
+        return local_tensor, local_tensor
 
     # Tensor dimensions
     local_shape = local_tensor.size()
