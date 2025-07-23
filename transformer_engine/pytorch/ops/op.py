@@ -228,6 +228,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self._quantizers = None
             return
 
+        # Communication group for FP8 amax reductions
+        fp8_group = FP8GlobalStateManager.get_fp8_group()
+
         # Skip resetting recipe type if it did not actually change.
         # This could happen for example if calling BasicOperation.forward directly, as in that
         # case, the OperationFuser is not persistent, or when loading from a checkpoint
@@ -247,7 +250,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     break
 
         if need_to_reset_recipe_state:
-            # Quantization recipe state for forward and backward pass
+            # Construct quantization recipe states
             self._fp8_metas = {"forward": None, "backward": None}
             self._quantizers = {"forward": [], "backward": []}
             for mode in ("forward", "backward"):
@@ -272,11 +275,38 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas[mode] = {
                     fp8_meta_key: recipe_state,
                     "recipe": recipe,
-                    "fp8_group": FP8GlobalStateManager.get_fp8_group(),
+                    "fp8_group": fp8_group,
                 }
 
                 # Construct builder class for quantized tensors
                 self._quantizers[mode] = recipe_state.make_quantizers()
+        else:
+            # Update quantization recipe states
+            for mode in ("forward", "backward"):
+                if self._fp8_metas[mode] is None:
+                    continue
+                self._fp8_metas[mode]["recipe"] = recipe
+                self._fp8_metas[mode]["fp8_group"] = fp8_group
+
+                # Update amax history for FP8 delayed scaling
+                if recipe.delayed():
+                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                        forward=(mode == "forward"),
+                    )
+                    recipe_state = self._fp8_metas[mode][fp8_meta_key]
+                    current_length = recipe_state.amax_history.size(0)
+                    target_length = recipe.amax_history_len
+                    if target_length < current_length:
+                        with torch.no_grad():
+                            recipe_state.amax_history = recipe_state.amax_history[
+                                :target_length
+                            ].clone()
+                    elif target_length > current_length:
+                        with torch.no_grad():
+                            recipe_state.amax_history = torch.nn.functional.pad(
+                                recipe_state.amax_history,
+                                pad=(0, 0, 0, target_length - current_length),
+                            )
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):

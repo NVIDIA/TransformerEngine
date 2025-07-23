@@ -712,6 +712,8 @@ def _make_graphed_callables(
                                 elif isinstance(m, BasicOperation):
                                     for mode in ("forward", "backward"):
                                         if m.num_quantizers(mode):
+                                            m._fp8_metas[mode]["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+                                            m._fp8_metas[mode]["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
                                             FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                                                 m._fp8_metas[mode],
                                             )
