@@ -54,6 +54,10 @@ inline bool is_nvfp_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING;
 }
 
+inline bool is_hybrid_nvfp4_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING;
+}
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");

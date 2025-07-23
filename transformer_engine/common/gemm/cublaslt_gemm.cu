@@ -87,7 +87,7 @@ struct GemmParam {
  */
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                int m, int n, int k) {
+                                int m, int n, int k, bool grad) {
   using namespace transformer_engine;
   NVTE_CHECK(
       A.scaling_mode == B.scaling_mode ||
@@ -123,8 +123,16 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
     }
-  } else if (is_mxfp_scaling(A.scaling_mode)) {
-    // MXFP8
+  } else if (is_hybrid_nvfp4_scaling(A.scaling_mode) && !grad) {
+    NVTE_CHECK(is_A_transposed, "Incorrect GEMM layout for NVFP4");
+    NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
+    ret.A = A.data.dptr;
+    ret.transA = CUBLAS_OP_T;
+    ret.Atype = A.data.dtype;
+    ret.A_scale_inv = A.scale_inv.dptr;
+    ret.lda = k;
+  } else if (is_mxfp_scaling(A.scaling_mode) || is_hybrid_nvfp4_scaling(A.scaling_mode)) {
+    // MXFP8 GEMM. Either for MXFP8 recipe or backward of Hybrid NVFP4 recipe.
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_A_transposed) {
@@ -137,14 +145,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
-  } else if (is_nvfp_scaling(A.scaling_mode)) {
-    NVTE_CHECK(is_A_transposed, "Incorrect GEMM layout for NVFP4");
-    NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
-    ret.A = A.data.dptr;
-    ret.transA = CUBLAS_OP_T;
-    ret.Atype = A.data.dtype;
-    ret.A_scale_inv = A.scale_inv.dptr;
-    ret.lda = k;
   } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
     // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
@@ -204,7 +204,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
-  } else if (is_nvfp_scaling(B.scaling_mode)) {
+  } else if (is_hybrid_nvfp4_scaling(B.scaling_mode)) {
     NVTE_CHECK(!is_B_transposed, "Incorrect GEMM layout for NVFP4");
     NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
     ret.B = B.data.dptr;
@@ -281,7 +281,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+  const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k, grad);
 
   void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
@@ -367,6 +367,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                      &math_sm_count, sizeof(math_sm_count)));
   }
 
+  // Set conditions for when MXFP8 and NVFP4 gemm execution.
+  bool hybrid_nvfp4_recipe = is_hybrid_nvfp4_scaling(inputA->scaling_mode) &&
+                             is_hybrid_nvfp4_scaling(inputB->scaling_mode);
+  bool mxfp8_gemm =
+      (is_mxfp_scaling(inputA->scaling_mode) && is_mxfp_scaling(inputB->scaling_mode)) ||
+      (grad && hybrid_nvfp4_recipe);
+  bool nvfp4_gemm = !grad && hybrid_nvfp4_recipe;
+
   // set fp8/fp4 attributes -- input and output types should already be set to fp8/fp4
   // as appropriate. Note: gelu fusion isn't available right now, and we don't need
   // amax(D) either (next op is high precision).
@@ -394,7 +402,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
       scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
 #endif  // CUBLAS_VERSION >= 120800
-    } else if ((is_mxfp_scaling(inputA->scaling_mode) && is_mxfp_scaling(inputB->scaling_mode))) {
+    } else if (mxfp8_gemm) {
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cublas_version() >= 120800,
                  "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
@@ -416,7 +424,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
-    } else if ((is_nvfp_scaling(inputA->scaling_mode) && is_nvfp_scaling(inputB->scaling_mode))) {
+    } else if (nvfp4_gemm) {
       fp8e4m3 *A_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.A_scale_inv);
       fp8e4m3 *B_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
