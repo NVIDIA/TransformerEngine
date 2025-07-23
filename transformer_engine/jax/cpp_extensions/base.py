@@ -65,20 +65,20 @@ class BasePrimitive(metaclass=ABCMeta):
             custom_calls_str = custom_calls_str.strip()
             if custom_calls_str.lower() == "true":
                 return True
-            elif custom_calls_str.lower() == "false":
+            if custom_calls_str.lower() == "false":
                 return False
-            else:
-                # Parse key=value pairs
-                settings = {}
-                for pair in custom_calls_str.split(","):
-                    pair = pair.strip()
-                    if "=" in pair:
-                        key, value = pair.split("=", 1)
-                        key = key.strip()
-                        value = value.strip().lower()
-                        settings[key] = value == "true"
-                if cls.__name__ in settings:
-                    return settings[cls.__name__]
+            
+            # Parse key=value pairs
+            settings = {}
+            for pair in custom_calls_str.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().lower()
+                    settings[key] = value == "true"
+            if cls.__name__ in settings:
+                return settings[cls.__name__]
 
         # Check old regex environment variable (deprecated)
         pattern_str = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE")
