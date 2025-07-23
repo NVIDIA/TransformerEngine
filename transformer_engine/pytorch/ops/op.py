@@ -183,7 +183,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self._quantizers: Optional[dict[str, list[Quantizer]]] = None
         with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         recipe = FP8GlobalStateManager.get_fp8_recipe() if with_fp8_parameters else None
-        self.reset_recipe_type(recipe=recipe)
+        self.reset_recipe_state(recipe=recipe)
 
     @property
     def is_fused_op(self) -> bool:
@@ -215,7 +215,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             return self.get_quantizer("backward", 0)
         return None
 
-    def reset_recipe_type(
+    def reset_recipe_state(
         self,
         *,
         recipe: Optional[Recipe],
@@ -604,7 +604,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             # Get op's quantizer state, initializing if needed
             if self._fp8_metas is None or self._fp8_metas[mode] is None:
                 with fp8_autocast(fp8_recipe=state[mode]["recipe"]):
-                    self.reset_recipe_type(recipe=state[mode]["recipe"])
+                    self.reset_recipe_state(recipe=state[mode]["recipe"])
             fp8_meta = self._fp8_metas[mode]
 
             # Load extra items

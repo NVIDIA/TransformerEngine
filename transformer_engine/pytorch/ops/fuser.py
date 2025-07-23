@@ -401,7 +401,7 @@ class OperationFuser:
         need_reset = False
         recipe_type = type(recipe)
         fusion_params = (recipe_type, first_op_requiring_backward)
-        if fusion_params == (self.recipe_type, self.first_op_requiring_backward):
+        if fusion_params != (self.recipe_type, self.first_op_requiring_backward):
             # Recipe type or grad requirmenets have changed
             need_reset = True
         elif (
@@ -415,7 +415,7 @@ class OperationFuser:
 
         # Reset recipe state
         for op in self._basic_ops:
-            op.reset_recipe_type(recipe=recipe)
+            op.reset_recipe_state(recipe=recipe)
 
         # Check if this is the first iteration
         if self.recipe_type is None:

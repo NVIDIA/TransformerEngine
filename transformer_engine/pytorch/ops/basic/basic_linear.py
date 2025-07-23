@@ -315,8 +315,8 @@ class BasicLinear(BasicOperation):
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
-    def reset_recipe_type(self, *, recipe: Optional[Recipe]) -> None:
-        super().reset_recipe_type(recipe=recipe)
+    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
+        super().reset_recipe_state(recipe=recipe)
 
         if recipe is not None and not FP8GlobalStateManager.with_fp8_parameters():
             # Make quantizers use internal tensors
