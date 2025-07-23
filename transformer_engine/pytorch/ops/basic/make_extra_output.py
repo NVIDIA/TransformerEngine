@@ -23,7 +23,7 @@ class MakeExtraOutput(BasicOperation):
     If this operation is included in the operation fuser, then the
     operation fuser will return the intermediate tensor as an extra
     tensor output.
-    
+
     In the backward pass, the gradient may be directly
     accumulated into the gradient w.r.t. the extra output. This is
     controlled by the in_place kwarg. Currently, the BackwardLinearAdd
