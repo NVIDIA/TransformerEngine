@@ -662,6 +662,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=device == "meta")
 
+        for name, param in self.named_parameters():
+            for i in range(self.num_gemms):
+                if name == f"weight{i}" or name == f"bias{i}":
+                    param.skip_backward_post_hook = True
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -807,21 +812,6 @@ class GroupedLinear(TransformerEngineBaseModule):
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
 
-    def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
-        """
-        This method is used to manually control the weight gradient accumulation and reduce.
-        This method should be called before the backward() method.
-        Set the skip_wgrad_accumulation_and_reduce to True to skip the weight gradient accumulation
-        and reduce in backward();
-        And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
-        """
-        self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
-        for i in range(self.num_gemms):
-            weight_param = getattr(self, f"weight{i}")
-            weight_param.skip_wgrad_accumulation_and_reduce = True
-            bias_param = getattr(self, f"bias{i}")
-            bias_param.skip_wgrad_accumulation_and_reduce = True
-
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -845,12 +835,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             del grad_biases_
             del wgrad_list
             del tensor_list
-            if self.wgrad_accumulation_and_reduce_func is not None:
-                for i in range(self.num_gemms):
-                    weight_params[i].skip_wgrad_accumulation_and_reduce = False
-                    self.wgrad_accumulation_and_reduce_func(weight_params[i])()
-                    bias_params[i].skip_wgrad_accumulation_and_reduce = False
-                    self.wgrad_accumulation_and_reduce_func(bias_params[i])()
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""

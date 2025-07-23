@@ -582,7 +582,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
-        self.wgrad_accumulation_and_reduce_func = None
+        self.wgrad_accumulation_and_reduce_hooks = []
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -1376,7 +1376,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
+    def register_wgrad_accumulation_and_reduce_hooks(self, wgrad_accumulation_and_reduce_hook):
         """
         This method is used to manually control the weight gradient accumulation and reduce.
         This method should be called before the backward() method.
@@ -1384,12 +1384,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         and reduce in backward();
         And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
         """
-        self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
-        weight_tensor = noop_cat(self._get_weight_tensors())
-        weight_tensor.skip_wgrad_accumulation_and_reduce = True
-        if self.use_bias:
-            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            bias_tensor.skip_wgrad_accumulation_and_reduce = True
+        self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
 
     def backward_dw(self):
         """
@@ -1410,14 +1405,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
             del wgrad
             del bgrad
-            if self.wgrad_accumulation_and_reduce_func is not None:
-                weight_tensor = noop_cat(self._get_weight_tensors())
-                weight_tensor.skip_wgrad_accumulation_and_reduce = False
-                self.wgrad_accumulation_and_reduce_func(weight_tensor)()
-                if self.use_bias:
-                    bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-                    bias_tensor.skip_wgrad_accumulation_and_reduce = False
-                    self.wgrad_accumulation_and_reduce_func(bias_tensor)()
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
 
     def _validate_name(self):
         """
