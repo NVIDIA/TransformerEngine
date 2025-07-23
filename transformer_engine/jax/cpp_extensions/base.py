@@ -67,7 +67,7 @@ class BasePrimitive(metaclass=ABCMeta):
                 return True
             if custom_calls_str.lower() == "false":
                 return False
-            
+
             # Parse key=value pairs
             settings = {}
             for pair in custom_calls_str.split(","):
