@@ -185,13 +185,11 @@ std::vector<py::object> fused_attn_fwd(
   // softmax offset
   TensorWrapper te_SoftmaxOffset;
   if (SoftmaxOffset.has_value()) {
-    printf("fwd has value\n");
     auto SoftmaxOffset_sizes = SoftmaxOffset.value().sizes().vec();
     std::vector<size_t> SoftmaxOffset_shape{SoftmaxOffset_sizes.begin(), SoftmaxOffset_sizes.end()};
     te_SoftmaxOffset =
         makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(), SoftmaxOffset_shape,
                                     DType::kFloat32, nullptr, nullptr, nullptr);
-    printf("tensor pter %ld\n", reinterpret_cast<uintptr_t>(te_SoftmaxOffset.data()));
   }
 
   // extract rng seed and offset
@@ -220,7 +218,6 @@ std::vector<py::object> fused_attn_fwd(
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
-    printf("allocate space\n");
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
@@ -247,7 +244,6 @@ std::vector<py::object> fused_attn_fwd(
       nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
       static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-    printf("allocated S \n");
   // fp8 has an additional softmax stats tensor
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     output_tensor = allocateSpace(
@@ -263,7 +259,6 @@ std::vector<py::object> fused_attn_fwd(
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     set_tensor_param(i++, Bias.value());
   }
-    printf("allocated all %ld\n", reinterpret_cast<uintptr_t>(te_SoftmaxOffset.data()));
 
   // execute the kernel
   NVTE_SCOPED_GIL_RELEASE({

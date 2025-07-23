@@ -837,8 +837,6 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   Tensor *input_output_S = convertNVTETensorCheck(S);
   Tensor *output_O = convertNVTETensorCheck(O);
   Tensor *wkspace = convertNVTETensor(workspace);
-  printf("nvte %ld\n", reinterpret_cast<uintptr_t>(input_SoftmaxOffset->data.dptr));
-  printf("nvte %ld\n", reinterpret_cast<uintptr_t>(input_Q->data.dptr));
 
   auto ndim = input_Q->data.shape.size();
   auto ndim_kv = input_K->data.shape.size();

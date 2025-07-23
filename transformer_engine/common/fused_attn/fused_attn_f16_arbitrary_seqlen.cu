@@ -61,7 +61,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
     void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
-  printf("impl SoftmaxOffset ptr %ld\n",reinterpret_cast<uintptr_t>(devPtrSoftmaxOffset));
 
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
@@ -100,7 +99,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     s_kv = is_ragged_kv ? max_t_kv : s_kv;
   }
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-  printf("before graph \n");
   try {
     FADescriptor_v1 descriptor{b,
                                h,
@@ -164,7 +162,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         return graph;
       }
 
-      printf("start graph \n");
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
       mha_graph->set_io_data_type(tensorType)
@@ -273,7 +270,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
       }
 
-      printf("start graph 1\n");
       if (is_paged_kv) {
         page_table_k =
             mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -305,19 +301,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                                .set_data_type(fe::DataType_t::INT64));
         sdpa_options.set_dropout(dropout_probability, dropout_seed, dropout_offset);
       }
-      printf("start graph 2\n");
 
       if (devPtrSoftmaxOffset) {
-	printf("graph yes\n");
         softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("softmax_offset")
                                   .set_dim({1, h, 1, 1})
                                   .set_stride({h, 1, 1, 1})
 				  .set_data_type(fe::DataType_t::FLOAT));
         sdpa_options.set_sink_token(softmax_offset);
-        //auto [O, Stats] = mha_graph->sdpa_with_max_sum_exp_stats(Q, K, V, sdpa_options);
-      //} else {
       }
+
       auto [O, Stats] = mha_graph->sdpa(Q, K, V, sdpa_options);
 
       std::vector<int64_t> o_stride(4);
@@ -369,15 +362,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
-      printf("before validate \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-      printf("before build graph \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
-      printf("before create plans \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-      printf("before check support \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
-      printf("before build plans\n");
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
       auto return_tuple = std::tuple_cat(
@@ -497,7 +485,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     if (devPtrSoftmaxOffset) {
       variant_pack[softmax_offset] = devPtrSoftmaxOffset;
     }
-    printf("before execute\n");
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {
@@ -1442,8 +1429,6 @@ void fused_attn_arbitrary_seqlen_fwd(
     bias_h = input_Bias->data.shape[1];
   }
   void *devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
-  printf("SoftmaxOffset ptr %p\n",devPtrSoftmaxOffset);
-  printf("SoftmaxOffset ptr %ld\n",reinterpret_cast<uintptr_t>(devPtrSoftmaxOffset));
 
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
@@ -1467,7 +1452,6 @@ void fused_attn_arbitrary_seqlen_fwd(
 
   size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
-    printf("before aux0, size %d\n", i);
     const auto cudnn_runtime_version = cudnnGetVersion();
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
@@ -1477,13 +1461,11 @@ void fused_attn_arbitrary_seqlen_fwd(
       output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     }
     output_S->data.dtype = DType::kFloat32;
-    printf("before aux1, size %d\n", i);
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = nullptr;
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
 
-    printf("before aux2, size %d\n", i);
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
@@ -1492,9 +1474,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     }
 
     Aux_CTX_Tensors->size = i;
-    printf("before aux3, size %d\n", i);
-  } else if (Aux_CTX_Tensors->size >= 1) {
-    printf("before aux 2\n");
+  } else if (Aux_CTX_Tensors->size >= 2) {
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
     Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -1507,14 +1487,12 @@ void fused_attn_arbitrary_seqlen_fwd(
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
 
-  printf("before dropout \n");
   void *devPtrDropoutSeed = rng_state->data.dptr;
   void *devPtrDropoutOffset =
       reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
   size_t workspace_size = 0;
 
-  printf("before calling impl\n");
   fused_attn_arbitrary_seqlen_fwd_impl(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
