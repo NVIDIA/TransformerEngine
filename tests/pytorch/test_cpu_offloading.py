@@ -10,6 +10,8 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
+from utils import ModelConfig, get_available_attention_backends
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -22,10 +24,13 @@ fp8_recipes = [
     recipe.DelayedScaling(),
 ]
 
-SIZE = 512
-NUM_HEADS = 8
-NUM_LAYERS = 5
-EPSILON = 0.1
+model_config = {
+    "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
+}
+SIZE = model_config["small"].hidden_size
+NUM_HEADS = model_config["small"].num_heads
+NUM_LAYERS = model_config["small"].num_layers
+EPSILON = model_config["small"].eps
 
 # Flash attention saves some internal tensor for the backward pass
 # that cannot be offloaded to CPU.
@@ -129,6 +134,18 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
     if fp8_recipe is not None:
         if fp8_recipe.mxfp8() and not mxfp8_available:
             pytest.skip(reason_for_no_mxfp8)
+
+    if model_key in ["multihead_attention", "transformer_layer"]:
+        available_backends, *_ = get_available_attention_backends(
+            model_config["small"],
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="sbhd_sbhd_sbhd",
+        )
+        _, fused_attn_supported, _ = available_backends
+        if not fused_attn_supported:
+            pytest.skip("Fused attention backend not available.")
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
 
     without_offloading = _measure_memory_between_forward_and_backward(
         models_list, fp8_recipe, False
