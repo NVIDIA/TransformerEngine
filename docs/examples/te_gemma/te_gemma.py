@@ -46,7 +46,6 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             fuse_qkv_params=config.fuse_qkv_params,
             normalization="RMSNorm",
             activation="geglu",
-            # attn_input_format=config.qkv_format,
             attn_input_format="bshd",
             num_gqa_groups=config.num_key_value_heads,
             kv_channels=self.gemma_config.head_dim,
@@ -58,7 +57,7 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
 
     def forward(self, *args, **kwargs):  # We need to additionally pass positional encoding.
 
-        # this args cannot be passed to TransformerLayer
+        # filter out HF specific args
         keys_to_remove = [
             "position_ids",
             "past_key_value",
@@ -70,7 +69,8 @@ class TEGemmaDecoderLayer(te.pytorch.TransformerLayer):
             kwargs.pop(key, None)
 
         rope_emb = kwargs.pop("rope_emb", None)
-        # We need to return tuple to be compatible with HF.
+
+        # Return tuple to be compatible with HF.
         return (super().forward(*args, rotary_pos_emb=rope_emb, **kwargs),)
 
 
@@ -84,19 +84,16 @@ class StaticGemmaModel(torch.nn.Module):
         self,
         model: GemmaModel,
         dtype: torch.dtype,
-        mask: torch.Tensor,
         lm_head: torch.nn.Module,
     ):
         super().__init__()
         self.model = model
         self.normalizer = torch.tensor(self.model.config.hidden_size**0.5, dtype=dtype)
-        self.mask = mask
         self.lm_head = lm_head
 
     def set_inference_params(self, inference_params):
         self.inference_params = inference_params
 
-    # @sudhakars: is `arbitrary` fine being the default here?
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -104,13 +101,11 @@ class StaticGemmaModel(torch.nn.Module):
         attn_mask_type: str = "arbitrary",
         rope_emb: torch.Tensor = None,
     ):
-        # print(f"StaticGemmaModel forward start")
         with torch.no_grad():
             # static operation - for CUDA graphs
             hidden_states.data[:] = hidden_states.data[:] * self.normalizer
 
             for i, decoder_layer in enumerate(self.model.layers):
-                # print(f"layer {i}")
                 hidden_states.data[:] = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -123,8 +118,10 @@ class StaticGemmaModel(torch.nn.Module):
 
         hidden_states.copy_(self.model.norm(hidden_states))  # static copy - for CUDA graphs
         logits = self.lm_head(hidden_states)
+
+        # @sudhakars: This is probably not needed, need to check.
         logits = logits.float()
-        return logits, hidden_states
+        return logits
 
 
 class GemmaGenerator(torch.nn.Module):
@@ -138,14 +135,13 @@ class GemmaGenerator(torch.nn.Module):
     ):
         super().__init__()
         self.model = model
-        self.gemma_layers = StaticGemmaModel(model, dtype, "arbitrary", lm_head)
+        self.gemma_layers = StaticGemmaModel(model, dtype, lm_head)
         self.qkv_format = qkv_format
 
     def set_inference_params(self, inference_params):
         self.inference_params = inference_params
         self.gemma_layers.set_inference_params(inference_params)
 
-    # @sudhakars: is `arbitrary` a good default value here?
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -153,13 +149,14 @@ class GemmaGenerator(torch.nn.Module):
         attn_mask_type: str = "arbitrary",
         rope_emb: torch.Tensor = None,
     ):
-        logits, _ = self.gemma_layers(
+        logits = self.gemma_layers(
             hidden_states, attention_mask=mask, attn_mask_type=attn_mask_type, rope_emb=rope_emb
         )
 
         assert logits.shape[0] == hidden_states.shape[0]  # b
         assert logits.shape[1] == hidden_states.shape[1]  # seq_len
-        # logits.shape[2] = number of tokens
+
+        # Fetch the logits for the last token
         logits = logits[:, -1, :]
         next_tokens = torch.argmax(logits, dim=1)
 
@@ -193,19 +190,22 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     """
 
     def __init__(self, config: GemmaConfig):
+
+        dtype = torch.bfloat16
         with replace_decoder(te_decoder_cls=TEGemmaDecoderLayer):
             super().__init__(config)
+
         self.config = config
-        self.to(torch.bfloat16).cuda()
+        self.to(dtype).cuda()
         self.hidden_size = config.hidden_size
         self._model_generation_phase = GemmaGenerator(
             lm_head=self.lm_head,
             model=self.model,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             qkv_format=config.qkv_format,
         )
         self._model_context_phase = StaticGemmaModel(
-            self.model, torch.bfloat16, "arbitrary", self.lm_head
+            self.model, dtype, self.lm_head
         )
 
         if self.config.fp8:
@@ -213,6 +213,8 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
             )
 
+        # Rotary position embedding remains the same for all the layers and so
+        # created here. This makes it compatible with CUDA Graphs too.
         self.te_rope_emb = RotaryPositionEmbedding(self.config.head_dim)(
             max_seq_len=self.config.max_position_embeddings
         ).cuda()
@@ -221,7 +223,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
     def _padding_to_end(inputs, lengths, max_seq_len=None):
         """
         Gets the tensor with sequence padded from the beginning and
-        return tensor padded from its end.
+        updates it inplace to be padded from its end.
 
         Parameters
         ----------
@@ -237,20 +239,10 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             new_input_ids[i, : lengths[i]] = inputs[i, (max_seq_len - lengths[i]) : max_seq_len]
             new_input_ids[i, lengths[i] :] = inputs[i, 0 : (max_seq_len - lengths[i])]
 
-        # Disable the input preparation that involves extra padding
-        # inputs.copy_(new_input_ids)
-
         # Trim the inputs to no extra padding i.e. fix the max seq len to
         # the longest sequence in the batch
         actual_max_seq_len = max_seq_len
         inputs.data = new_input_ids[:, :actual_max_seq_len]
-        # print(f"actual_max_seq_len: {actual_max_seq_len}")
-
-        # For Paged Attention, make the valid sequences, multiple of 64
-        # inputs.data = new_input_ids[:, :4].repeat(1, 16)
-        # import pdb; pdb.set_trace()
-        # print(f"inputs.data.shape: {inputs.data.shape}")
-        # exit()
 
     def _next_64_multiply(self, x):
         return ((x + 63) // 64) * 64
@@ -262,7 +254,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             device="cuda",
             dtype=torch.float32,
         )
-        # import pdb; pdb.set_trace()
         return tensor
 
     # This function is overriden in TeGEmmaForCausalLMCudaGraphs.
@@ -296,24 +287,15 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         return generation_buffer
 
     def _generate_context_phase(self, input_ids: torch.Tensor, inference_params: InferenceParams):
-        # import pdb; pdb.set_trace()
         hidden_states = self._create_hidden_states_buffer(input_ids)
         hidden_states.copy_(self.model.embed_tokens(input_ids))
 
-        # We need to update offsets before every forward pass to make cache work properly.
+        # Update offsets before every forward pass (including context/prefill phase) to make
+        # cache work properly.
         lengths = input_ids.ne(0).sum(dim=1)
+        inference_params.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths.tolist())))
 
-        # import pdb; pdb.set_trace()
-        if self.config.qkv_format == "thd":
-            # inference_params.setup_before_new_input(
-            #     lengths_tensor=lengths, max_input_length=input_ids.shape[1]
-            # )
-            lengths = input_ids.ne(0).sum(dim=1)
-            inference_params.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths.tolist())))
-        else:
-            inference_params.setup_before_new_input(length=input_ids.shape[1])
-
-        logits, hs_buffer = self._model_context_phase(
+        logits = self._model_context_phase(
             hidden_states,
             attention_mask=((input_ids == 0) if self.config.qkv_format != "thd" else None),
             attn_mask_type="padding_causal" if self.config.qkv_format == "thd" else "arbitrary",
@@ -358,8 +340,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
 
             lengths = torch.sum(input_ids.ne(pad_token_id), dim=-1).squeeze()  # [s]
 
-            # print(f"max_input_sequence_len: {max_input_sequence_len}")
-            # exit()
+            batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(
+                input_ids
+            )
 
             if self.config.qkv_format == "thd":
                 # For thd layout padding is at the end, otherwise at the beginning.
@@ -373,15 +356,10 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                     ),
                 )
 
-            batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(
-                input_ids
-            )
-
             # InferenceParams is a cache, where keys and values of previous tokens are stored.
             # Moreover it stores length of both already generated and input sequences.
             inference_params = self._create_inference_params(
                 max_batch_size=batch_size,
-                # num_layers=self.config.num_hidden_layers,
                 max_sequence_length=128,
                 num_heads_kv=self.config.num_key_value_heads,
                 # num_heads_q=self.config.num_attention_heads,
@@ -396,11 +374,8 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             self._model_context_phase.set_inference_params(inference_params)
             self._model_generation_phase.set_inference_params(inference_params)
 
-            # print(f"context phase start")
-            # import pdb; pdb.set_trace()
             hidden_states, next_tokens = self._generate_context_phase(input_ids, inference_params)
 
-            # print(f"context phase done")
             # Generation phase.
             if self.config.qkv_format == "thd":
                 lengths_tensor = torch.ones((next_tokens.shape[0],), dtype=int)
@@ -435,13 +410,11 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 # to update the information of sequence lengths.
                 # Here we increase sequence offsets by one,
                 # because we generated one token for every sequence.
-                if self.config.qkv_format == "thd":
-                    lengths_tensor = torch.ones((next_tokens.shape[0],), dtype=int)
-                    inference_params.pre_step(
-                        OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist()))
-                    )
-                else:
-                    inference_params.setup_before_new_input(length=1)
+                lengths_tensor = torch.ones((next_tokens.shape[0],), dtype=int)
+                inference_params.pre_step(
+                    OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist()))
+                )
+
                 # next_tokens is static output tensor, so we need to clone it
                 # - it gets changed every iteration.
                 output_tokens.append(next_tokens.clone())
@@ -457,7 +430,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             attention_mask=(
                 (kwargs["input_ids"] == 0) if self.config.qkv_format != "thd" else None
             ),
-            attn_mask_type="arbitrary",
+            attn_mask_type="padding_causal",
         )
         return logits
 
@@ -491,18 +464,15 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         self.generation_buffer = self._get_generation_buffer(self.hidden_states_buffer)
         self.inference_params = InferenceParams(
             max_batch_size=self.config.cuda_graphs_static_batch_size,
-            # num_layers=self.config.num_hidden_layers,
             max_sequence_length=self.config.cuda_graphs_static_max_seq_len,
             num_heads_kv=self.config.num_key_value_heads,
-            # num_heads_q=self.config.num_attention_heads,
             head_dim_v=self.config.head_dim,
             head_dim_k=self.config.head_dim,
             dtype=torch.bfloat16,
             is_paged=self.config.is_paged,
             page_size=64,
-            total_num_pages=64
-            * self.config.cuda_graphs_static_max_seq_len
-            // 64,  # 64 * 64 (max_sequence_length) / 64 (page_size)
+            total_num_pages=(64 * self.config.cuda_graphs_static_max_seq_len //
+                             64),  # 64 * 64 (max_sequence_length) / 64 (page_size)
         )
 
         self._model_generation_phase.set_inference_params(self.inference_params)
@@ -521,15 +491,13 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             self.config.cuda_graphs_static_max_context_len,
         )
 
-        # [1] Should be same as lengths_tensor from TEGemmaForCausalLM
+        # Forcing the inputs to be the same as lengths_tensor from TEGemmaForCausalLM
         lengths = torch.tensor(input_shape[0] * [input_shape[1]], device="cuda", dtype=torch.int32)
-        max_input_length = input_shape[1]
-
+        # @sudhakars: Hardcoded value. Remove this.
+        lengths.data[:] = torch.tensor([9]*self.config.cuda_graphs_static_batch_size)
         self.inference_params.pre_step(
             OrderedDict(zip(list(range(len(lengths))), lengths.tolist()))
         )
-
-        # print(f"context phase recording start")
 
         self._model_context_phase = self.record_graph(
             self._model_context_phase,
@@ -538,11 +506,9 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             rope_emb=self.te_rope_emb,
         )  # CUDA Graphs recording
 
-        # print(f"context phase recording done")
+        # Setup the recording for generation phase.
         input_shape = (self.config.cuda_graphs_static_batch_size, 1)
-
         lengths = torch.tensor(input_shape[0] * [1], device="cuda", dtype=torch.int32)
-
         self.inference_params.pre_step(
             OrderedDict(zip(list(range(len(lengths))), lengths.tolist()))
         )

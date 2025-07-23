@@ -123,9 +123,7 @@ def init_te_llama_model(hyperparams):
     cls = TELlamaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TELlamaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
-    # config.hidden_size = 1024
-    # config.head_dim = 128
-    print(config)
+
     # Adding all params from the hyperparams to the config to make the code simpler.
     for key, value in hyperparams.__dict__.items():
         setattr(config, key, value)
@@ -139,9 +137,7 @@ def init_te_gemma_model(hyperparams):
     cls = TEGemmaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
-    # config.hidden_size = 1024
-    # config.head_dim = 128
-    print(config)
+
     # Adding all params from the hyperparams to the config to make the code simpler.
     for key, value in hyperparams.__dict__.items():
         setattr(config, key, value)

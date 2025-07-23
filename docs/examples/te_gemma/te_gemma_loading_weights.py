@@ -26,8 +26,13 @@ def _load_weights_for_fp8_model(vanilla_model, hyperparams):
     # of model with weights which contains also fp8 parameters.
     # The weights are in BF16 precision, but they contain fp8 metadata
     # computed by the calibration procedure.
+    fp8_metadata_sd = torch.load(hyperparams.fp8_model_weights_filename)
+
+    # @sudhakars: This is a hack to remove the extra state from the fp8_metadata_sd
+    # that contains the extra state from the core_attention module.
+    fp8_metadata_sd = {k: v for k, v in fp8_metadata_sd.items() if "core_attention._extra_state" not in k}
     vanilla_model.load_state_dict(
-        torch.load(hyperparams.fp8_model_weights_filename),
+        fp8_metadata_sd,
         strict=False,
         # strict = false, because some parameters have
         # multiple pointers to the same weight
@@ -60,6 +65,9 @@ def _load_weights_for_standard_model(vanilla_model, config):
 
 
 def load_te_model(cls, config):
+    # Force the dtype to bfloat16 while loading the model.
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
     """
     Custom method adapted from `from_pretrained` method in HuggingFace
     Transformers repo:
@@ -68,7 +76,7 @@ def load_te_model(cls, config):
     config.use_cache = False  # To make TransformerLayer compatible with GemmaModel
     with fp8_model_init(config.fp8_model_init):
         # there we need only to create model
-        vanilla_model = cls(config).to(torch.bfloat16).cuda()
+        vanilla_model = cls(config).cuda()
 
     # return vanilla_model
     # and now we copy the weights into it
@@ -77,6 +85,8 @@ def load_te_model(cls, config):
     else:
         _load_weights_for_standard_model(vanilla_model, config)
 
+    # Restore the original dtype.
+    torch.set_default_dtype(old_dtype)
     return vanilla_model
 
 
