@@ -39,26 +39,61 @@ class BasePrimitive(metaclass=ABCMeta):
     @classmethod
     def enabled(cls):
         """
-        Determines if a custom call is enabled based on a state variable and the `NVTE_JAX_CUSTOM_CALLS_RE` environment variable.
-        If the environment variable NVTE_JAX_CUSTOM_CALLS_RE is explicitly set, it overrides any internal state.
-        For example, set `NVTE_JAX_CUSTOM_CALLS_RE='^(?!DBiasQuantizePrimitive$).+$'` to disable `DBiasQuantizePrimitive` via env.
-        If the environment variable is not set, the internal state `_is_enabled` is used, which can be modified by helper functions like `manage_primitives`.
-
+        Determines if a custom call is enabled based on a state variable and environment variables.
+        Checks `NVTE_JAX_CUSTOM_CALLS` (key/value format) first, then falls back to the deprecated `NVTE_JAX_CUSTOM_CALLS_RE` (regex pattern),
+        and finally to the internal state `_is_enabled` if neither is set.
+        
+        Environment Variables:
+            1. `NVTE_JAX_CUSTOM_CALLS`: Preferred key/value format to enable/disable specific primitives or a single value 'true' or 'false' to enable/disable all primitives.
+               - Example 1 (global enable): 'true' enables all primitives.
+               - Example 2 (global disable): 'false' disables all primitives.
+               - Example 3 (specific settings): 'DBiasQuantizePrimitive=false,GemmPrimitive=true' disables DBiasQuantizePrimitive and enables GemmPrimitive, leaving others at their default state. 
+                 Note that the default state is set at class level based on _default_disable_names.
+            2. `NVTE_JAX_CUSTOM_CALLS_RE`: Deprecated regex pattern to match primitive names.
+               - Example: 'DBiasQuantizePrimitive' or '^(?!DBiasQuantizePrimitive$).+$' to enable/disable DBiasQuantizePrimitive.
+               - A deprecation warning is raised if used; it will be removed in future releases.
+        
         Behavior:
-            1. Checks if the environment variable `NVTE_JAX_CUSTOM_CALLS_RE` is set.
-            2. If set, uses the pattern to determine if the primitive is enabled based on its class name.
-            3. If not set, falls back to the internal state `_is_enabled`.
+            1. Checks if `NVTE_JAX_CUSTOM_CALLS` is set and parses key/value pairs or single true/false value.
+            2. If not set, checks `NVTE_JAX_CUSTOM_CALLS_RE` (with deprecation warning) for regex matching.
+            3. If neither is set, falls back to the internal state `_is_enabled`.
         """
-        # Check if environment variable is explicitly set
+
+        # Check new key/value environment variable first
+        custom_calls_str = os.getenv("NVTE_JAX_CUSTOM_CALLS")
+        if custom_calls_str is not None:
+            custom_calls_str = custom_calls_str.strip()
+            if custom_calls_str.lower() == 'true':
+                return True
+            elif custom_calls_str.lower() == 'false':
+                return False
+            else:
+                # Parse key=value pairs
+                settings = {}
+                for pair in custom_calls_str.split(','):
+                    pair = pair.strip()
+                    if '=' in pair:
+                        key, value = pair.split('=', 1)
+                        key = key.strip()
+                        value = value.strip().lower()
+                        settings[key] = value == 'true'
+                if cls.__name__ in settings:
+                    return settings[cls.__name__]
+
+        # Check old regex environment variable (deprecated)
         pattern_str = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE")
         if pattern_str is not None:
+            warnings.warn(
+                "NVTE_JAX_CUSTOM_CALLS_RE is deprecated and will be removed in future releases. "
+                "Use NVTE_JAX_CUSTOM_CALLS with key=value format instead (e.g., 'DBiasQuantizePrimitive=false').",
+                DeprecationWarning
+            )
             pattern = re.compile(pattern_str)
             env_enabled = pattern.fullmatch(cls.__name__) is not None
             return env_enabled
 
-        # If environment variable is not set, fall back to the internal state
-        enabled_state = getattr(cls, "_is_enabled", True)
-        return enabled_state
+        # If no environment variable is set, fall back to the internal state
+        return cls._is_enabled
 
     @classmethod
     def set_enabled(cls, enabled: bool):
