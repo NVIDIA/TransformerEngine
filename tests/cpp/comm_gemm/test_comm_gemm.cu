@@ -1,3 +1,4 @@
+#include <cuda.h>
 #include <gtest/gtest.h>
 #include <mpi.h>
 #include <nccl.h>
@@ -37,12 +38,29 @@ using transformer_engine::TypeInfo;
     }                                                                                 \
   } while (false)
 
+#define CHECK_CU(expr)                                          \
+  do {                                                          \
+    CUresult err = (expr);                                      \
+    if (err != CUDA_SUCCESS) {                                  \
+      const char* str{};                                        \
+      CUresult e_str = cuGetErrorString(err, &str);             \
+      if (e_str != CUDA_SUCCESS) str = "(unknown)";             \
+      EXPECT_TRUE(false) << "CU error: " << err << ": " << str; \
+    }                                                           \
+  } while (false)
+
 int main(int argc, char* argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
   CHECK_MPI(MPI_Init(&argc, &argv));
   auto ret = RUN_ALL_TESTS();
   CHECK_MPI(MPI_Finalize());
   return ret;
+}
+
+bool IsMulticastSupported(int device_id) {
+  int supported = 0;
+  CHECK_CU(cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device_id));
+  return supported;
 }
 
 template <typename T>
@@ -318,6 +336,11 @@ struct GemmAr : public CommGemmFixure {
                 cudaStream_t stream) override {
     nvte_gemm_all_reduce(ctx_, m, n, k, a, b, d, bias, pre_act_out, transa, transb, grad,
                          accumulate, comm_sm_count, stream);
+  }
+
+  void SetUp() override {
+    if (!IsMulticastSupported(rank_))
+      GTEST_SKIP() << "Multicast is not supported on device " << rank_;
   }
 };
 
