@@ -437,7 +437,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 act_out = activation_func(fc1_out, None)
                 act_out = tex.quantize(act_out, fc2_input_quantizer)
             else:
-                act_out = activation_func(fc1_out, fc2_input_quantizer)
+                if fp8_calibration:
+                    act_out = activation_func(fc1_out, None)
+                else:
+                    act_out = activation_func(fc1_out, fc2_input_quantizer)
 
         if not is_grad_enabled:
             clear_tensor_data(fc1_out)
