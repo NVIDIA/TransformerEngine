@@ -23,8 +23,18 @@ namespace pytorch {
 
 namespace {
 
-std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
+std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor, bool transpose_shape = false) {
   const auto &shape = tensor.shape();
+  if (transpose_shape) {
+    std::vector<size_t> shape_transposed(shape.ndim);
+    for (size_t i = 0; i + 1 < shape.ndim; ++i) {
+      shape_transposed[i + 1] = shape.data[i];
+    }
+    if (shape.ndim > 0) {
+      shape_transposed[0] = shape.data[shape.ndim - 1];
+    }
+    return shape_transposed;
+  }
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
@@ -32,9 +42,17 @@ void quantize_impl(const TensorWrapper &input, py::handle &quantizer_py,
                    std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &output,
                    TensorWrapper &noop_flag) {
   // Check tensor dims
-  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output),
+  // For blockwise FP8 tensor, if all_gather_usage is true, the columnwise data is not transposed.
+  // and if it does not contain the rowwise data, the returned shape is transposed, which is wrong.
+  bool need_transpose_shape = false;
+  if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
+    auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
+    need_transpose_shape = my_quantizer_bw->all_gather_usage && !my_quantizer_bw->rowwise_usage;
+  }
+  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output, need_transpose_shape),
              "Input tensor (shape=", get_tensor_shape(input),
-             ") and output tensor (shape=", get_tensor_shape(output), ") do not match");
+             ") and output tensor (shape=", get_tensor_shape(output, need_transpose_shape),
+             ") do not match");
   if (input.numel() == 0) {
     return;
   }
