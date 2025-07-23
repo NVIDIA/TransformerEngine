@@ -294,9 +294,9 @@ class BasicLinear(BasicOperation):
                 raise RuntimeError(
                     "Tried to quantize weight with deferred initialization "
                     "due to meta device, but no quantizer was available. "
-                    "This is most likely because fp8_model_init was called "
-                    "with enabled=True and recipe=None, instead of providing "
-                    "a recipe to use for quantization."
+                    "This is most likely because the weight was initialized "
+                    "within fp8_model_init, but the forward pass was not "
+                    "performed within fp8_autocast."
                 )
             quantizer.set_usage(
                 rowwise=True,
