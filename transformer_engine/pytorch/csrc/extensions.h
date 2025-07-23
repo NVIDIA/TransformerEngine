@@ -11,6 +11,10 @@
 
 #include "common.h"
 
+class CommOverlapHelper;
+class CommOverlap;
+class CommOverlapP2P;
+
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
@@ -418,6 +422,13 @@ void nvshmem_send_on_current_stream(at::Tensor src, at::Tensor dst, int peer, at
 void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_kind);
 
 void nvshmem_finalize();
+
+/***************************************************************************************************
+ * Comm+GEMM Overlap Wrappers
+ **************************************************************************************************/
+
+void bulk_overlap_ag_with_external_gemm(py::handle input, CommOverlapP2P &allgather_communicator,
+                                        CommOverlapP2P &gemm_communicator);
 
 }  // namespace transformer_engine::pytorch
 

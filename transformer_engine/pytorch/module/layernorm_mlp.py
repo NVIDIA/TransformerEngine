@@ -873,7 +873,18 @@ class _LayerNormMLP(torch.autograd.Function):
                     # # Synchronize with the main stream
                     # mxfp8_fc2_grad_output_work.wait()
 
-                    ub_obj_fc2_wgrad.copy_into_buffer(grad_outputs[0])
+                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                    grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                        ub_obj_fc2_wgrad,
+                        grad_outputs[0],
+                        ctx.fc2_grad_output_quantizer,
+                        ctx.tp_group,
+                    )
+                    # Allgather grad_outputs[0] using ub_obj_fc2_wgrad to do the copy,
+                    # while overlapping with the fc2_dgrad gemm
+                    tex.bulk_overlap_ag_with_external_gemm(
+                        grad_outputs[0], ub_obj_fc2_wgrad, ub_obj_fc2_dgrad
+                    )
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
