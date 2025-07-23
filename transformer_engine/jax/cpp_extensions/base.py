@@ -42,17 +42,17 @@ class BasePrimitive(metaclass=ABCMeta):
         Determines if a custom call is enabled based on a state variable and environment variables.
         Checks `NVTE_JAX_CUSTOM_CALLS` (key/value format) first, then falls back to the deprecated `NVTE_JAX_CUSTOM_CALLS_RE` (regex pattern),
         and finally to the internal state `_is_enabled` if neither is set.
-        
+
         Environment Variables:
             1. `NVTE_JAX_CUSTOM_CALLS`: Preferred key/value format to enable/disable specific primitives or a single value 'true' or 'false' to enable/disable all primitives.
                - Example 1 (global enable): 'true' enables all primitives.
                - Example 2 (global disable): 'false' disables all primitives.
-               - Example 3 (specific settings): 'DBiasQuantizePrimitive=false,GemmPrimitive=true' disables DBiasQuantizePrimitive and enables GemmPrimitive, leaving others at their default state. 
+               - Example 3 (specific settings): 'DBiasQuantizePrimitive=false,GemmPrimitive=true' disables DBiasQuantizePrimitive and enables GemmPrimitive, leaving others at their default state.
                  Note that the default state is set at class level based on _default_disable_names.
             2. `NVTE_JAX_CUSTOM_CALLS_RE`: Deprecated regex pattern to match primitive names.
                - Example: 'DBiasQuantizePrimitive' or '^(?!DBiasQuantizePrimitive$).+$' to enable/disable DBiasQuantizePrimitive.
                - A deprecation warning is raised if used; it will be removed in future releases.
-        
+
         Behavior:
             1. Checks if `NVTE_JAX_CUSTOM_CALLS` is set and parses key/value pairs or single true/false value.
             2. If not set, checks `NVTE_JAX_CUSTOM_CALLS_RE` (with deprecation warning) for regex matching.
@@ -63,20 +63,20 @@ class BasePrimitive(metaclass=ABCMeta):
         custom_calls_str = os.getenv("NVTE_JAX_CUSTOM_CALLS")
         if custom_calls_str is not None:
             custom_calls_str = custom_calls_str.strip()
-            if custom_calls_str.lower() == 'true':
+            if custom_calls_str.lower() == "true":
                 return True
-            elif custom_calls_str.lower() == 'false':
+            elif custom_calls_str.lower() == "false":
                 return False
             else:
                 # Parse key=value pairs
                 settings = {}
-                for pair in custom_calls_str.split(','):
+                for pair in custom_calls_str.split(","):
                     pair = pair.strip()
-                    if '=' in pair:
-                        key, value = pair.split('=', 1)
+                    if "=" in pair:
+                        key, value = pair.split("=", 1)
                         key = key.strip()
                         value = value.strip().lower()
-                        settings[key] = value == 'true'
+                        settings[key] = value == "true"
                 if cls.__name__ in settings:
                     return settings[cls.__name__]
 
@@ -84,9 +84,10 @@ class BasePrimitive(metaclass=ABCMeta):
         pattern_str = os.getenv("NVTE_JAX_CUSTOM_CALLS_RE")
         if pattern_str is not None:
             warnings.warn(
-                "NVTE_JAX_CUSTOM_CALLS_RE is deprecated and will be removed in future releases. "
-                "Use NVTE_JAX_CUSTOM_CALLS with key=value format instead (e.g., 'DBiasQuantizePrimitive=false').",
-                DeprecationWarning
+                "NVTE_JAX_CUSTOM_CALLS_RE is deprecated and will be removed in future releases. Use"
+                " NVTE_JAX_CUSTOM_CALLS with key=value format instead (e.g.,"
+                " 'DBiasQuantizePrimitive=false').",
+                DeprecationWarning,
             )
             pattern = re.compile(pattern_str)
             env_enabled = pattern.fullmatch(cls.__name__) is not None
