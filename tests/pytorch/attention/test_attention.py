@@ -1061,12 +1061,14 @@ def _run_dot_product_attention(
     )
     if is_training:
         out.backward(d_out)
-
+    additional_grad = None
+    if is_training and config.softmax_type != "vanilla":
+        additional_grad = block.softmax_offset.grad
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
-            return out, (q.grad, k.grad, v.grad)
+            return out, (q.grad, k.grad, v.grad, additional_grad)
         else:
-            return out, (None, None, None)
+            return out, (None, None, None, additional_grad)
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1095,14 +1097,14 @@ def _run_dot_product_attention(
                         [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
-                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig, additional_grad)
             else:
-                return out_orig, (None, None, None)
+                return out_orig, (None, None, None, additional_grad)
         else:
             if is_training:
-                return out, (q.grad, k.grad, v.grad)
+                return out, (q.grad, k.grad, v.grad, additional_grad)
             else:
-                return out, (None, None, None)
+                return out, (None, None, None, additional_grad)
 
 
 model_configs_te_layer = {
