@@ -308,3 +308,11 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
 at::Stream CommOverlapP2P::get_communication_stream() {
   return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
 }
+
+void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
+    py::handle input, CommOverlapP2P &allgather_communicator, CommOverlapP2P &gemm_communicator) {
+  auto main_stream = at::cuda::getCurrentCUDAStream();
+  auto tensor_wrapper = transformer_engine::pytorch::makeTransformerEngineTensor(input, py::none());
+  allgather_communicator.bulk_overlap_columnwise_ag(tensor_wrapper, &gemm_communicator,
+                                                    main_stream);
+}

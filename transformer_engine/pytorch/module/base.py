@@ -259,8 +259,15 @@ def initialize_ub(
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
-        "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
-        "pipeline": ["proj_fprop", "fc2_fprop", "proj_wgrad", "fc2_wgrad"],
+        "ring_exchange": [
+            "qkv_fprop",
+            "fc1_fprop",
+            "proj_dgrad",
+            "fc2_dgrad",
+            "proj_wgrad",
+            "fc2_wgrad",
+        ],
+        "pipeline": ["proj_fprop", "fc2_fprop"],
         "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
 

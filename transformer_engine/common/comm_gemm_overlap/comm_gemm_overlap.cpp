@@ -1117,7 +1117,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
 }
 
 void CommOverlapP2PBase::bulk_overlap_columnwise_ag(const TensorWrapper &input,
-                                                    CommOverlapCore *overlap_gemm) {
+                                                    CommOverlapCore *overlap_gemm,
+                                                    cudaStream_t stream_main) {
   auto *overlap_gemm_p2p = static_cast<CommOverlapP2PBase *>(overlap_gemm);
   int comm_bytes = input.numel() * input.element_size();
   assert(comm_bytes % _tp_size == 0);
@@ -1129,9 +1130,9 @@ void CommOverlapP2PBase::bulk_overlap_columnwise_ag(const TensorWrapper &input,
                        overlap_gemm_p2p->_stream_recv);
 
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, overlap_gemm_p2p->_stream_send[0]));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_main, _stop_send, 0));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, overlap_gemm_p2p->_stream_recv));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_main, _stop_recv, 0));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
 }
 
 }  // namespace transformer_engine
