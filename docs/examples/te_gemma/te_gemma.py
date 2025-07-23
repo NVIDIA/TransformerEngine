@@ -204,9 +204,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             dtype=dtype,
             qkv_format=config.qkv_format,
         )
-        self._model_context_phase = StaticGemmaModel(
-            self.model, dtype, self.lm_head
-        )
+        self._model_context_phase = StaticGemmaModel(self.model, dtype, self.lm_head)
 
         if self.config.fp8:
             self.fp8_recipe = DelayedScaling(
@@ -471,8 +469,9 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             dtype=torch.bfloat16,
             is_paged=self.config.is_paged,
             page_size=64,
-            total_num_pages=(64 * self.config.cuda_graphs_static_max_seq_len //
-                             64),  # 64 * 64 (max_sequence_length) / 64 (page_size)
+            total_num_pages=(
+                64 * self.config.cuda_graphs_static_max_seq_len // 64
+            ),  # 64 * 64 (max_sequence_length) / 64 (page_size)
         )
 
         self._model_generation_phase.set_inference_params(self.inference_params)
@@ -494,7 +493,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
         # Forcing the inputs to be the same as lengths_tensor from TEGemmaForCausalLM
         lengths = torch.tensor(input_shape[0] * [input_shape[1]], device="cuda", dtype=torch.int32)
         # @sudhakars: Hardcoded value. Remove this.
-        lengths.data[:] = torch.tensor([9]*self.config.cuda_graphs_static_batch_size)
+        lengths.data[:] = torch.tensor([9] * self.config.cuda_graphs_static_batch_size)
         self.inference_params.pre_step(
             OrderedDict(zip(list(range(len(lengths))), lengths.tolist()))
         )

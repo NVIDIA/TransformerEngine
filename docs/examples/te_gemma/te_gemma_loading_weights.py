@@ -30,7 +30,9 @@ def _load_weights_for_fp8_model(vanilla_model, hyperparams):
 
     # @sudhakars: This is a hack to remove the extra state from the fp8_metadata_sd
     # that contains the extra state from the core_attention module.
-    fp8_metadata_sd = {k: v for k, v in fp8_metadata_sd.items() if "core_attention._extra_state" not in k}
+    fp8_metadata_sd = {
+        k: v for k, v in fp8_metadata_sd.items() if "core_attention._extra_state" not in k
+    }
     vanilla_model.load_state_dict(
         fp8_metadata_sd,
         strict=False,
