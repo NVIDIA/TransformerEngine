@@ -583,7 +583,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const size_t global_scales_offset_X = scales_offset_X_colwise;
-      const size_t scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      const size_t scale_idx =
+          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y) >= rows;
       const bool out_of_bounds_colwise = row_out_of_bounds_colwise || col_out_of_bounds_colwise;
 
@@ -626,7 +627,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     if constexpr (ROWWISE_SCALING) {
-      const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
+      const size_t shmem_offset_base_rowwise =
+          buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
 
       float thread_amax_act = 0.0f;
       float thread_amax_gate = 0.0f;

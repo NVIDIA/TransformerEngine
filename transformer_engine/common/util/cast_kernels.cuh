@@ -265,7 +265,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
       const size_t global_scales_offset_X = scales_offset_X_colwise;
-      const size_t scale_idx = global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      const size_t scale_idx =
+          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
       scales_colwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -288,7 +289,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     if constexpr (ROWWISE_SCALING) {
-      const size_t shmem_offset_base_rowwise = buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
+      const size_t shmem_offset_base_rowwise =
+          buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
       thread_amax = 0.0f;
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
@@ -847,8 +849,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 constexpr size_t DBIAS_THREADS_PER_BLOCK = 256;
 template <int nvec, typename OType>
 __global__ void __launch_bounds__(DBIAS_THREADS_PER_BLOCK)
-    reduce_dbias_kernel(OType *const dbias_output, const float *const dbias_partial, const size_t rows,
-                        const size_t cols) {
+    reduce_dbias_kernel(OType *const dbias_output, const float *const dbias_partial,
+                        const size_t rows, const size_t cols) {
   using ComputeVec = Vec<float, nvec>;
   using OutputVec = Vec<OType, nvec>;
 
