@@ -240,8 +240,10 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(unfused_attn_bwd):
             print('bwd output',i)
-            print('unfused_attn_bwd min/max', unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
-            print('fused_attn_bwd min/max', fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+            if unfused_attn_bwd[i] is not None:
+                print('unfused_attn_bwd min/max', unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
+            if fused_attn_bwd[i] is not None:
+                print('fused_attn_bwd min/max', fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
