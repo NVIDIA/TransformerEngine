@@ -176,6 +176,10 @@ def test_dot_product_attention(
             pad_between_seqs,
             is_training,
         )
+        print('llllll',len(unfused_attn_fwd), unfused_attn_fwd.shape, unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+        print('llllll',len(unfused_attn_bwd), unfused_attn_bwd[0].shape, unfused_attn_bwd[0].min().item(), unfused_attn_bwd[0].max().item())
+        #print('unfused_attn_fwd min/max', unfused_attn_fwd[0].min().item(), unfused_attn_fwd[0].max().item())
+        #print('unfused_attn_bwd min/max', unfused_attn_bwd[0].min().item(), unfused_attn_bwd[0].max().item())
 
     # FusedAttention backend
     if fused_attn_supported:
@@ -190,6 +194,8 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
+            print('fused_attn_fwd min/max', fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+            print('fused_attn_bwd min/max', fused_attn_bwd.min().item(), fused_attn_bwd.max().item())
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
@@ -248,6 +254,33 @@ def test_dot_product_attention(
         torch.testing.assert_close(fused_attn_fwd, fused_attn_fwd_1, **tols)
         for i, _ in enumerate(fused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], fused_attn_bwd_1[i], **tols)
+
+
+model_configs_softmax = {
+    #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
+    "base_1_0": ModelConfig(8, 128, 16, 64),
+    "base_1_1": ModelConfig(8, 128, 16, 64, softmax_type="off-by-one"),
+    "base_1_2": ModelConfig(8, 128, 16, 64, softmax_type="learnable"),
+    #"base_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
+    #"base_2_0": ModelConfig(2, 2048, 24, 128),
+    #"base_2_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    #"base_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048),
+    #"base_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048),
+    #"base_4_0": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048),
+    #"base_4_1": ModelConfig(8, 128, 16, 192, max_seqlen_kv=2048),
+    #"base_5_0": ModelConfig(8, 1, 16, 512, max_seqlen_kv=2048),
+    #"base_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
+    #"base_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
+    #"base_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
+}
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16]) #param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_softmax])
+@pytest.mark.parametrize("model", model_configs_softmax.keys())
+def test_dpa_softmax(dtype, model_configs, model):
+    """Test DotProductAttention module with various softmax types"""
+    test_dot_product_attention(dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -724,7 +757,7 @@ def _run_dot_product_attention(
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
-
+    #is_training = False
     # Set RNG and environment varables
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -987,6 +1020,7 @@ def _run_dot_product_attention(
         tp_group=None,
         layer_number=1,
         attention_type=config.attn_type,
+        softmax_type=config.softmax_type,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()

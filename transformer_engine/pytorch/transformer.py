@@ -190,6 +190,14 @@ class TransformerLayer(torch.nn.Module):
                          and `DotProductAttention` modules.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 the type of softmax operation as described in this paper:
+                 `Efficient Streaming Language Models with Attention Sinks
+                 <https://arxiv.org/pdf/2309.17453v3>`_.
+                 For a given attention score S = Q*K^T of shape [b, h, s_q, s_kv],
+                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(alpha[j] + sum(exp(S[:,j,:,:]), dim=-1)).
 
     Parallelism parameters
     ----------------------
@@ -305,6 +313,7 @@ class TransformerLayer(torch.nn.Module):
         qk_norm_type: Optional[str] = None,
         qk_norm_eps: float = 1e-6,
         qk_norm_before_rope: bool = False,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -361,6 +370,7 @@ class TransformerLayer(torch.nn.Module):
         self.get_rng_state_tracker = get_rng_state_tracker
 
         self.attn_input_format = attn_input_format
+        self.softmax_type = softmax_type
 
         self.name = name
 
@@ -396,6 +406,7 @@ class TransformerLayer(torch.nn.Module):
             "qkv_format": self.attn_input_format,
             "seq_length": seq_length,
             "micro_batch_size": micro_batch_size,
+            "softmax_type": self.softmax_type,
         }
 
         self.self_attention = MultiheadAttention(

@@ -133,6 +133,7 @@ def fused_attn_fwd(
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
     rng_gen: torch.Generator = None,
+    softmax_offset: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -205,6 +206,9 @@ def fused_attn_fwd(
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
+    softmax_offset: torch.Tensor, default = None
+                softmax offset tensor in shape [1, h_q, 1, 1].
+                See softmax_type in DotProductAttention for details.
 
     Returns
     ----------
@@ -276,6 +280,10 @@ def fused_attn_fwd(
 
     # execute kernel
 
+    print('tex',
+        softmax_offset.data_ptr(),
+        softmax_offset,
+        )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -300,6 +308,7 @@ def fused_attn_fwd(
         s_quantizer,
         o_quantizer,
         attn_bias,
+        softmax_offset,
         rng_gen,
         rng_elts_per_thread,
     )
@@ -417,6 +426,9 @@ def fused_attn_bwd(
     d_bias: torch.Tensor, optional
                 gradient tensor of Bias when attn_bias_type is "pre_scale_bias"
                 or "post_scale_bias"; same data type and shape as Bias
+    d_softmax_offset: torch.Tensor, optional
+                gradient tensor of softmax offset in shape [1, h_q, 1, 1].
+                See softmax_type in DotProductAttention for details.
     """
     if attn_scale is None:
         d = q.size(-1)

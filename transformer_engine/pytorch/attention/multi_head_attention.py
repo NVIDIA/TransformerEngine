@@ -135,6 +135,14 @@ class MultiheadAttention(torch.nn.Module):
             For that, please use `get_qkv_layout` to gain the layout information.
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
+    softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
+                 the type of softmax operation as described in this paper:
+                 `Efficient Streaming Language Models with Attention Sinks
+                 <https://arxiv.org/pdf/2309.17453v3>`_.
+                 For a given attention score S = Q*K^T of shape [b, h, s_q, s_kv],
+                 'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+                 'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)).
 
     Parallelism parameters
     ----------------------
@@ -245,6 +253,7 @@ class MultiheadAttention(torch.nn.Module):
         qk_norm_before_rope: bool = False,
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -262,6 +271,7 @@ class MultiheadAttention(torch.nn.Module):
         self.return_bias = return_bias
         self.cp_size = 1
         self.cp_rank = 0
+        self.softmax_type = softmax_type
 
         kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
 
@@ -416,6 +426,7 @@ class MultiheadAttention(torch.nn.Module):
             tp_group=tp_group,
             layer_number=self.layer_number,
             attention_type=self.attention_type,
+            softmax_type=self.softmax_type,
         )
 
         # Linear

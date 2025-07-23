@@ -55,12 +55,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     int64_t max_pages_per_seq_v, int64_t bias_b, int64_t bias_h, bool is_training,
     float scaling_factor, float dropout_probability, NVTE_QKV_Layout layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
-    int64_t window_size_right, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
+    int64_t window_size_right, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias, void *devPtrSoftmaxOffset,
     void *devPtrSoftmaxStats, void *devPtrO, void *devPtrDropoutSeed, void *devPtrDropoutOffset,
     void *devPtrCuSeqlensQ, void *devPtrCuSeqlensKV, void *devPtrPageTableK, void *devPtrPageTableV,
     void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
     void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
+  printf("impl SoftmaxOffset ptr %ld\n",reinterpret_cast<uintptr_t>(devPtrSoftmaxOffset));
 
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
@@ -99,7 +100,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     s_kv = is_ragged_kv ? max_t_kv : s_kv;
   }
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
-
+  printf("before graph \n");
   try {
     FADescriptor_v1 descriptor{b,
                                h,
@@ -138,6 +139,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // O
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // Stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // softmax_offset
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // page_table_k
@@ -162,13 +164,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         return graph;
       }
 
+      printf("start graph \n");
       // otherwise, build the op_graph and the plan. Then update cache
       auto mha_graph = std::make_shared<fe::graph::Graph>();
       mha_graph->set_io_data_type(tensorType)
           .set_intermediate_data_type(fe::DataType_t::FLOAT)
           .set_compute_data_type(fe::DataType_t::FLOAT);
 
-      std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
+      std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale, softmax_offset;
       std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
       std::shared_ptr<fe::graph::Tensor_attributes> page_table_k, page_table_v;
       std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o,
@@ -270,6 +273,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         sdpa_options.set_padding_mask(is_padding).set_seq_len_q(seq_q).set_seq_len_kv(seq_kv);
       }
 
+      printf("start graph 1\n");
       if (is_paged_kv) {
         page_table_k =
             mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -301,7 +305,19 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                                .set_data_type(fe::DataType_t::INT64));
         sdpa_options.set_dropout(dropout_probability, dropout_seed, dropout_offset);
       }
+      printf("start graph 2\n");
 
+      if (devPtrSoftmaxOffset) {
+	printf("graph yes\n");
+        softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("softmax_offset")
+                                  .set_dim({1, h, 1, 1})
+                                  .set_stride({h, 1, 1, 1})
+				  .set_data_type(fe::DataType_t::FLOAT));
+        sdpa_options.set_sink_token(softmax_offset);
+        //auto [O, Stats] = mha_graph->sdpa_with_max_sum_exp_stats(Q, K, V, sdpa_options);
+      //} else {
+      }
       auto [O, Stats] = mha_graph->sdpa(Q, K, V, sdpa_options);
 
       std::vector<int64_t> o_stride(4);
@@ -338,6 +354,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           key_tensors_tuple = std::make_tuple(Q, K, V, attn_scale, O);
       auto Stats_tuple = std::make_tuple(Stats);
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
+      auto softmax_offset_tuple = devPtrSoftmaxOffset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto page_table_tuple = is_paged_kv ? std::make_tuple(page_table_k, page_table_v)
@@ -352,21 +369,26 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
+      printf("before validate \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      printf("before build graph \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->build_operation_graph(handle));
+      printf("before create plans \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      printf("before check support \n");
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
+      printf("before build plans\n");
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
       auto return_tuple = std::tuple_cat(
-          std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple, padding_tuple,
+          std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple, softmax_offset_tuple, padding_tuple,
           page_table_tuple, offset_qo_tuple, offset_kv_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
     };
 
-    auto [mha_graph, Q, K, V, attn_scale, O, Stats, bias, seq_q, seq_kv, page_table_k, page_table_v,
+    auto [mha_graph, Q, K, V, attn_scale, O, Stats, bias, softmax_offset, seq_q, seq_kv, page_table_k, page_table_v,
           offset_q, offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_fprop_cache, descriptor);
 
@@ -471,6 +493,12 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[dropout_seed] = devPtrDropoutSeed;
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
+
+    if (devPtrSoftmaxOffset) {
+      variant_pack[softmax_offset] = devPtrSoftmaxOffset;
+    }
+    printf("before execute\n");
+
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
@@ -484,7 +512,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
     int64_t window_size_right, bool deterministic, void *devPtrQ, void *devPtrKTranspose,
     void *devPtrVTranspose, void *devPtrO, void *devPtrSoftmaxStats, void *devPtrBias,
-    void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias,
+    void *devPtrdQ, void *devPtrdK, void *devPtrdV, void *devPtrdO, void *devPtrdBias, void *devPtrdSoftmaxOffset,
     void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
     void *devPtrCuSeqlensKV, void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV,
     cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
@@ -577,6 +605,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dV
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // bias
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dBias
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // d_softmax_offset
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_q
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // seq_kv
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_q
@@ -606,7 +635,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           .set_compute_data_type(fe::DataType_t::FLOAT);
 
       std::shared_ptr<fe::graph::Tensor_attributes> q, k, v, o, dO, stats, attn_scale;
-      std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
+      std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, d_softmax_offset, seq_q, seq_kv;
       std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o,
           offset_stats;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
@@ -769,6 +798,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         sdpa_backward_options.set_dropout(dropout_probability, dropout_seed, dropout_offset);
       }
 
+      if (devPtrdSoftmaxOffset) {
+        d_softmax_offset = mha_graph->tensor(fe::graph::Tensor_attributes()
+			.set_name("d_softmax_offset")
+			.set_dim({1, h, 1, 1})
+			.set_stride({h, 1, 1, 1})
+			.set_data_type(fe::DataType_t::FLOAT));
+        sdpa_backward_options.set_dsink_token(d_softmax_offset);
+      }
+
       auto [dQ, dK, dV] = mha_graph->sdpa_backward(q, k, v, o, dO, stats, sdpa_backward_options);
 
       dQ->set_output(true).set_dim({b, h, s_q, d_qk}).set_stride(q_stride);
@@ -794,6 +832,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                  std::shared_ptr<fe::graph::Tensor_attributes>>  // dV
           key_tensors_tuple = std::make_tuple(q, k, v, o, dO, stats, attn_scale, dQ, dK, dV);
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
+      auto softmax_offset_tuple = devPtrdSoftmaxOffset ? std::make_tuple(d_softmax_offset)
+                                      : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto offset_qo_tuple =
@@ -813,14 +853,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
       auto return_tuple =
-          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple, padding_tuple,
+          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple, softmax_offset_tuple, padding_tuple,
                          offset_qo_tuple, offset_kv_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
     };
 
-    auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, seq_q, seq_kv,
+    auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, d_softmax_offset, seq_q, seq_kv,
           offset_q, offset_o, offset_k, offset_v, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_bprop_cache, descriptor);
 
@@ -934,6 +974,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
 
+    if (devPtrdSoftmaxOffset) {
+      variant_pack[d_softmax_offset] = devPtrdSoftmaxOffset;
+    }
+
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
   } catch (cudnn_frontend::cudnnException &e) {
     NVTE_ERROR(e.what());
@@ -946,7 +990,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, size_t num_tokens,
     bool is_training, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
-    int64_t window_size_right, const Tensor *input_QKV, const Tensor *input_Bias, Tensor *output_O,
+    int64_t window_size_right, const Tensor *input_QKV, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens, const Tensor *cu_seqlens_padded,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -973,6 +1017,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     bias_b = input_Bias->data.shape[0];
     bias_h = input_Bias->data.shape[1];
   }
+  void *devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
 
   void *devPtrO = output_O->data.dptr;
   void *devPtrS = nullptr;
@@ -986,53 +1031,39 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     max_tokens = get_max_tokens(num_tokens);
   }
 
+  size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_S->data.dptr = nullptr;
+    if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      output_S->data.shape = {max_tokens, num_attn_heads, 1};
+    } else {
+      output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+    }
+    output_S->data.dtype = DType::kFloat32;
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen, max_seqlen};
       output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
     }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+
+    Aux_CTX_Tensors->size = i;
+  } else if (Aux_CTX_Tensors->size >= 2) {
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_bias->data.dptr = devPtrBias;
+    }
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
@@ -1047,7 +1078,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
       batch, num_attn_heads, num_attn_heads, max_seqlen, max_seqlen, head_dim, head_dim,
       max_batch_size, max_tokens, max_tokens, 0, 0, 0, 0, 0, 0, bias_b, bias_h, is_training,
       attn_scale, p_dropout, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
-      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed,
+      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS, devPtrO, devPtrDropoutSeed,
       devPtrDropoutOffset, devPtrCuSeqlens, devPtrCuSeqlens, nullptr, nullptr, devPtrSeqOffsets,
       devPtrSeqOffsets, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream,
       handle);
@@ -1072,7 +1103,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right,
     bool deterministic, const Tensor *input_QKV, const Tensor *input_O, const Tensor *input_dO,
-    const Tensor *input_Bias, Tensor *output_S, Tensor *output_dQKV, Tensor *output_dBias,
+    const Tensor *input_Bias, Tensor *output_S, Tensor *output_dQKV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
     const Tensor *cu_seqlens, const Tensor *cu_seqlens_padded, const Tensor *rng_state,
     Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
@@ -1118,6 +1149,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
 
   void *devPtrSoftmaxStats = nullptr;
   devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrdSoftmaxOffset = output_dSoftmaxOffset->data.dptr;
 
   void *devPtrCuSeqlens = cu_seqlens->data.dptr;
   void *devPtrSeqOffsets = cu_seqlens_padded->data.dptr;
@@ -1133,7 +1165,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
       max_batch_size, max_tokens, max_tokens, bias_b, bias_h, attn_scale, p_dropout, qkv_layout,
       bias_type, mask_type, window_size_left, window_size_right, deterministic, devPtrQ, devPtrK,
       devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-      devPtrdBias, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlens, devPtrCuSeqlens,
+      devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlens, devPtrCuSeqlens,
       devPtrSeqOffsets, devPtrSeqOffsets, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
       &workspace_size, stream, handle);
 
@@ -1158,7 +1190,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training, float attn_scale,
     float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, const Tensor *input_Q,
-    const Tensor *input_KV, const Tensor *input_Bias, Tensor *output_O,
+    const Tensor *input_KV, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
     NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
     const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded,
     const Tensor *page_table_k, const Tensor *page_table_v, const Tensor *rng_state,
@@ -1188,6 +1220,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     bias_b = input_Bias->data.shape[0];
     bias_h = input_Bias->data.shape[1];
   }
+  void *devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
 
   void *devPtrO = output_O->data.dptr;
   void *devPtrS = nullptr;
@@ -1212,53 +1245,39 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     max_tokens_kv = get_max_tokens(num_tokens_kv);
   }
 
+  size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
     const auto cudnn_runtime_version = cudnnGetVersion();
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_S->data.dptr = nullptr;
+    if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
+    } else {
+      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    }
+    output_S->data.dtype = DType::kFloat32;
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
     }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+
+    Aux_CTX_Tensors->size = i;
+  } else if (Aux_CTX_Tensors->size >= 2) {
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_bias->data.dptr = devPtrBias;
+    }
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
@@ -1274,7 +1293,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
       attn_scale, p_dropout, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
-      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed,
+      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS, devPtrO, devPtrDropoutSeed,
       devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
       devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
       &workspace_size, stream, handle);
@@ -1301,7 +1320,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
     NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right,
     bool deterministic, const Tensor *input_Q, const Tensor *input_KV, const Tensor *input_O,
     const Tensor *input_dO, const Tensor *input_Bias, Tensor *output_S, Tensor *output_dQ,
-    Tensor *output_dKV, Tensor *output_dBias, const Tensor *cu_seqlens_q,
+    Tensor *output_dKV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q,
     const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle) {
@@ -1355,6 +1374,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
   void *devPtrSoftmaxStats = nullptr;
   devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrdSoftmaxOffset = output_dSoftmaxOffset->data.dptr;
 
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
@@ -1372,7 +1392,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
       max_batch_size, max_tokens_q, max_tokens_kv, bias_b, bias_h, attn_scale, p_dropout,
       qkv_layout, bias_type, mask_type, window_size_left, window_size_right, deterministic, devPtrQ,
       devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV,
-      devPtrdO, devPtrdBias, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
+      devPtrdO, devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
       devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type),
       workspace->data.dptr, &workspace_size, stream, handle);
 
@@ -1398,7 +1418,7 @@ void fused_attn_arbitrary_seqlen_fwd(
     size_t page_size_v, size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right,
-    const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
+    const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias, const Tensor *input_SoftmaxOffset,
     Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
     const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
@@ -1421,6 +1441,9 @@ void fused_attn_arbitrary_seqlen_fwd(
     bias_b = input_Bias->data.shape[0];
     bias_h = input_Bias->data.shape[1];
   }
+  void *devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
+  printf("SoftmaxOffset ptr %p\n",devPtrSoftmaxOffset);
+  printf("SoftmaxOffset ptr %ld\n",reinterpret_cast<uintptr_t>(devPtrSoftmaxOffset));
 
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
@@ -1442,69 +1465,62 @@ void fused_attn_arbitrary_seqlen_fwd(
     max_tokens_kv = get_max_tokens(num_tokens_kv);
   }
 
+  size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
+    printf("before aux0, size %d\n", i);
     const auto cudnn_runtime_version = cudnnGetVersion();
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_S->data.dptr = nullptr;
+    if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
+      output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
+    } else {
+      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+    }
+    output_S->data.dtype = DType::kFloat32;
+    printf("before aux1, size %d\n", i);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+
+    printf("before aux2, size %d\n", i);
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if (q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
-        output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
-      } else {
-        output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
     }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+
+    Aux_CTX_Tensors->size = i;
+    printf("before aux3, size %d\n", i);
+  } else if (Aux_CTX_Tensors->size >= 1) {
+    printf("before aux 2\n");
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_bias->data.dptr = devPtrBias;
+    }
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
 
+  printf("before dropout \n");
   void *devPtrDropoutSeed = rng_state->data.dptr;
   void *devPtrDropoutOffset =
       reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1);
 
   size_t workspace_size = 0;
 
+  printf("before calling impl\n");
   fused_attn_arbitrary_seqlen_fwd_impl(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
       max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
       attn_scale, p_dropout, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
-      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed,
+      devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS, devPtrO, devPtrDropoutSeed,
       devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
       devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
       &workspace_size, stream, handle);
@@ -1531,7 +1547,7 @@ void fused_attn_arbitrary_seqlen_bwd(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
     int64_t window_size_right, bool deterministic, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
-    Tensor *output_S, Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias,
+    Tensor *output_S, Tensor *output_dQ, Tensor *output_dK, Tensor *output_dV, Tensor *output_dBias, Tensor *output_dSoftmaxOffset,
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle) {
@@ -1573,6 +1589,7 @@ void fused_attn_arbitrary_seqlen_bwd(
   void *devPtrdV = output_dV->data.dptr;
   void *devPtrSoftmaxStats = nullptr;
   devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrdSoftmaxOffset = output_dSoftmaxOffset->data.dptr;
 
   void *devPtrCuSeqlensQ = cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = cu_seqlens_kv->data.dptr;
@@ -1590,7 +1607,7 @@ void fused_attn_arbitrary_seqlen_bwd(
       max_batch_size, max_tokens_q, max_tokens_kv, bias_b, bias_h, attn_scale, p_dropout,
       qkv_layout, bias_type, mask_type, window_size_left, window_size_right, deterministic, devPtrQ,
       devPtrK, devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrdQ, devPtrdK, devPtrdV,
-      devPtrdO, devPtrdBias, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
+      devPtrdO, devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
       devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type),
       workspace->data.dptr, &workspace_size, stream, handle);
 

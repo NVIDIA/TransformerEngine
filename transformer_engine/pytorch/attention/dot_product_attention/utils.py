@@ -216,6 +216,8 @@ class AttentionParams:
         The FP8 metadata tensor of `DotProductAttention`.
     inference_params: Optional[InferenceParams], default = `None`
         Inference-related parameters. See InferenceParams for details.
+    softmax_type: str, default = "vanilla"
+        The type of softmax operation. See DotProductAttention for details.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -242,6 +244,7 @@ class AttentionParams:
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
 
     def __eq__(self, other):
         """
@@ -313,6 +316,7 @@ def get_attention_backend(
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
+    softmax_type = attention_params.softmax_type
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -813,6 +817,15 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
+
+    # Filter: Softmax type
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for non-vanilla softmax types")
+        use_flash_attention = False
+        if use_fused_attention and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
+            logger.debug("Disabling FusedAttention max512 backend for non-vanilla softmax types")
+            use_fused_attention = False
+            fused_attention_backend = FusedAttnBackend["No_Backend"]
 
     # Filter: Determinism
     # backend                      | deterministic

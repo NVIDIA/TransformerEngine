@@ -13,6 +13,7 @@ import logging
 from packaging.version import Version as PkgVersion
 
 import torch
+import torch.nn.functional as F
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
@@ -142,6 +143,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_dropout: float = 0.0,
         attention_dropout_ctx: Optional[Callable] = nullcontext,
         layer_number: Optional[int] = None,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -149,6 +151,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
+        self.softmax_type = softmax_type
+        self.softmax_offset = None
 
         def mask_func(x, y):
             return (
@@ -185,6 +189,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         inference_params: Optional[InferenceParams] = None,
+        softmax_offset: torch.Tensor = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
         assert (
@@ -216,10 +221,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
-        batch_size, max_seqlen_q, max_seqlen_kv = (
+        batch_size, max_seqlen_q, max_seqlen_kv, num_heads = (
             query_layer.shape[1],
             query_layer.shape[0],
             key_layer.shape[0],
+            query_layer.shape[-2],
         )
 
         if "padding" in attn_mask_type and attention_mask is None:
@@ -326,11 +332,26 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 dtype=query_layer.dtype
             )
 
+        # softmax offsets
+        if self.softmax_type == "off-by-one" and self.softmax_offset is None:
+            self.softmax_offset = torch.ones(1, num_heads, 1, 1,
+                    device=query_layer.device, dtype=query_layer.dtype)
+        if self.softmax_type == "learable":
+            self.softmax_offset = softmax_offset
+        if self.softmax_type != "vanilla":
+            print('sss',softmax_offset.shape, matmul_result.shape)
+            matmul_result = torch.cat([
+                softmax_offset.expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
+                matmul_result], dim=-1)
+            attention_mask = F.pad(attention_mask, (0, 1), mode='constant', value=False)
+
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
             matmul_result, attention_mask, attn_mask_type, softmax_scale
         )
+        if self.softmax_type != "vanilla":
+            attention_probs = attention_probs[..., :-1]
 
         # mask out the pad positions in softmax results, mostly for the rows (pad tokens from q)
         # the columns (pad tokens from k) are already zeroed out during softmax
@@ -925,6 +946,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         quantizers,
         deterministic,
+        softmax_offset,
     ):
         # pylint: disable=missing-function-docstring
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
@@ -1061,6 +1083,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 window_size,
                 rng_gen,
+                softmax_offset,
             )
             out_save = out_ret
             fp8_tensors = (None, None, None, None)
@@ -1120,6 +1143,7 @@ class FusedAttnFunc(torch.autograd.Function):
         )
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
+        ctx.is_softmax_vanilla = softmax_offset is None
 
         return out_ret
 
@@ -1291,38 +1315,16 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
 
+        count = 0
         # if no_bias or alibi, return dqkv
-        if ctx.attn_bias_type in ["no_bias", "alibi"]:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                dq,
-                dk,
-                dv,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        # else, return (dqkv, dbias)
+        d_bias = None
+        if ctx.attn_bias_type not in ["no_bias", "alibi"]:
+            d_bias = rest[count]
+            count += 1
+        # if softmax type is "learnable"
+        d_softmax_offset = None
+        if not ctx.is_softmax_vanilla:
+            d_softmax_offset = rest[count]
         return (
             None,
             None,
@@ -1336,7 +1338,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dq,
             dk,
             dv,
-            rest[0],
+            d_bias,
             None,
             None,
             None,
@@ -1351,6 +1353,7 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             None,
+            d_softmax_offset,
         )
 
 
@@ -1390,6 +1393,7 @@ class FusedAttention(torch.nn.Module):
         attention_type: str = "self",
         layer_number: Optional[int] = None,
         deterministic: bool = False,
+        softmax_type: str = "vanilla",
     ) -> None:
         super().__init__()
 
@@ -1402,6 +1406,7 @@ class FusedAttention(torch.nn.Module):
         ) == "1" and get_device_compute_capability() == (9, 0)
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.softmax_type = softmax_type
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1453,6 +1458,7 @@ class FusedAttention(torch.nn.Module):
         quantizers=None,
         pad_between_seqs: bool = False,
         inference_params: Optional[InferenceParams] = None,
+        softmax_offset: torch.Tensor = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -1634,6 +1640,7 @@ class FusedAttention(torch.nn.Module):
                     fp8_meta,
                     quantizers,
                     self.deterministic,
+                    softmax_offset,
                 )
 
         # ...hd -> ...(hd)

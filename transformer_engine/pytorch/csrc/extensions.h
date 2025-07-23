@@ -82,7 +82,7 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
+    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias, const std::optional<at::Tensor> SoftmaxOffset,
     const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<py::object> fused_attn_bwd(

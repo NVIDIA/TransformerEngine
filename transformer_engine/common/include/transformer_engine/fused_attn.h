@@ -224,6 +224,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
  *  \param[in]     Bias                     The Bias tensor.
+ *  \param[in]     SoftmaxOffset             The SoftmaxOffset tensor.
  *  \param[in,out] S                        The S tensor.
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
@@ -244,7 +245,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, NVTETensor S,
+void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
                                    NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
                                    const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
                                    const NVTETensor rng_state, size_t max_seqlen, bool is_training,
@@ -284,6 +285,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  *                                          e.g. M, ZInv, rng_state.
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
+ *  \param[out]    dSoftmaxOffset            The gradient of the SoftmaxOffset tensor.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,
@@ -302,7 +304,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
                                    const NVTETensor S, NVTETensor dP,
                                    const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
-                                   NVTETensor dBias, const NVTETensor cu_seqlens,
+                                   NVTETensor dBias, NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens,
                                    const NVTETensor cu_seqlens_padded, size_t max_seqlen,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -340,6 +342,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *  \param[in]     Q                         The Q tensor, in HD layouts.
  *  \param[in]     KV                        The KV tensor, in 2HD or H2D layouts.
  *  \param[in]     Bias                      The Bias tensor.
+ *  \param[in]     SoftmaxOffset             The SoftmaxOffset tensor.
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
@@ -368,7 +371,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd_kvpacked(
-    const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O,
+    const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
     NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
@@ -409,6 +412,7 @@ void nvte_fused_attn_fwd_kvpacked(
  *  \param[out]    dQ                        The gradient of the Q tensor.
  *  \param[out]    dKV                       The gradient of the KV tensor.
  *  \param[out]    dBias                     The gradient of the Bias tensor.
+ *  \param[out]    dSoftmaxOffset            The gradient of the SoftmaxOffset tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -431,7 +435,7 @@ void nvte_fused_attn_fwd_kvpacked(
 void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
     const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,
-    NVTETensor dKV, NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    NVTETensor dKV, NVTETensor dBias, NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
@@ -473,6 +477,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     K                         The K tensor.
  *  \param[in]     V                         The V tensor.
  *  \param[in]     Bias                      The Bias tensor.
+ *  \param[in]     SoftmaxOffset             The SoftmaxOffset tensor.
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
@@ -500,7 +505,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor Bias, NVTETensor S, NVTETensor O,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
                          NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
@@ -549,6 +554,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.
  *  \param[out]    dBias                     The gradient of the Bias tensor.
+ *  \param[out]    dSoftmaxOffset            The gradient of the SoftmaxOffset tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -571,7 +577,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
                          const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
-                         NVTETensor dV, NVTETensor dBias, const NVTETensor cu_seqlens_q,
+                         NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,

@@ -147,6 +147,7 @@ class ModelConfig:
         max_seqlen_kv: int = None,
         num_gqa_groups: int = None,
         head_dim_v: int = None,
+        softmax_type: str = "vanilla",
         dropout_p: float = 0.0,
         attn_mask_type: str = "no_mask",
         attn_bias_type: str = "no_bias",
@@ -171,6 +172,7 @@ class ModelConfig:
             self.kv_channels = (self.head_dim_qk, self.head_dim_v)
         self.hidden_size = self.num_heads * self.head_dim_qk
         self.hidden_size_kv = self.num_gqa_groups * self.head_dim_v
+        self.softmax_type = softmax_type
         self.dropout_p = dropout_p
         self.attn_mask_type = attn_mask_type
         self.attn_bias_type = attn_bias_type
@@ -239,6 +241,7 @@ def get_available_attention_backends(
     fused_attention_backend = None
 
     def test():
+        print('sss', config.softmax_type)
         attention_params = AttentionParams(
             qkv_dtype=qkv_dtype,
             qkv_layout=qkv_layout,
@@ -263,11 +266,12 @@ def get_available_attention_backends(
             fp8_meta=fp8_meta,
             is_training=is_training,
             inference_params=inference_params,
+            softmax_type=config.softmax_type,
         )
         (
             use_flash_attention,
-            use_fused_attention,
             flash_attention_backend,
+            use_fused_attention,
             fused_attention_backend,
             use_unfused_attention,
             available_backends,
@@ -280,6 +284,7 @@ def get_available_attention_backends(
         _attention_backends["fused_attention_backend"] = fused_attention_backend
         _attention_backends["use_unfused_attention"] = use_unfused_attention
         _attention_backends["backend_selection_requires_update"] = False
+        print("return ", available_backends, flash_attention_backend, fused_attention_backend)
         return available_backends, flash_attention_backend, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
