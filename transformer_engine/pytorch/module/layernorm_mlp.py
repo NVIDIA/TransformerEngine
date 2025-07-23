@@ -1642,6 +1642,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 warmup_jit_bias_gelu_all_dtypes(
                     self.size_per_partition, seq_length, micro_batch_size
                 )
+        for name, param in self.named_parameters():
+            if name in ["fc1_weight", "fc2_weight"] or name in ["fc1_bias", "fc2_bias"]:
+                param.skip_backward_post_hook = True
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -2113,21 +2116,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8BwdTensors.GRAD_OUTPUT2
                 ].all_gather_usage = True
 
-    def register_wgrad_accumulation_and_reduce_func(self, wgrad_accumulation_and_reduce_func):
-        """
-        This method is used to manually control the weight gradient accumulation and reduce.
-        This method should be called before the backward() method.
-        Set the skip_wgrad_accumulation_and_reduce to True to skip the weight gradient accumulation
-        and reduce in backward();
-        And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
-        """
-        self.wgrad_accumulation_and_reduce_func = wgrad_accumulation_and_reduce_func
-        self.fc1_weight.skip_wgrad_accumulation_and_reduce = True
-        self.fc2_weight.skip_wgrad_accumulation_and_reduce = True
-        if self.use_bias:
-            self.fc1_bias.skip_wgrad_accumulation_and_reduce = True
-            self.fc2_bias.skip_wgrad_accumulation_and_reduce = True
-
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -2165,13 +2153,5 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
-            if self.wgrad_accumulation_and_reduce_func is not None:
-                self.fc1_weight.skip_wgrad_accumulation_and_reduce = False
-                self.fc2_weight.skip_wgrad_accumulation_and_reduce = False
-                self.wgrad_accumulation_and_reduce_func(self.fc2_weight)()
-                self.wgrad_accumulation_and_reduce_func(self.fc1_weight)()
-                if self.use_bias:
-                    self.fc1_bias.skip_wgrad_accumulation_and_reduce = False
-                    self.fc2_bias.skip_wgrad_accumulation_and_reduce = False
-                    self.wgrad_accumulation_and_reduce_func(self.fc1_bias)()
-                    self.wgrad_accumulation_and_reduce_func(self.fc2_bias)()
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
