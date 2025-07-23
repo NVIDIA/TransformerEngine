@@ -405,7 +405,8 @@ class OperationFuser:
             # Recipe type or grad requirmenets have changed
             need_reset = True
         elif (
-            recipe is not None and recipe.delayed()
+            recipe is not None
+            and recipe.delayed()
             and self._last_amax_history_len != recipe.amax_history_len
         ):
             # FP8 delayed scaling has changed amax history length
