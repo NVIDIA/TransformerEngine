@@ -329,7 +329,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             print('params', softmax_offset)
             #self.softmax_offset = self.softmax_offset
         if self.softmax_type == "off-by-one":
-            self.softmax_offset = torch.ones(1, self.num_attention_heads // self.tp_size, 1, 1)
+            self.softmax_offset = torch.ones(1, self.num_attention_heads // self.tp_size, 1, 1, device="cuda")
         if self.softmax_type == "vanilla":
             self.softmax_offset = None
 

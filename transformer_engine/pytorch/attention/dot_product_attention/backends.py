@@ -341,7 +341,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         if self.softmax_type != "vanilla":
             print('sss',softmax_offset.shape, matmul_result.shape)
             matmul_result = torch.cat([
-                softmax_offset.expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
+                softmax_offset.to(dtype=matmul_result.dtype).expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
                 matmul_result], dim=-1)
             attention_mask = F.pad(attention_mask, (0, 1), mode='constant', value=False)
 
@@ -379,6 +379,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
 
         # matmul: [b * np, sq, hn]
+        print('xxxxxx',attention_probs.dtype, value_layer.dtype)
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]

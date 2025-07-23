@@ -194,8 +194,9 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
+            print("fffff", len(fused_attn_fwd), len(fused_attn_bwd))
             print('fused_attn_fwd min/max', fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
-            print('fused_attn_bwd min/max', fused_attn_bwd.min().item(), fused_attn_bwd.max().item())
+            print('fused_attn_bwd min/max', fused_attn_bwd[0].min().item(), fused_attn_bwd[0].max().item())
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
             fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(

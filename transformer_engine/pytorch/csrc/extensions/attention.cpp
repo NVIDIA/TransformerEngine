@@ -191,6 +191,7 @@ std::vector<py::object> fused_attn_fwd(
     te_SoftmaxOffset =
         makeTransformerEngineTensor(SoftmaxOffset.value().data_ptr(), SoftmaxOffset_shape,
                                     DType::kFloat32, nullptr, nullptr, nullptr);
+    printf("tensor pter %ld\n", reinterpret_cast<uintptr_t>(te_SoftmaxOffset.data()));
   }
 
   // extract rng seed and offset
@@ -262,12 +263,12 @@ std::vector<py::object> fused_attn_fwd(
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     set_tensor_param(i++, Bias.value());
   }
-    printf("allocated all \n");
+    printf("allocated all %ld\n", reinterpret_cast<uintptr_t>(te_SoftmaxOffset.data()));
 
   // execute the kernel
   NVTE_SCOPED_GIL_RELEASE({
     nvte_fused_attn_fwd(
-        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_SoftmaxOffset.data(), te_O.data(),
+        te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_SoftmaxOffset.data(), te_S.data(), te_O.data(),
         &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
