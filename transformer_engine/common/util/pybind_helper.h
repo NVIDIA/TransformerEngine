@@ -9,6 +9,7 @@
 
 #include <pybind11/pybind11.h>
 #include <transformer_engine/comm_gemm_overlap.h>
+#include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -84,6 +85,11 @@
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
       .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
+  pybind11::enum_<transformer_engine::CommOverlapMethod>(m, "CommOverlapMethod",                   \
+                                                         pybind11::module_local())                 \
+      .value("BULK", transformer_engine::CommOverlapMethod::BULK)                                  \
+      .value("PIPELINE", transformer_engine::CommOverlapMethod::PIPELINE)                          \
+      .value("RING_EXCHANGE", transformer_engine::CommOverlapMethod::RING_EXCHANGE);               \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \
@@ -135,6 +141,8 @@
       },                                                                                           \
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
         py::call_guard<py::gil_scoped_release>());
 
 #endif

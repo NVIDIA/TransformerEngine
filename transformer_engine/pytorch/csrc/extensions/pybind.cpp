@@ -463,13 +463,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
+      .def(py::init<c10d::ProcessGroup *>(), py::call_guard<py::gil_scoped_release>(),
+           py::arg("tp_group"))
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
-           py::arg("intra_node_group") = py::none());
+           py::arg("intra_node_group"));
 
-  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
-             transformer_engine::CommOverlapCore>(m, "CommOverlap")
-      .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
+  py::class_<CommOverlapManager>(m, "CommOverlapManager")
+      .def(py::init<transformer_engine::CommOverlapMethod,
+                    const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
                     int, int, int, int, bool, bool, bool>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
@@ -477,27 +479,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
-      .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
+      .def("is_fp8_ubuf", &CommOverlapManager::is_fp8_ubuf);
+      .def("copy_into_buffer", &CommOverlapManager::copy_into_buffer, py::arg("input"),
            py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlap::get_buffer, py::arg("local_chunk") = false,
+      .def("get_buffer", &CommOverlapManager::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlap::get_communication_stream);
-
-  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
-             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
-      m, "CommOverlapP2P")
-      .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
-                    transformer_engine::CommOverlapType, int, int, int, int, int, bool, bool, bool,
-                    bool>(),
-           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
-           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
-           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
-           py::arg("shape") = std::nullopt)
-      .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
+      .def("get_communication_stream", &CommOverlapManager::get_communication_stream);
 }

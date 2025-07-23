@@ -27,6 +27,7 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/comm_gemm_overlap.h>
+#include <transformer_engine/comm_gemm.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>

@@ -44,6 +44,14 @@ enum NVTECommGemmAlgoType {
   kNVTECommGemmAlgoAtomicMulticast = 4
 };
 
+bool nvte_built_with_cublasmp() {
+#ifdef NVTE_WITH_CUBLASMP
+    return true;
+#else
+    return false;
+#endif
+}
+
 /*! \brief Create a comm-gemm context.
  *
  *  \param[in]  comm          NCCL communicator.

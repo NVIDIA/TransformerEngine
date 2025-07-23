@@ -128,7 +128,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                             bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
+                             bool use_split_accumulator, CommOverlapManager *comm_overlap = nullptr,
                              std::optional<CommOverlapType> comm_type = std::nullopt,
                              MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
                              float alpha = 1.0f, std::optional<float> beta = std::nullopt);
@@ -504,8 +504,9 @@ class CommOverlapHelper : torch::CustomClassHolder {
 
   CommOverlapHelper();
 
-  CommOverlapHelper(c10d::ProcessGroup *world_group,
-                    std::optional<c10d::ProcessGroup *> intra_node_group);
+  CommOverlapHelper(c10d::ProcessGroup *tp_group);
+
+  CommOverlapHelper(c10d::ProcessGroup *world_group, c10d::ProcessGroup *intra_node_group);
 
   ~CommOverlapHelper();
 
@@ -513,18 +514,46 @@ class CommOverlapHelper : torch::CustomClassHolder {
                     ExtComm comm);
 
   void ub_barrier(ExtComm comm);
+
+  int64_t get_comm_ptr(std::string group = "world") { return pgs[group]->getCommPtr(); }
 };
 
-class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
- public:
-  CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-              CommOverlapHelper *helper, int tp_size, int num_splits = 3,
-              int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-              int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
-              bool set_sm_margin = true, bool atomic_gemm = false,
-              bool rs_overlap_first_gemm = false);
+class CommOverlapManager : torch::CustomClassHolder {
+ private:
+#ifndef NVTE_WITH_CUBLASMP
+  transformer_engine::CommOverlapCore *_ctx;
+#else
+  CommGemmCtx *_ctx;
+#endif
+  transformer_engine::CommOverlapMethod _method;
+  int _num_comm_sm;
+  bool _use_atomic_gemm;
 
-  ~CommOverlap() {}
+ public:
+  CommOverlapManager(transformer_engine::CommOverlapMethod method,
+                     transformer_engine::CommOverlapType comm_type,
+                     const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                     CommOverlapHelper *helper, int tp_size, int num_splits = 3,
+                     int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+                     int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
+                     bool set_sm_margin = false, bool atomic_gemm = false,
+                     bool aggregate_ag = false, bool rs_overlap_first_gemm = false);
+
+  ~CommOverlapManager() {
+#ifdef NVTE_WITH_CUBLASMP
+    nvte_comm_gemm_ctx_destroy(_ctx);
+#else
+    delete _ctx;
+#endif;
+  }
+
+  bool is_fp8_ubuf() {
+#ifndef NVTE_WITH_CUBLASMP
+    return _ctx->is_fp8_ubuf();
+#else
+    return false;
+#endif
+  }
 
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
@@ -533,27 +562,11 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
   std::pair<at::Stream, at::Stream> get_communication_stream();
 
-};  // CommOverlap
-
-class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
- public:
-  CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                 CommOverlapHelper *helper, int tp_size,
-                 transformer_engine::CommOverlapType comm_type,
-                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false);
-
-  ~CommOverlapP2P() {}
-
-  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
-
-  at::Tensor get_buffer(bool local_chunk = false,
-                        std::optional<std::vector<int64_t>> shape = std::nullopt);
-
-  std::pair<at::Stream, at::Stream> get_communication_stream();
-
-};  // CommOverlapP2P
+  void execute(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+               TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+               TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
+               transformer_engine::CommOverlapType comm_type, TensorWrapper &aux_out,
+               cudaStream_t stream);
+};  // CommOverlapManager
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
