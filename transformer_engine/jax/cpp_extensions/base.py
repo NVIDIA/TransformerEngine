@@ -249,7 +249,7 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
         if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
             cls.set_enabled(True)
         else:
-            warnings.warn(f"Primitive not found in registry: {name}")
+            raise ValueError(f"Primitive not found in registry: {name}")
 
     # Apply disables (overrides enables if there's a conflict)
     for name in disable_set:
@@ -257,4 +257,4 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
         if cls and isinstance(cls, type) and issubclass(cls, BasePrimitive):
             cls.set_enabled(False)
         else:
-            warnings.warn(f"Primitive not found in registry: {name}")
+            raise ValueError(f"Primitive not found in registry: {name}")
