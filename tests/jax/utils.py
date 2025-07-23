@@ -1609,6 +1609,8 @@ def use_jax_gemm(enabled=False):
     try:
         if enabled:
             os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=false"
+        else:
+            os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=true"
         yield
 
     finally:
