@@ -65,8 +65,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
@@ -116,6 +115,7 @@ class _Linear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
+        save_original_input: bool = False,
         debug: Optional[bool] = False,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -156,6 +156,11 @@ class _Linear(torch.autograd.Function):
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
+            if save_original_input:
+                assert not isinstance(
+                    input_quantizer, Float8Quantizer
+                ), "DelayedScaling recipe is not supported with save_original_input"
+
         if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
 
             # Cast local input tensor if needed
@@ -163,14 +168,19 @@ class _Linear(torch.autograd.Function):
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorBase):
+                    own_quantized_input = True
                     input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
                         # All-gather is not supported with FP8 column-wise data
                         input_quantizer.set_usage(columnwise=False)
+                    if save_original_input:
+                        # No need for column-wise data since this
+                        # tensor will not be cached for backward pass
+                        input_quantizer.set_usage(columnwise=False)
+                        own_quantized_input = False
                     inputmat = input_quantizer(inputmat)
-                    own_quantized_input = True
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
 
@@ -200,7 +210,9 @@ class _Linear(torch.autograd.Function):
                 else:
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    input_quantizer.set_usage(
+                        rowwise=True, columnwise=backward_needs_input and not save_original_input
+                    )
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
             else:
@@ -329,23 +341,33 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
 
         if is_grad_enabled:
+            if save_original_input:
+                inputmat = inp
+
             ctx.weight_quantizer = weight_quantizer
-            saved_inputmat = None
 
             ctx.backward_input_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
+            # Discard unneeded data in input tensor
+            if (
+                backward_needs_input
+                and own_quantized_input
+                and isinstance(inputmat, QuantizedTensorBase)
+            ):
+                if ctx.backward_input_needs_gather and isinstance(
+                    quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                ):
+                    # All-gather is not supported with FP8 column-wise data
+                    inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+                else:
+                    # Discard row-wise data since it is not needed in backward pass
+                    inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+
+            # Cached input tensor
+            saved_inputmat = None
             if backward_needs_input:
-                if own_quantized_input and isinstance(inputmat, QuantizedTensorBase):
-                    # For sequence parallel in vanilla FP8, rowwise data is
-                    # to gather the input. For MXFP8, columnwise only data
-                    # can be allgathered.
-                    if (
-                        isinstance(inputmat, (MXFP8TensorBase, Float8BlockwiseQTensorBase))
-                        or not ctx.backward_input_needs_gather
-                    ):
-                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -556,6 +578,30 @@ class _Linear(torch.autograd.Function):
             # --------------------------------------------------
             inputmat_total = None
             inputmat_total_work = None
+            if ctx.requires_wgrad:
+                if ctx.fp8 or ctx.debug:
+                    if isinstance(inputmat, QuantizedTensorBase):
+                        # Input tensor is already quantized
+                        pass
+                    elif ctx.debug:
+                        # Debug quantizer will be applied immediately before wgrad GEMM
+                        pass
+                    else:
+                        # Quantize input tensor
+                        quantizer = ctx.input_quantizer
+                        if ctx.backward_input_needs_gather and isinstance(
+                            quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                        ):
+                            # All-gather is not supported with FP8 column-wise data
+                            quantizer.set_usage(rowwise=True, columnwise=False)
+                        else:
+                            quantizer.set_usage(rowwise=True, columnwise=True)
+                        inputmat = quantizer(inputmat)
+                else:
+                    if isinstance(inputmat, QuantizedTensorBase):
+                        inputmat = inputmat.dequantize(dtype=ctx.activation_dtype)
+                    else:
+                        inputmat = cast_if_needed(inputmat, ctx.activation_dtype)
             if ctx.backward_input_needs_gather:
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
@@ -897,6 +943,7 @@ class _Linear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
+            None,  # save_original_input
             None,  # debug
         )
 
@@ -979,6 +1026,11 @@ class Linear(TransformerEngineBaseModule):
                    This can help in latency bound communication situations.
                    Requires PyTorch version 2.7.0 or higher. When set to None, standard all-reduce
                    is used.
+    save_original_input : bool, default = `False`
+                       If set to `True`, always saves the original input tensor rather than the
+                       cast tensor. In some scenarios, the input tensor is used by multiple modules,
+                       and saving the original input tensor may reduce the memory usage.
+                       Cannot work with FP8 DelayedScaling recipe.
     """
 
     def __init__(
@@ -1006,6 +1058,7 @@ class Linear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         symmetric_ar_type: Optional[str] = None,
+        save_original_input: bool = False,
         name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -1020,6 +1073,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
         self.symmetric_ar_type = symmetric_ar_type
+        self.save_original_input = save_original_input
         self.name = name
 
         if TEDebugState.debug_enabled:
@@ -1278,6 +1332,9 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp, fp8_output)
+
         debug = TEDebugState.debug_enabled
         if debug:
             self._validate_name()
@@ -1301,13 +1358,7 @@ class Linear(TransformerEngineBaseModule):
             allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
 
-            # Get concatenated weight and bias tensors
-            unfused_weights = self._get_weight_tensors()
-            weight_tensor = noop_cat(unfused_weights)
-            if self.use_bias:
-                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            else:
-                bias_tensor = None
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
@@ -1373,6 +1424,7 @@ class Linear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.save_original_input,
                 debug,
             )
             out = linear_fn(*args)
@@ -1420,6 +1472,95 @@ class Linear(TransformerEngineBaseModule):
             for name, q in zip(names, original_quantizers)
         )
 
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        unfused_weights = [getattr(self, name) for name in self.weight_names]
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                warnings.warn(
+                    "You are using quantized weights without quantized compute. "
+                    "Please make sure this is intentional."
+                )
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+        return unfused_weights
+
+    def _get_weight_and_bias_tensors(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # Get concatenated weight and bias tensors
+        unfused_weights = self._get_weight_tensors()
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                warnings.warn(
+                    "You are using quantized weights without quantized compute. "
+                    "Please make sure this is intentional."
+                )
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+
+        weight_tensor = noop_cat(unfused_weights)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = None
+
+        return weight_tensor, bias_tensor
+
+    def onnx_forward(
+        self,
+        inp: torch.Tensor,
+        fp8_output: bool,
+    ) -> torch.Tensor:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        from ..export import onnx_gemm
+
+        assert_warmed_up(self)
+        assert not TEDebugState.debug_enabled, "Debug mode is not supported in ONNX export."
+        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+        (
+            input_quantizer,
+            weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers(fp8_output, False)
+        inp_dtype = inp.dtype
+
+        if input_quantizer is not None:
+            inp_q = input_quantizer.onnx_quantize(inp)
+            inp = input_quantizer.onnx_dequantize(inp_q)
+            inp = inp.to(inp_dtype)
+
+        if weight_quantizer is not None:
+            weight_q = weight_quantizer.onnx_quantize(weight_tensor)
+            weight_tensor = weight_quantizer.onnx_dequantize(weight_q)
+        if bias_tensor is not None:
+            bias_tensor = bias_tensor.to(inp_dtype)
+        weight_tensor = weight_tensor.to(inp_dtype)
+
+        if self.apply_bias:
+            output = onnx_gemm(weight_tensor, inp, bias_tensor)
+        else:
+            output = onnx_gemm(weight_tensor, inp, None)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+
+        if self.return_bias:
+            return output, bias_tensor
+
+        return output
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
         assert (
@@ -1466,23 +1607,6 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
-        """Get the weight tensors of the module."""
-        unfused_weights = [getattr(self, name) for name in self.weight_names]
-        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
-            if self.fp8:
-                if len(unfused_weights) != 1:
-                    raise RuntimeError(
-                        "Splitting QuantizedTensor into multiple params is not supported"
-                    )
-            else:
-                warnings.warn(
-                    "You are using quantized weights without quantized compute. "
-                    "Please make sure this is intentional."
-                )
-                unfused_weights = [w.dequantize() for w in unfused_weights]
-        return unfused_weights
 
     def _get_weight_quantizers(self) -> List[Quantizer]:
         """Get the weight quantizers of the module."""
