@@ -571,7 +571,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor_list = []
                         for state_tuple in state:
                             if self.double_buffering:
-                                reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                                reload_buffer = self.reload_double_buffer[double_buffer_idx][
+                                    buffer_idx
+                                ]
                             else:
                                 reload_buffer = None
 
