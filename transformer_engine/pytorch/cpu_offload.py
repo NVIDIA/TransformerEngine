@@ -622,6 +622,7 @@ def get_cpu_offload_context(
         def __enter__(self):
             assert self.inside_context == False, \
                 f"Offloading context was entered without synchronization function being called."
+            self.inside_context = True
             self._hooks_ctx = saved_tensors_hooks(
                 offload_synchronizer.push_tensor, offload_synchronizer.pop_tensor
             )
@@ -651,7 +652,6 @@ def get_cpu_offload_context(
             cur_layer = self.current_layer
             assert self.inside_context == False, \
                 f"Synchronization function was called without offloading context being entered."
-            self.inside_context = True
 
             def hook(_):
                 # offload_synchronizer.finish_part_of_bwd needs
