@@ -1400,9 +1400,6 @@ class TestBasicOps:
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
 
         torch.testing.assert_close(y_test, y_ref, **tols)
-        # L2Norm backward pass requires slightly looser atol for bfloat16
-        if dtype == torch.bfloat16:
-            tols["atol"] = 2e-3
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
     @pytest.mark.parametrize("in_place", (True, False))

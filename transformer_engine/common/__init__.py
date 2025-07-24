@@ -246,6 +246,18 @@ def _load_cudnn():
     if found:
         return handle
 
+    # Attempt to locate libcudnn via ldconfig
+    libs = subprocess.check_output(
+        f"ldconfig -p | grep 'libcudnn{_get_sys_extension()}'", shell=True
+    )
+    libs = libs.decode("utf-8").split("\n")
+    sos = []
+    for lib in libs:
+        if "libcudnn" in lib and "=>" in lib:
+            sos.append(lib.split(">")[1].strip())
+    if sos:
+        return ctypes.CDLL(sos[0], mode=ctypes.RTLD_GLOBAL)
+
     # If all else fails, assume that it is in LD_LIBRARY_PATH and error out otherwise
     return ctypes.CDLL(f"libcudnn{_get_sys_extension()}", mode=ctypes.RTLD_GLOBAL)
 
@@ -267,12 +279,12 @@ def _load_nvrtc():
         return handle
 
     # Attempt to locate NVRTC via ldconfig
-    libs = subprocess.check_output("ldconfig -p | grep 'libnvrtc'", shell=True)
+    libs = subprocess.check_output(
+        f"ldconfig -p | grep 'libnvrtc{_get_sys_extension()}'", shell=True
+    )
     libs = libs.decode("utf-8").split("\n")
     sos = []
     for lib in libs:
-        if "stub" in lib or "libnvrtc-builtins" in lib:
-            continue
         if "libnvrtc" in lib and "=>" in lib:
             sos.append(lib.split(">")[1].strip())
     if sos:
