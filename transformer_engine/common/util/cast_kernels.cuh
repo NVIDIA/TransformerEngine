@@ -25,6 +25,7 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "transformer_engine/transformer_engine.h"
+#include "cast_kernels_spec.cuh"
 
 namespace transformer_engine {
 
@@ -1079,6 +1080,52 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
       input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
+
+          if (spec::hasSpec<IS_DBIAS, IS_DACT, IS_ACT, IType, OType>()) {
+
+            switch (scaling_type) {
+              case ScalingType::ROWWISE: {
+                using traits = spec::CastTraits<IType, OType, true, false>;
+                auto kernel = spec::cast_mxfp8_kernel<traits>;
+
+                if (traits::smem > 48 * 1024) {
+                  cudaFuncSetAttribute(
+                    kernel,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    traits::smem);
+                }
+
+                dim3 block(traits::threadLayout::num,
+                           traits::warpLayout::N,
+                           traits::warpLayout::M);
+                dim3 grid((cols + traits::blockDimN - 1) / traits::blockDimN,
+                          (rows + traits::blockDimM - 1) / traits::blockDimM);
+                kernel<<<grid, block, traits::smem, stream>>>(
+                  reinterpret_cast<typename traits::IType *>(input.data.dptr),
+                  reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                  scales_rowwise_ptr,
+                  amax_ptr,
+                  rows,
+                  cols,
+                  scale_stride_rowwise,
+                  scale_stride_colwise
+                );
+
+                break;
+              }
+              case ScalingType::COLWISE: {
+                NVTE_ERROR("Colwise scaling not implemented.");
+                break;
+              }
+              case ScalingType::BIDIMENSIONAL: {
+                break;
+              }
+              default: {
+                NVTE_ERROR("Invalid scaling type.");
+              }
+            }
+            return;
+          }
 
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};

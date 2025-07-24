@@ -369,6 +369,30 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
                  "r"(reinterpret_cast<const uint32_t &>(p2)));
 }
 
+__device__ __forceinline__
+bf16 get_amax(bf16 a, bf16 b) {
+    bf16 r;
+    asm volatile (
+        "max.xorsign.abs.bf16 %0, %1, %2;"
+        : "=h"(*reinterpret_cast<int16_t*>(&r))
+        : "h"(*reinterpret_cast<int16_t*>(&a)),
+          "h"(*reinterpret_cast<int16_t*>(&b))
+    );
+    return r;
+}
+
+__device__ __forceinline__
+fp16 get_amax(fp16 a, fp16 b) {
+    fp16 r;
+    asm volatile (
+        "max.xorsign.abs.f16 %0, %1, %2;"
+        : "=h"(*reinterpret_cast<int16_t*>(&r))
+        : "h"(*reinterpret_cast<int16_t*>(&a)),
+          "h"(*reinterpret_cast<int16_t*>(&b))
+    );
+    return r;
+}
+
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 }  // namespace ptx
