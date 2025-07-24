@@ -275,9 +275,7 @@ def _dense_bwd_rule(
             and not tex.gemm_uses_jax_dot()
         ),
         sequence_dim=(
-            None
-            if sequence_parallel_output or tex.gemm_uses_jax_dot()
-            else sequence_dim
+            None if sequence_parallel_output or tex.gemm_uses_jax_dot() else sequence_dim
         ),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
