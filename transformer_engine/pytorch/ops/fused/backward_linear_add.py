@@ -29,10 +29,10 @@ class BackwardLinearAdd(FusedOperation):
     def __init__(
         self,
         *,
-        linear: BasicLinear,
         backward_add: MakeExtraOutput,
+        linear: BasicLinear,
     ) -> None:
-        super().__init__((linear, backward_add))
+        super().__init__((backward_add, linear))
 
     def fuser_backward(
         self,
@@ -47,7 +47,7 @@ class BackwardLinearAdd(FusedOperation):
     ]:
 
         # Get basic operations
-        linear_op = self.basic_ops[0]
+        linear_op = self.basic_ops[1]
         linear_op_ctx = basic_op_ctxs[0]
 
         # Saved tensors from forward pass
@@ -138,6 +138,8 @@ def fuse_backward_linear_add(
         # Check if second op is "make extra output"
         op, _ = ops[0]
         if not isinstance(op, MakeExtraOutput):
+            continue
+        if not op._in_place:
             continue
         window.extend(ops[:1])
         ops = ops[1:]
