@@ -19,6 +19,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
     Float8CurrentScaling,
+    Float8BlockScaling,
     Format,
     Recipe,
 )
@@ -33,10 +34,17 @@ NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
 QUANTIZATION = None
 
+if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
 
-# Disable TF32
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
 
 
 # Quantization recipe setup
@@ -49,6 +57,8 @@ def quantization_recipe() -> Recipe:
         return MXFP8BlockScaling()
     if QUANTIZATION == "fp8_cs":
         return Float8CurrentScaling()
+    if QUANTIZATION == "fp8_block_scaling":
+        return Float8BlockScaling()
     return te.fp8.get_default_fp8_recipe()
 
 
@@ -85,11 +95,15 @@ def main(argv=None, namespace=None):
 
     # Quantization scheme
     QUANTIZATION = args.quantization
+    global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
     if QUANTIZATION in ("fp8", "mxfp8"):
-        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    elif QUANTIZATION == "fp8_block_scaling":
+        SEQ_LEN = 128
+        BATCH_SIZE = 128
+        HIDDEN_SIZE = 512
 
     test_dict = [
         test_quantizer,
@@ -147,7 +161,7 @@ def _gather(tensor, dim=0):
 
 
 def _constant(tensor):
-    return nn.init.constant_(tensor, 0.5)
+    return nn.init.constant_(tensor, 0.05)
 
 
 def dist_print(msg, src=None, end="\n", error=False):
@@ -170,7 +184,8 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1.3e-6, "atol": 1e-5}
+        # TF32 has same mantissa bits as FP16
+        return {"rtol": 1e-3, "atol": 1e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
@@ -297,6 +312,11 @@ def _loss_backward(output_single_node, output_distributed):
     LOSS_FN(output_distributed, target).backward()
 
 
+def _loss_backward_dw(model_single_node, model_distributed):
+    model_single_node.backward_dw()
+    model_distributed.backward_dw()
+
+
 def _alloc_main_grad(model_single_node, model_distributed):
     for model in [model_single_node, model_distributed]:
         for param in model.parameters():
@@ -317,7 +337,6 @@ def _construct_quantizer(quantizer_class, fp8_dtype, device, tp_group, tp_size):
             device=device,
             with_amax_reduction=True,
             amax_reduction_group=tp_group,
-            amax_reduction_size=tp_size,
         )
         quantizer = quantizer_class(
             fp8_dtype=fp8_dtype,
@@ -471,6 +490,10 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
 
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
+
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
 
@@ -492,8 +515,12 @@ def test_linear():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"params_dtype": torch.float16},
+        {"delay_wgrad_compute": True},
+        {"save_original_input": True},
     ]
     for kwargs in kwargs_list:
+        if kwargs.get("save_original_input", False) and QUANTIZATION == "fp8":
+            continue
         for parallel_mode in ["column", "row"]:
             for sequence_parallel in [False, True]:
                 _test_linear(parallel_mode, sequence_parallel, **kwargs)
@@ -625,7 +652,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 
@@ -642,6 +669,10 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
 
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
+
+    # Compute delayed weight gradient
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
 
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
@@ -665,6 +696,7 @@ def test_layernorm_linear():
         {"params_dtype": torch.float16},
         {"zero_centered_gamma": False},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
     for kwargs in kwargs_list:
         for parallel_mode in ["column"]:
@@ -729,7 +761,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 
@@ -743,6 +775,9 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
 
     # Compute loss and backpropagate
     _loss_backward(output_single_node, output_distributed)
+
+    if "delay_wgrad_compute" in kwargs:
+        _loss_backward_dw(model_single_node, model_distributed)
 
     # Validate outputs and gradients
     _check_outputs(output_single_node, output_distributed)
@@ -769,6 +804,7 @@ def test_layernorm_mlp():
         {"fuse_wgrad_accumulation": True},
         {"return_bias": True},
         {"return_layernorm_output": True},
+        {"delay_wgrad_compute": True},
     ]
 
     for kwargs in kwargs_list:

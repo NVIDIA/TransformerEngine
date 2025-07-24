@@ -153,11 +153,11 @@ void performTest(
 
   DType itype = TypeInfo<Type>::dtype;
 
-  Tensor data_in("data_in", { batches, heads, rows, cols }, itype);
-  Tensor softmax_out("softmax_out", { batches, heads, rows, cols }, itype);
-  Tensor softmax_in("softmax_in", { batches, heads, rows, cols }, itype);
-  Tensor grads_in("grads_in", { batches, heads, rows, cols }, itype);
-  Tensor grads_out("grads_out", { batches, heads, rows, cols }, itype);
+  Tensor data_in("data_in", std::vector<size_t>{ batches, heads, rows, cols }, itype);
+  Tensor softmax_out("softmax_out", std::vector<size_t>{ batches, heads, rows, cols }, itype);
+  Tensor softmax_in("softmax_in", std::vector<size_t>{ batches, heads, rows, cols }, itype);
+  Tensor grads_in("grads_in", std::vector<size_t>{ batches, heads, rows, cols }, itype);
+  Tensor grads_out("grads_out", std::vector<size_t>{ batches, heads, rows, cols }, itype);
 
   const size_t elements_total = batches * heads * rows * cols;
   std::unique_ptr<Type[]> softmax_out_ref = std::make_unique<Type[]>(elements_total);

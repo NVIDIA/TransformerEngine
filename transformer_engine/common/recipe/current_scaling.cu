@@ -108,7 +108,7 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
 
   // Check input tensor
   NVTE_CHECK(input_ != nullptr, "Invalid input tensor (got NULL)");
-  const auto &input = *reinterpret_cast<const Tensor *>(input_);
+  const auto &input = *convertNVTETensorCheck(input_);
   NVTE_CHECK(input.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Input tensor for amax computation must unquantized, "
              "but got scaling_mode=",
@@ -121,7 +121,7 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
 
   // Check output tensor
   NVTE_CHECK(output_ != nullptr, "Invalid output tensor (got NULL)");
-  auto &output = *reinterpret_cast<Tensor *>(output_);
+  auto &output = *convertNVTETensorCheck(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Output tensor for amax computation must be FP8 tensor with per-tensor scaling, "
              "but got scaling_mode=",
@@ -152,7 +152,8 @@ namespace {
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
                                                const float epsilon) {
-  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon);
+  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon,
+                                       std::numeric_limits<float>::max());
 }
 
 }  // namespace
@@ -165,7 +166,7 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
 
   // Check output tensor
   NVTE_CHECK(output_ != nullptr, "Invalid output tensor (got NULL)");
-  auto &output = *reinterpret_cast<Tensor *>(output_);
+  auto &output = *convertNVTETensorCheck(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Tensor must be FP8 tensor with per-tensor scaling, "
              "but got scaling_mode=",
@@ -197,8 +198,9 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
                                          max_fp8 = Quantized_Limits<DType>::max_norm;);
 
   // Update scale
-  compute_scale_from_amax_kernel<<<1, 1>>>(reinterpret_cast<const float *>(output.amax.dptr),
-                                           reinterpret_cast<float *>(output.scale.dptr), max_fp8,
-                                           config.force_pow_2_scales, config.amax_epsilon);
+  compute_scale_from_amax_kernel<<<1, 1, 0, stream>>>(
+      reinterpret_cast<const float *>(output.amax.dptr),
+      reinterpret_cast<float *>(output.scale.dptr), max_fp8, config.force_pow_2_scales,
+      config.amax_epsilon);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

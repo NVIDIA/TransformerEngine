@@ -103,8 +103,11 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id)
 
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
-  // NOTE: This needs to be guarded at compile time because the
+  // NOTE: This needs to be guarded at compile-time and run-time because the
   //       CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED enum is not defined in earlier CUDA versions.
+  if (cudart_version() < 12010) {
+    return false;
+  }
   static std::vector<bool> cache(num_devices(), false);
   static std::vector<std::once_flag> flags(num_devices());
   if (device_id < 0) {
@@ -114,9 +117,15 @@ bool supports_multicast(int device_id) {
   auto init = [&]() {
     CUdevice cudev;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
-    int result;
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
-                                CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+    // Multicast support requires both CUDA12.1 UMD + KMD
+    int result = 0;
+    // Check if KMD >= 12.1
+    int driver_version;
+    NVTE_CHECK_CUDA(cudaDriverGetVersion(&driver_version));
+    if (driver_version >= 12010) {
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
+                                  CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+    }
     cache[device_id] = static_cast<bool>(result);
   };
   std::call_once(flags[device_id], init);
@@ -189,6 +198,16 @@ const std::string &include_directory(bool required) {
 
   // Return cached path
   return path;
+}
+
+int cudart_version() {
+  auto get_version = []() -> int {
+    int version;
+    NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&version));
+    return version;
+  };
+  static int version = get_version();
+  return version;
 }
 
 }  // namespace cuda

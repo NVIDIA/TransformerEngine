@@ -188,7 +188,7 @@ class ReorderStrategy(Enum):
 
     - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
     GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
-    mulitple of 2 * cp_size.
+    multiple of 2 * cp_size.
       Examples:
       - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
       - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
@@ -277,6 +277,7 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 
 def is_fused_attn_kernel_available(
+    is_training,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -287,7 +288,8 @@ def is_fused_attn_kernel_available(
     kv_num_heads,
     q_max_seqlen,
     kv_max_seqlen,
-    head_dim,
+    head_dim_qk,
+    head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
 ):
     """
@@ -296,6 +298,7 @@ def is_fused_attn_kernel_available(
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
+            is_training,
             q_dtype,
             kv_dtype,
             qkv_layout,
@@ -306,7 +309,8 @@ def is_fused_attn_kernel_available(
             kv_num_heads,
             q_max_seqlen,
             kv_max_seqlen,
-            head_dim,
+            head_dim_qk,
+            head_dim_v,
             (-1, -1) if window_size is None else window_size,
         )
 
@@ -378,6 +382,44 @@ def _mask_to_seqlens_offset(mask, max_segments_per_seq):
     return q_seqlen, q_offset, kv_seqlen, kv_offset
 
 
+def _fast_causal_adjust_seqlen_and_offsets(
+    segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+):
+    # The assumption is that for any segment tokens respect causal ordering except at the ends
+    # of the segment. This allows us to tweak the length and offset by only looking at the start
+    # and end tokens between segments.
+    is_active_segment = jnp.logical_and(q_len > 0, kv_len > 0)
+
+    q_seq_id_start = jnp.take(segment_pos_q, q_offset[..., :-1], fill_value=-1)
+    kv_seq_id_start = jnp.take(segment_pos_kv, kv_offset[..., :-1], fill_value=-1)
+    skip_start_token = jnp.logical_and(kv_seq_id_start > q_seq_id_start, is_active_segment).astype(
+        jnp.int32
+    )
+
+    q_len -= skip_start_token
+    q_offset += jnp.insert(skip_start_token, skip_start_token.shape[-1], 0, axis=-1)
+
+    q_seq_id_end = jnp.take(segment_pos_q, q_offset[..., 1:] - 1, fill_value=-1)
+    kv_seq_id_end = jnp.take(segment_pos_kv, kv_offset[..., 1:] - 1, fill_value=-1)
+    skip_end_token = jnp.logical_and(kv_seq_id_end > q_seq_id_end, is_active_segment).astype(
+        jnp.int32
+    )
+
+    kv_len -= skip_end_token
+
+    return q_len, kv_len, q_offset, kv_offset
+
+
+def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+    segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+):
+    q_len, q_offset = _get_seqlens_and_offsets(segment_ids_q, max_segments_per_seq)
+    kv_len, kv_offset = _get_seqlens_and_offsets(segment_ids_kv, max_segments_per_seq)
+    return _fast_causal_adjust_seqlen_and_offsets(
+        segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
+    )
+
+
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
     segment_ids_kv,
@@ -387,6 +429,25 @@ def _segment_ids_pos_to_seqlens_offsets(
     window_size,
     max_segments_per_seq,
 ):
+    # TODO(mgoldfarb-nvidia): Consider an opt-in for arbitrary masking if needed here.
+    # Computing the full mask is expensive due to quadratic expansion of Q * KV masking.
+
+    # Assumptions for cudnn causal mask correctness.
+    # 1. Segments are monotonic [4 4 4 0 0 5 5 5 6 6 0 0]
+    # 2. No intra-segment padding, only inter-segment paddding allowed
+    # 3. Only start or end token within a segment may violate the causal order relationship
+    #        1 5 9     0 4 8 10    0 4 8
+    #    0             x           x
+    #    4   x         x x         x x
+    #    8   x x       x x x       x x x
+    #
+    # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
+    # examine only O(Q+KV) elements.
+    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+        return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
+            segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
+        )
+
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
         segment_ids_q,
@@ -432,7 +493,7 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
 
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
-    """A class to descibe the sequences with flexible initialization.
+    """A class to describe the sequences with flexible initialization.
     - SequenceDescriptor.from_seqlens
       For non-THD (non-packed) cases, where each batch has only 1 sequence.
     - SequenceDescriptor.from_seqlens_and_offsets

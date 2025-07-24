@@ -15,7 +15,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax.linen.attention import combine_masks
 from jax import nn as jax_nn
 from jax import random as jax_random
@@ -181,8 +180,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             attn_weights_without_groups_shape = (b, h * g, q, k)
             attn_weights = attn_weights.reshape(attn_weights_without_groups_shape)
 
+        # (b, h, q, k): Last two axes are always replicated
         attn_weights = with_sharding_constraint_by_logical_axes(
-            attn_weights, (BATCH_AXES, HEAD_AXES, SEQLEN_AXES, SEQLEN_AXES)
+            attn_weights, (BATCH_AXES, HEAD_AXES, None, None)
         )
 
         # When post_scale_bias is present, the computation is Softmax(attn_weights * scale + bias)
@@ -220,11 +220,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if mask is not None:
                 mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
+            if mask is not None:
+                return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.CAUSAL_MASK:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
-                if mask is not None:
-                    return SoftmaxType.SCALED_MASKED, mask
+            if attn_mask_type is AttnMaskType.NO_MASK:
                 return SoftmaxType.SCALED, mask
             raise ValueError(
                 f"Unsupported {attn_mask_type=}, supported attn_mask_type="
@@ -447,6 +447,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
 
+       attn_mask_type       mask/sequence_descriptor       SWA          softmax type
+       --------------------------------------------------------------------------------------------
+       no_mask              None                           None         SCALED
+       causal               None                           None         SCALED_UPPER_TRIANG_MASKED
+       causal               None                           Yes          SCALED_MASKED
+       padding              Required                       Yes/No       SCALED_MASKED
+       padding_causal       Required                       Yes/No       SCALED_MASKED
+
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -587,8 +595,16 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_kv = seqlen_q
         else:
             seqlen_kv = key.shape[sequence_dim]
+        if qkv_layout.is_separate():
+            head_dim_qk = query.shape[-1]
+            head_dim_v = value.shape[-1]
+        else:
+            head_dim_qk = self.head_dim
+            head_dim_v = self.head_dim
 
         has_fused_attn_kernel = is_fused_attn_kernel_available(
+            # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
+            not deterministic,
             self.dtype,
             self.dtype,
             qkv_layout,
@@ -599,7 +615,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             self.num_gqa_groups,
             seqlen_q,
             seqlen_kv,
-            self.head_dim,
+            head_dim_qk,
+            head_dim_v,
             self.window_size,
         )
 
@@ -612,7 +629,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Please try to update the cuDNN and TE to the latest version.\n"
                 f"{self.dtype=}\n{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
-                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{self.head_dim=}\n"
+                f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
             )
 
         dropout_rng = None
@@ -620,7 +637,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             dropout_rng = self.make_rng(self.dropout_rng_name)
 
         if self.scale_factor is None:
-            scale_factor = 1.0 / sqrt(self.head_dim)
+            scale_factor = 1.0 / sqrt(head_dim_qk)
         else:
             scale_factor = self.scale_factor
         del self.scale_factor
@@ -638,7 +655,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout.is_separate()
 
-            assert sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray)
+            assert sequence_descriptor is None or isinstance(
+                sequence_descriptor, (jnp.ndarray, np.ndarray)
+            )
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
@@ -928,7 +947,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
+        The data type used to allocate the initial parameters.
     fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
@@ -1493,12 +1512,11 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
         rp_bucket += np.where(rpb_is_small, negative_rp, rpb_val_if_large)
 
         # Compute relative attention bias
-        relative_attention_bias = nn_partitioning.param_with_axes(
+        relative_attention_bias = self.param(
             "rel_embedding",
-            self.embedding_init,
+            nn.with_logical_partitioning(self.embedding_init, self.embedding_axes),
             (self.num_attention_heads, self.num_buckets),
             self.dtype,
-            axes=self.embedding_axes,
         )
 
         relative_attention_bias = jnp.asarray(relative_attention_bias, self.dtype)
@@ -1788,6 +1806,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
+
         input_dtype = inputs.dtype
         assert (
             self.layer_type in TransformerLayerType

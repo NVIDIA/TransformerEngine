@@ -22,24 +22,26 @@ extern "C" {
  *  \brief TE datatype.
  */
 enum NVTEDType {
-  kNVTEByte = 0,       /*!< Byte */
-  kNVTEInt32 = 1,      /*!< 32-bit integer */
-  kNVTEInt64 = 2,      /*!< 64-bit integer */
-  kNVTEFloat32 = 3,    /*!< 32-bit float */
-  kNVTEFloat16 = 4,    /*!< 16-bit float (E5M10) */
-  kNVTEBFloat16 = 5,   /*!< 16-bit bfloat (E8M7) */
-  kNVTEFloat8E4M3 = 6, /*!< 8-bit float (E4M3) */
-  kNVTEFloat8E5M2 = 7, /*!< 8-bit float (E5M2) */
-  kNVTEFloat8E8M0 = 8, /*!< 8-bit float (E8M0) */
-  kNVTENumTypes        /*!< Number of supported types */
+  kNVTEByte = 0,        /*!< Byte */
+  kNVTEInt16 = 1,       /*!< 16-bit integer */
+  kNVTEInt32 = 2,       /*!< 32-bit integer */
+  kNVTEInt64 = 3,       /*!< 64-bit integer */
+  kNVTEFloat32 = 4,     /*!< 32-bit float */
+  kNVTEFloat16 = 5,     /*!< 16-bit float (E5M10) */
+  kNVTEBFloat16 = 6,    /*!< 16-bit bfloat (E8M7) */
+  kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
+  kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
+  kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
+  kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
+  kNVTENumTypes         /*!< Number of supported types */
 };
 
 /*! \struct NVTEShape
  *  \brief Shape of the tensor.
  */
 struct NVTEShape {
-  /*! \brief Shape data, of size ndim. */
-  const size_t *data;
+  /*! \brief Shape data, with ndim valid elements. */
+  size_t data[15];
   /*! \brief Number of dimensions. */
   size_t ndim;
 };
@@ -80,7 +82,17 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  NVTE_INVALID_SCALING
+  /*! Tensor is split into NxN quantization tiles or 1xN quantization tiles,
+    which each yield a scale. The block_scaling_dim property of the quantizer
+    selects the granularity.
+   */
+  NVTE_BLOCK_SCALING_1D = 2,
+  NVTE_BLOCK_SCALING_2D = 3,
+  /*! Single NVFP4 scale per block of 16 contiguous elements in forward pass (FWD),
+    and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
+  */
+  NVTE_FWD_NVFP4_BWD_MXFP8_SCALING = 4,
+  NVTE_INVALID_SCALING = 100
 };
 
 /*! \brief TE Tensor type
@@ -128,6 +140,15 @@ void *nvte_tensor_data(const NVTETensor tensor);
  */
 void *nvte_tensor_columnwise_data(const NVTETensor tensor);
 
+/*! \brief Construct a shape from an array of dimension sizes.
+ *
+ *  \param[data] Pointer to start of shape array.
+ *  \param[data] Number of dimensions (must be <= 14)
+ *
+ *  \return A shape. The shape will own its own copy of the data.
+ */
+NVTEShape nvte_make_shape(const size_t *data, size_t ndim);
+
 /*! \brief Get a tensor's data shape.
  *
  *  \param[in] tensor Tensor.
@@ -161,6 +182,14 @@ size_t nvte_tensor_ndims(const NVTETensor tensor);
  */
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
 
+/*! \brief Get the byte size for the tensor.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Byte size of the tensor.
+ */
+size_t nvte_tensor_size_bytes(const NVTETensor tensor);
+
 /*! \brief Get a tensor's total number of elements.
  *
  *  \param[in] tensor Tensor.
@@ -176,6 +205,14 @@ size_t nvte_tensor_numel(const NVTETensor tensor);
  *  \return Byte size of the tensor's data type.
  */
 size_t nvte_tensor_element_size(const NVTETensor tensor);
+
+/*! \brief Get the bit size for the tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Bit size of the tensor's data type.
+ */
+size_t nvte_tensor_element_size_bits(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data type.
  *
@@ -280,6 +317,19 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigForcePow2Scales = 0,
   /*! Small value to add to amax for numerical stability */
   kNVTEQuantizationConfigAmaxEpsilon = 1,
+  /*! Noop tensor (containing a scalar).
+   If the scalar element value = 1, quantization kernel will early exit.
+   This is a tensor because the flag must be on GPU in order to enable
+   conditional early even when captured in a static CUDA graph.
+  */
+  kNVTEQuantizationConfigNoopTensor = 2,
+  /*! Data format for an FP8 block-scaled tensor
+   *
+   *  This is not the right design since the tensor format is a
+   *  property of the tensor, not the quantization. This enum will
+   *  likely be refactored away in the future.
+   */
+  kNVTEQuantizationConfigFloat8BlockScaleTensorFormat = 3,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -320,6 +370,23 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
  */
 void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
 
+/*! \brief Check if non-TN FP8 Gemm is supported.
+ *
+ *  \return A flag which indicates whether non-TN FP8 Gemm is supported or not.
+ */
+int nvte_is_non_tn_fp8_gemm_supported();
+
+/*! \brief Performs a memset of the data at the given pointer and size in bytes.
+ *
+ *  \param[in] ptr Pointer to the memory to be set.
+ *  \param[in] value Value to set the memory to.
+ *  \param[in] size_in_bytes Size of the memory in bytes.
+ *  \param[in] stream CUDA stream to use for the operation.
+ *
+ *  This function calls a fill kernel for small sizes and calls cudaMemsetAsync for larger sizes.
+*/
+void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -335,16 +402,34 @@ namespace transformer_engine {
  */
 enum class DType {
   kByte = 0,
-  kInt32 = 1,
-  kInt64 = 2,
-  kFloat32 = 3,
-  kFloat16 = 4,
-  kBFloat16 = 5,
-  kFloat8E4M3 = 6,
-  kFloat8E5M2 = 7,
-  kFloat8E8M0 = 8,
+  kInt16 = 1,
+  kInt32 = 2,
+  kInt64 = 3,
+  kFloat32 = 4,
+  kFloat16 = 5,
+  kBFloat16 = 6,
+  kFloat8E4M3 = 7,
+  kFloat8E5M2 = 8,
+  kFloat8E8M0 = 9,
+  kFloat4E2M1 = 10,
   kNumTypes
 };
+
+/*! \brief Check if TE datatype is FP8
+ *
+ * Return true if TE datatype is FP8
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_fp8_dtype(const DType t) {
+  return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
+}
+
+/*! \brief Check if TE datatype is FP4
+ *
+ * Return true if TE datatype is FP4
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
@@ -398,8 +483,9 @@ class TensorWrapper {
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
                 float *scale_inv_dptr = nullptr, const std::vector<size_t> &scale_inv_shape = {1},
                 const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
-      : TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype, amax_dptr, scale_dptr,
-                      scale_inv_dptr, NVTEShape{scale_inv_shape.data(), scale_inv_shape.size()},
+      : TensorWrapper(dptr, nvte_make_shape(shape.data(), shape.size()), dtype, amax_dptr,
+                      scale_dptr, scale_inv_dptr,
+                      nvte_make_shape(scale_inv_shape.data(), scale_inv_shape.size()),
                       scaling_mode) {}
 
   /*! \brief Constructs new empty TensorWrapper.
@@ -515,7 +601,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_shape(tensor_);
   }
 
@@ -524,7 +612,9 @@ class TensorWrapper {
    *  \return Shape of this TensorWrapper.
    */
   const NVTEShape columnwise_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_columnwise_shape(tensor_);
   }
 
@@ -568,6 +658,15 @@ class TensorWrapper {
     return nvte_tensor_element_size(tensor_);
   }
 
+  /*! \brief Get the tensor's element size in bits.
+   *
+   *  \return Element size in bits.
+   */
+  size_t element_size_bits() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_element_size_bits(tensor_);
+  }
+
   /*! \brief Get the tensor's allocated size in bytes. This will return 0 for tensors with nullptr
    *         data even if the TensorWrapper has a non-zero shape and valid dtype.
    *
@@ -575,7 +674,7 @@ class TensorWrapper {
    */
   size_t bytes() const noexcept {
     if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
-    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+    return nvte_tensor_size_bytes(tensor_);
   }
 
   /*! \brief Get the data type of this TensorWrapper.
@@ -637,7 +736,9 @@ class TensorWrapper {
    *  \return scale_inv_shape of this TensorWrapper.
    */
   const NVTEShape scale_inv_shape() const noexcept {
-    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    if (tensor_ == nullptr) {
+      return nvte_make_shape(nullptr, 0);
+    }
     return nvte_tensor_scale_inv_shape(tensor_);
   }
 
@@ -653,15 +754,28 @@ class TensorWrapper {
   void zero_(cudaStream_t stream) { nvte_zero_tensor(tensor_, stream); }
 
   static constexpr size_t defaultData = 1;
-  static constexpr NVTEShape defaultShape = {&defaultData, 1};
+  static constexpr NVTEShape defaultShape = {
+      {defaultData, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 1};
 
  private:
   NVTEShape convertShape(const NVTEShape &s) { return s; }
 
-  NVTEShape convertShape(const std::vector<size_t> &s) { return {s.data(), s.size()}; }
+  NVTEShape convertShape(const std::vector<size_t> &s) {
+    return nvte_make_shape(s.data(), s.size());
+  }
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
+};
+
+/*! \enum Float8BlockScaleTensorFormat
+ *  \brief Data format for an FP8 block-scaled tensor
+ */
+enum class Float8BlockScaleTensorFormat {
+  /*! FP8 data is transposed if needed and scales are swizzled */
+  GEMM_READY = 0,
+  /*! FP8 data is untransposed and scales are not swizzled or padded */
+  COMPACT = 1
 };
 
 /*! \struct QuantizationConfigWrapper
@@ -709,6 +823,19 @@ class QuantizationConfigWrapper {
   void set_amax_epsilon(float amax_epsilon) {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
                                            &amax_epsilon, sizeof(float));
+  }
+
+  /*! \brief Set noop tensor pointer */
+  void set_noop_tensor(NVTETensor noop_tensor) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNoopTensor, &noop_tensor,
+                                           sizeof(NVTETensor));
+  }
+
+  /*! \brief Set FP8 block-scaled tensor format */
+  void set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat format) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigFloat8BlockScaleTensorFormat,
+                                           &format, sizeof(Float8BlockScaleTensorFormat));
   }
 
  private:

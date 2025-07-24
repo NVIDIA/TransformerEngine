@@ -7,7 +7,6 @@ import math
 import os
 from typing import Dict, List, Tuple, Optional
 import pytest
-import copy
 import random
 
 import torch
@@ -38,49 +37,39 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
+from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
+from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
 seed = 1234
-torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-# Record initial RNG state from script run.
-_cpu_rng_state = torch.get_rng_state()
-_cuda_rng_state = torch.cuda.get_rng_state()
+# Reset RNG states.
+reset_rng_states()
 
 torch._dynamo.config.recompile_limit = 16
 
 
-class ModelConfig:
-    def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.num_attention_heads = num_attention_heads
-        self.embed = embed
-        self.num_layers = num_layers
-        self.seq_len = seq_len
-
-
 model_configs = {
-    "small": ModelConfig(128, 1e-5, 8, 36, 4, 128),
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
+    "small": ModelConfig(1, 128, 8, 16, num_layers=4),
+    "126m": ModelConfig(1, 2048, 12, 64, num_layers=12),
 }
-
 model_configs_inference = {
-    # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 256),
+    "126m": ModelConfig(1, 256, 12, 64, num_layers=12),
 }
 backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
@@ -100,11 +89,38 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
+NVTE_TEST_NVINSPECT_ENABLED = int(os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", "0"))
+
+if NVTE_TEST_NVINSPECT_ENABLED:
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, which can happen if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
+
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
     recipe.Float8CurrentScaling(),
+    recipe.Float8BlockScaling(),
 ]
+
+
+def is_fused_attn_available(
+    config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
+):
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+    )
+    return FusedAttnBackend["F16_arbitrary_seqlen"] in fused_attn_backends
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -127,18 +143,20 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 
 def assert_allclose(
-    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float = None, rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        tols = dict(atol=atol)
+        tols = dtype_tols(t2.dtype)
         if rtol is not None:
             tols["rtol"] = rtol
+        if atol is not None:
+            tols["atol"] = atol
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            tol = atol + (rtol * torch.abs(t2))
+            tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
             exceed_mask = diff > tol
             if exceed_mask.any():
                 indices = torch.nonzero(exceed_mask, as_tuple=True)
@@ -152,12 +170,6 @@ def assert_allclose(
                     f"(diff {max_diff.item()})."
                 )
             raise AssertionError(msg)
-
-
-def reset_rng_states() -> None:
-    """revert back to initial RNG state."""
-    torch.set_rng_state(_cpu_rng_state)
-    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 @pytest.fixture(autouse=True)
@@ -512,13 +524,13 @@ def _test_e2e_selective_recompute(
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -527,13 +539,13 @@ def _test_e2e_selective_recompute(
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         te_out = block(
@@ -563,6 +575,10 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -603,13 +619,13 @@ def _test_e2e_full_recompute(
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -618,14 +634,14 @@ def _test_e2e_full_recompute(
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=use_reentrant,
     )
     if use_reentrant:
         te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if recompute:
@@ -675,6 +691,10 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -730,13 +750,13 @@ def _test_e2e_checkpointing_get_model(config, dtype):
     return TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0.1,
         attention_dropout=0.1,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
         params_dtype=dtype,
@@ -748,7 +768,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
     reset_rng_states()
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -778,14 +798,14 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
             if p.requires_grad:
                 param_grads.append(p.grad.clone())
 
-        global _cpu_rng_state, _cuda_rng_state
         _cpu_rng_state = torch.get_rng_state()
         _cuda_rng_state = torch.cuda.get_rng_state()
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
         block.load_state_dict(torch.load(path, weights_only=False))
-        reset_rng_states()
+        torch.set_rng_state(_cpu_rng_state)
+        torch.cuda.set_rng_state(_cuda_rng_state)
 
         for p in block.parameters():
             if p.requires_grad:
@@ -818,6 +838,8 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype):
+        pytest.skip("No attention backend available.")
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
     outputs_checkpoint = _test_e2e_checkpointing(bs, dtype, config, checkpoint=True)
 
@@ -838,13 +860,13 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
-    inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     out = block(inp_hidden_states, attention_mask=inp_attn_mask)
     loss = out.sum()
@@ -864,11 +886,13 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+        pytest.skip("No attention backend available.")
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
         ffn_hidden_size=4 * config.hidden_size,
-        num_attention_heads=config.num_attention_heads,
+        num_attention_heads=config.num_heads,
         layernorm_epsilon=config.eps,
         attention_dropout=0.1,
         hidden_dropout=0.1,
@@ -883,7 +907,7 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
         TorchGPT(
             config.hidden_size,
             config.eps,
-            config.num_attention_heads,
+            config.num_heads,
             parallel_attention_mlp=parallel_attention_mlp,
         )
         .to(dtype=dtype)
@@ -944,13 +968,13 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
     reset_rng_states()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
-    inp_attn_mask = get_causal_attn_mask(config.seq_len) if mask_type == "causal" else None
+    inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q) if mask_type == "causal" else None
 
     forward_kwargs = {}
     if te:
@@ -975,10 +999,12 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
+    if not is_fused_attn_available(config, dtype, qkv_layout="sb3hd", is_training=False):
+        pytest.skip("No attention backend available.")
 
     te_mha = MultiheadAttention(
         config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         fuse_qkv_params=True,
         params_dtype=dtype,
         qkv_weight_interleaved=False,
@@ -989,7 +1015,7 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
     torch_mha = (
         TorchMHA(
             config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
         )
         .to(dtype=dtype)
         .cuda()
@@ -1028,28 +1054,38 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_granular_accuracy(block, bs, dtype, config):
+def _test_granular_accuracy(block, bs, dtype, config, delay_wgrad_compute=False, recipe=None):
     reset_rng_states()
+    fp8 = recipe is not None
+    if fp8:
+        FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
 
-    out = block(inp_hidden_states)
-    if isinstance(out, (List, Tuple)):
-        out = out[0]
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
+        out = block(inp_hidden_states)
+        if isinstance(out, (List, Tuple)):
+            out = out[0]
     loss = out.sum()
     loss.backward()
+    if delay_wgrad_compute:
+        block.backward_dw()
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
     for p in block.parameters():
         if p.requires_grad:
-            outputs.append(p.grad)
+            if getattr(p, "main_grad", None) is not None:
+                outputs.append(p.main_grad)
+                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+            else:
+                outputs.append(p.grad)
     return outputs
 
 
@@ -1057,11 +1093,12 @@ def _test_dpa_accuracy(block, bs, dtype, config):
     reset_rng_states()
 
     mask = torch.triu(
-        torch.ones(config.seq_len, config.seq_len, dtype=torch.bool, device="cuda"), diagonal=1
+        torch.ones(config.max_seqlen_q, config.max_seqlen_kv, dtype=torch.bool, device="cuda"),
+        diagonal=1,
     )
     query, key, value = [
         torch.randn(
-            (config.seq_len, bs, config.num_attention_heads, config.embed),
+            (config.max_seqlen_q, bs, config.num_heads, config.kv_channels),
             dtype=dtype,
             device="cuda",
             requires_grad=True,
@@ -1090,8 +1127,8 @@ def test_dpa_accuracy(dtype, bs, model):
 
     te_dpa = (
         DotProductAttention(
-            config.num_attention_heads,
-            config.embed,
+            config.num_heads,
+            config.kv_channels,
             attention_dropout=0.0,  # disable dropout, FU uses rng differently
         )
         .to(dtype=dtype)
@@ -1100,7 +1137,7 @@ def test_dpa_accuracy(dtype, bs, model):
 
     torch_dpa = (
         TorchDotProductAttention(
-            config.embed,
+            config.kv_channels,
             0.0,  # dropout
         )
         .to(dtype=dtype)
@@ -1181,6 +1218,112 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         }
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_accumulation):
+    config = model_configs[model]
+
+    te_linear_ref = Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        delay_wgrad_compute=False,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    te_linear = Linear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        bias=bias,
+        params_dtype=dtype,
+        device="cuda",
+        delay_wgrad_compute=True,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        te_linear_ref.weight = Parameter(te_linear.weight.clone())
+        if bias:
+            te_linear_ref.bias = Parameter(te_linear.bias.clone())
+        if fuse_wgrad_accumulation:
+            weight = getattr(te_linear, f"weight")
+            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+            te_linear_ref.weight.main_grad = weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(
+        te_linear_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+def test_linear_accuracy_save_original_input(dtype, model, recipe):
+    bs = 1
+    fuse_wgrad_accumulation = True
+    fp8_model_params = False
+    fp8 = recipe is not None
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        te_linear_ref = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            save_original_input=False,
+        ).eval()
+
+        te_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            save_original_input=True,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        te_linear_ref.weight = Parameter(te_linear.weight.clone())
+        if fuse_wgrad_accumulation:
+            weight = getattr(te_linear, f"weight")
+            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+            te_linear_ref.weight.main_grad = weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, recipe=recipe)
+    te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, recipe=recipe)
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1371,6 +1514,67 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_layernorm_linear_accuracy_delay_wgrad_compute(
+    dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
+):
+    config = model_configs[model]
+
+    ln_linear_ref = LayerNormLinear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        device="cuda",
+        delay_wgrad_compute=False,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    ln_linear = LayerNormLinear(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        zero_centered_gamma=zero_centered_gamma,
+        device="cuda",
+        delay_wgrad_compute=True,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ln_linear_ref.layer_norm_weight = Parameter(ln_linear.layer_norm_weight.clone())
+        if normalization != "RMSNorm":
+            ln_linear_ref.layer_norm_bias = Parameter(ln_linear.layer_norm_bias.clone())
+        ln_linear_ref.weight = Parameter(ln_linear.weight.clone())
+        if bias:
+            ln_linear_ref.bias = Parameter(ln_linear.bias.clone())
+        if fuse_wgrad_accumulation:
+            weight = getattr(ln_linear, f"weight")
+            weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
+            ln_linear_ref.weight.main_grad = weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_linear_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("return_bias", all_boolean)
@@ -1444,15 +1648,85 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("activation", all_activations)
+@pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+def test_layernorm_mlp_accuracy_delay_wgrad_compute(
+    dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
+):
+    config = model_configs[model]
+
+    ln_mlp = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        delay_wgrad_compute=True,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    ln_mlp_ref = LayerNormMLP(
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
+        eps=config.eps,
+        bias=bias,
+        normalization=normalization,
+        params_dtype=dtype,
+        device="cuda",
+        delay_wgrad_compute=False,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+    ).eval()
+
+    # Share params
+    with torch.no_grad():
+        ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
+        if normalization != "RMSNorm":
+            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
+        ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
+        if bias:
+            ln_mlp_ref.fc1_bias = Parameter(ln_mlp.fc1_bias.clone())
+            ln_mlp_ref.fc2_bias = Parameter(ln_mlp.fc2_bias.clone())
+        if fuse_wgrad_accumulation:
+            ln_mlp.fc1_weight.main_grad = torch.rand_like(ln_mlp.fc1_weight, dtype=torch.float32)
+            ln_mlp_ref.fc1_weight.main_grad = ln_mlp.fc1_weight.main_grad.clone()
+            ln_mlp.fc2_weight.main_grad = torch.rand_like(ln_mlp.fc2_weight, dtype=torch.float32)
+            ln_mlp_ref.fc2_weight.main_grad = ln_mlp.fc2_weight.main_grad.clone()
+
+    te_outputs = _test_granular_accuracy(ln_mlp, bs, dtype, config, delay_wgrad_compute=True)
+    te_outputs_ref = _test_granular_accuracy(
+        ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
 def _test_grouped_linear_accuracy(
-    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+    block,
+    num_gemms,
+    bs,
+    dtype,
+    config,
+    recipe,
+    fp8,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute=False,
 ):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
@@ -1462,18 +1736,17 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            if recipe.delayed():
-                split_size = 16
+            split_size = 16
             if recipe.mxfp8():
                 split_size = 128
-        m = config.seq_len // split_size
+        m = config.max_seqlen_q // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
         m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
         m_splits = m_splits * split_size
-        assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+        assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
     else:
-        m_splits = torch.tensor([config.seq_len])
+        m_splits = torch.tensor([config.max_seqlen_q])
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
@@ -1488,6 +1761,12 @@ def _test_grouped_linear_accuracy(
             )
     loss = out.sum()
     loss.backward()
+    if delay_wgrad_compute:
+        if isinstance(block, GroupedLinear):
+            block.backward_dw()
+        else:
+            for i in range(num_gemms):
+                block[i].backward_dw()
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
@@ -1501,36 +1780,39 @@ def _test_grouped_linear_accuracy(
     return outputs
 
 
-@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
     bs,
     model,
-    fp8,
     recipe,
     fp8_model_params,
     fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
     parallel_mode=None,
 ):
+    fp8 = recipe is not None
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
-        pytest.skip("MXFP8 unsupported for grouped linear.")
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -1538,18 +1820,20 @@ def test_grouped_linear_accuracy(
             num_gemms,
             config.hidden_size,
             4 * config.hidden_size,
-            bias=True,
+            bias=bias,
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
             fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=False,
         ).eval()
         sequential_linear = torch.nn.ModuleList(
             [
                 Linear(
                     config.hidden_size,
                     4 * config.hidden_size,
-                    bias=True,
+                    bias=bias,
                     params_dtype=dtype,
                     parallel_mode=parallel_mode,
                     device="cuda",
@@ -1563,17 +1847,34 @@ def test_grouped_linear_accuracy(
     with torch.no_grad():
         for i in range(num_gemms):
             sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
-            sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
             if fuse_wgrad_accumulation:
                 weight_i = getattr(grouped_linear, f"weight{i}")
                 weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
                 sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
 
     outputs_ref = _test_grouped_linear_accuracy(
-        sequential_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
     )
     outputs = _test_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
     )
 
     # Shoule be bit-wise match
@@ -1581,24 +1882,111 @@ def test_grouped_linear_accuracy(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("parallel_mode", ["column", "row"])
-@pytest.mark.parametrize("recipe", fp8_recipes)
-def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
-    """Split the tests to save CI time"""
-    test_grouped_linear_accuracy(
-        dtype=torch.float32,
-        num_gemms=6,
-        bs=2,
-        model="126m",
-        fp8=True,
-        recipe=recipe,
-        fp8_model_params=True,
-        parallel_mode=parallel_mode,
-        fuse_wgrad_accumulation=True,
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", [False])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("delay_wgrad_compute", [True])
+def test_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
+    parallel_mode=None,
+):
+    fp8 = recipe is not None
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=True,
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=bias,
+                    params_dtype=dtype,
+                    parallel_mode=parallel_mode,
+                    device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if fuse_wgrad_accumulation:
+                weight_i = getattr(grouped_linear, f"weight{i}")
+                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
     )
 
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
-@pytest.mark.parametrize("recipe", fp8_recipes)
+
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -1606,19 +1994,23 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         num_gemms=1,
         bs=2,
         model="126m",
-        fp8=True,
         recipe=recipe,
         fp8_model_params=True,
         fuse_wgrad_accumulation=True,
+        bias=True,
+        delay_wgrad_compute=False,
     )
 
 
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
-        """Padding tensor shapes to multiples of 16."""
+        align_size = 16
+        if recipe.mxfp8():
+            align_size = 32
         padded_tokens_per_expert = [
-            (num_tokens + 15) // 16 * 16 for num_tokens in tokens_per_expert
+            (num_tokens + align_size - 1) // align_size * align_size
+            for num_tokens in tokens_per_expert
         ]
         hidden_states = torch.split(hidden_states, tokens_per_expert)
         padded_hidden_states = []
@@ -1672,14 +2064,14 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
         FP8GlobalStateManager.reset()
 
     inp_hidden_states = torch.randn(
-        (config.seq_len * bs, config.hidden_size),
+        (config.max_seqlen_q * bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     inp_hidden_states.retain_grad()
 
-    m_splits = _generate_random_numbers(num_gemms, config.seq_len * bs)
+    m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
 
     with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
@@ -1713,19 +2105,26 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, parallel_mode=None
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
-        pytest.skip("MXFP8 unsupported for grouped linear.")
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
-    if config.seq_len % 16 != 0 and fp8:
+    if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
@@ -1748,6 +2147,84 @@ def test_padding_grouped_linear_accuracy(
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
+            save_original_input=False,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        inner_grouped_linear = grouped_linear.linear_fn
+        for i in range(num_gemms):
+            setattr(
+                ref_grouped_linear,
+                f"weight{i}",
+                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
+            )
+
+    outputs = _test_padding_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+    outputs_ref = _test_padding_grouped_linear_accuracy(
+        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", [False])
+def test_padding_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
+):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = TorchGroupedLinearWithPadding(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            fp8=fp8,
+        ).eval()
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        ref_grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            save_original_input=True,
         ).eval()
 
     # Share params
@@ -1781,9 +2258,11 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 
     # Placeholders used for graph capture.
     static_input = torch.randn(
-        config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
+        config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype, requires_grad=True
     )
-    static_target = torch.randn(config.seq_len, bs, config.hidden_size, device="cuda", dtype=dtype)
+    static_target = torch.randn(
+        config.max_seqlen_q, bs, config.hidden_size, device="cuda", dtype=dtype
+    )
 
     real_input = torch.rand_like(static_input)
     real_target = torch.rand_like(static_target)
@@ -1836,6 +2315,8 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("Cuda Graphs are not supported in debug mode.")
     config = model_configs[model]
 
     sigma = 0.023
@@ -1845,7 +2326,7 @@ def test_gpt_cuda_graph(dtype, bs, model):
     block_args = (
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
     )
     block_kwargs = dict(
         layernorm_epsilon=config.eps,
@@ -1853,7 +2334,7 @@ def test_gpt_cuda_graph(dtype, bs, model):
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0.1,
         attention_dropout=0.1,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -1888,13 +2369,13 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
-            config.num_attention_heads,
+            config.num_heads,
             layernorm_epsilon=config.eps,
             init_method=init_method,
             output_layer_init_method=output_layer_init_method,
             hidden_dropout=0.1,
             attention_dropout=0.1,
-            kv_channels=config.embed,
+            kv_channels=config.kv_channels,
             apply_residual_connection_post_layernorm=False,
             output_layernorm=False,
             params_dtype=dtype,
@@ -1903,13 +2384,13 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
         )
 
     te_inp_hidden_states = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
     te_inp_hidden_states.retain_grad()
-    te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
+    te_inp_attn_mask = get_causal_attn_mask(config.max_seqlen_q)
 
     with fp8_autocast(enabled=True, fp8_recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
@@ -1933,6 +2414,10 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -1968,13 +2453,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_sbhd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -1989,13 +2474,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_bshd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2007,13 +2492,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     block_thd = TransformerLayer(
         config.hidden_size,
         4 * config.hidden_size,
-        config.num_attention_heads,
+        config.num_heads,
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
         hidden_dropout=0,
         attention_dropout=0,
-        kv_channels=config.embed,
+        kv_channels=config.kv_channels,
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
@@ -2028,15 +2513,15 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
 
     x_sbhd = torch.randn(
-        (config.seq_len, bs, config.hidden_size),
+        (config.max_seqlen_q, bs, config.hidden_size),
         dtype=dtype,
         device="cuda",
         requires_grad=True,
     )
 
     x_bshd = x_sbhd.transpose(0, 1).contiguous()
-    x_thd = x_bshd.reshape(bs * config.seq_len, config.hidden_size).contiguous()
-    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.seq_len
+    x_thd = x_bshd.reshape(bs * config.max_seqlen_q, config.hidden_size).contiguous()
+    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.max_seqlen_q
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -2063,158 +2548,14 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             x_thd,
             cu_seqlens_q=x_thd_cumsum,
             cu_seqlens_kv=x_thd_cumsum,
-            max_seqlen_q=config.seq_len,
-            max_seqlen_kv=config.seq_len,
+            max_seqlen_q=config.max_seqlen_q,
+            max_seqlen_kv=config.max_seqlen_kv,
         )
 
         torch.testing.assert_close(
             y_bshd,
-            y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
+            y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
         )
-
-
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model_key", model_configs_inference.keys())
-@pytest.mark.parametrize("use_RoPE", all_boolean)
-@pytest.mark.parametrize("input_format", input_formats_inference)
-@pytest.mark.parametrize("module", module_inference)
-@pytest.mark.parametrize("backend", backends_inference)
-@pytest.mark.parametrize("is_paged", [False, True])
-def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged):
-    reset_rng_states()
-
-    if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
-        pytest.skip("FusedAttention and FlashAttention do not support FP32")
-    if use_RoPE:
-        pytest.skip("KV cache does not support starting positions for RoPE")
-
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-
-    if backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-    elif backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    elif backend == "UnfusedAttention":
-        os.environ["NVTE_UNFUSED_ATTN"] = "1"
-
-    config = model_configs_inference[model_key]
-
-    S = config.seq_len
-    B = bs
-    H = config.num_attention_heads
-    D = config.hidden_size
-    head_size = config.embed
-    layer_number = 1
-
-    # Limits the max size of KV-cache
-    B_max = B
-    S_max = S
-
-    if module == "TransformerLayer":
-        model = TransformerLayer(
-            hidden_size=D,
-            ffn_hidden_size=4 * D,
-            num_attention_heads=H,
-            attn_input_format=input_format,
-            self_attn_mask_type="causal",
-            enc_dec_attn_mask_type="causal",
-            layer_number=layer_number,
-            attention_dropout=0.0,
-            params_dtype=dtype,
-            device="cuda",
-        ).eval()
-    else:
-        model = (
-            MultiheadAttention(
-                hidden_size=D,
-                num_attention_heads=H,
-                qkv_format=input_format,
-                layer_number=layer_number,
-                attention_dropout=0.0,
-                attn_mask_type="causal",
-                params_dtype=dtype,
-            )
-            .cuda()
-            .eval()
-        )
-
-    inference_params = InferenceParams(
-        max_batch_size=B_max,
-        max_seqlen_kv=S_max,
-        num_heads_kv=H,
-        head_dim_k=head_size,
-        dtype=dtype,
-        is_paged=is_paged,
-        total_num_pages=int(B_max * S_max / 256),
-        page_size=256,
-    )
-
-    rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
-
-    input = torch.randn((S, B, D), dtype=dtype, device="cuda")
-    if input_format == "bshd":
-        input = input.transpose(0, 1).contiguous()
-
-    incremental_output = torch.zeros_like(input)
-
-    # Generate output for the entire sequence
-    full_output = model(hidden_states=input, rotary_pos_emb=rotary_freqs if use_RoPE else None)
-
-    # Incrementaly generate outputs using KV-cache
-    step_dict = OrderedDict(zip(list(range(B)), [1] * B))
-    for i in range(S):
-        inference_params.pre_step(step_dict)
-
-        if input_format == "sbhd":
-            incremental_input = input[i].view(1, B, D)
-        else:
-            incremental_input = input[:, i, :].view(B, 1, D)
-
-        seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
-        cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        cu_seqlens_kv = cu_seqlens_q.clone()
-
-        mask_type = "padding"
-        kwargs = {}
-        if module == "TransformerLayer":
-            kwargs["self_attn_mask_type"] = mask_type
-        else:
-            kwargs["attn_mask_type"] = mask_type
-        line_output = model(
-            hidden_states=incremental_input,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_freqs if use_RoPE else None,
-            **kwargs,
-            max_seqlen_q=1,
-            max_seqlen_kv=S,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-        )
-
-        if input_format == "sbhd":
-            incremental_output[i, :, :] = line_output.view(B, D)
-        else:
-            incremental_output[:, i, :] = line_output.view(B, D)
-
-    if module == "TransformerLayer":
-        atol = {
-            torch.float32: 5e-3,
-            torch.half: 5e-3,
-            torch.bfloat16: 5e-2,
-        }
-    else:
-        atol = {
-            torch.float32: 1e-3,
-            torch.half: 1e-3,
-            torch.bfloat16: 1e-2,
-        }
-
-    # Check if the fully generated output matches the one generated incrementally
-    assert_allclose(full_output, incremental_output, atol[dtype])
 
 
 @pytest.mark.parametrize(

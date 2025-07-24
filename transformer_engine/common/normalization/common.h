@@ -10,6 +10,7 @@
 #include <cudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
@@ -137,7 +138,6 @@ struct BackwardKernelParams : public KernelParamsBase {
 };
 
 enum class NVTE_Norm_Backend { Te, Cudnn };
-enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
@@ -159,7 +159,7 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
                      uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
                      bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
-                     bool training = true);
+                     bool training = true, bool gamma_in_weight_dtype = false);
 
 template <typename KernelParamsType>
 class TeNormalizationRegistry {
@@ -307,7 +307,8 @@ class NormalizationPlanRegistry {
       NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
       DType wtype, DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
       const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
-      const NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING, const bool training = true);
+      const NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING, const bool training = true,
+      const bool gamma_in_weight_dtype = false);
 
  private:
   NormalizationPlanRegistry() {}
@@ -380,6 +381,8 @@ bool is_ptr_aligned(const Args*... ptrs) {
 
 bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
+
+bool& use_zero_centered_gamma_in_weight_dtype();
 
 }  // namespace normalization
 }  // namespace transformer_engine

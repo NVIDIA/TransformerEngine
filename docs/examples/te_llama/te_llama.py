@@ -8,11 +8,9 @@ import gc
 from contextlib import contextmanager
 
 import torch
-from torch import nn
 
 import transformer_engine as te
-from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
-from transformer_engine.pytorch.fp8 import fp8_model_init
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding
 
 import transformers
 from transformers.models.llama.modeling_llama import (
@@ -21,7 +19,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaConfig,
 )
-from transformers.modeling_utils import _add_variant, load_state_dict, _load_state_dict_into_model
+from transformers.modeling_utils import _add_variant, load_state_dict
 from transformers.utils import WEIGHTS_INDEX_NAME
 from transformers.utils.hub import get_checkpoint_shard_files
 
@@ -150,8 +148,8 @@ class TELlamaForCausalLM:
             state_dict = load_state_dict(shard_file)
             # replace_params copies parameters relevant only to TransformerEngine
             replace_params(state_dict, vanilla_model.state_dict(), config)
-            # _load_state_dict_into_model copies parameters other than those in TransformerEngine
-            _load_state_dict_into_model(vanilla_model, state_dict, start_prefix="")
+            # load_state_dict copies parameters other than those in TransformerEngine
+            vanilla_model.load_state_dict(state_dict, strict=False)
 
             # Force mem release. Taken from huggingface code
             del state_dict

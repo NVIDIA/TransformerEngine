@@ -6,15 +6,14 @@
 
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
-from functools import reduce
-from operator import mul as multiply_op
 
+import queue
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..utils import get_default_init_method
-from ..tensor.float8_tensor import Float8Tensor
+from ..export import is_in_onnx_export_mode
 
 
 def _get_normalization_func(normalization: str, forward: bool):
@@ -30,39 +29,6 @@ def _get_normalization_func(normalization: str, forward: bool):
     if forward:
         return fwd_normalization_funcs[normalization]
     return bwd_normalization_funcs[normalization]
-
-
-def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
-    """Reorder FP8 transposes after Userbuffers gather.
-
-    The all-gather is performed in-place in the Float8Tensor's
-    row-wise data, and afterwards we need to do a transpose to get the
-    correct ordering. This misuses data fields in Float8Tensor and
-    should be considered an evil hack. It would be best to move
-    transpose logic into CommOverlap::get_buffer.
-
-    Responsibility for fixing: adener, tmoon
-
-    """
-    assert isinstance(fp8_tensor, Float8Tensor), "Tensor is not a Float8Tensor"
-    assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
-    assert fp8_tensor._data is not None, "The tensor does not hold any rowwise data"
-    assert (
-        fp8_tensor._data.shape[0] % tp_size == 0
-    ), "Leading dimension of data is not divisble by TP size"
-
-    data = fp8_tensor._data
-    batched_size = reduce(multiply_op, data.shape[1:])
-    interleaved_shape = [tp_size, data.shape[0] // tp_size, batched_size]
-    transposed_shape = [data.shape[0] // tp_size, batched_size * tp_size]
-    fp8_tensor._transpose = (
-        data.view(interleaved_shape).transpose(0, 1).contiguous().view(transposed_shape)
-    )
-
-    fp8_tensor._transpose_invalid = False
-    fp8_tensor._data = None
-
-    return fp8_tensor
 
 
 def apply_normalization(
@@ -199,6 +165,8 @@ def noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 
@@ -216,3 +184,79 @@ class _ParameterInitMeta:
         """Safeguard reference to the parameter's parent module and initialization function."""
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
+
+
+class WeightGradStore:
+    """
+    A class to manage weight gradient storage and computation in Transformer modules.
+    This class enables split backward propagation for better memory efficiency.
+    """
+
+    def __init__(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
+        """
+        Initialize the WeightGradStore.
+
+        Args:
+            delay_wgrad_compute (bool): Whether to delay weight gradient computation
+            ub_bulk_wgrad (bool): Whether to enable bulk weight gradient computation
+        """
+        if delay_wgrad_compute:
+            self.context = queue.Queue()
+            assert (
+                ub_bulk_wgrad is False
+            ), "ub_bulk_wgrad is not supported when enabling delay_wgrad_compute"
+            self.enabled = delay_wgrad_compute
+        else:
+            self.context = None
+            self.enabled = False
+
+    def delay_wgrad_compute(self):
+        """
+        Get the current split backward propagation status.
+
+        Returns:
+            bool: True if split backward is enabled, False otherwise
+        """
+        return self.enabled
+
+    def enable_delay_wgrad_compute(self):
+        """Enable split backward propagation."""
+        self.enabled = True
+
+    def disable_delay_wgrad_compute(self):
+        """Disable split backward propagation."""
+        self.enabled = False
+
+    def put(self, tensor_list, func):
+        """
+        Store tensors and computation function for later execution.
+
+        Args:
+            tensor_list (list): List of tensors needed for computation
+            func (callable): Function to be executed with the tensors
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        self.context.put([tensor_list, func])
+
+    def pop(self):
+        """
+        Execute the stored computation with the stored tensors.
+        Raises an exception if the queue is empty.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        if self.context.qsize() > 0:
+            tensor_list, func = self.context.get()
+            return func(*tensor_list), tensor_list
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            raise RuntimeError(f"Pop empty queue. rank {rank}")
+        raise RuntimeError("Pop empty queue. No distributed environment detected.")
+
+    def assert_empty(self):
+        """
+        Assert that the queue is empty.
+        Used for debugging and ensuring proper cleanup.
+        """
+        assert self.enabled is True, "delay_wgrad_compute is not enabled"
+        rank = torch.distributed.get_rank()
+        assert self.context.empty(), f"Queue is not empty. rank {rank}"

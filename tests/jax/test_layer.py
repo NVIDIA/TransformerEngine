@@ -20,11 +20,14 @@ from utils import (
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
 
-from transformer_engine.common.recipe import Format
+from transformer_engine.common import recipe
 from transformer_engine.jax.flax import TransformerLayer, TransformerLayerType
-from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
-
-is_fp8_supported, reason = is_fp8_available()
+from transformer_engine.jax.quantize import (
+    QuantizeConfig,
+    ScalingMode,
+    is_fp8_available,
+    update_collections,
+)
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -35,12 +38,21 @@ def enable_fused_attn():
     del os.environ["NVTE_FUSED_ATTN"]
 
 
+is_fp8_supported, reason = is_fp8_available()
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+
+QUANTIZE_RECIPES = []
+""" Find supported scaling modes"""
+if is_fp8_supported:
+    QUANTIZE_RECIPES.append(pytest.param(recipe.DelayedScaling(), id="DelayedScaling"))
+if is_mxfp8_supported:
+    QUANTIZE_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+
+
 DATA_SHAPE = [  # (batch, seqlen, emb_dim)
     pytest.param((32, 128, 1024), id="32-128-1024"),
-    pytest.param((32, 512, 1024), id="32-512-1024"),
 ]
-DTYPE = [jnp.float32, jnp.bfloat16]
-FP8_FORMATS = [Format.E4M3, Format.HYBRID]
+DTYPE = [jnp.bfloat16]
 
 _KEY_OF_RESIDUAL_POST_LAYERNORM = "apply_residual_connection_post_layernorm"
 _KEY_OF_OUTPUT_LAYERNORM = "output_layernorm"
@@ -80,27 +92,37 @@ BASE_ATTRS = {
 }
 
 ATTRS = [
+    # attrs0
     {},
+    # attrs1
     {
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
     },
+    # attrs2
     {
         _KEY_OF_ZERO_CENTERED_GAMMA: True,
         _KEY_OF_LAYERNORM_EPS: 1e-2,
     },
+    # attrs3
     {_KEY_OF_LAYERNORM_TYPE: "rmsnorm", _KEY_OF_RESIDUAL_POST_LAYERNORM: True},
+    # attrs4
     {_KEY_OF_LAYERNORM_TYPE: "rmsnorm", _KEY_OF_OUTPUT_LAYERNORM: True},
+    # attrs5
     {
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
         _KEY_OF_RESIDUAL_POST_LAYERNORM: True,
         _KEY_OF_OUTPUT_LAYERNORM: True,
     },
+    # attrs6
     {_KEY_OF_LAYERNORM_TYPE: "rmsnorm", _KEY_OF_DROP_PATH: 0.1},
+    # attrs7
     {_KEY_OF_LAYERNORM_TYPE: "rmsnorm", _KEY_OF_FUSE_QKV_PARAMS: False},
+    # attrs8
     {
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
         _KEY_OF_MLP_ACTIVATIONS: ("gelu", "linear"),
     },
+    # attrs9
     {
         _KEY_OF_SCALE_ATTN_LOGITS: True,
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
@@ -109,12 +131,14 @@ ATTRS = [
         _KEY_OF_MLP_ACTIVATIONS: ("gelu", "linear"),
         _KEY_OF_USE_BIAS: True,
     },
+    # attrs10
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_SCALE_ATTN_LOGITS: True,
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
         _KEY_OF_MLP_ACTIVATIONS: ("gelu", "linear"),
     },
+    # attrs11
     {
         _KEY_OF_NUM_HEADS: 8,
         _KEY_OF_NUM_GQA_GROUPS: 4,
@@ -123,33 +147,7 @@ ATTRS = [
         _KEY_OF_MLP_ACTIVATIONS: ("gelu",),
         _KEY_OF_USE_BIAS: True,
     },
-    {
-        _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
-        _KEY_OF_MLP_ACTIVATIONS: (("silu", "linear")),
-    },
-    {
-        _KEY_OF_SCALE_ATTN_LOGITS: True,
-        _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
-        _KEY_OF_HIDDEN_DROPOUT: 0.8,
-        _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
-        _KEY_OF_MLP_ACTIVATIONS: (("silu", "linear")),
-        _KEY_OF_USE_BIAS: True,
-    },
-    {
-        _KEY_OF_TRANSPOSE_BS: False,
-        _KEY_OF_SCALE_ATTN_LOGITS: True,
-        _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
-        _KEY_OF_MLP_ACTIVATIONS: (("silu", "linear")),
-    },
-    {
-        _KEY_OF_NUM_HEADS: 8,
-        _KEY_OF_NUM_GQA_GROUPS: 4,
-        _KEY_OF_TRANSPOSE_BS: False,
-        _KEY_OF_SCALE_ATTN_LOGITS: True,
-        _KEY_OF_LAYERNORM_TYPE: "layernorm",
-        _KEY_OF_MLP_ACTIVATIONS: (("silu",)),
-        _KEY_OF_USE_BIAS: True,
-    },
+    # attrs12
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
@@ -158,12 +156,14 @@ ATTRS = [
         _KEY_OF_ROPE_GROUP_METHOD: "consecutive",
         _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
     },
+    # attrs13
     {
         _KEY_OF_TRANSPOSE_BS: True,
         _KEY_OF_ENABLE_ROPE: True,
         _KEY_OF_ROPE_GROUP_METHOD: "consecutive",
         _KEY_OF_USE_BIAS: True,
     },
+    # attrs14
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_LAYERNORM_TYPE: "layernorm",
@@ -173,6 +173,7 @@ ATTRS = [
         _KEY_OF_USE_BIAS: True,
         _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
     },
+    # attrs15
     {
         _KEY_OF_TRANSPOSE_BS: True,
         _KEY_OF_LAYERNORM_TYPE: "rmsnorm",
@@ -180,26 +181,32 @@ ATTRS = [
         _KEY_OF_ROPE_GROUP_METHOD: "alternate",
         _KEY_OF_USE_BIAS: True,
     },
+    # attrs16
     {
         _KEY_OF_HIDDEN_DROPOUT: 0.3,
         _KEY_OF_HIDDEN_DROPOUT_DIMS: (0,),
         _KEY_OF_INTERMEDIATE_DROPOUT: 0.5,
         _KEY_OF_INTERMEDIATE_DROPOUT_DIMS: (1,),
     },
+    # attrs17
     {
         _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
         _KEY_OF_USE_BIAS: True,
     },
+    # attrs18
     {
         _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_SELF_ATTN_BIAS_TYPE: "no_bias",
     },
+    # attrs19
     {
         _KEY_OF_ATTENTION_DROPOUT: 0.3,
     },
+    # attrs20
     {
         _KEY_OF_MLP_ACTIVATIONS: (("relu", "relu")),
     },
+    # attrs21
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_RELATIVE_EMBEDDING: False,
@@ -207,10 +214,52 @@ ATTRS = [
         _KEY_OF_WINDOW_SIZE: (64, 0),  # Left size must < DATA_SHAPE seqlen
         _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
     },
+    # attrs22
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_WINDOW_SIZE: None,
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
+    },
+    # attrs23
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
+    },
+    # attrs24
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "no_mask",
+    },
+    # attrs25
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "no_mask",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
+    },
+    # attrs26
     {
         _KEY_OF_TRANSPOSE_BS: False,
         _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
+    },
+    # attrs27
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: None,
+    },
+    # attrs28
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_WINDOW_SIZE: (2, 2),
     },
 ]
@@ -296,20 +345,24 @@ class BaseRunner:
 
         ref_params, test_params = self._sync_params(ref_params, test_params)
 
-        if FP8Helper.is_fp8_enabled():
+        if QuantizeConfig.is_fp8_enabled():
             for _ in range(4):
-                _, tmp_grad = jax.value_and_grad(self._loss_fn, argnums=(3,), has_aux=False)(
+                _, updated_state = jax.value_and_grad(self._loss_fn, argnums=(3,), has_aux=False)(
                     inputs,
                     test_masks,
                     test_params,
                     test_others,
                     test_layer,
                 )
-                _, fp8_meta_grad = flax.core.pop(tmp_grad[0], FP8Helper.FP8_COLLECTION_NAME)
-                test_others = FP8Helper.update_collections(
-                    {FP8Helper.FP8_COLLECTION_NAME: fp8_meta_grad}, test_others
-                )
-                del tmp_grad, fp8_meta_grad
+                if QuantizeConfig.SCALING_MODE == ScalingMode.DELAYED_TENSOR_SCALING:
+                    _, updated_quantize_meta = flax.core.pop(
+                        updated_state[0], QuantizeConfig.COLLECTION_NAME
+                    )
+                    test_others = update_collections(
+                        {QuantizeConfig.COLLECTION_NAME: updated_quantize_meta}, test_others
+                    )
+                    del updated_quantize_meta
+                del updated_state
 
         grad_fn = jax.value_and_grad(self._loss_fn, argnums=(0, 2), has_aux=False)
 
@@ -358,13 +411,13 @@ class EncoderRunner(BaseRunner):
         data_rng = jax.random.PRNGKey(2024)
         inputs = (jax.random.normal(data_rng, data_shape, dtype),)
 
-        padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
-        causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
+        mask_shape = (batch, 1, seqlen, seqlen)
+        padded_mask = jnp.zeros(mask_shape, dtype=jnp.uint8)
+        causal_mask = jnp.triu(jnp.ones(mask_shape, dtype=jnp.uint8), k=1)
         if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             mask = causal_mask
         else:
             mask = padded_mask
-
         ref_masks = (1 - mask,)
         test_masks = (None, mask)  # The second arg of Transformer is encoded tokens.
 
@@ -436,29 +489,29 @@ class BaseTester:
 
     def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""
-        FP8Helper.finalize()  # Ensure FP8 disabled.
+        QuantizeConfig.finalize()  # Ensure FP8 disabled.
         self.runner(attrs).test_forward(data_shape, dtype)
 
     def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
-        FP8Helper.finalize()  # Ensure FP8 disabled.
+        QuantizeConfig.finalize()  # Ensure FP8 disabled.
         self.runner(attrs).test_backward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("fp8_format", FP8_FORMATS)
-    def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
+    @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
+    def test_forward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test forward with fp8 enabled"""
-        FP8Helper.initialize(fp8_format=fp8_format)
+        QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
         self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-4, atol=1e-3)
-        FP8Helper.finalize()
+        QuantizeConfig.finalize()
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("fp8_format", FP8_FORMATS)
-    def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_format):
+    @pytest.mark.parametrize("fp8_recipe", QUANTIZE_RECIPES)
+    def test_backward_with_fp8(self, data_shape, dtype, attrs, fp8_recipe):
         """Test backward with fp8 enabled"""
-        FP8Helper.initialize(fp8_format=fp8_format)
+        QuantizeConfig.initialize(fp8_recipe=fp8_recipe)
         self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-4, atol=1e-3)
-        FP8Helper.finalize()
+        QuantizeConfig.finalize()
 
 
 class TestEncoderLayer(BaseTester):

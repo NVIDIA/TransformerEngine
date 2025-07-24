@@ -8,16 +8,85 @@ from __future__ import annotations
 from typing import Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
+import warnings
 
 import torch
 from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
+from transformer_engine.common.recipe import Recipe
+
+
+class QuantizedTensorBase:
+    r"""Base class for all *TensorBase classes.
+
+    This class (and its subclasses) are optimization for when
+    the full QuantizedTensor is not needed (when it is fully
+    contained inside torch.autograd function and not visible to
+    PyTorch's autograd).
+
+    When creating a new tensor type X one should create both
+    XTensorBase class inheriting from QuantizedTensorBase and
+    XTensor inheriting from XTensorBase and QuantizedTensor.
+    XTensorBase should contain all data members needed to
+    implement the functionality of the tensor, while
+    XTensor should only implement the functionality needed
+    to behave like regular torch.Tensor (liek __torch_dispatch__)."""
+
+    _quantizer: Optional[Quantizer]
+
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
+        r"""
+        Generate or remove quantized data based on provided usage.
+
+        Parameters
+        ----------
+        rowwise_usage : Optional[bool[, default = `None`
+                        Whether to create or keep the data needed for using the tensor
+                        in rowwise fashion (e.g. as B argument in TN GEMM). Leaving it as `None`
+                        preserves the original value in the tensor.
+        columnwise_usage : Optional[bool], default = `None`
+                           Whether to create or keep the data needed for using the tensor
+                           in columnwise fashion (e.g. as A argument in TN GEMM). Leaving it as
+                           `None` preserves the original value in the tensor.
+
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_usage function"
+        )
+
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorBase]:
+        """Prepare the tensor base for saving for backward"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement prepare_for_saving function"
+        )
+
+    def restore_from_saved(
+        self, tensors: list[Optional[torch.Tensor]]
+    ) -> list[Optional[torch.Tensor]]:
+        """Restore the tensor base data from the saved tensors list"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement restore_from_saved function"
+        )
+
+    def update_quantizer(self, quantizer: Quantizer):
+        """Update quantizer for the tensor"""
+        if self._quantizer is None:
+            raise RuntimeError("To be updated, quantizer must be set")
+        if self._quantizer is not quantizer:
+            warnings.warn("Quantizer is being updated, this may affect model behavior")
+            self._quantizer = quantizer
 
 
 def prepare_for_saving(
-    *tensors,
-) -> Tuple[list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], Optional[Any]]:
+    *tensors: Union[torch.Tensor, QuantizedTensorBase],
+) -> Tuple[
+    list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], list[Optional[QuantizedTensorBase]]
+]:
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
     the internal TensorBase types too."""
@@ -35,9 +104,13 @@ def prepare_for_saving(
 
 
 def restore_from_saved(
-    tensors: list[Optional[Any]],
+    tensors: list[Optional[Union[torch.Tensor, QuantizedTensorBase]]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
-) -> list[Optional[Any]]:
+    return_saved_tensors: bool = False,
+) -> (
+    list[Optional[torch.Tensor | QuantizedTensorBase]]
+    | tuple[list[Optional[torch.Tensor | QuantizedTensorBase]], list[Optional[torch.Tensor]]]
+):
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
     for tensor in tensors:
@@ -47,6 +120,9 @@ def restore_from_saved(
         else:
             saved_tensors = tensor.restore_from_saved(saved_tensors)
             tensor_objects.append(tensor)
+
+    if return_saved_tensors:
+        return tensor_objects, saved_tensors
     return tensor_objects
 
 
@@ -113,7 +189,11 @@ class Quantizer(abc.ABC):
         """Quantize tensor in-place"""
 
     def quantize(
-        self, tensor: torch.Tensor, *, out: Optional[QuantizedTensor] = None
+        self,
+        tensor: torch.Tensor,
+        *,
+        out: Optional[QuantizedTensor] = None,
+        dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
     ) -> QuantizedTensor:
         """Quantize tensor"""
         if out is not None:
@@ -169,6 +249,16 @@ class Quantizer(abc.ABC):
     def copy(self) -> Quantizer:
         """Create shallow copy"""
         return copy.copy(self)
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Symbolic function for ONNX export"""
+
+    def onnx_dequantize(self, tensor) -> torch.Tensor:
+        """Symbolic function for ONNX export"""
+
+    @abc.abstractmethod
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        """Returns recipe class that is compatible with this quantizer"""
 
 
 class _QuantizeFunc(torch.autograd.Function):
@@ -284,21 +374,6 @@ class QuantizedTensor(torch.Tensor):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement detach function"
-        )
-
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        """Indicate to the tensor how it is going to be used
-
-        This enables optimizations to memory usage in some cases
-        where forward and backward passes use the tensor in
-        different directions.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
     def clear(self):

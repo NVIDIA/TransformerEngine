@@ -4,12 +4,13 @@
 
 """FP8 Padding API"""
 
-from typing import List
+from typing import List, Optional
 
 import torch
 
 import transformer_engine_torch as tex
 
+from ..fp8 import FP8GlobalStateManager
 from ..jit import no_torch_dynamo
 
 
@@ -28,10 +29,13 @@ class _Fp8Unpadding(torch.autograd.Function):
         is_grad_enabled: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        inputmats = torch.split(inp.view(-1, inp.shape[-1]), padded_m_splits)
-        out_ret = torch.cat(
-            [grad_output_mat[: m_splits[i]] for i, grad_output_mat in enumerate(inputmats)], dim=0
-        )
+        in_features = inp.shape[-1]
+
+        # Allocate cast and transpose output tensor
+        total_row = sum(m_splits)
+        out_ret = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
+
+        tex.fused_multi_row_unpadding(inp.view(-1, in_features), out_ret, padded_m_splits, m_splits)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
@@ -68,17 +72,23 @@ class Fp8Unpadding(torch.nn.Module):
 
     Parameters
     ----------
-    num_gemms: int
-               number of GEMMs to be performed simutaneously.
+    num_gemms : int
+                number of GEMMs to be performed simultaneously.
+    align_size : int, optional
+                 the alignment size for the input tensor. If not provided, the alignment size will
+                 be determined by the FP8 recipe (32 for MXFP8 and 16 for others) in the first
+                 forward pass.
     """
 
     def __init__(
         self,
-        num_gemms,
+        num_gemms: int,
+        align_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
         self.num_gemms = num_gemms
+        self.align_size = align_size
 
     @no_torch_dynamo()
     def forward(
@@ -98,9 +108,16 @@ class Fp8Unpadding(torch.nn.Module):
         """
 
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
+        if self.align_size is None:
+            self.align_size = 32 if FP8GlobalStateManager.get_fp8_recipe().mxfp8() else 16
 
         # FP8 padding calculate
-        padded_m_splits = [(m + 15) // 16 * 16 for m in m_splits]
+        padded_m_splits = [
+            (m + self.align_size - 1) // self.align_size * self.align_size for m in m_splits
+        ]
+        # no padding needed
+        if m_splits == padded_m_splits:
+            return inp
 
         if torch.is_grad_enabled():
             fn = _Fp8Unpadding.apply

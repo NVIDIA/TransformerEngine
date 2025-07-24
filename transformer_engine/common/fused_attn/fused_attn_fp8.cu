@@ -2364,9 +2364,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = static_cast<void*>(devPtrQKV);
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2383,9 +2383,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2396,9 +2396,9 @@ void fused_attn_fp8_fwd_qkvpacked(size_t batch, size_t num_attn_heads, size_t ma
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
@@ -2466,9 +2466,9 @@ void fused_attn_fp8_bwd_qkvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_attn_heads * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrQ = devPtrQKV;
   void* devPtrK = static_cast<void*>(static_cast<int8_t*>(devPtrQKV) + stride);
@@ -2564,9 +2564,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);
@@ -2582,9 +2582,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2595,9 +2595,9 @@ void fused_attn_fp8_fwd_kvpacked(size_t batch, size_t num_attn_heads, size_t num
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;
@@ -2671,9 +2671,9 @@ void fused_attn_fp8_bwd_kvpacked(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
+    stride = (typeToNumBits(QKV_type) * num_gqa_groups * head_dim) / 8;
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = typeToSize(QKV_type) * head_dim;
+    stride = (typeToNumBits(QKV_type) * head_dim) / 8;
   }
   void* devPtrK = devPtrKV;
   void* devPtrV = static_cast<void*>(static_cast<int8_t*>(devPtrKV) + stride);
@@ -2779,9 +2779,9 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   void* devPtrZInv = nullptr;
   if (Aux_CTX_Tensors->size == 0) {
     Aux_CTX_Tensors->size = 3;
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     output_M->data.dptr = nullptr;
     output_M->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
     output_M->data.dtype = DType::kFloat32;
@@ -2792,9 +2792,9 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     output_rng_state->data.shape = {2};
     output_rng_state->data.dtype = DType::kInt64;
   } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor* output_M = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[0]);
-    Tensor* output_ZInv = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[1]);
-    Tensor* output_rng_state = reinterpret_cast<Tensor*>(Aux_CTX_Tensors->tensors[2]);
+    Tensor* output_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+    Tensor* output_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor* output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
     devPtrM = output_M->data.dptr;
     devPtrZInv = output_ZInv->data.dptr;
     output_rng_state->data.dptr = rng_state->data.dptr;

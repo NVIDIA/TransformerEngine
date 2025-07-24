@@ -13,11 +13,11 @@ import torch
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.basic import BasicLinear, Bias
 from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
     FusedOperation,
     FusibleOperation,
     OperationContext,
 )
+from ...tensor import Quantizer
 
 
 class ForwardLinearBiasActivation(FusedOperation):
@@ -59,8 +59,8 @@ class ForwardLinearBiasActivation(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -70,10 +70,12 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx = basic_op_ctxs[idx]
         if self._op_idxs["bias"] is None:
             bias_op = None
+            bias_op_ctx = None
             bias = None
         else:
             idx = self._op_idxs["bias"]
             bias_op = self.basic_ops[idx]
+            bias_op_ctx = basic_op_ctxs[idx]
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
@@ -82,31 +84,26 @@ class ForwardLinearBiasActivation(FusedOperation):
         else:
             raise NotImplementedError("Activations are not yet supported")
 
+        # Check which grads are required
+        input_requires_grad = linear_op_ctx.requires_grad
+        weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
+
         # FP8 metadata
+        input_quantizer = linear_op.get_quantizer("forward", 0)
+        weight_quantizer = linear_op.get_quantizer("forward", 1)
+        output_quantizer = next_op_input_quantizer
+        grad_output_quantizer = linear_op.get_quantizer("backward", 0)
+        grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        input_quantizer = None
-        weight_quantizer = None
-        output_quantizer = None
-        grad_output_quantizer = None
-        grad_input_quantizer = None
-        if with_quantized_compute:
-            input_quantizer = linear_op.get_quantizer("forward", 0)
-            weight_quantizer = linear_op.get_quantizer("forward", 1)
-            next_op = basic_op_next_ops[-1]
-            if next_op is not None and next_op.num_quantizers("forward") > 0:
-                output_quantizer = next_op.get_quantizer("forward", 0)
-            grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-            prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_quantizers("backward") > 0:
-                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = linear_op.weight.dtype
 
         # Linear forward
-        output, x_local, _ = BasicLinear._functional_forward(
+        output, x_local, w = BasicLinear._functional_forward(
             input=input_,
             weight=linear_op.weight,
             bias=bias,
@@ -118,19 +115,23 @@ class ForwardLinearBiasActivation(FusedOperation):
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
         )
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local)
-        linear_op_ctx.with_quantized_compute = with_quantized_compute
-        linear_op_ctx.input_quantizer = input_quantizer
-        linear_op_ctx.weight_quantizer = weight_quantizer
-        linear_op_ctx.grad_output_quantizer = grad_output_quantizer
-        linear_op_ctx.grad_input_quantizer = grad_input_quantizer
-        linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_requires_grad = input_.requires_grad
-        linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
-        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
+        if linear_op_ctx.requires_grad:
+            linear_op_ctx.save_for_backward(x_local, w)
+            linear_op_ctx.with_quantized_compute = with_quantized_compute
+            linear_op_ctx.input_quantizer = input_quantizer
+            linear_op_ctx.weight_quantizer = weight_quantizer
+            linear_op_ctx.grad_output_quantizer = grad_output_quantizer
+            linear_op_ctx.grad_input_quantizer = grad_input_quantizer
+            linear_op_ctx.dtype = dtype
+            linear_op_ctx.input_requires_grad = input_requires_grad
+            linear_op_ctx.weight_requires_grad = weight_requires_grad
+        if bias_op is not None and bias_op_ctx.requires_grad:
+            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
