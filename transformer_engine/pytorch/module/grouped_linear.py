@@ -662,10 +662,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=device == "meta")
 
-        for name, param in self.named_parameters():
-            for i in range(self.num_gemms):
-                if name == f"weight{i}" or name == f"bias{i}":
-                    param.skip_backward_post_hook = True
+        if self.wgrad_store.delay_wgrad_compute():
+            for name, param in self.named_parameters():
+                for i in range(self.num_gemms):
+                    if name == f"weight{i}" or name == f"bias{i}":
+                        param.skip_backward_post_hook = True
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
