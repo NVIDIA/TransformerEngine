@@ -65,13 +65,16 @@ class _Buffer:
         gathered_buffer, _ = gather_along_first_dim(
             self._buffer.unsqueeze(0), process_group=self.reduction_group
         )
-        return gathered_buffer[mask.to(bool)]
+        return gathered_buffer[mask.to(torch.bool)]
 
-    def feed(self, tensor, iteration):
+    def feed(self, tensor, iteration, aux_dict=None):
         """
         feed() is used to add tensor for computing the statistics.
         Because of the microbatching, feed() can be used multiple
         times for one log().
+
+        The aux_dict is used to share common computation between different stats.
+        For example for LogFp8TensorStats in can contain quantized tensors in different precisions.
 
         The main reason of this design: need to combine results for already processed
         tensors with the result of the new tensor.
@@ -95,7 +98,7 @@ class _Buffer:
         # save stats for tensor to tmp buffer
         for stat_name in self.stats_to_compute:
             fn, _ = STATS[stat_name]
-            self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor)
+            self._tmp_buffer[stats_to_num[stat_name]] = fn(tensor, aux_dict)
 
         # [num_buffers, num_stats]
         buffers = torch.cat((self._buffer.unsqueeze(0), self._tmp_buffer.unsqueeze(0)), dim=0)
@@ -106,7 +109,7 @@ class _Buffer:
                 self._new_buffer[stats_to_num[stat_name]] = combinator(buffers)
             else:
                 fn = STATS[stat_name][0]
-                self._new_buffer[stats_to_num[stat_name]] = fn(tensor)
+                self._new_buffer[stats_to_num[stat_name]] = fn(tensor, aux_dict)
 
         self._buffer.copy_(self._new_buffer)
 
@@ -161,10 +164,17 @@ class StatsBuffers:
         self.buffers[(layer_name, tensor_name, options)] = buffer
         self.reduction_group_to_buffer[reduction_group].append(buffer)
 
-    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction):
-        """Feeds the tensor into the respective buffer."""
+    def feed(
+        self, layer_name, tensor_name, options, tensor, iteration, skip_reduction, aux_dict=None
+    ):
+        """
+        Feeds the tensor into the respective buffer.
+
+        The aux_dict is used to share common computation between different stats.
+        For example for LogFp8TensorStats in can contain quantized tensors in different precisions.
+        """
         buffer = self.buffers[(layer_name, tensor_name, options)]
-        buffer.feed(tensor, iteration)
+        buffer.feed(tensor, iteration, aux_dict)
         buffer.skip_reduction = skip_reduction
 
     def log_stats(self):
