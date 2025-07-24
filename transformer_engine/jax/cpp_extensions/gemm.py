@@ -1319,9 +1319,9 @@ def gemm(
         Tuple of sequences representing the contracting dimensions of the operands.
     batched_dims: Tuple[Sequence[int], Sequence[int]], default = ((), ()),
         Tuple of sequences representing the batched dimensions of the operands. This is *not* used
-        to perform a batched matrix multiplication, but it is required to avoid a potentially
-        undesirable reduction in any batched contracting dimensions when invoked with sharded
-        operands (e.g. when computing weight gradients in a Flax module).
+        to perform a batched matrix multiplication, but it is required for TE's custom cuBLAS GEMM
+        call to avoid a potentially undesirable reduction in any batched contracting dimensions
+        when invoked with sharded operands (e.g. when computing weight gradients in a Flax module).
     bias: jax.Array, default = None
         Optional additive bias term, required for forward GEMM with bias fusion. Only supported
         with TE's custom call to cuBLAS GEMM.
@@ -1339,11 +1339,13 @@ def gemm(
         TE's custom call to cuBLAS GEMM.
     use_split_accumulator: bool, default = True
         Enable promoting some intermediate sums to higher precision when accumulating the result in
-        the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
+        the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed. Only
+        supported with TE's custom call to cuBLAS GEMM.
     sequence_parallel_output: bool, default = False
         Produces an output with the first non-batched non-contracting dimension sharded with the
         same spec as operand contracting dimensions. This effectively converts the `jax.lax.psum`
-        for the GEMM output into a `jax.lax.psum_scatter`.
+        for the GEMM output into a `jax.lax.psum_scatter`. Only supported with TE's custom call to
+        cuBLAS GEMM.
     sequence_dim: int, default = None
         Index of the sequence dimension for the LHS operand. This controls which dimension of the
         GEMM output is scattered when `sequence_parallel_output=True`. When `None`, the first
@@ -1378,12 +1380,20 @@ def gemm(
     if not GemmPrimitive.enabled():
         assert kwargs.get("bias", None) is None and not fuse_gelu, (
             "TE GEMM was invoked with bias fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jnp.scaled_matmul` backends used when the custom cuBLAS "
+            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
             "GEMM primitive is disabled."
         )
         assert kwargs.get("gelu_input", None) is None and not fuse_bias, (
             "TE GEMM was invoked with GeLU fusion options that are not supported by the "
-            "`jax.lax.dot_general` and `jnp.scaled_matmul` backends used when the custom cuBLAS "
+            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
+            "GEMM primitive is disabled."
+        )
+        assert (
+            not kwargs.get("sequence_parallel_output", False)
+            and kwargs.get("sequence_dim", None) is None
+        ), (
+            "TE GEMM was invoked with sequence-parallelism options that are not supported by the "
+            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backedns used when the custom cuBLAS "
             "GEMM primitive is disabled."
         )
         return _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)

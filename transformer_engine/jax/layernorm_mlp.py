@@ -353,8 +353,8 @@ def _layernorm_mlp_fwd_rule(
         batched_dims=((x_bdim,), ()),
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
-        sequence_parallel_output=sequence_dim is not None,
-        sequence_dim=sequence_dim,
+        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
+        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     if use_bias_2 and tex.gemm_uses_jax_dot():
@@ -509,8 +509,8 @@ def _layernorm_mlp_bwd_rule(
         casted_kernel_1,
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
         batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=sequence_dim is not None,
-        sequence_dim=sequence_dim,
+        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
+        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)

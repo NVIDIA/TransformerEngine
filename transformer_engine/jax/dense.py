@@ -201,7 +201,7 @@ def _dense_fwd_rule(
         batched_dims=((x_bdim,), ()),
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
-        sequence_parallel_output=sequence_parallel_output,
+        sequence_parallel_output=sequence_parallel_output and not tex.gemm_uses_jax_dot(),
     )
 
     if use_bias and tex.gemm_uses_jax_dot():
@@ -269,8 +269,16 @@ def _dense_bwd_rule(
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
         batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=sequence_dim is not None and not sequence_parallel_output,
-        sequence_dim=None if sequence_parallel_output else sequence_dim,
+        sequence_parallel_output=(
+            sequence_dim is not None
+            and not sequence_parallel_output
+            and not tex.gemm_uses_jax_dot()
+        ),
+        sequence_dim=(
+            None
+            if sequence_parallel_output or tex.gemm_uses_jax_dot()
+            else sequence_dim
+        ),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 

@@ -333,8 +333,8 @@ def _layernorm_dense_bwd_rule(
         casted_kernel,
         contracting_dims=(g_constracting_dim, k_constracting_dim),
         batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=sequence_dim is not None,
-        sequence_dim=sequence_dim,
+        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
+        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
