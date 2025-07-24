@@ -139,6 +139,8 @@ def fuse_backward_linear_add(
         op, _ = ops[0]
         if not isinstance(op, MakeExtraOutput):
             continue
+        if not op._in_place:
+            continue
         window.extend(ops[:1])
         ops = ops[1:]
 

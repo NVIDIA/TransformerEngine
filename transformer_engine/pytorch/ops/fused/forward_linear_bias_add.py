@@ -11,7 +11,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.ops.basic import AddInPlace, BasicLinear, Bias
+from transformer_engine.pytorch.ops.basic import AddExtraInput, BasicLinear, Bias
 from transformer_engine.pytorch.ops.op import (
     FusedOperation,
     FusibleOperation,
@@ -33,7 +33,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         *,
         linear: BasicLinear,
         bias: Optional[Bias],
-        add: AddInPlace,
+        add: AddExtraInput,
     ) -> None:
 
         # Basic operations that comprise this fused operation
@@ -179,8 +179,10 @@ def fuse_forward_linear_bias_add(
                 continue
             op, _ = ops[0]
 
-        # Check if next op is add in-place
-        if not isinstance(op, AddInPlace):
+        # Check if next op is in-place add extra input
+        if not isinstance(op, AddExtraInput):
+            continue
+        if not op._in_place:
             continue
         add = op
         window.extend(ops[:1])
