@@ -12,4 +12,4 @@ export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 cd $TE_PATH/tests/cpp
 cmake -GNinja -S. -Bbuild
 cmake --build build
-mpirun --allow-run-as-root --np 4 ./build/comm_gemm/test_comm_gemm
+mpirun --allow-run-as-root --np 4 --oversubscribe ./build/comm_gemm/test_comm_gemm
