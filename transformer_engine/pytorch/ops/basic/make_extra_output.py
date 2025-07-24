@@ -22,20 +22,30 @@ class MakeExtraOutput(BasicOperation):
 
     If this operation is included in the operation fuser, then the
     operation fuser will return the intermediate tensor as an extra
-    tensor output. In the backward pass, the gradient is directly
-    accumulated into the gradient w.r.t. the extra output.
+    tensor output.
 
-    This operation is considered an advanced feature and most users
-    are discouraged from using it. In-place operations break some
-    autograd assumptions and they can result in subtle, esoteric bugs.
+    In the backward pass, the gradient may be directly
+    accumulated into the gradient w.r.t. the extra output. This is
+    controlled by the in_place kwarg. Currently, the BackwardLinearAdd
+    fusion is able to happen only with in_place=True.
 
-    Compare to `AddInPlace`, which does a similar operation in the
+    Using this operation with in_place=True is
+    considered an advanced feature. Most users are discouraged
+    from enabling it in-place gradient accumulation, as in-place
+    operations break some autograd assumptions and they can result
+    in subtle, esoteric bugs.
+
+    Compare to `AddExtraInput`, which does a similar operation in the
     backward pass.
 
     """
 
     # Operation expects buffer for output tensor
     num_extra_outputs: int = 1
+
+    def __init__(self, *, in_place: bool = False):
+        super().__init__()
+        self._in_place: bool = in_place
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -76,6 +86,10 @@ class MakeExtraOutput(BasicOperation):
         Iterable[Iterable[Optional[torch.Tensor]]],
         Iterable[Iterable[Optional[torch.Tensor]]],
     ]:
-        grad_input = basic_op_grad_extra_outputs[0][0]
-        grad_input += grad_output
+        grad_extra_output = basic_op_grad_extra_outputs[0][0]
+        if self._in_place:
+            grad_extra_output += grad_output
+            grad_input = grad_extra_output
+        else:
+            grad_input = grad_extra_output + grad_output
         return grad_input, [()], [()]
