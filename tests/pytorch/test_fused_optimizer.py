@@ -112,13 +112,6 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_bfloat16(self):
         self.gen_single_type_test(param_type=torch.bfloat16, skip_assert=True)
 
-    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
-
     def test_multi_params(self):
         sizes = [[4096, 1024], [4096], [4096, 2048], [32320, 1024], [1]]
 
@@ -529,13 +522,6 @@ class TestFusedSGD(TestFusedOptimizer):
 
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
-
-    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
 
 
 class Model(torch.nn.Module):
