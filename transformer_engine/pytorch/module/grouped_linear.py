@@ -665,7 +665,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.wgrad_store.delay_wgrad_compute():
             for name, param in self.named_parameters():
                 for i in range(self.num_gemms):
-                    if name == f"weight{i}" or name == f"bias{i}":
+                    if name in (f"weight{i}", f"bias{i}"):
                         param.skip_backward_post_hook = True
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
