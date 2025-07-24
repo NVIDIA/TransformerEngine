@@ -270,22 +270,22 @@ class TestSequentialContainer:
         bias = te_ops.Bias(size=size, device="cpu")
         with torch.no_grad():
             bias.bias.copy_(torch.rand((size,)))
-        model = te_ops.Sequential(  #    | Inputs  | Outputs
-            torch.nn.Identity(),  #      | x1      | x1
-            te_ops.MakeExtraOutput(),  # | x1      | x1 [x1]
-            bias,  #                     | x1      | h1 (= x1 + b)
-            te_ops.MakeExtraOutput(),  # | h1      | h1 [h1]
-            te_ops.AddInPlace(),  #      | h1 [x2] | x2 (= x2 + h1)
-            te_ops.MakeExtraOutput(),  # | x2      | x2 [x2]
-            torch.nn.Identity(),  #      | x2      | x2
-            bias,  #                     | x2      | h2 (= x2 + b)
-            te_ops.AddInPlace(),  #      | h2 [x3] | x3 (= x3 + h2)
-            te_ops.MakeExtraOutput(),  # | x3      | x3 [x3]
-            te_ops.AddInPlace(),  #      | x3 [x4] | x4 (= x4 + x3)
-            torch.nn.Identity(),  #      | x4      | x4
-            te_ops.Identity(),  #        | x4      | x4
-            te_ops.MakeExtraOutput(),  # | x4      | x4 [x4]
-            te_ops.Identity(),  #        | x4      | x4
+        model = te_ops.Sequential(  #                 | Inputs  | Outputs
+            torch.nn.Identity(),  #                   | x1      | x1
+            te_ops.MakeExtraOutput(in_place=True),  # | x1      | x1 [x1]
+            bias,  #                                  | x1      | h1 (= x1 + b)
+            te_ops.MakeExtraOutput(in_place=True),  # | h1      | h1 [h1]
+            te_ops.AddExtraInput(in_place=True),  #   | h1 [x2] | x2 (= x2 + h1)
+            te_ops.MakeExtraOutput(in_place=True),  # | x2      | x2 [x2]
+            torch.nn.Identity(),  #                   | x2      | x2
+            bias,  #                                  | x2      | h2 (= x2 + b)
+            te_ops.AddExtraInput(in_place=True),  #   | h2 [x3] | x3 (= x3 + h2)
+            te_ops.MakeExtraOutput(in_place=True),  # | x3      | x3 [x3]
+            te_ops.AddExtraInput(in_place=True),  #   | x3 [x4] | x4 (= x4 + x3)
+            torch.nn.Identity(),  #                   | x4      | x4
+            te_ops.Identity(),  #                     | x4      | x4
+            te_ops.MakeExtraOutput(in_place=True),  # | x4      | x4 [x4]
+            te_ops.Identity(),  #                     | x4      | x4
         )
 
         # Create input tensors
@@ -1399,18 +1399,17 @@ class TestBasicOps:
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
 
         torch.testing.assert_close(y_test, y_ref, **tols)
-        # L2Norm backward pass requires slightly looser atol for bfloat16
-        if dtype == torch.bfloat16:
-            tols["atol"] = 2e-3
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
-    def test_add_in_place(
+    def test_add_extra_input(
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1456,7 +1455,7 @@ class TestBasicOps:
         dx2_ref = dy_ref
 
         # Implementation with fusible operation
-        op = te_ops.AddInPlace()
+        op = te_ops.AddExtraInput(in_place=in_place)
         y_test = op(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -1471,6 +1470,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx1_test, dx1_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx2_test, dx2_ref, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1478,6 +1478,7 @@ class TestBasicOps:
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1523,7 +1524,7 @@ class TestBasicOps:
         (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
 
         # Implementation with fusible operation
-        op = te_ops.MakeExtraOutput()
+        op = te_ops.MakeExtraOutput(in_place=in_place)
         y1_test, y2_test = op(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -1887,7 +1888,7 @@ class TestFusedOps:
                     device=device,
                     dtype=dtype,
                 ),
-                te_ops.AddInPlace(),
+                te_ops.AddExtraInput(in_place=True),
             )
         with torch.no_grad():
             model[0].weight.copy_(w_test)
@@ -2079,7 +2080,7 @@ class TestFusedOps:
         recipe = make_recipe(quantization)
         with te.fp8_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
-                te_ops.MakeExtraOutput(),
+                te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
                     in_features,
                     out_features,
