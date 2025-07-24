@@ -294,9 +294,9 @@ class BasicLinear(BasicOperation):
                 raise RuntimeError(
                     "Tried to quantize weight with deferred initialization "
                     "due to meta device, but no quantizer was available. "
-                    "This is most likely because fp8_model_init was called "
-                    "with enabled=True and recipe=None, instead of providing "
-                    "a recipe to use for quantization."
+                    "This is most likely because the weight was initialized "
+                    "within fp8_model_init, but the forward pass was not "
+                    "performed within fp8_autocast."
                 )
             quantizer.set_usage(
                 rowwise=True,
@@ -315,8 +315,8 @@ class BasicLinear(BasicOperation):
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
-    def reset_recipe_type(self, *, recipe: Optional[Recipe]) -> None:
-        super().reset_recipe_type(recipe=recipe)
+    def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
+        super().reset_recipe_state(recipe=recipe)
 
         if recipe is not None and not FP8GlobalStateManager.with_fp8_parameters():
             # Make quantizers use internal tensors

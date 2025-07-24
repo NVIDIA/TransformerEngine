@@ -712,6 +712,12 @@ def _make_graphed_callables(
                                 elif isinstance(m, BasicOperation):
                                     for mode in ("forward", "backward"):
                                         if m.num_quantizers(mode):
+                                            m._fp8_metas[mode][
+                                                "fp8_group"
+                                            ] = FP8GlobalStateManager.get_fp8_group()
+                                            m._fp8_metas[mode][
+                                                "recipe"
+                                            ] = FP8GlobalStateManager.get_fp8_recipe()
                                             FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                                                 m._fp8_metas[mode],
                                             )
@@ -756,7 +762,7 @@ def save_fp8_tensors(
                     m.adjust_amax_history_length(fp8_recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
             elif isinstance(m, BasicOperation):
-                m.reset_recipe_type(recipe=fp8_recipe)
+                m.reset_recipe_state(recipe=fp8_recipe)
                 module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors
