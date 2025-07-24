@@ -340,8 +340,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             self.softmax_offset = softmax_offset
         if self.softmax_type != "vanilla":
             matmul_result = torch.cat([
+                matmul_result
                 softmax_offset.to(dtype=matmul_result.dtype).expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
-                matmul_result], dim=-1)
+            ], dim=-1)
             attention_mask = F.pad(attention_mask, (0, 1), mode='constant', value=False)
 
         # attention scores and attention mask [b, np, sq, sk]
