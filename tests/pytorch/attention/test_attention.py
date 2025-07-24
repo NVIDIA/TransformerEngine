@@ -1581,7 +1581,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
 
 model_configs_fp8_vs_f16 = {
-    #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
+    #  test:             b,   sq, hq,   d
     "fp8_9": ModelConfig(2, 2048, 16, 128),
     "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
     "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
@@ -1615,6 +1615,8 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     except Exception as e:
         logging.debug(e)
 
+    print(name_a, 'min/max', a.min().item(), a.max().item())
+    print(name_b, 'min/max', b.min().item(), b.max().item())
     rmse = _rmse(a, b)
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
@@ -1868,13 +1870,25 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
     # Test backend availability
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_layout,
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    print('xxx0 ', flash_attn_supported, fused_attn_supported, unfused_attn_supported)
     # Skip if only unfused backend is supported
     if flash_attn_supported + fused_attn_supported < 1:
         pytest.skip("No FP8 attention backend available.")
@@ -1888,6 +1902,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         _, fused_attn_supported, _ = available_backends
         if not fused_attn_supported:
             pytest.skip("No attention backend available.")
+        print('xxx1 ', flash_attn_supported, fused_attn_supported, unfused_attn_supported)
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
@@ -1895,7 +1910,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
-        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FlashAttention)")
         flash_attn_fwd_fp8, flash_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
             dtype, config, True, qkv_layout, is_training
         )
@@ -1903,14 +1918,14 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
+    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
         dtype, config, True, qkv_layout, is_training
     )
 
     if config.dropout_p == 0.0:
         # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
-        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
         fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
             dtype, config, False, qkv_layout, is_training
         )
@@ -1976,6 +1991,11 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
         amax_compute_algo="most_recent",
         fp8_dpa=fp8_dpa,
     )
+    #fp8_recipe = recipe.Float8CurrentScaling(
+    #    fp8_format=recipe.Format.HYBRID,
+    #    fp8_dpa=fp8_dpa,
+    #    fp8_mha=False,
+    #)
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
     with fp8_model_init(enabled=fp8_dpa):

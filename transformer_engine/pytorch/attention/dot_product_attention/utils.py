@@ -424,6 +424,8 @@ def get_attention_backend(
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
             use_unfused_attention = False
+    if fp8:
+        print('filter ', fp8, fp8_meta["recipe"].fp8_dpa, is_training, use_flash_attention_2, use_flash_attention_3)
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
