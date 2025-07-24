@@ -81,8 +81,8 @@ void compute_ref(const ProcessingMethod processing_method,
             // Cache computations
             for (size_t i = i_min; i < i_max; ++i) {
                 for (size_t j = j_min; j < j_max; ++j) {
-                    const int idx = i * cols + j;
-                    const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                    const size_t idx = i * cols + j;
+                    const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
 
                     float elt = static_cast<float>(input[idx]);
                     if (processing_method == ProcessingMethod::CAST_DBIAS) {
@@ -114,18 +114,18 @@ void compute_ref(const ProcessingMethod processing_method,
                     float block_amax = 0.0f;
 
                     for (size_t j = j_min; j < j_max; ++j) {
-                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
                         block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    const int scale_idx = i * scales_stride_rowwise + tile_X;
+                    const size_t scale_idx = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx] = biased_exponent;
                     const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t j = j_min; j < j_max; ++j) {
-                        const int idx = i * cols + j;
-                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        const size_t idx = i * cols + j;
+                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
                         output_rowwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
                     }
                 }
@@ -135,18 +135,18 @@ void compute_ref(const ProcessingMethod processing_method,
                     float block_amax = 0.0f;
 
                     for (size_t i = i_min; i < i_max; ++i) {
-                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
                         block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
                     }
 
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    const int scale_idx = tile_Y * scales_stride_colwise + j;
+                    const size_t scale_idx = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx] = biased_exponent;
                     const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t i = i_min; i < i_max; ++i) {
-                        const int idx = i * cols + j;
-                        const int cache_idx = (i - i_min) * tile_size_X + (j - j_min);
+                        const size_t idx = i * cols + j;
+                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
                         output_colwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
                     }
                 }
