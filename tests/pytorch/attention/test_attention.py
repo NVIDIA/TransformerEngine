@@ -1606,6 +1606,8 @@ def _rmse(a, b):
 
 
 def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
+    print(a.view(-1)[:16])
+    print(b.view(-1)[:16])
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:
@@ -1615,8 +1617,6 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     except Exception as e:
         logging.debug(e)
 
-    print(name_a, 'min/max', a.min().item(), a.max().item())
-    print(name_b, 'min/max', b.min().item(), b.max().item())
     rmse = _rmse(a, b)
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())

@@ -91,7 +91,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     rowwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
   }
   at::TensorOptions opts;
-  opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
+  opts = opts.dtype(torch::kFloat16).device(torch::kCUDA);
   at::Tensor data;
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {
