@@ -190,7 +190,15 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
       }
     }
-  } else if (is_mxfp_scaling(B.scaling_mode)) {
+  } else if (is_hybrid_nvfp4_scaling(B.scaling_mode) && !grad) {
+    NVTE_CHECK(!is_B_transposed, "Incorrect GEMM layout for NVFP4");
+    NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+    ret.B = B.data.dptr;
+    ret.transB = CUBLAS_OP_N;
+    ret.Btype = B.data.dtype;
+    ret.B_scale_inv = B.scale_inv.dptr;
+    ret.ldb = k;
+  } else if (is_mxfp_scaling(B.scaling_mode) || is_hybrid_nvfp4_scaling(B.scaling_mode)) {
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
@@ -204,14 +212,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
-  } else if (is_hybrid_nvfp4_scaling(B.scaling_mode)) {
-    NVTE_CHECK(!is_B_transposed, "Incorrect GEMM layout for NVFP4");
-    NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
-    ret.B = B.data.dptr;
-    ret.transB = CUBLAS_OP_N;
-    ret.Btype = B.data.dtype;
-    ret.B_scale_inv = B.scale_inv.dptr;
-    ret.ldb = k;
   } else if (B.scaling_mode == NVTE_BLOCK_SCALING_1D || B.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // FP8 block scaling
     // Note: Hopper only supports TN GEMMs for FP8. "Column-wise data" is transpose of data.
