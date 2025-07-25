@@ -1759,8 +1759,8 @@ class TestBasicOps:
         # Check values
         if is_training:
             mask = ((y != 0) / (1 - prob)).to(dtype=dtype)
-            torch.testing.assert_close(y, x_ref*mask)
-            torch.testing.assert_close(x_test.grad, dy_ref*mask)
+            torch.testing.assert_close(y, x_ref * mask)
+            torch.testing.assert_close(x_test.grad, dy_ref * mask)
         else:
             torch.testing.assert_close(y, x_ref, rtol=0, atol=0)
             torch.testing.assert_close(x_test.grad, dy_ref, rtol=0, atol=0)
@@ -1776,10 +1776,8 @@ class TestBasicOps:
         # distribution is incorrect.
         if is_training:
             prob_observed = 1 - torch.count_nonzero(y).item() / y.numel()
-            z_score = (prob_observed - prob) / math.sqrt(prob * (1-prob) / y.numel())
-            assert (
-                abs(z_score) < 2.5758
-            ), "Number of zeros is outside 99% confidence interval"
+            z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y.numel())
+            assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
 
 
 class TestFusedOps:
