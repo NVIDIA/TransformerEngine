@@ -356,7 +356,9 @@ def _make_graphed_callables(
                     modules.add(module)
                 # If forward is called on a te.ops.Sequential it is not called on its constituent ops
                 elif isinstance(module, Sequential):
-                    assert module._module_groups is not None, "Should have been initialized by warmup"
+                    assert (
+                        module._module_groups is not None
+                    ), "Should have been initialized by warmup"
                     for module_group in module._module_groups:
                         if isinstance(module_group, OperationFuser):
                             for basic_op in module_group._basic_ops:
