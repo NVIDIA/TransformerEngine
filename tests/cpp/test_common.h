@@ -474,6 +474,7 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
                              const double abs_tolerable_mismatches_limit = 0,
                              const double rel_tolerable_mismatches_limit = 0);
 
+
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols);
 

@@ -767,6 +767,7 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
   using UpcastType = typename CastToType<T>::type;
   auto [atol_fp8e4m3, rtol_fp8e4m3] = getTolerances(DType::kFloat8E4M3);
 
+
   const size_t N = row_blocks * col_blocks;
   const size_t tolerable_mismatches_limit = std::min(abs_tolerable_mismatches_limit,
                                                      std::floor(N * rel_tolerable_mismatches_limit));
@@ -832,6 +833,7 @@ void compare_scaling_factors<fp8e4m3>(const std::string &name, const fp8e4m3 *te
                                       size_t& mismatches_num, const size_t atol,
                                       const double abs_tolerable_mismatches_limit,
                                       const double rel_tolerable_mismatches_limit);
+
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
