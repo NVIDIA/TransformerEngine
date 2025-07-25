@@ -44,6 +44,19 @@ void *get_symbol(const char *symbol, int cuda_version) {
   return entry_point;
 }
 
+void ensure_context_exists() {
+  CUcontext context;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
+  if (context == nullptr) {
+    // Add primary context to context stack
+    CUdevice device;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, cuda::current_device());
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
+  }
+}
+
 }  // namespace cuda_driver
 
 }  // namespace transformer_engine

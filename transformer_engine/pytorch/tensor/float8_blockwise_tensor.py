@@ -521,7 +521,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         def _set_from_tensor(dst: Float8BlockwiseQTensor, src: Float8BlockwiseQTensor):
             dst._rowwise_data = src._rowwise_data
             dst._columnwise_data = src._columnwise_data
-            dst._quantizer = src._quantizer
+            dst._quantizer = src._quantizer.copy()
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv

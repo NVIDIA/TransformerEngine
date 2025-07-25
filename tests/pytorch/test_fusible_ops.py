@@ -837,10 +837,9 @@ class TestBasicOps:
                 pytest.skip("FP8 output is only supported with FP8 GEMMs")
             if quantized_grad_input and not quantized_compute:
                 pytest.skip("FP8 grad input is only supported with FP8 GEMMs")
-        if quantization == "mxfp8" and quantized_output:
-            pytest.skip("MXFP8 output is not supported with MXFP8 GEMMs")
-        if quantization == "mxfp8" and quantized_grad_input:
-            pytest.skip("MXFP8 grad input is not supported with MXFP8 GEMMs")
+        if quantization not in (None, "fp8"):
+            if quantized_output or quantized_grad_input:
+                pytest.skip("Recipe does not support quantized GEMM output")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(

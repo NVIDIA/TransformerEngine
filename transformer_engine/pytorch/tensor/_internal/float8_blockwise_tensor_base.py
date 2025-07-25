@@ -59,7 +59,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             instance = super().__new__(cls, *args, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv

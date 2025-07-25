@@ -28,60 +28,6 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-void quantize_impl(const TensorWrapper &input, py::handle &quantizer_py,
-                   std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &output,
-                   TensorWrapper &noop_flag) {
-  // Check tensor dims
-  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output),
-             "Input tensor (shape=", get_tensor_shape(input),
-             ") and output tensor (shape=", get_tensor_shape(output), ") do not match");
-  if (input.numel() == 0) {
-    return;
-  }
-
-  // Recipe-specific configuration
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_noop_tensor(noop_flag.data());
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream()); });
-    // check if we need to do amax reudction (depending on model parallel configs)
-    if (my_quantizer_cs->with_amax_reduction) {
-      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
-      // construct torch tesnor from NVTEBasicTensor without reallocating memory
-      at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
-      std::vector<at::Tensor> tensors = {amax_tensor_torch};
-      // allreduce amax tensor
-      c10d::AllreduceOptions allreduce_opts;
-      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
-      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
-    }
-    // this config is used for cs scaling factor computation
-    // because compute scale is cannot be fused with quantize kernel
-    // so in nvte_quantize_v2 with current scaling, the quant config is not used again
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-    });
-    // set amax ptr to null in output TensorWrapper to avoid atomic amax updates in kernel
-    output.set_amax(nullptr, DType::kFloat32, output.defaultShape);
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
-    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
-    if (my_quantizer_bw->all_gather_usage) {
-      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
-    }
-  }
-
-  // Perform quantization
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_quantize_v2(input.data(), output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-  });
-}
-
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -101,18 +47,17 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
     const auto fake_dtype = input_cpp.dtype();
     std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
   } else {
-    output_py = output;
-    output_cpp = makeTransformerEngineTensor(output_py, quantizer);
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
   // Initialize no-op flag
-  TensorWrapper noop_flag_cpp;
+  std::optional<TensorWrapper> noop_flag_cpp;
   if (noop_flag.has_value()) {
     noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
   }
 
   // Perform quantization
-  quantize_impl(input_cpp, quantizer, quantizer_cpp, output_cpp, noop_flag_cpp);
+  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
   return output_py;
 }
@@ -182,10 +127,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     });
   } else {
     // Quantize kernels individually
-    TensorWrapper dummy_noop_flag;
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantize_impl(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
-                    dummy_noop_flag);
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
     }
   }
 }

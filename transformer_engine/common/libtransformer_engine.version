@@ -8,6 +8,7 @@
 			transformer_engine::cuda::stream_priority_range*;
 			transformer_engine::cuda::current_device*;
 			transformer_engine::cuda_driver::get_symbol*;
+			transformer_engine::cuda_driver::ensure_context_exists*;
 			transformer_engine::ubuf_built_with_mpi*;
 			*transformer_engine::rtc*;
 			transformer_engine::nvte_cudnn_handle_init*;
