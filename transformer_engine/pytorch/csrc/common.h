@@ -194,10 +194,22 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
+  /*! @brief Construct a high precision tensor giving it this quantizer's amax */
+  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
+                                                                  DType dtype) const;
+
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  /*! @brief Convert to a quantized data format avoiding amax computation */
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
+                          const std::optional<TensorWrapper>& noop_flag = std::nullopt);
+
+ private:
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
 
 class Float8BlockQuantizer : public Quantizer {
