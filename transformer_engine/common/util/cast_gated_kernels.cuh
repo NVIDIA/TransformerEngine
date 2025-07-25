@@ -610,7 +610,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 // 3. Scale elements
 #pragma unroll
       for (int i = 0; i < SCALE_DIM_Y / COLWISE_WAVEFRONT_SIZE; ++i) {
-
         const size_t shmem_offset_elt =
             shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * BUFF_DIM_X;
         if constexpr (IS_DGATED) {
@@ -629,7 +628,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
 
     if constexpr (ROWWISE_SCALING) {
-
       const size_t shmem_offset_base_rowwise =
           buff * BUFF_DIM + thread_offset_Y_rowwise * BUFF_DIM_X;
 
@@ -650,7 +648,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         IType2 thread_amax_2x_gate = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
@@ -668,7 +665,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
           if (!out_of_bounds) {
             if constexpr (std::is_same_v<IType, float>) {
-
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
                 thread_amax_act = fmaxf(thread_amax_act, fabsf(in_cached_act[w].data.elt[e]));
@@ -702,7 +698,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
@@ -852,7 +847,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     // Initiate TMA transfer to copy shared memory to global memory
     if (is_master_thread) {
-
       const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
       const size_t global_offset_X = block_offset_X;
       const size_t buff_offset = buff * BUFF_DIM;

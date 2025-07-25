@@ -269,7 +269,6 @@ using fp4e2m1 = __nv_fp4_e2m1;
 using fp4e2m1x2 = __nv_fp4x2_e2m1;
 using fp4e2m1x4 = __nv_fp4x4_e2m1;
 
-
 static_assert(sizeof(floatx2) == 8);
 static_assert(sizeof(bf16x2) == 4);
 static_assert(sizeof(fp16x2) == 4);

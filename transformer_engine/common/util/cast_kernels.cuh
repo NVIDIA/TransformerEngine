@@ -174,7 +174,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 #pragma unroll
   for (int stage = 0; stage < STAGES; ++stage) {
-
     const size_t buff = stage % BUFFS_NUM;
     const size_t next_stage = stage + 1;
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
@@ -358,7 +357,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
@@ -440,7 +438,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             in.y = in_compute_rowwise[j + 1];
           }
           ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
-
         }
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
@@ -1024,7 +1021,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
-
     }
   }
 
@@ -1065,7 +1061,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 }
 }  // namespace nvfp4_kernel
 
-  
 constexpr size_t FP8_CHUNK_DIM_Y = 128;
 constexpr size_t FP8_CHUNK_DIM_X = 128;
 constexpr size_t FP8_THREADS_PER_CHUNK = 128;
