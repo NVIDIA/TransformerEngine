@@ -20,7 +20,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
-    BackwardBiasActivation,
+    BackwardActivationBias,
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
     ForwardLinearBiasAdd,
@@ -261,6 +261,65 @@ class TestSequentialContainer:
         )
         model(torch.zeros(1))
         assert len(model._module_groups) == 6
+
+    def test_extra_tensors(self, size: int = 16) -> None:
+        """Check that extra inputs are distributed properly between module groups
+        and that extra outputs are properly collected"""
+
+        # Construct sequential container
+        bias = te_ops.Bias(size=size, device="cpu")
+        with torch.no_grad():
+            bias.bias.copy_(torch.rand((size,)))
+        model = te_ops.Sequential(  #                 | Inputs  | Outputs
+            torch.nn.Identity(),  #                   | x1      | x1
+            te_ops.MakeExtraOutput(in_place=True),  # | x1      | x1 [x1]
+            bias,  #                                  | x1      | h1 (= x1 + b)
+            te_ops.MakeExtraOutput(in_place=True),  # | h1      | h1 [h1]
+            te_ops.AddExtraInput(in_place=True),  #   | h1 [x2] | x2 (= x2 + h1)
+            te_ops.MakeExtraOutput(in_place=True),  # | x2      | x2 [x2]
+            torch.nn.Identity(),  #                   | x2      | x2
+            bias,  #                                  | x2      | h2 (= x2 + b)
+            te_ops.AddExtraInput(in_place=True),  #   | h2 [x3] | x3 (= x3 + h2)
+            te_ops.MakeExtraOutput(in_place=True),  # | x3      | x3 [x3]
+            te_ops.AddExtraInput(in_place=True),  #   | x3 [x4] | x4 (= x4 + x3)
+            torch.nn.Identity(),  #                   | x4      | x4
+            te_ops.Identity(),  #                     | x4      | x4
+            te_ops.MakeExtraOutput(in_place=True),  # | x4      | x4 [x4]
+            te_ops.Identity(),  #                     | x4      | x4
+        )
+
+        # Create input tensors
+        x1 = torch.rand((size,))
+        x2 = torch.rand((size,))
+        x3 = torch.rand((size,))
+        x4 = torch.rand((size,))
+
+        # Save original input tensor values
+        x1_orig = x1.clone()
+        x2_orig = x2.clone()
+        x3_orig = x3.clone()
+        x4_orig = x4.clone()
+
+        # Run forward
+        ys = model(x1, x2, x3, x4)
+
+        # Check whether outputs match (x4, x1, h1, x2, x3, x4)
+        assert len(ys) == 6
+        assert ys[0].data_ptr() == x4.data_ptr()
+        assert ys[1].data_ptr() == x1.data_ptr()
+        assert ys[2].data_ptr() not in [x.data_ptr() for x in (x1, x2, x3, x4)]
+        assert ys[3].data_ptr() == x2.data_ptr()
+        assert ys[4].data_ptr() == x3.data_ptr()
+        assert ys[5].data_ptr() == x4.data_ptr()
+
+        # Check whether tensors have correct values
+        b = bias.bias
+        h1 = ys[2]
+        torch.testing.assert_close(x1, x1_orig)
+        torch.testing.assert_close(h1, x1_orig + b)
+        torch.testing.assert_close(x2, x2_orig + h1)
+        torch.testing.assert_close(x3, x3_orig + x2 + b)
+        torch.testing.assert_close(x4, x4_orig + x3)
 
 
 class TestFuser:
@@ -1341,18 +1400,17 @@ class TestBasicOps:
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
 
         torch.testing.assert_close(y_test, y_ref, **tols)
-        # L2Norm backward pass requires slightly looser atol for bfloat16
-        if dtype == torch.bfloat16:
-            tols["atol"] = 2e-3
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
-    def test_add_in_place(
+    def test_add_extra_input(
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1398,7 +1456,7 @@ class TestBasicOps:
         dx2_ref = dy_ref
 
         # Implementation with fusible operation
-        op = te_ops.AddInPlace()
+        op = te_ops.AddExtraInput(in_place=in_place)
         y_test = op(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -1413,6 +1471,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx1_test, dx1_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx2_test, dx2_ref, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1420,6 +1479,7 @@ class TestBasicOps:
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1465,7 +1525,7 @@ class TestBasicOps:
         (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
 
         # Implementation with fusible operation
-        op = te_ops.MakeExtraOutput()
+        op = te_ops.MakeExtraOutput(in_place=in_place)
         y1_test, y2_test = op(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -1829,7 +1889,7 @@ class TestFusedOps:
                     device=device,
                     dtype=dtype,
                 ),
-                te_ops.AddInPlace(),
+                te_ops.AddExtraInput(in_place=True),
             )
         with torch.no_grad():
             model[0].weight.copy_(w_test)
@@ -1870,7 +1930,7 @@ class TestFusedOps:
     @pytest.mark.parametrize("out_shape", ((32, 32), (32, 1, 32), (8, 2, 2, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
-    def test_backward_bias_activation(
+    def test_backward_activation_bias(
         self,
         *,
         activation: str,
@@ -1879,7 +1939,7 @@ class TestFusedOps:
         device: torch.device = "cuda",
         quantization: Optional[str],
     ) -> None:
-        """Backward dbias + dact + quantize"""
+        """Backward dact + dbias + quantize"""
 
         # Tensor dimensions
         in_shape = list(out_shape)
@@ -1938,7 +1998,7 @@ class TestFusedOps:
         backward_ops = model._module_groups[0]._backward_ops
         if with_quantization and quantization in ["fp8_delayed_scaling", "mxfp8"]:
             assert len(backward_ops) == 2
-            assert isinstance(backward_ops[0][0], BackwardBiasActivation)
+            assert isinstance(backward_ops[0][0], BackwardActivationBias)
             assert isinstance(backward_ops[1][0], te_ops.Quantize)
         else:
             assert len(backward_ops) == 3
@@ -2021,7 +2081,7 @@ class TestFusedOps:
         recipe = make_recipe(quantization)
         with te.fp8_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
-                te_ops.MakeExtraOutput(),
+                te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
                     in_features,
                     out_features,
@@ -2185,6 +2245,7 @@ class TestSequentialModules:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
+    @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
     @pytest.mark.parametrize("quantized_compute", (False, True))
@@ -2194,6 +2255,7 @@ class TestSequentialModules:
     def test_layernorm_mlp(
         self,
         *,
+        requires_grad: bool,
         bias: bool,
         normalization: str,
         quantized_compute: bool,
@@ -2234,6 +2296,7 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            requires_grad=requires_grad,
         )
         _, dy_test = make_reference_and_test_tensors(
             in_shape,

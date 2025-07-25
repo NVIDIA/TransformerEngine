@@ -24,6 +24,7 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
+from .sharding import get_sequence_parallel_dim
 
 
 LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED = False
@@ -324,11 +325,16 @@ def _layernorm_dense_bwd_rule(
     )
 
     # NT GEMM
+    sequence_dim = get_sequence_parallel_dim(
+        layernorm_input_axes, x_contracting_dims_in_fwd, (x_bdim,)
+    )
     dgrad = tex.gemm(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel,
         contracting_dims=(g_constracting_dim, k_constracting_dim),
         batched_dims=((x_bdim,), ()),
+        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
+        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)

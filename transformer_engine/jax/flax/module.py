@@ -415,6 +415,8 @@ class DenseGeneral(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    sequence_parallel_output: bool, default = False
+        Produce a sequence-parallel output with the first non-batch dimension sharded over
 
     Optimization parameters
     -----------------------
@@ -439,6 +441,7 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
+    sequence_parallel_output: bool = False
 
     def __post_init__(self):
         if self.transpose_batch_sequence:
@@ -511,6 +514,7 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
+            sequence_parallel_output=self.sequence_parallel_output,
         )
 
         if self.enable_low_rank_adaptation:

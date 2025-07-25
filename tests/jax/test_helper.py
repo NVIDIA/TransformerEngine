@@ -58,7 +58,6 @@ class TestFP8Functions(unittest.TestCase):
         self.assertTrue(ref.amax_compute_algo == test.amax_compute_algo)
 
     def _compare_current_scaling(self, test):
-        self.assertEqual(QuantizeConfig.MARGIN, test.margin)
         self.assertEqual(QuantizeConfig.FP8_FORMAT, test.fp8_format)
         self.assertEqual(QuantizeConfig.SCALING_MODE, ScalingMode.CURRENT_TENSOR_SCALING)
 
@@ -91,7 +90,7 @@ class TestFP8Functions(unittest.TestCase):
 
         self._check_default_state()
 
-    @unittest.skipIf(not is_mxfp8_supported, reason=mxfp8_reason)
+    @unittest.skipIf(not is_fp8_supported, reason=reason)
     def test_fp8_autocast_current_scaling(self):
         QuantizeConfig.finalize()  # Ensure the testing not affect by previous tests.
         self._check_default_state()
@@ -101,14 +100,14 @@ class TestFP8Functions(unittest.TestCase):
 
         self._check_default_state()
 
-        cs = Float8CurrentScaling(margin=5.0, fp8_format=FP8Format.E4M3)
+        cs = Float8CurrentScaling(fp8_format=FP8Format.E4M3)
         with fp8_autocast(enabled=True, fp8_recipe=cs):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_current_scaling(cs)
 
         self._check_default_state()
 
-        cs = Float8CurrentScaling(margin=3.0, fp8_format=FP8Format.HYBRID)
+        cs = Float8CurrentScaling(fp8_format=FP8Format.HYBRID)
         with fp8_autocast(enabled=True, fp8_recipe=cs):
             self.assertTrue(QuantizeConfig.is_fp8_enabled())
             self._compare_current_scaling(cs)

@@ -48,14 +48,14 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": None, "bias": None, "reduce_scatter": None}
         ops = []
-        if reduce_scatter is not None:
-            op_idxs["reduce_scatter"] = len(ops)
-            ops.append(reduce_scatter)
+        op_idxs["linear"] = len(ops)
+        ops.append(linear)
         if bias is not None:
             op_idxs["bias"] = len(ops)
             ops.append(bias)
-        op_idxs["linear"] = len(ops)
-        ops.append(linear)
+        if reduce_scatter is not None:
+            op_idxs["reduce_scatter"] = len(ops)
+            ops.append(reduce_scatter)
 
         # Initialize base class
         super().__init__(ops)
@@ -495,7 +495,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Get basic operations
         idx = self._op_idxs["linear"]
         linear_op = self.basic_ops[idx]
-        linear_op_ctx = basic_op_ctxs[idx]
+        linear_op_ctx = basic_op_ctxs[-1]
         bias_op = None
         if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
@@ -556,6 +556,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
             grad_params[self._op_idxs["bias"]] = (grad_bias,)
+        grad_params.reverse()
         grad_extra_inputs = [() for _ in range(len(self.basic_ops))]
         return grad_input, grad_params, grad_extra_inputs
 

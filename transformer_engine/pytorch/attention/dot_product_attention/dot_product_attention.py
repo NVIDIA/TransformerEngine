@@ -630,7 +630,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             If true, there are padding tokens between individual sequences in a packed batch.
         """
 
-        with self.prepare_forward(
+        with torch.cuda.device(query_layer.device), self.prepare_forward(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,

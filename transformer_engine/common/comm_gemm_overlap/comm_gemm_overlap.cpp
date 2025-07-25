@@ -133,14 +133,21 @@ CommOverlapCore::~CommOverlapCore() {
 
   if (_atomic_gemm) cudaFree(_counter.dptr());
 
-  for (size_t i = 0; i < _stream_compute.size(); i++) cudaStreamDestroy(_stream_compute[i]);
+  for (size_t i = 0; i < _stream_compute.size(); i++) {
+    cudaStreamSynchronize(_stream_compute[i]);
+    cudaStreamDestroy(_stream_compute[i]);
+  }
 
   if (_comm_created) {
+    try {
 #ifdef NVTE_UB_WITH_MPI
-    destroy_communicator_mpi(_ub_comm);
+      destroy_communicator_mpi(_ub_comm);
 #else
-    destroy_communicator(_ub_comm);
+      destroy_communicator(_ub_comm);
 #endif
+    } catch (const std::exception &e) {
+      NVTE_WARN("Error destroying communicator, cleanup may be incomplete:\n", e.what());
+    }
     _comm_created = false;
   }
 }

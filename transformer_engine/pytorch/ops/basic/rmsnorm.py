@@ -13,7 +13,6 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
-from ...fp8 import FP8GlobalStateManager
 from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,
@@ -151,8 +150,8 @@ class RMSNorm(BasicOperation):
             weight = torch.nn.Parameter(weight)
         self.weight = weight
 
-    def pre_first_forward(self, *args, **kwargs) -> None:
-        super().pre_first_forward(*args, **kwargs)
+    def pre_first_fuser_forward(self) -> None:
+        super().pre_first_fuser_forward()
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
@@ -160,7 +159,7 @@ class RMSNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
         if is_in_onnx_export_mode():
@@ -182,30 +181,21 @@ class RMSNorm(BasicOperation):
         x = maybe_dequantize(input_.contiguous(), dtype).view((-1, inner_dim))
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
-
-        # Check if output is quantized
-        output_quantizer = None
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        if with_quantized_compute:
-            output_quantizer = next_op_input_quantizer
-
         # Compute RMSNorm
-        sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
+        sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         y, _, rstdevs = rmsnorm_fwd(
             x,
             w,
             self.eps,
             None,
-            output_quantizer,
+            next_op_input_quantizer,
             TE_DType[dtype],
             sm_margin,
             self.zero_centered_gamma,
         )
 
         # Save state for backward pass
-        if requires_grad:
+        if ctx.requires_grad:
             ctx.save_for_backward(x, rstdevs)
             ctx.dtype = dtype
 
