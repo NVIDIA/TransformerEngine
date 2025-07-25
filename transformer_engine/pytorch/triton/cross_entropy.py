@@ -343,22 +343,19 @@ def cross_entropy_forward(
 def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
     """Backward implementation of cross entropy loss kernel"""
 
-    # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
-    if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
-        pass
+    # Always multiply - if grad_output is 1.0, this is effectively a no-op
+    # This avoids the torch.equal check which is incompatible with CUDA graphs
+    B, SQ, V = _input.shape
+    n_rows = B * SQ
+    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
-    else:
-        B, SQ, V = _input.shape
-        n_rows = B * SQ
-        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-
-        element_mul_kernel[(n_rows,)](
-            _input,
-            _input.stride(-2),
-            grad_output,
-            V,
-            BLOCK_SIZE=BLOCK_SIZE,
-            num_warps=32,
-        )
+    element_mul_kernel[(n_rows,)](
+        _input,
+        _input.stride(-2),
+        grad_output,
+        V,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=32,
+    )
 
     return _input
