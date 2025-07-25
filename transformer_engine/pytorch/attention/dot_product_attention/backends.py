@@ -152,7 +152,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
         self.softmax_type = softmax_type
-        self.softmax_offset = None
 
         def mask_func(x, y):
             return (
@@ -333,14 +332,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
 
         # softmax offsets
-        if self.softmax_type == "off-by-one" and self.softmax_offset is None:
-            self.softmax_offset = torch.ones(1, num_heads, 1, 1,
-                    device=query_layer.device, dtype=query_layer.dtype)
-        if self.softmax_type == "learable":
-            self.softmax_offset = softmax_offset
         if self.softmax_type != "vanilla":
             matmul_result = torch.cat([
-                matmul_result
+                matmul_result,
                 softmax_offset.to(dtype=matmul_result.dtype).expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
             ], dim=-1)
             attention_mask = F.pad(attention_mask, (0, 1), mode='constant', value=False)
