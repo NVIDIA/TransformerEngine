@@ -340,20 +340,6 @@ def _make_graphed_callables(
     visited_te_modules = set()
     need_bwd_dw_graph = {}
 
-    def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
-        if isinstance(module, TransformerEngineBaseModule):
-            visited_te_modules.add(module)
-        # If forward is called on a BasicOperation directly the hook will run
-        elif isinstance(module, BasicOperation):
-            visited_te_modules.add(module)
-        # If forward is called on a te.ops.Sequential it is not called on its constituent ops
-        elif isinstance(module, Sequential):
-            assert module._module_groups is not None, "Should have been initialized by warmup"
-            for module_group in module._module_groups:
-                if isinstance(module_group, OperationFuser):
-                    for basic_op in module_group._basic_ops:
-                        visited_te_modules.add(basic_op)
-
     # Run warmup and do the above filtering.
     with torch.cuda.stream(torch.cuda.Stream()):
         for func_idx, func in zip(warmup_func_idx, warmup_func):
@@ -362,10 +348,24 @@ def _make_graphed_callables(
             static_input_surface = per_callable_static_input_surfaces[func_idx]
 
             def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
+                modules = set()
                 if isinstance(module, TransformerEngineBaseModule):
+                    modules.add(module)
+                # If forward is called on a BasicOperation directly the hook will run
+                elif isinstance(module, BasicOperation):
+                    modules.add(module)
+                # If forward is called on a te.ops.Sequential it is not called on its constituent ops
+                elif isinstance(module, Sequential):
+                    assert module._module_groups is not None, "Should have been initialized by warmup"
+                    for module_group in module._module_groups:
+                        if isinstance(module_group, OperationFuser):
+                            for basic_op in module_group._basic_ops:
+                                modules.add(basic_op)
+
+                if len(modules) > 0:
                     if func_idx not in visited_te_modules:
                         visited_te_modules[func_idx] = set()
-                    visited_te_modules[func_idx].add(module)
+                    visited_te_modules[func_idx].update(modules)
 
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
