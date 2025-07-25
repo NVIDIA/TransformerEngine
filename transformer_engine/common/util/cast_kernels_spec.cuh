@@ -13,6 +13,13 @@ namespace ptx = transformer_engine::ptx;
 
 
 inline bool is_cast_only_enabled() {
+    // static bool enabled = [](){
+    //     const char* env = std::getenv("ENABLE_CAST_ONLY");
+    //     return env != nullptr && (env[0] == '1');
+    // }();
+    // return enabled;
+
+    // FIXME: when finish debugging, remove this
     const char* env = std::getenv("ENABLE_CAST_ONLY");
     return env != nullptr && (env[0] == '1');
 }
@@ -56,7 +63,8 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
     using OType = _OType;
 
     static constexpr int32_t chunkElems = 32;
-    using threadLayout = Layout<8, 4>;
+    // using threadLayout = Layout<8, 4>;
+    using threadLayout = Layout<1, 32>;
     static constexpr int32_t numThreadsPerChunk = 1;
     static constexpr int32_t warpDimM = threadLayout::M;
     static constexpr int32_t warpDimN = threadLayout::N * chunkElems;
@@ -96,14 +104,21 @@ __global__ void cast_mxfp8_kernel(
 
     float block_amax = 0.0f;
 
-    int32_t offset = blockIdx.y * CastTraits::blockDimM * cols
-                    + blockIdx.x * CastTraits::blockDimN
-                    + threadIdx.z * CastTraits::warpDimM * cols
-                    + threadIdx.y * CastTraits::warpDimN
-                    + (threadIdx.x / CastTraits::threadLayout::N) * cols
-                    + (threadIdx.x % CastTraits::threadLayout::N) * CastTraits::chunkElems;
+    uint2 coords;
+    coords.y = blockIdx.y * CastTraits::blockDimM
+                + threadIdx.z * CastTraits::warpDimM
+                + (threadIdx.x / CastTraits::threadLayout::N);
+    coords.x = blockIdx.x * CastTraits::blockDimN
+                + threadIdx.y * CastTraits::warpDimN
+                + (threadIdx.x % CastTraits::threadLayout::N) * CastTraits::chunkElems;
+    if (coords.y >= rows || coords.x >= cols) {
+        return;
+    }
+    
 
-    typename CastTraits::inputUnitType * input_units = reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+    int32_t offset = coords.y * cols + coords.x;
+    typename CastTraits::inputUnitType * input_units = 
+        reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
 
 
     if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
@@ -137,15 +152,11 @@ __global__ void cast_mxfp8_kernel(
         e8m0_t biased_exponent = ptx::float_to_e8m0(
             thread_amax_fp32 * Quantized_Limits<typename CastTraits::OType>::max_norm_rcp);
 
+
         // write biased_exponent
-        int32_t scale_offset = blockIdx.y * CastTraits::blockDimM * scale_stride_rowwise
-                               + blockIdx.x * (CastTraits::blockDimN / CastTraits::chunkElems)
-                               + threadIdx.z * CastTraits::warpDimM * scale_stride_rowwise
-                               + threadIdx.y * CastTraits::warpDimN / CastTraits::chunkElems
-                               + (threadIdx.x / CastTraits::threadLayout::N) * scale_stride_rowwise
-                               + (threadIdx.x % CastTraits::threadLayout::N) * 1;
         // method-1: point-wise writing
-        scales_rowwise[scale_offset] = biased_exponent;
+        scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+
         // method-2: packed to int32_t, then STG.32
         // uint32_t packed_scale = biased_exponent << ((threadIdx.x % 4) * 8);
         // uint32_t group_mask = 0xF << ((threadIdx.x / 4) * 4);
@@ -154,6 +165,24 @@ __global__ void cast_mxfp8_kernel(
         //     *reinterpret_cast<uint32_t *>(scales_rowwise + scale_offset) = packed_scale;
         // }
 
+        // method-3: accumulate to SMEM
+        // if constexpr (CastTraits::threadLayout::N == 32) {
+        //     __shared__ e8m0_t sScales[CastTraits::warpLayout::M][CastTraits::warpLayout::N][CastTraits::threadLayout::num];
+        //     sScales[threadIdx.z][threadIdx.y][threadIdx.x] = biased_exponent;
+        //     ptx::numbered_barrier_sync(32, 8 + threadIdx.z * CastTraits::warpLayout::N + threadIdx.y);
+        //     // int32_t leader = ptx::elect_one_sync();
+        //     // if (leader) {
+        //     //     int4 * gScales = reinterpret_cast<int4 *>(scales_rowwise + scale_offset);
+        //     //     #pragma unroll
+        //     //     for (int32_t i = 0; i < 2; i++) {
+        //     //         gScales[i] = reinterpret_cast<int4 *>(sScales[threadIdx.z][threadIdx.y])[i];
+        //     //     }
+        //     // }
+        //     if (threadIdx.x < 2) {
+        //         int4 * gScales = reinterpret_cast<int4 *>(scales_rowwise + scale_offset - threadIdx.x);
+        //         gScales[threadIdx.x] = reinterpret_cast<int4 *>(sScales[threadIdx.z][threadIdx.y])[threadIdx.x];
+        //     }
+        // }
 
         // scaling input
         float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
