@@ -19,6 +19,27 @@ namespace ptx {
 
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
+__device__ __forceinline__ 
+int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
+    int32_t pred = 0;
+    asm volatile (
+        "{\n\t"
+            ".reg .pred %px; \n"
+            "elect.sync _|%px, %1; \n"
+            "selp.b32 %0, 1, 0, %px; \n"
+        "\n\t}"
+        : "=r"(pred)
+        : "r"(mask)
+    );
+    return pred;
+}
+
+__device__ __forceinline__ 
+void numbered_barrier_sync(uint32_t num_threads, uint32_t barrier_id = 1u) {
+    asm volatile ("bar.sync %0, %1;\n" :: "r"(barrier_id), "r"(num_threads));
+}
+
+
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
   uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
