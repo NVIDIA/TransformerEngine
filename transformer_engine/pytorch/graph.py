@@ -337,7 +337,7 @@ def _make_graphed_callables(
     ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
 
     # Filter the TE modules that cudagraph can access.
-    visited_te_modules = set()
+    visited_te_modules = {}
     need_bwd_dw_graph = {}
 
     # Run warmup and do the above filtering.
