@@ -146,6 +146,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   }();
   // rank is the number of dimensions of the array
   constexpr uint32_t rank = 2;
+
+  // Dimension for the packed data types must reflect the number of individual U# values.
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
