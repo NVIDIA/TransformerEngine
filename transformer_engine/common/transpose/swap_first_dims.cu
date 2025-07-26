@@ -4,13 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_runtime.h>
 #include <transformer_engine/transpose.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <string>
-
-#include <cuda_runtime.h>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
@@ -103,11 +102,8 @@ struct KernelConfig {
 
 template <typename Type>
 __global__ void __launch_bounds__(block_size)
-    swap_first_dims_untuned_kernel(const Type * __restrict__ input,
-                                   Type * __restrict__ output,
-                                   const size_t dim0,
-                                   const size_t dim1,
-                                   const size_t dim2) {
+    swap_first_dims_untuned_kernel(const Type *__restrict__ input, Type *__restrict__ output,
+                                   const size_t dim0, const size_t dim1, const size_t dim2) {
   const size_t gid = threadIdx.x + blockIdx.x * block_size;
   const size_t nthreads = gridDim.x * block_size;
   for (size_t idx = gid; idx < dim0 * dim1 * dim2; idx += nthreads) {
@@ -129,9 +125,8 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Output tensor must be simple tensor, but scaling mode is ",
              to_string(output.scaling_mode), ".");
-  NVTE_CHECK(input.dtype() == output.dtype(),
-             "Input tensor (dtype=", to_string(input.dtype()), ") and output tensor (dtype=",
-             to_string(output.dtype()), ") do not match.");
+  NVTE_CHECK(input.dtype() == output.dtype(), "Input tensor (dtype=", to_string(input.dtype()),
+             ") and output tensor (dtype=", to_string(output.dtype()), ") do not match.");
   NVTE_CHECK(input.data.dptr != nullptr, "Input is not allocated.");
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
 
@@ -139,19 +134,15 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
   const auto input_shape = input.shape();
   const auto output_shape = output.shape();
   NVTE_CHECK(input_shape.size() >= 2, "Invalid input tensor dimensions (shape=", input_shape, ").");
-  NVTE_CHECK(output_shape.size() == input_shape.size(),
-             "Input tensor (shape=", input_shape, ") and output tensor (shape=", output_shape,
-             ") do not match.");
-  NVTE_CHECK(input_shape[0] == output_shape[1],
-             "Input tensor (shape=", input_shape, ") and output tensor (shape=", output_shape,
-             ") do not match.");
-  NVTE_CHECK(input_shape[1] == output_shape[0],
-             "Input tensor (shape=", input_shape, ") and output tensor (shape=", output_shape,
-             ") do not match.");
+  NVTE_CHECK(output_shape.size() == input_shape.size(), "Input tensor (shape=", input_shape,
+             ") and output tensor (shape=", output_shape, ") do not match.");
+  NVTE_CHECK(input_shape[0] == output_shape[1], "Input tensor (shape=", input_shape,
+             ") and output tensor (shape=", output_shape, ") do not match.");
+  NVTE_CHECK(input_shape[1] == output_shape[0], "Input tensor (shape=", input_shape,
+             ") and output tensor (shape=", output_shape, ") do not match.");
   for (size_t i = 2; i < input_shape.size(); ++i) {
-    NVTE_CHECK(input_shape[i] == output_shape[i],
-               "Input tensor (shape=", input_shape, ") and output tensor (shape=", output_shape,
-               ") do not match.");
+    NVTE_CHECK(input_shape[i] == output_shape[i], "Input tensor (shape=", input_shape,
+               ") and output tensor (shape=", output_shape, ") do not match.");
   }
 
   // Reinterpret tensors as 3D tensors of bytes
@@ -184,29 +175,29 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
   // Launch kernel
   if (vector_size == 1) {
     // General kernel
-    swap_first_dims_untuned_kernel
-      <<<config.num_blocks, block_size, 0, stream>>>(static_cast<const uint8_t*>(input.data.dptr),
-                                                     static_cast<uint8_t*>(output.data.dptr),
-                                                     dim0, dim1, dim2);
+    swap_first_dims_untuned_kernel<<<config.num_blocks, block_size, 0, stream>>>(
+        static_cast<const uint8_t *>(input.data.dptr), static_cast<uint8_t *>(output.data.dptr),
+        dim0, dim1, dim2);
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     // Compile NVRTC kernel if needed
     auto &rtc_manager = rtc::KernelManager::instance();
-    const std::string kernel_label = concat_strings(
-        "swap_first_dims,vector_size=", vector_size,
-        ",single_load_store=", config.single_load_store);
+    const std::string kernel_label =
+        concat_strings("swap_first_dims,vector_size=", vector_size,
+                       ",single_load_store=", config.single_load_store);
     if (!rtc_manager.is_compiled(kernel_label)) {
       std::string code = string_code_transpose_rtc_swap_first_dims_cu;
       code = regex_replace(code, "__VECTOR_SIZE__", vector_size);
       code = regex_replace(code, "__BLOCK_SIZE__", block_size);
-      code = regex_replace(code, "__SINGLE_LOAD_STORE__", static_cast<int>(config.single_load_store));
+      code =
+          regex_replace(code, "__SINGLE_LOAD_STORE__", static_cast<int>(config.single_load_store));
       rtc_manager.compile(kernel_label, "swap_first_dims_kernel", code,
                           "transformer_engine/common/transpose/rtc/swap_first_dims.cu");
     }
 
     // Launch NVRTC kernel
-    rtc_manager.launch(kernel_label, config.num_blocks, block_size, 0, stream,
-                       input.data.dptr, output.data.dptr, dim0, dim1, dim2 / vector_size);
+    rtc_manager.launch(kernel_label, config.num_blocks, block_size, 0, stream, input.data.dptr,
+                       output.data.dptr, dim0, dim1, dim2 / vector_size);
   }
 }
 
