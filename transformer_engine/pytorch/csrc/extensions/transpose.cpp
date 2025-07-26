@@ -44,29 +44,29 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   return out;
 }
 
-at::Tensor swap_first_dims(at::Tensor input, std::optional<at::Tensor> output) {
+at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   init_extension();
 
   // Make sure input is contiguous
-  input = input.contiguous();
+  const auto &input = tensor.contiguous();
 
   // Allocate output tensor if needed
-  if (!output) {
+  if (!out) {
     auto in_shape = getTensorShape(input);
     NVTE_CHECK(in_shape.size() >= 2, "Invalid input tensor dimensions (shape=", in_shape, ")");
     std::vector<int64_t> out_shape_int64(in_shape.begin(), in_shape.end());
     out_shape_int64[0] = static_cast<int64_t>(in_shape[1]);
     out_shape_int64[1] = static_cast<int64_t>(in_shape[0]);
     auto opts = at::TensorOptions().dtype(input.dtype()).device(input.device());
-    output = at::empty(out_shape_int64, opts);
+    out = at::empty(out_shape_int64, opts);
   }
 
   // Launch kernel
   const TensorWrapper te_input = makeTransformerEngineTensor(input);
-  TensorWrapper te_output = makeTransformerEngineTensor(*output);
+  TensorWrapper te_output = makeTransformerEngineTensor(*out);
   nvte_swap_first_dims(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
 
-  return std::move(*output);
+  return std::move(*out);
 }
 
 }  // namespace pytorch

@@ -143,7 +143,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
 
-at::Tensor swap_first_dims(at::Tensor input, std::optional<at::Tensor> output = std::nullopt);
+at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
  * Activations
