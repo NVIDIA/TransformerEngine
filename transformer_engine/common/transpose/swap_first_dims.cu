@@ -26,7 +26,7 @@ namespace {
 #include "string_code_transpose_rtc_swap_first_dims_cu.h"
 
 // Hard-coded kernel parameters
-constexpr size_t block_size = 256;
+constexpr size_t block_size = 128;
 
 /* Performance heuristics for optimized kernel parameters */
 struct KernelConfig {
@@ -75,7 +75,7 @@ struct KernelConfig {
     bytes_per_load = std::min(cache_line_size, warp_size * vector_size);  // Contiguous reads
     bytes_per_store = bytes_per_load;
     if (dim2 % (vector_size * warp_size) != 0) {
-      // Some warps are writing to two memory non-contiguous regions
+      // Some warps are writing to two non-contiguous regions
       bytes_per_store /= 2;
     }
   }
@@ -114,9 +114,8 @@ __global__ void __launch_bounds__(block_size)
     const size_t idx2 = idx % dim2;
     const size_t idx1 = (idx / dim2) % dim1;
     const size_t idx0 = (idx / dim2) / dim1;
-    const size_t in_offset = idx0 * dim1 * dim2 + idx1 * dim2 + idx2;
     const size_t out_offset = idx1 * dim0 * dim2 + idx0 * dim2 + idx2;
-    output[out_offset] = input[in_offset];
+    output[out_offset] = input[idx];
   }
 }
 
@@ -174,6 +173,8 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
         config = new_config;
       }
     };
+    try_config(32);
+    try_config(16);
     try_config(8);
     try_config(4);
     try_config(2);
@@ -189,26 +190,14 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
                                                      dim0, dim1, dim2);
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
-    // Check if NVRTC kernel is available
+    // Compile NVRTC kernel if needed
     auto &rtc_manager = rtc::KernelManager::instance();
     const std::string kernel_label = concat_strings(
         "swap_first_dims,vector_size=", vector_size,
         ",single_load_store=", config.single_load_store);
     if (!rtc_manager.is_compiled(kernel_label)) {
-      // Data type for vectorized load/stores
-      std::string type_name;
-      switch (vector_size) {
-      case 8: type_name = "uint64_t"; break;
-      case 4: type_name = "uint32_t"; break;
-      case 2: type_name = "uint16_t"; break;
-      case 1: type_name = "uint8_t"; break;
-      default:
-        NVTE_ERROR("Unsupported vector size (", vector_size, ")");
-      }
-
-      // Compile NVRTC kernel
       std::string code = string_code_transpose_rtc_swap_first_dims_cu;
-      code = regex_replace(code, "__TYPE__", type_name);
+      code = regex_replace(code, "__VECTOR_SIZE__", vector_size);
       code = regex_replace(code, "__BLOCK_SIZE__", block_size);
       code = regex_replace(code, "__SINGLE_LOAD_STORE__", static_cast<int>(config.single_load_store));
       rtc_manager.compile(kernel_label, "swap_first_dims_kernel", code,
