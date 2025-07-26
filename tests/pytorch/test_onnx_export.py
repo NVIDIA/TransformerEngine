@@ -27,7 +27,6 @@ import warnings
 import numpy as np
 import onnxruntime as ort
 import torch
-import random
 from torch import nn as nn
 from typing import Optional, Union, Tuple, List
 from onnxruntime_extensions import PyCustomOpDef, get_library_path, onnx_op
@@ -59,14 +58,13 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-skip_MXFP8 = pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
 
-fp8_recipes = [
-    None,
-    recipe.DelayedScaling(),
-    recipe.MXFP8BlockScaling(),
-]
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.DelayedScaling())
+fp8_recipes.append(None)
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
@@ -369,14 +367,6 @@ def validate_result(
     )
 
 
-def create_meta(scale_factor: float, size: int = 1):
-    meta = tex.FP8TensorMeta()
-    meta.amax_history = torch.zeros(1, size, dtype=torch.float32, device="cuda")
-    meta.scale_inv = torch.ones(size, dtype=torch.float32, device="cuda") / scale_factor
-    meta.scale = torch.ones(size, dtype=torch.float32, device="cuda") * scale_factor
-    return meta
-
-
 def dtype2str(dtype: torch.dtype, fake_bf16_io=False):
     if fake_bf16_io:
         assert dtype == torch.bfloat16
@@ -412,8 +402,6 @@ def get_attn_mask_str(use_mask, attn_mask_type):
 Test cases begin here.
 """
 
-
-@pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [True, False])
@@ -431,18 +419,11 @@ Test cases begin here.
     ],
 )
 def test_export_linear(
-    seed_default_rng,
-    scale_factor: float,
     fp8_recipe: recipe.Recipe,
     use_bias: bool,
     return_bias: bool,
     precision: torch.dtype,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if return_bias and not use_bias:
         pytest.skip("Cannot return bias when bias is disabled")
 
@@ -498,7 +479,6 @@ def test_export_linear(
             )
 
 
-@pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize(
     "precision",
@@ -511,18 +491,11 @@ def test_export_linear(
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_export_layernorm(
-    seed_default_rng,
-    scale_factor: float,
     fp8_recipe: recipe.Recipe,
     precision: torch.dtype,
     zero_centered_gamma: bool,
     normalization: str,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
     batch_size = 4
@@ -582,7 +555,6 @@ def test_export_layernorm(
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_export_layernorm_linear(
-    seed_default_rng,
     scale_factor: float,
     fp8_recipe: recipe.Recipe,
     use_bias: bool,
@@ -592,11 +564,6 @@ def test_export_layernorm_linear(
     zero_centered_gamma: bool,
     normalization: str,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if return_bias and not use_bias:
         pytest.skip("Cannot return bias when bias is disabled")
 
@@ -663,7 +630,6 @@ def test_export_layernorm_linear(
 @pytest.mark.parametrize("activation", supported_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_export_layernorm_mlp(
-    seed_default_rng,
     scale_factor: float,
     fp8_recipe: recipe.Recipe,
     use_bias: bool,
@@ -674,11 +640,6 @@ def test_export_layernorm_mlp(
     activation: str,
     normalization: str,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if return_bias and not use_bias:
         pytest.skip("Cannot return bias when bias is disabled")
 
@@ -734,8 +695,6 @@ def test_export_layernorm_mlp(
     ],
 )
 def test_export_core_attention(
-    seed_default_rng,
-    set_max_seq_len,
     precision: torch.dtype,
     use_mask: bool,
     attn_mask_type: str,
@@ -803,8 +762,6 @@ test_configs_attention_type = [
     "input_layernorm, attention_type, fuse_qkv_params", test_configs_attention_type
 )
 def test_export_multihead_attention(
-    seed_default_rng,
-    set_max_seq_len,
     fp8_recipe: recipe.Recipe,
     use_mask: bool,
     attn_mask_type: str,
@@ -814,12 +771,6 @@ def test_export_multihead_attention(
     attention_type: str,
     fuse_qkv_params: bool,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-
     hidden_size = 256
     sequence_length = 128
     batch_size = 4
@@ -967,8 +918,6 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("zero_centered_gamma", [False, True])
 @pytest.mark.parametrize("activation", supported_activations)
 def test_export_transformer_layer(
-    seed_default_rng,
-    set_max_seq_len,
     fp8_recipe: recipe.Recipe,
     use_mask: bool,
     attn_mask_type: str,
@@ -978,11 +927,6 @@ def test_export_transformer_layer(
     zero_centered_gamma: bool,
     activation: str,
 ):
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
 
     # Layer configuration
     hidden_size = 64
@@ -1043,14 +987,10 @@ def test_export_transformer_layer(
     )
 
 
-@skip_FP8
-@skip_MXFP8
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("precision", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("zero_centered_gamma", [True])
 def test_export_gpt_generation(
-    seed_default_rng,
-    set_max_seq_len,
     fp8_recipe: recipe.Recipe,
     precision: torch.dtype,
     zero_centered_gamma: bool,
@@ -1058,12 +998,6 @@ def test_export_gpt_generation(
     """Test that the ONNX model can correctly handle inputs with different shapes and that
     the attention mask is adjusted on-the-fly to different sequence lengths.
     """
-
-    # Skip FP8 tests on non-hopper devices
-    if fp8_recipe is not None and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None and fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
 
     # Layer configuration
     hidden_size = 64

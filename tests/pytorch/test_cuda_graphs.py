@@ -2,9 +2,7 @@
 #
 # See LICENSE for license information.
 
-from dataclasses import dataclass
-import itertools
-from typing import Iterable, List, Tuple, Union
+from typing import Iterable, List, Union
 import pytest
 
 import torch
@@ -26,11 +24,11 @@ from transformer_engine.common import recipe
 from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_block_scaling_available, _ = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 
 # Reset RNG states.
 reset_rng_states()
@@ -39,12 +37,14 @@ model_configs = {
     "small": ModelConfig(32, 2, 2, 32),
 }
 
-fp8_recipes = [
-    recipe.DelayedScaling(),
-    recipe.MXFP8BlockScaling(),
-    recipe.Float8CurrentScaling(),
-    recipe.Float8BlockScaling(),
-]
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+if fp8_block_scaling_available:
+    fp8_recipes.append(recipe.Float8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
 
 # Supported data types
 dtypes: List[torch.dtype] = [torch.float32, torch.float16]
@@ -292,20 +292,14 @@ def test_make_graphed_callables(
     fp8_weight_caching: bool = False,
 ) -> None:
 
-    # Skip invalid configurations.
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if fp8_recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
-    if fp8_recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
 
     if fp8_recipe.float8_block_scaling() and module == "linear_op":
         pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
+
     # Run model with different CUDA graph settings.
     model_config = model_configs[model_config]
     kwargs = dict(
@@ -336,7 +330,6 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 ]
 
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize(
     "module",
     _test_make_graphed_callables_with_fp8_weight_caching_modules,
