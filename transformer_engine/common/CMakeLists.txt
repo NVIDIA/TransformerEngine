@@ -67,6 +67,7 @@ list(APPEND transformer_engine_SOURCES
      transpose/multi_cast_transpose.cu
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
+     transpose/swap_first_dims.cu
      activation/gelu.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
@@ -166,6 +167,8 @@ make_string_header_from_file(transpose/rtc/cast_transpose.cu
                              string_code_transpose_rtc_cast_transpose_cu)
 make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
+make_string_header_from_file(transpose/rtc/swap_first_dims.cu
+                             string_code_transpose_rtc_swap_first_dims_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
