@@ -108,6 +108,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
+  const bool rowwise_scale_is_within_bounds = scales_offset_X_rowwise < cols;
+  const bool colwise_scale_is_within_bounds = scales_offset_X_colwise < cols;
+
   // helps resolving bank conflicts in shmem
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
@@ -136,8 +139,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
   IType *act_in_sh = reinterpret_cast<IType *>(dshmem + elt_input_mem);
 
-  OType *out_rowwise_sh = reinterpret_cast<OType *>(dshmem + in_mem);
-  OType *out_colwise_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
+  OType *out_rowwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem);
+  OType *out_colwise_data_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
@@ -285,7 +288,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float scaled_out = in * block_scale_inverse;
 
         const size_t shmem_offset_elt = shmem_offset_base_colwise + i * BUFF_DIM_X;
-        out_colwise_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
+        out_colwise_data_sh[shmem_offset_elt] = static_cast<OType>(scaled_out);
       }
     }
 
@@ -439,9 +442,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
           ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
         }
-        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-        const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const int shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
         out.store_to(&out_rowwise_data_sh[shmem_offset_rowwise]);
       }
     }
