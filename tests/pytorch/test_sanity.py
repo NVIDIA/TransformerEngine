@@ -811,9 +811,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
-def test_sanity_gradient_accumulation_fusion(
-    dtype, fp8_recipe, model, skip_wgrad
-):
+def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad):
     config = model_configs[model]
 
     if fp8_recipe is not None:

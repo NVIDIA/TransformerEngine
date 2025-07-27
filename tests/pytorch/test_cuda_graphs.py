@@ -25,9 +25,7 @@ from utils import ModelConfig, reset_rng_states
 
 # Check if FP8 is supported.
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
-fp8_block_scaling_available, _ = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
-)
+fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 
 # Reset RNG states.
