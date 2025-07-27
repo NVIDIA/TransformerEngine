@@ -47,7 +47,7 @@ import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 # Only run FP8 tests on supported devices.
-fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
@@ -2594,6 +2594,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
 )
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_fp8_grouped_gemm(shape, accumulate):
+    if not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     z, m, k, n = shape
     m_splits = [m // z] * z
 

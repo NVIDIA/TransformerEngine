@@ -614,6 +614,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, normalization):
     config = model_configs[model]
 
     if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
 
@@ -666,6 +668,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, normalization):
     config = model_configs[model]
 
     if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
 
