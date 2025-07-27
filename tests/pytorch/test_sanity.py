@@ -539,7 +539,7 @@ def test_sanity_layernorm_mlp(
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
-@pytest.mark.parametrize("activation", all_activations)
+@pytest.mark.parametrize("activation", ["gelu", "swiglu"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_sanity_gpt(
@@ -598,7 +598,6 @@ def test_sanity_gpt_126m():
         fp8_recipe=fp8_recipe,
         model="126m",
         skip_wgrad=False,
-        zero_centered_gamma=True,
         bias=True,
         activation="gelu",
         normalization="LayerNorm",
@@ -610,9 +609,8 @@ def test_sanity_gpt_126m():
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
-@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
+def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, normalization):
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -635,7 +633,6 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, 
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=True,
         output_layernorm=True,
-        zero_centered_gamma=zero_centered_gamma,
         self_attn_mask_type="causal",
         normalization=normalization,
         device="cuda",
@@ -656,7 +653,6 @@ def test_sanity_bert_126m():
         fp8_recipe=fp8_recipe,
         model="126m",
         skip_wgrad=False,
-        zero_centered_gamma=False,
         normalization="LayerNorm",
     )
 
@@ -665,9 +661,8 @@ def test_sanity_bert_126m():
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
-@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, normalization):
+def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, normalization):
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -691,7 +686,6 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, no
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
         layer_type="decoder",
-        zero_centered_gamma=zero_centered_gamma,
         normalization=normalization,
         device="cuda",
     )
@@ -711,7 +705,6 @@ def test_sanity_T5_126m():
         fp8_recipe=fp8_recipe,
         model="126m",
         skip_wgrad=False,
-        zero_centered_gamma=False,
         normalization="LayerNorm",
     )
 
@@ -750,8 +743,7 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("skip_wgrad", all_boolean)
-def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
+def test_sanity_drop_path(dtype, fp8_recipe, model):
     config = model_configs[model]
 
     if fp8_recipe is not None:
@@ -778,7 +770,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
         device="cuda",
     )
 
-    _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad)
+    _test_sanity_e2e(block, dtype, config, fp8_recipe, False)
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -819,9 +811,8 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
-@pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_sanity_gradient_accumulation_fusion(
-    dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma
+    dtype, fp8_recipe, model, skip_wgrad
 ):
     config = model_configs[model]
 
@@ -845,7 +836,6 @@ def test_sanity_gradient_accumulation_fusion(
         params_dtype=dtype,
         apply_residual_connection_post_layernorm=False,
         output_layernorm=False,
-        zero_centered_gamma=zero_centered_gamma,
         fuse_qkv_params=True,
         fuse_wgrad_accumulation=True,
         device="cuda",

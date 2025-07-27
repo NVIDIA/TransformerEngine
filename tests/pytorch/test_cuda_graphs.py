@@ -277,27 +277,25 @@ def _test_cuda_graphs(
 
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
-@pytest.mark.parametrize("fp8", (False, True))
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None])
 def test_make_graphed_callables(
     *,
     module: str,
     model_config: str = "small",
     num_layers: int = 3,
     dtype: torch.dtype,
-    fp8: bool,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
     fp8_weight_caching: bool = False,
 ) -> None:
 
+    fp8 = fp8_recipe is not None
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-
-    if fp8_recipe.float8_block_scaling() and module == "linear_op":
+    if fp8 and fp8_recipe.float8_block_scaling() and module == "linear_op":
         pytest.skip("Module not yet supported for float8_block_scaling with CUDA graphs")
 
     # Run model with different CUDA graph settings.
@@ -345,7 +343,6 @@ def test_make_graphed_callables_with_fp8_weight_caching(
     test_make_graphed_callables(
         module=module,
         dtype=torch.float32,
-        fp8=True,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
         fp8_weight_caching=True,

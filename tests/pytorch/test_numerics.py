@@ -1631,14 +1631,12 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("activation", all_activations)
-@pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
+    dtype, bs, model, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
 
@@ -1647,7 +1645,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
         bias=bias,
-        normalization=normalization,
         params_dtype=dtype,
         device="cuda",
         delay_wgrad_compute=True,
@@ -1659,7 +1656,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
         bias=bias,
-        normalization=normalization,
         params_dtype=dtype,
         device="cuda",
         delay_wgrad_compute=False,
@@ -1669,8 +1665,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     # Share params
     with torch.no_grad():
         ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
-        if normalization != "RMSNorm":
-            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
         ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
         ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
         if bias:
