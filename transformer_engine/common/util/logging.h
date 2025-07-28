@@ -102,17 +102,6 @@
     }                                                         \
   } while (false)
 
-#define NVTE_CHECK_MPI(expr)                         \
-  do {                                               \
-    int err = (expr);                                \
-    if (err != MPI_SUCCESS) {                        \
-      char err_str[MPI_MAX_ERROR_STRING + 1]{};      \
-      int _len{};                                    \
-      MPI_Error_string(err, err_str, &_len);         \
-      NVTE_ERROR("MPI error: ", err, ": ", err_str); \
-    }                                                \
-  } while (false)
-
 #endif  // NVTE_WITH_CUBLASMP
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
