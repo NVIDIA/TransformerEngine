@@ -76,7 +76,7 @@ std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrap
   return swizzled_scale_inv;
 }
 
-std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
+std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper>& tensors, bool rowwise) {
   using namespace transformer_engine::pytorch;
 
@@ -92,10 +92,13 @@ std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
     return std::nullopt;
   }
 
-  std::vector<at::Tensor> swizzled_scale_inv_list;
   std::vector<transformer_engine::TensorWrapper> wrappers;
   std::vector<NVTETensor> input_tensors, output_tensors;
 
+  // Collect scale_inv shapes
+  std::vector<std::vector<size_t>> scale_inv_shapes;
+  size_t buffer_size = 0;
+  std::vector<size_t> scale_inv_offsets;
   for (auto& tensor : tensors) {
     NVTEBasicTensor scale_inv;
     if (rowwise) {
@@ -103,19 +106,30 @@ std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
     } else {
       scale_inv = tensor.get_columnwise_scale_inv();
     }
-
-    auto input_shape = nvte_shape_to_vector(tensor.shape());
     auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
-
-    // Allocate memory for swizzled output.
-    auto options = at::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
-    std::vector<int64_t> scale_inv_shape_int;
-    for (size_t i = 0; i < scale_inv_shape.size(); ++i) {
-      scale_inv_shape_int.push_back(static_cast<int64_t>(scale_inv_shape[i]));
+    scale_inv_shapes.emplace_back(scale_inv_shape);
+  }
+  // Calculate buffer size and offsets for scale_invs
+  constexpr size_t scale_elem_size = 1;
+  for (size_t i = 0; i < scale_inv_shapes.size(); ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      scale_inv_offsets.push_back(buffer_size);
+      buffer_size += product(scale_inv_shapes[i]) * scale_elem_size;
+  }
+  // Allocate full buffer
+  auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
+ 
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    auto& tensor = tensors[i];
+    NVTEBasicTensor scale_inv;
+    if (rowwise) {
+      scale_inv = tensor.get_rowwise_scale_inv();
+    } else {
+      scale_inv = tensor.get_columnwise_scale_inv();
     }
-    auto swizzled_scale_inv = at::empty(scale_inv_shape_int, options);
     void* scale_inv_dptr = scale_inv.data_ptr;
-    void* swizzled_scale_inv_dptr = getDataPtr(swizzled_scale_inv, 0);
+    void* swizzled_scale_inv_dptr = getDataPtr(buffer, scale_inv_offsets[i]);
+    auto input_shape = nvte_shape_to_vector(tensor.shape());
 
     // Reconstruct input only to avoid swizzling both directions if not needed.
     // Use any 8 bit type, it's irrelevant.
@@ -124,29 +138,28 @@ std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
     if (rowwise) {
       input_cu.set_rowwise_data(tensor.dptr(), transformer_engine::DType::kFloat8E4M3, input_shape);
       input_cu.set_rowwise_scale_inv(scale_inv_dptr, transformer_engine::DType::kFloat8E8M0,
-                                     scale_inv_shape);
+                                     scale_inv_shapes[i]);
       output_cu.set_rowwise_data(tensor.dptr(), transformer_engine::DType::kFloat8E4M3,
                                  input_shape);
       output_cu.set_rowwise_scale_inv(swizzled_scale_inv_dptr,
-                                      transformer_engine::DType::kFloat8E8M0, scale_inv_shape);
+                                      transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);
       // Set the swizzled scaling factor to the original tensor.
       tensor.set_rowwise_scale_inv(swizzled_scale_inv_dptr, transformer_engine::DType::kFloat8E8M0,
-                                   scale_inv_shape);
+                                   scale_inv_shapes[i]);
     } else {
       input_cu.set_columnwise_data(tensor.columnwise_dptr(), transformer_engine::DType::kFloat8E4M3,
                                    input_shape);
       input_cu.set_columnwise_scale_inv(scale_inv_dptr, transformer_engine::DType::kFloat8E8M0,
-                                        scale_inv_shape);
+                                        scale_inv_shapes[i]);
       output_cu.set_columnwise_data(tensor.columnwise_dptr(),
                                     transformer_engine::DType::kFloat8E4M3, input_shape);
       output_cu.set_columnwise_scale_inv(swizzled_scale_inv_dptr,
-                                         transformer_engine::DType::kFloat8E8M0, scale_inv_shape);
+                                         transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);
       // Set the swizzled scaling factor to the original tensor.
       tensor.set_columnwise_scale_inv(swizzled_scale_inv_dptr,
-                                      transformer_engine::DType::kFloat8E8M0, scale_inv_shape);
+                                      transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);
     }
 
-    swizzled_scale_inv_list.emplace_back(std::move(swizzled_scale_inv));
     input_tensors.emplace_back(input_cu.data());
     output_tensors.emplace_back(output_cu.data());
     wrappers.emplace_back(std::move(input_cu));
@@ -157,5 +170,5 @@ std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
   nvte_multi_tensor_swizzle_scaling_factors(input_tensors.data(), output_tensors.data(),
                                             input_tensors.size(), at::cuda::getCurrentCUDAStream());
 
-  return swizzled_scale_inv_list;
+  return buffer;
 }

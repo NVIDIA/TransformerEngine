@@ -13,18 +13,18 @@
 
 #include "transformer_engine/transformer_engine.h"
 
-/* Swizzle the scaling factor of the input tensor.
+/*! \brief Swizzle the scaling factor of the input tensor.
  *
  * The returned swizzled scaling factor tensor should be kept alive during the GEMM.
  */
 std::optional<at::Tensor> swizzle_scaling_factors(transformer_engine::TensorWrapper &input,
                                                   bool rowwise);
 
-/* Swizzle the scaling factor of the input tensors.
+/*! \brief Swizzle the scaling factor of the input tensors.
  *
  * The returned swizzled scaling factor tensors should be kept alive during the GEMMs.
  */
-std::optional<std::vector<at::Tensor>> multi_tensor_swizzle_scaling_factors(
+std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper> &inputs, bool rowwise);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
