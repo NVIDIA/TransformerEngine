@@ -1126,8 +1126,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           cudaLaunchConfig_t cfg = {grid, block_size, dshmem_size, stream, NULL, 0};
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-          attribute[0].val.programmaticStreamSerializationAllowed = 1;
-          cfg.attrs = attribute;
+          attribute[0].val.programmaticStreamSerializationAllowed = 1; cfg.attrs = attribute;
           cfg.numAttrs = 1;
 
           switch (scaling_type) {
@@ -1137,12 +1136,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cudaLaunchKernelEx(&cfg, cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                   false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                       false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
             case ScalingType::COLWISE:
               cudaFuncSetAttribute(
@@ -1150,12 +1150,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cudaLaunchKernelEx(&cfg, cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
-                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
             case ScalingType::BIDIMENSIONAL:
               cudaFuncSetAttribute(
@@ -1163,12 +1164,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
 
-              cudaLaunchKernelEx(&cfg, cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true, true,
-                                   CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+              cudaLaunchKernelEx(
+                  &cfg,
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
+                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                  tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                  workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise, scale_stride_colwise);
               break;
           }
 
