@@ -229,8 +229,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.empty(1, dtype=torch.float32, device=device)
-        self.amax = torch.empty(1, dtype=torch.float32, device=device)
+        self.scale = torch.ones(1, dtype=torch.float32, device=device)
+        self.amax = torch.zeros(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
