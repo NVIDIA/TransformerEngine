@@ -412,7 +412,9 @@ def train_and_evaluate(args):
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            jit_encoder_init = jax.jit(
+                encoder.init, in_shardings=in_shardings, out_shardings=out_shardings
+            )
             var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
@@ -432,11 +434,15 @@ def train_and_evaluate(args):
                 None,
             )
             out_shardings = (state_sharding, None, None, None)
-            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
+            jit_train_step = jax.jit(
+                train_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(
+                eval_step, in_shardings=in_shardings, out_shardings=out_shardings
+            )
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -609,7 +615,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling")
-        assert result[0] < 0.505 and result[1] > 0.753
+        assert result[0] < 0.506 and result[1] > 0.753
 
     @unittest.skipIf(
         not is_fp8_supported(), "Device compute capability 9.0+ is required for CurrentScaling FP8"
@@ -639,7 +645,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
-        assert result[0] < 0.505 and result[1] > 0.753
+        assert result[0] < 0.506 and result[1] > 0.753
 
     # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
 

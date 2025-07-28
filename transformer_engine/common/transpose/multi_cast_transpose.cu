@@ -237,8 +237,8 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
 
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_store_size / typeToSize(otype);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_size / typeToSize(itype);
+  const int tile_dim_m = THREADS_PER_WARP * desired_store_size * 8 / typeToNumBits(otype);
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_size * 8 / typeToNumBits(itype);
 
   // Add tensors to kernel argument struct
   MultiCastTransposeArgs kernel_args_aligned, kernel_args_unaligned;
@@ -334,8 +334,8 @@ void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
   using namespace transformer_engine;
   std::vector<Tensor*> input_list_, output_list_;
   for (size_t i = 0; i < num_tensors; ++i) {
-    input_list_.push_back(reinterpret_cast<Tensor*>(const_cast<NVTETensor&>(input_list[i])));
-    output_list_.push_back(reinterpret_cast<Tensor*>(output_list[i]));
+    input_list_.push_back(convertNVTETensorCheck(input_list[i]));
+    output_list_.push_back(convertNVTETensorCheck(output_list[i]));
   }
   multi_cast_transpose(input_list_, output_list_, stream);
 }

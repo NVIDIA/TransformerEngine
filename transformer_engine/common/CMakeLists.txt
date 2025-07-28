@@ -6,7 +6,9 @@ cmake_minimum_required(VERSION 3.21)
 
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
   else ()
     set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
@@ -90,6 +92,7 @@ list(APPEND transformer_engine_SOURCES
      util/cuda_driver.cpp
      util/cuda_nvml.cpp
      util/cuda_runtime.cpp
+     util/multi_stream.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu

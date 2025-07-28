@@ -47,11 +47,6 @@ if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     )
 
 
-# Disable TF32
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
-
-
 # Quantization recipe setup
 def quantization_recipe() -> Recipe:
     if QUANTIZATION == "fp8":
@@ -100,11 +95,15 @@ def main(argv=None, namespace=None):
 
     # Quantization scheme
     QUANTIZATION = args.quantization
-    if QUANTIZATION in ("fp8", "mxfp8", "fp8_block_scaling"):
-        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+    if QUANTIZATION in ("fp8", "mxfp8"):
         SEQ_LEN = 32
         BATCH_SIZE = 32
         HIDDEN_SIZE = 128
+    elif QUANTIZATION == "fp8_block_scaling":
+        SEQ_LEN = 128
+        BATCH_SIZE = 128
+        HIDDEN_SIZE = 512
 
     test_dict = [
         test_quantizer,
@@ -162,7 +161,7 @@ def _gather(tensor, dim=0):
 
 
 def _constant(tensor):
-    return nn.init.constant_(tensor, 0.5)
+    return nn.init.constant_(tensor, 0.05)
 
 
 def dist_print(msg, src=None, end="\n", error=False):
@@ -185,7 +184,8 @@ def _get_tolerances(dtype):
     if dtype == torch.bfloat16:
         return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
-        return {"rtol": 1e-4, "atol": 1e-4}
+        # TF32 has same mantissa bits as FP16
+        return {"rtol": 1e-3, "atol": 1e-5}
     raise ValueError(f"Unsupported dtype ({dtype})")
 
 
@@ -649,7 +649,7 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 
@@ -758,7 +758,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     if "return_layernorm_output" in kwargs:
         output_single_node, norm_s = output_single_node
         output_distributed, norm_d = output_distributed
-        if sequence_parallel:
+        if sequence_parallel and not kwargs.get("return_layernorm_output_gathered", False):
             norm_d = _gather(norm_d)
         _check_outputs(norm_s, norm_d)
 

@@ -83,7 +83,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
     """Returns workspace for multi-stream cublas."""
     global _multi_stream_cublas_workspace
     if not _multi_stream_cublas_workspace:
-        for _ in range(tex._num_cublas_streams):
+        for _ in range(tex.get_num_cublas_streams()):
             _multi_stream_cublas_workspace.append(
                 torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda")
             )
@@ -639,6 +639,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Update quantizers with new amax pointers.
             self.quantizers[meta_key] = self.fp8_meta[meta_key].make_quantizers()
+            # Make sure weight tensors has correct quantizers
+            self._update_weight_quantizers()
 
             # Update the global buffers with new amax and history pointers.
             if FP8GlobalStateManager.get_buffer_info() in self.fp8_meta:
@@ -691,6 +693,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def _update_weight_quantizers(self) -> None:
+        """Update the quantizers for the weight tensors."""
+        weight_tensors = self._get_weight_tensors()
+        weight_quantizers = self._get_weight_quantizers()
+        assert len(weight_tensors) == len(weight_quantizers), (
+            f"Number of weight tensors ({len(weight_tensors)}) and quantizers "
+            f"({len(weight_quantizers)}) must match"
+        )
+        for weight, quantizer in zip(weight_tensors, weight_quantizers):
+            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+                weight.update_quantizer(quantizer)
+
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+        """Get the weight tensors of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
+        )
+
+    def _get_weight_quantizers(self) -> List[Quantizer]:
+        """Get the weight quantizers of the module."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_weight_quantizers function"
+        )
 
     def init_fp8_meta_tensors(self, recipe: Recipe) -> None:
         """Init scales and amaxes."""
@@ -794,6 +820,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def set_extra_state(self, state: torch.Tensor) -> None:
         """Load previous state."""
+
+        # Maintain backwards compatibility with older checkpoints.
+        if state is None:
+            return
+
         # Load state
         if isinstance(state, torch.Tensor):
             # No FP8 is indicated by an empty tensor we don't need to unpickle.
@@ -1152,18 +1183,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     with get_rng_state_tracker().fork():
                         init_fn(param)
 
-            # If primary weights are in fp8, wrap the parameter as FP8Tensor
+            # Wrap parameters in QuantizedTensor if needed
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+
+                # Keep high-precision values on CPU if needed
                 if self.preserve_high_precision_init_val:
                     high_precision_init_val = param.detach().cpu()
 
+                # Configure quantizer
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
-                assert (
-                    quantizer is not None
-                )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                if quantizer is None:
+                    raise RuntimeError("Weight quantizer has not been initialized")
+                quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
                 quantizer.internal = False
+
+                # Quantize parameter
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
@@ -1171,6 +1207,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
             param = torch.nn.Parameter(param)
+
+            # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
 
                 # - Master weights are initialized from model weights, if we use fp8 primary
@@ -1214,7 +1252,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fsdp_group: Optional[dist_group_type] = None,
         workspace_dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
-        """Get FP8 workspace buffer and maybe update its values
+        """Get workspace buffer for weights and maybe update its values
 
         The workspace buffer may be cached for future function calls.
 
@@ -1240,13 +1278,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             for debug quantization, this is dtype of the tensor.
         """
 
-        # FP8 primary weights
+        # Handle case where weights are already quantized
+        # Note: Make sure weights have required usages, but do not
+        # destroy unnecessary usages since they may be used later.
         if isinstance(tensor, QuantizedTensor):
-            if update_workspace and quantizer is not None:
-                tensor.update_usage(
-                    rowwise_usage=quantizer.rowwise_usage,
-                    columnwise_usage=quantizer.columnwise_usage,
-                )
+            update_rowwise_usage = True if quantizer.rowwise_usage else None
+            update_columnwise_usage = True if quantizer.columnwise_usage else None
+            tensor.update_usage(
+                rowwise_usage=update_rowwise_usage,
+                columnwise_usage=update_columnwise_usage,
+            )
             return tensor
 
         # Try getting workspace from cache
