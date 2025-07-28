@@ -10,6 +10,116 @@ namespace spec {
 namespace cg = cooperative_groups;
 namespace ptx = transformer_engine::ptx;
 
+namespace {
+
+template <typename IType, typename OType>
+struct _Quantized_Limits;
+
+template <>
+struct _Quantized_Limits<fp16, fp8e5m2> {
+    static constexpr uint16_t max_norm_rcp{0x125};
+};
+
+template <>
+struct _Quantized_Limits<bf16, fp8e5m2> {
+    static constexpr uint16_t max_norm_rcp{0x3792};
+};
+
+template <>
+struct _Quantized_Limits<fp16, fp8e4m3> {
+    static constexpr uint16_t max_norm_rcp{0x1892};
+};
+
+template <>
+struct _Quantized_Limits<bf16, fp8e4m3> {
+    static constexpr uint16_t max_norm_rcp{0x3b12};
+};
+
+
+template <typename OType, typename IType>
+__device__ __forceinline__
+e8m0_t to_e8m0(IType amax) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) && (defined _ENABLE_MXFMA)
+    constexpr uint16_t max_norm_rcp = _Quantized_Limits<IType, OType>::max_norm_rcp;
+
+    float amax_fp32;
+    if constexpr (std::is_same_v<IType, fp16>) {
+        asm volatile (
+            "fma.rn.f32.f16 %0, %1, %2, 0.0;"
+            : "=f"(amax_fp32)
+            : "h"(reinterpret_cast<uint16_t&>(amax)),
+              "h"(max_norm_rcp)
+        );
+    } else if constexpr (std::is_same_v<IType, bf16>) {
+        asm volatile (
+            "fma.rn.f32.bf16 %0, %1, %2, 0.0;"
+            : "=f"(amax_fp32)
+            : "h"(reinterpret_cast<uint16_t&>(amax)),
+              "h"(max_norm_rcp)
+        );
+    }
+    return ptx::float_to_e8m0(amax_fp32);
+#else
+    float amax_fp32 = static_cast<float>(amax);
+    return ptx::float_to_e8m0(
+        __fmaf_ieee_rn(amax_fp32, Quantized_Limits<OType>::max_norm_rcp, 0.0f)
+    );
+#endif
+}
+
+template <typename T>
+struct alignas(4 * sizeof(T)) FPx4 {
+    T x, y, z, w;
+};
+using floatx4 = FPx4<float>;
+using bf16x4 = FPx4<bf16>;
+using fp16x4 = FPx4<fp16>;
+using fp8e4m3x4 = FPx4<fp8e4m3>;
+using fp8e5m2x4 = FPx4<fp8e5m2>;
+
+static_assert(sizeof(floatx4) == 16);
+static_assert(sizeof(bf16x4) == 8);
+static_assert(sizeof(fp16x4) == 8);
+static_assert(sizeof(fp8e4m3x4) == 4);
+static_assert(sizeof(fp8e5m2x4) == 4);
+
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const floatx4 &scale) {
+    bf16x2 const * in2 = reinterpret_cast<bf16x2 const*>(&in);
+    floatx2 const * scale2 = reinterpret_cast<floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "prmt.b32 val2, 0x0, %1, 0x7632;\n\t"
+        "prmt.b32 val1, 0x0, %1, 0x5410;\n\t"
+        "prmt.b32 val4, 0x0, %2, 0x7632;\n\t"
+        "prmt.b32 val3, 0x0, %2, 0x5410;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 result_1_2;\n\t"
+        ".reg.b64 result_3_4;\n\t"
+        "fma.rn.f32x2 result_1_2, val_1_2, %3, 0x0;\n\t"
+        "fma.rn.f32x2 result_3_4, val_3_4, %4, 0x0;\n\t"
+        "mov.b32 {val1, val2}, result_1_2;\n\t"
+        "mov.b32 {val3, val4}, result_3_4;\n\t"
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val1, val2, val3, val4}, 0x0\n\t"
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1]))
+    );
+}
+
+
+} // anonymous namespace
 
 
 inline bool is_cast_only_enabled() {
@@ -74,8 +184,15 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
     static constexpr int32_t numOutUnitsPerChunk = chunkElems * sizeof(OType) / sizeof(outputUnitType);
 
     using warpLayout = Layout<4, 1>;
-    static constexpr int32_t blockDimM = warpLayout::M * warpDimM;
-    static constexpr int32_t blockDimN = warpLayout::N * warpDimN;
+    static constexpr int32_t blockIterDimM = warpLayout::M * warpDimM;
+    static constexpr int32_t blockIterDimN = warpLayout::N * warpDimN;
+
+    using iterLayout = Layout<1, 1>;
+    static constexpr int32_t blockDimM = iterLayout::M * blockIterDimM;
+    static constexpr int32_t blockDimN = iterLayout::N * blockIterDimN;
+
+    static constexpr int32_t numStages = 1;
+    static constexpr int32_t numPrefetch = numStages - 1;
 
     static constexpr int32_t numThreads = warpLayout::num * 32;
     static constexpr size_t smem = 0ul;
@@ -104,94 +221,88 @@ __global__ void cast_mxfp8_kernel(
 
     float block_amax = 0.0f;
 
-    uint2 coords;
-    coords.y = blockIdx.y * CastTraits::blockDimM
+    uint2 block_coords;
+    block_coords.y = blockIdx.y * CastTraits::blockDimM
                 + threadIdx.z * CastTraits::warpDimM
                 + (threadIdx.x / CastTraits::threadLayout::N);
-    coords.x = blockIdx.x * CastTraits::blockDimN
+    block_coords.x = blockIdx.x * CastTraits::blockDimN
                 + threadIdx.y * CastTraits::warpDimN
                 + (threadIdx.x % CastTraits::threadLayout::N) * CastTraits::chunkElems;
-    if (coords.y >= rows || coords.x >= cols) {
-        return;
-    }
-    
 
-    int32_t offset = coords.y * cols + coords.x;
-    typename CastTraits::inputUnitType * input_units = 
-        reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+    typename CastTraits::inputUnitType rInput[CastTraits::numStages][CastTraits::numUnitsPerChunk];
+    // prologue
+    #pragma unroll
+    for (int32_t iter = 0; iter < CastTraits::numPrefetch; iter++) {
+        int32_t iter_m = iter / CastTraits::iterLayout::N;
+        int32_t iter_n = iter % CastTraits::iterLayout::N;
 
+        uint2 coords;
+        coords.y = block_coords.y + iter_m * CastTraits::blockIterDimM;
+        coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
 
-    if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-
-    } else {
-        IType2 thread_amax2{0.f, 0.f};
-
-        typename CastTraits::inputUnitType rInput[CastTraits::numUnitsPerChunk];
-        rInput[0] = input_units[0];
-        #pragma unroll
-        for (int32_t i = 1; i < CastTraits::numUnitsPerChunk; i++) {
-            rInput[i] = input_units[i];
-
-            IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[i - 1]);
+        if (coords.y < rows && coords.x < cols) {
+            int32_t offset = coords.y * cols + coords.x;
+            typename CastTraits::inputUnitType * input_units = 
+                reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+        
             #pragma unroll
-            for (int32_t j = 0; j < numItersIType2; j++) {
-                ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
+            for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
+                rInput[iter][i] = input_units[i];
             }
         }
-
-        IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[CastTraits::numUnitsPerChunk - 1]);
-        #pragma unroll
-        for (int32_t j = 0; j < numItersIType2; j++) {
-            ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
-        }
-        typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
-        float thread_amax_fp32 = static_cast<float>(thread_amax);
-        // FIXME: this may not be needed
-        // thread_amax_fp32 = fabsf(thread_amax_fp32);
-
-        e8m0_t biased_exponent = ptx::float_to_e8m0(
-            thread_amax_fp32 * Quantized_Limits<typename CastTraits::OType>::max_norm_rcp);
-
-
-        // write biased_exponent
-        // method-1: point-wise writing
-        scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
-
-        // method-2: packed to int32_t, then STG.32
-        // uint32_t packed_scale = biased_exponent << ((threadIdx.x % 4) * 8);
-        // uint32_t group_mask = 0xF << ((threadIdx.x / 4) * 4);
-        // packed_scale = __reduce_or_sync(group_mask, packed_scale);
-        // if (threadIdx.x % 4 == 0) {
-        //     *reinterpret_cast<uint32_t *>(scales_rowwise + scale_offset) = packed_scale;
-        // }
-
-        // method-3: accumulate to SMEM
-        // if constexpr (CastTraits::threadLayout::N == 32) {
-        //     __shared__ e8m0_t sScales[CastTraits::warpLayout::M][CastTraits::warpLayout::N][CastTraits::threadLayout::num];
-        //     sScales[threadIdx.z][threadIdx.y][threadIdx.x] = biased_exponent;
-        //     ptx::numbered_barrier_sync(32, 8 + threadIdx.z * CastTraits::warpLayout::N + threadIdx.y);
-        //     // int32_t leader = ptx::elect_one_sync();
-        //     // if (leader) {
-        //     //     int4 * gScales = reinterpret_cast<int4 *>(scales_rowwise + scale_offset);
-        //     //     #pragma unroll
-        //     //     for (int32_t i = 0; i < 2; i++) {
-        //     //         gScales[i] = reinterpret_cast<int4 *>(sScales[threadIdx.z][threadIdx.y])[i];
-        //     //     }
-        //     // }
-        //     if (threadIdx.x < 2) {
-        //         int4 * gScales = reinterpret_cast<int4 *>(scales_rowwise + scale_offset - threadIdx.x);
-        //         gScales[threadIdx.x] = reinterpret_cast<int4 *>(sScales[threadIdx.z][threadIdx.y])[threadIdx.x];
-        //     }
-        // }
-
-        // scaling input
-        float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-        ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-
+    }
+    // mainloop
+    #pragma unroll
+    for (int32_t iter = CastTraits::numPrefetch; iter < CastTraits::iterLayout::num; iter++) {
         {
+            // load data
+            int32_t iter_m = iter / CastTraits::iterLayout::N;
+            int32_t iter_n = iter % CastTraits::iterLayout::N;
+
+            uint2 coords;
+            coords.y = block_coords.y + iter_m * CastTraits::blockIterDimM;
+            coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
+
+            if (coords.y < rows && coords.x < cols) {
+                int32_t offset = coords.y * cols + coords.x;
+                typename CastTraits::inputUnitType * input_units = 
+                    reinterpret_cast<typename CastTraits::inputUnitType *>(input + offset);
+            
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::numUnitsPerChunk; i++) {
+                    rInput[iter % CastTraits::numStages][i] = input_units[i];
+                }
+            }
+        }
+        int32_t process_iter = iter - CastTraits::numPrefetch;
+        int32_t iter_m = process_iter / CastTraits::iterLayout::N;
+        int32_t iter_n = process_iter % CastTraits::iterLayout::N;
+        uint2 coords;
+        coords.y = block_coords.y + iter_m * CastTraits::blockIterDimM;
+        coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
+        if (coords.y >= rows || coords.x >= cols) { return; }
+
+        if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
+        } else {
+            IType2 thread_amax2{0.f, 0.f};
+            IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
+            #pragma unroll
+            for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
+                ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
+            }
+            typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
+            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            
+            // write biased_exponent
+            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+
+            // scaling input
+            float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+            ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+            
             typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
-            IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
-            OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+            OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
             #pragma unroll
             for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
                 IType2 in = rInput2[i];
@@ -199,11 +310,59 @@ __global__ void cast_mxfp8_kernel(
                 ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
                 rOutput2[i] = out;
             }
-            // write output
-            typename CastTraits::outputUnitType * output_units = reinterpret_cast<typename CastTraits::outputUnitType *>(output + offset);
+            typename CastTraits::outputUnitType * output_units = 
+                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
             #pragma unroll
-            for (int32_t i = 0; i < CastTraits::numOutUnitsPerChunk; i++) {
-                output_units[i] = rOutput[i];
+            for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
+                output_units[j] = rOutput[j];
+            }
+        }
+    }
+
+    // epilogue
+    #pragma unroll
+    for (int32_t iter = CastTraits::iterLayout::num; iter < CastTraits::iterLayout::num + CastTraits::numPrefetch; iter++) {
+        int32_t process_iter = iter - CastTraits::numPrefetch;
+        int32_t iter_m = process_iter / CastTraits::iterLayout::N;
+        int32_t iter_n = process_iter % CastTraits::iterLayout::N;
+        uint2 coords;
+        coords.y = block_coords.y + iter_m * CastTraits::blockIterDimM;
+        coords.x = block_coords.x + iter_n * CastTraits::blockIterDimN;
+        if (coords.y >= rows || coords.x >= cols) { return; }
+
+        if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+            // FIXME: implement
+        } else {
+            IType2 thread_amax2{0.f, 0.f};
+            IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
+            #pragma unroll
+            for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
+                ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[j]);
+            }
+            typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
+            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            
+            // write biased_exponent
+            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+
+            // scaling input
+            float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+            ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+            
+            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+            #pragma unroll
+            for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
+                IType2 in = rInput2[i];
+                OType2 out;
+                ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                rOutput2[i] = out;
+            }
+            typename CastTraits::outputUnitType * output_units = 
+                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            #pragma unroll
+            for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
+                output_units[j] = rOutput[j];
             }
         }
     }
