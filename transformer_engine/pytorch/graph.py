@@ -427,7 +427,7 @@ def _make_graphed_callables(
                     # delay_wgrad_compute enabled.
                     need_backward_dw = False
                     for module in visited_te_modules.get(func_idx, set()):
-                        if module.need_backward_dw():
+                        if hasattr(module, "need_backward_dw") and module.need_backward_dw():
                             need_backward_dw = True
                             module.backward_dw()
                     need_bwd_dw_graph[func_idx] = need_backward_dw
@@ -519,7 +519,10 @@ def _make_graphed_callables(
                             bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
                             with torch.cuda.graph(bwd_dw_graph, pool=mempool):
                                 for module in visited_te_modules[per_callable_bwd_idx]:
-                                    if module.need_backward_dw():
+                                    if (
+                                        hasattr(module, "need_backward_dw")
+                                        and module.need_backward_dw()
+                                    ):
                                         module.backward_dw()
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
@@ -613,7 +616,7 @@ def _make_graphed_callables(
                 if need_bwd_dw_graph[bwd_idx]:
                     with torch.cuda.graph(bwd_dw_graph, pool=mempool):
                         for module in visited_te_modules[bwd_idx]:
-                            if module.need_backward_dw():
+                            if hasattr(module, "need_backward_dw") and module.need_backward_dw():
                                 module.backward_dw()
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
