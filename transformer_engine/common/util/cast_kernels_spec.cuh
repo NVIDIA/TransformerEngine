@@ -1,13 +1,11 @@
 #pragma once
 
 #include <cstdlib>
-#include <cooperative_groups.h>
 
 namespace transformer_engine {
 namespace mxfp8_kernel {
 namespace spec {
 
-namespace cg = cooperative_groups;
 namespace ptx = transformer_engine::ptx;
 
 namespace {
@@ -60,13 +58,20 @@ e8m0_t to_e8m0(IType amax) {
     }
     return ptx::float_to_e8m0(amax_fp32);
 #else
-    float amax_fp32 = static_cast<float>(amax);
-    return ptx::float_to_e8m0(
-        __fmaf_ieee_rn(amax_fp32, Quantized_Limits<OType>::max_norm_rcp, 0.0f)
-    );
+    if constexpr (std::is_same_v<IType, float>) {
+        return ptx::float_to_e8m0(
+            __fmaf_ieee_rn(amax, Quantized_Limits<OType>::max_norm_rcp, 0.0f)
+        );
+    } else {
+        float amax_fp32 = static_cast<float>(amax);
+        return ptx::float_to_e8m0(
+            __fmaf_ieee_rn(amax_fp32, Quantized_Limits<OType>::max_norm_rcp, 0.0f)
+        );
+    }
 #endif
 }
 
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 template <typename T>
 struct alignas(4 * sizeof(T)) FPx4 {
     T x, y, z, w;
@@ -85,9 +90,8 @@ static_assert(sizeof(fp8e5m2x4) == 4);
 
 
 __device__ __forceinline__
-void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const floatx4 &scale) {
-    bf16x2 const * in2 = reinterpret_cast<bf16x2 const*>(&in);
-    floatx2 const * scale2 = reinterpret_cast<floatx2 const*>(&scale);
+void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const ptx::floatx2 &scale) {
+    ptx::bf16x2 const * in2 = reinterpret_cast<ptx::bf16x2 const*>(&in);
     asm volatile (
         "{\n\t"
         ".reg.b32 val1;\n\t"
@@ -102,22 +106,242 @@ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const floatx4 &scale) {
         ".reg.b64 val_3_4;\n\t"
         "mov.b64 val_1_2, {val1, val2};\n\t"
         "mov.b64 val_3_4, {val3, val4};\n\t"
-        ".reg.b64 result_1_2;\n\t"
-        ".reg.b64 result_3_4;\n\t"
-        "fma.rn.f32x2 result_1_2, val_1_2, %3, 0x0;\n\t"
-        "fma.rn.f32x2 result_3_4, val_3_4, %4, 0x0;\n\t"
-        "mov.b32 {val1, val2}, result_1_2;\n\t"
-        "mov.b32 {val3, val4}, result_3_4;\n\t"
-        "cvt.rs.satfinite.e4m3x4.f32 %0, {val1, val2, val3, val4}, 0x0\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %3, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
         "}\n\t"
         : "=r"(reinterpret_cast<uint32_t&>(out))
         : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
           "r"(reinterpret_cast<const uint32_t&>(in2[1])),
-          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
-          "l"(reinterpret_cast<const uint64_t&>(scale2[1]))
+          "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
     );
 }
 
+__device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const ptx::floatx2 &scale) {
+    ptx::bf16x2 const * in2 = reinterpret_cast<ptx::bf16x2 const*>(&in);
+    asm volatile (
+        "{\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "prmt.b32 val2, 0x0, %1, 0x7632;\n\t"
+        "prmt.b32 val1, 0x0, %1, 0x5410;\n\t"
+        "prmt.b32 val4, 0x0, %2, 0x7632;\n\t"
+        "prmt.b32 val3, 0x0, %2, 0x5410;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %3, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, const ptx::floatx2 &scale) {
+    ptx::fp16x2 const * in2 = reinterpret_cast<ptx::fp16x2 const*>(&in);
+    asm volatile (
+        "{\n\t"
+        ".reg.b16 val1_f16;\n\t"
+        ".reg.b16 val2_f16;\n\t"
+        ".reg.b16 val3_f16;\n\t"
+        ".reg.b16 val4_f16;\n\t"
+        "mov.b32 {val1_f16, val2_f16}, %1;\n\t"
+        "mov.b32 {val3_f16, val4_f16}, %2;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "cvt.f32.f16 val1, val1_f16;\n\t"
+        "cvt.f32.f16 val2, val2_f16;\n\t"
+        "cvt.f32.f16 val3, val3_f16;\n\t"
+        "cvt.f32.f16 val4, val4_f16;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %3, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const ptx::floatx2 &scale) {
+    ptx::fp16x2 const * in2 = reinterpret_cast<ptx::fp16x2 const*>(&in);
+    asm volatile (
+        "{\n\t"
+        ".reg.b16 val1_f16;\n\t"
+        ".reg.b16 val2_f16;\n\t"
+        ".reg.b16 val3_f16;\n\t"
+        ".reg.b16 val4_f16;\n\t"
+        "mov.b32 {val1_f16, val2_f16}, %1;\n\t"
+        "mov.b32 {val3_f16, val4_f16}, %2;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "cvt.f32.f16 val1, val1_f16;\n\t"
+        "cvt.f32.f16 val2, val2_f16;\n\t"
+        "cvt.f32.f16 val3, val3_f16;\n\t"
+        "cvt.f32.f16 val4, val4_f16;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %3, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
+    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+    asm volatile (
+        "{\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 %2, %2, %3, zeros;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "mov.b64 {val1, val2}, %1;\n\t"
+        "mov.b64 {val3, val4}, %2;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out)),
+          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
+          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
+        : "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
+    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+    asm volatile (
+        "{\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 %2, %2, %3, zeros;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "mov.b64 {val1, val2}, %1;\n\t"
+        "mov.b64 {val3, val4}, %2;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out)),
+          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
+          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
+        : "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void abs_max_2x(float &dst, const float &p1, const float &p2, const float &p3) {
+    asm volatile (
+        "max.abs.f32 %0, %1, %2, %3;"
+        : "=f"(dst)
+        : "f"(p1), "f"(p2), "f"(p3)
+    );
+}
+
+
+#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 } // anonymous namespace
 
@@ -194,6 +418,8 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
     static constexpr int32_t numStages = 1;
     static constexpr int32_t numPrefetch = numStages - 1;
 
+    static constexpr bool _use_cvt_4x = true;
+
     static constexpr int32_t numThreads = warpLayout::num * 32;
     static constexpr size_t smem = 0ul;
 };
@@ -205,7 +431,6 @@ __global__ void cast_mxfp8_kernel(
     typename CastTraits::IType * __restrict__ input,
     typename CastTraits::OType * __restrict__ output,
     e8m0_t * __restrict__ scales_rowwise,
-    float * __restrict__ amax_ptr,
     int32_t rows,
     int32_t cols,
     int32_t scale_stride_rowwise,
@@ -215,11 +440,6 @@ __global__ void cast_mxfp8_kernel(
     using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
     constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
     using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
-
-    auto block = cg::this_thread_block();
-    auto warp = cg::tiled_partition<32>(block);
-
-    float block_amax = 0.0f;
 
     uint2 block_coords;
     block_coords.y = blockIdx.y * CastTraits::blockDimM
@@ -283,7 +503,47 @@ __global__ void cast_mxfp8_kernel(
         if (coords.y >= rows || coords.x >= cols) { return; }
 
         if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+            float thread_amax = 0.f;
+            IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
+            #pragma unroll
+            for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
+                abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
+            }
+            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
 
+            float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+            ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+
+            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            if constexpr (CastTraits::_use_cvt_4x) {
+                using OType4 = FPx4<typename CastTraits::OType>;
+                using IType4 = FPx4<typename CastTraits::IType>;
+                IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
+                OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                #pragma unroll
+                for (int32_t j = 0; j < CastTraits::chunkElems / 4; j++) {
+                    IType4 in = rInput4[j];
+                    OType4 out;
+                    mul_cvt_4x(out, in, block_scale_inverse_2x);
+                    rOutput4[j] = out;
+                }
+            } else {
+                OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                #pragma unroll
+                for (int32_t j = 0; j < CastTraits::chunkElems / 2; j++) {
+                    IType2 in = rInput2[j];
+                    OType2 out;
+                    ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                    rOutput2[j] = out;
+                }
+            }
+            typename CastTraits::outputUnitType * output_units = 
+                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            #pragma unroll
+            for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
+                output_units[j] = rOutput[j];
+            }
         } else {
             IType2 thread_amax2{0.f, 0.f};
             IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
@@ -302,13 +562,27 @@ __global__ void cast_mxfp8_kernel(
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
             
             typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
-            OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
-            #pragma unroll
-            for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
-                IType2 in = rInput2[i];
-                OType2 out;
-                ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
-                rOutput2[i] = out;
+            if constexpr (CastTraits::_use_cvt_4x) {
+                using OType4 = FPx4<typename CastTraits::OType>;
+                using IType4 = FPx4<typename CastTraits::IType>;
+                IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
+                OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::chunkElems / 4; i++) {
+                    IType4 in = rInput4[i];
+                    OType4 out;
+                    mul_cvt_4x(out, in, block_scale_inverse_2x);
+                    rOutput4[i] = out;
+                }
+            } else {
+                OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
+                    IType2 in = rInput2[i];
+                    OType2 out;
+                    ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                    rOutput2[i] = out;
+                }
             }
             typename CastTraits::outputUnitType * output_units = 
                 reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
@@ -331,7 +605,47 @@ __global__ void cast_mxfp8_kernel(
         if (coords.y >= rows || coords.x >= cols) { return; }
 
         if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-            // FIXME: implement
+            float thread_amax = 0.f;
+            IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
+            #pragma unroll
+            for (int32_t j = 0; j < numItersIType2 * CastTraits::numUnitsPerChunk; j++) {
+                abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
+            }
+            e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+
+            float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+            ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+
+            typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
+            if constexpr (CastTraits::_use_cvt_4x) {
+                using OType4 = FPx4<typename CastTraits::OType>;
+                using IType4 = FPx4<typename CastTraits::IType>;
+                IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
+                OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                #pragma unroll
+                for (int32_t j = 0; j < CastTraits::chunkElems / 4; j++) {
+                    IType4 in = rInput4[j];
+                    OType4 out;
+                    mul_cvt_4x(out, in, block_scale_inverse_2x);
+                    rOutput4[j] = out;
+                }
+            } else {
+                OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                #pragma unroll
+                for (int32_t j = 0; j < CastTraits::chunkElems / 2; j++) {
+                    IType2 in = rInput2[j];
+                    OType2 out;
+                    ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                    rOutput2[j] = out;
+                }
+            }
+            typename CastTraits::outputUnitType * output_units = 
+                reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
+            #pragma unroll
+            for (int32_t j = 0; j < CastTraits::numOutUnitsPerChunk; j++) {
+                output_units[j] = rOutput[j];
+            }
         } else {
             IType2 thread_amax2{0.f, 0.f};
             IType2 * rInput2 = reinterpret_cast<IType2 *>(&rInput[process_iter % CastTraits::numStages]);
@@ -350,13 +664,27 @@ __global__ void cast_mxfp8_kernel(
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
             
             typename CastTraits::outputUnitType rOutput[CastTraits::numOutUnitsPerChunk];
-            OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
-            #pragma unroll
-            for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
-                IType2 in = rInput2[i];
-                OType2 out;
-                ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
-                rOutput2[i] = out;
+            if constexpr (CastTraits::_use_cvt_4x) {
+                using OType4 = FPx4<typename CastTraits::OType>;
+                using IType4 = FPx4<typename CastTraits::IType>;
+                IType4 * rInput4 = reinterpret_cast<IType4 *>(&rInput[process_iter % CastTraits::numStages]);
+                OType4 * rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::chunkElems / 4; i++) {
+                    IType4 in = rInput4[i];
+                    OType4 out;
+                    mul_cvt_4x(out, in, block_scale_inverse_2x);
+                    rOutput4[i] = out;
+                }
+            } else {
+                OType2 * rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::chunkElems / 2; i++) {
+                    IType2 in = rInput2[i];
+                    OType2 out;
+                    ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                    rOutput2[i] = out;
+                }
             }
             typename CastTraits::outputUnitType * output_units = 
                 reinterpret_cast<typename CastTraits::outputUnitType *>(output + coords.y * cols + coords.x);
