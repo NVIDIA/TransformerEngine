@@ -107,6 +107,10 @@ size_t DIVUP(const size_t &x, const size_t &y){
   return (((x) + ((y)-1)) / (y));
 }
 
+size_t DIVUP_TO_MULTIPLE(const size_t &x, const size_t &y){
+  return DIVUP(x, y) * y;
+}
+
 struct scale_inv_meta {
   std::vector<size_t> shape;
   DType type;
@@ -147,26 +151,16 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    const std::vector<size_t> block_alignment = std::vector<size_t>{128ul, 4ul};
-    {
-      size_t alignment = block_alignment[1];
-      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 1lu), alignment) * alignment;
-      alignment = block_alignment[0];
-      size_t scale_dim_1;
-      if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
-        scale_dim_1 = DIVUP(DIVUP(last_dim, 16lu), alignment) * alignment;
-      } else {
-        scale_dim_1 = DIVUP(DIVUP(last_dim, 32lu), alignment) * alignment;
-      }
-      ret_rowwise.shape = {scale_dim_0, scale_dim_1};
-    }
-    {
-      size_t alignment = block_alignment[0];
-      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 32lu), alignment) * alignment;
-      alignment = block_alignment[1];
-      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 1lu), alignment) * alignment;
-      ret_colwise.shape = {scale_dim_0, scale_dim_1};
-    }
+    const size_t block_size_X_rowwise = (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) ? 16 : 32;
+    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
+    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
+
+    const size_t block_size_Y_colwise = 32;
+    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
+    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
+    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
+
     if (scaling_mode == NVTE_FWD_NVFP4_BWD_MXFP8_SCALING) {
       ret_rowwise.type = DType::kFloat8E4M3;
       ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E4M3);
@@ -189,21 +183,16 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    const std::vector<size_t> block_alignment = std::vector<size_t>{128ul, 4ul};
-    {
-      size_t alignment = block_alignment[1];
-      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 1lu), alignment) * alignment;
-      alignment = block_alignment[0];
-      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 32lu), alignment) * alignment;
-      ret_rowwise.shape = {scale_dim_0, scale_dim_1};
-    }
-    {
-      size_t alignment = block_alignment[0];
-      size_t scale_dim_0 = DIVUP(DIVUP(first_dim, 32lu), alignment) * alignment;
-      alignment = block_alignment[1];
-      size_t scale_dim_1 = DIVUP(DIVUP(last_dim, 1lu), alignment) * alignment;
-      ret_colwise.shape = {scale_dim_0, scale_dim_1};
-    }
+    const size_t block_size_X_rowwise = 32;
+    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
+    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
+    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
+
+    const size_t block_size_Y_colwise = 32;
+    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
+    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
+    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
+
     ret_rowwise.type = DType::kFloat8E8M0;
     ret_colwise.type = DType::kFloat8E8M0;
     ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
