@@ -30,6 +30,20 @@ extern "C" {
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Swizzling scaling factors into the required interleaved layout for GEMM
+ *
+ *  \param[in]     inputs       Input tensors with non-swizzled scale_inv.
+ *  \param[in,out] outputs      Output tensors which hosts swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ * 
+ *  Requirements:
+ *  - scale_inv is stored in row-major.
+ *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ */
+void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
+                                               const size_t num_tensors, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

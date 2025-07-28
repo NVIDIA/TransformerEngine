@@ -335,3 +335,14 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
   using namespace transformer_engine;
   swizzle_scaling_factors(convertNVTETensorCheck(input), convertNVTETensorCheck(output), stream);
 }
+
+void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
+                                               const size_t num_tensors, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_swizzle_scaling_factors);
+  using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  for (size_t i = 0; i < num_tensors; i++) {
+    swizzle_scaling_factors(convertNVTETensorCheck(inputs[i]), convertNVTETensorCheck(outputs[i]),
+                            stream);
+  }
+}
