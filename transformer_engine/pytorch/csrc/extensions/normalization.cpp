@@ -108,9 +108,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
   TensorWrapper unquantized_out_cu;
+  py::object unquantized_out;
   if (force_unfused_kernel) {
     NoneQuantizer q{none};
-    py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
@@ -269,9 +269,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
   TensorWrapper unquantized_out_cu;
+  py::object unquantized_out;
   if (force_unfused_kernel) {
     NoneQuantizer q{none};
-    py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
   TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
