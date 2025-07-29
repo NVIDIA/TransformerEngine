@@ -2,10 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operation for reshape."""
+"""Fusible operation for constant scaling."""
 
 from __future__ import annotations
-from collections.abc import Iterable
 from typing import Optional
 
 import torch
@@ -17,22 +16,12 @@ from transformer_engine.pytorch.ops.op import (
 from ...tensor import Quantizer
 
 
-class Reshape(BasicOperation):
-    """Reshape tensor
+class ConstantScale(BasicOperation):
+    """Multiply by a constant"""
 
-    See `torch.reshape`.
-
-    Parameters
-    ----------
-    shape: iterable of int
-        Output tensor dimensions. If one dimension is -1, it is
-        inferred based on input tensor dimensions.
-
-    """
-
-    def __init__(self, shape: Iterable[int]) -> None:
+    def __init__(self, scale: float) -> None:
         super().__init__()
-        self._shape = tuple(shape)
+        self.scale = scale
 
     def op_forward(
         self,
@@ -41,13 +30,11 @@ class Reshape(BasicOperation):
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
-        if ctx.requires_grad:
-            ctx.input_shape = input_.size()
-        return input_.reshape(*self._shape)
+        return input_ * self.scale
 
     def op_backward(
         self,
         ctx: OperationContext,
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
-        return grad_output.reshape(*ctx.input_shape), ()
+        return grad_output * self.scale, ()
