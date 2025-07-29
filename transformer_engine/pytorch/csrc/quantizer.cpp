@@ -534,7 +534,7 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
   // Cast to FP8
   out.set_amax(nullptr, DType::kFloat32, out.defaultShape);  // Avoid atomic amax updates
-  NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });  
+  NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
@@ -543,8 +543,7 @@ void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorW
 }
 
 void Float8CurrentScalingQuantizer::quantize_with_amax(
-    TensorWrapper& input, TensorWrapper& out,
-    const std::optional<TensorWrapper>& noop_flag) {
+    TensorWrapper& input, TensorWrapper& out, const std::optional<TensorWrapper>& noop_flag) {
   NVTE_CHECK(input.get_amax().data_ptr == amax.data_ptr(),
              "Input does not use the appropriate amax tensor");
   input.set_amax(nullptr, DType::kFloat32, input.defaultShape);

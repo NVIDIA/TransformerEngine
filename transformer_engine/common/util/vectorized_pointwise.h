@@ -217,7 +217,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       atomicMaxFloat(amax, max);
     }
   }
-  
+
   if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
@@ -266,7 +266,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     }
     storer.store(tid, N);
   }
-  
+
   // Reduce amax over block
   if (requires_amax) {
     max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -275,7 +275,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       atomicMaxFloat(amax, max);
     }
   }
-  
+
   if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
@@ -442,7 +442,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     }
     storer.store(id_x, n);
   }
-  
+
   // Reduce amax over block
   if (requires_amax) {
     max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -451,7 +451,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       atomicMaxFloat(amax, max);
     }
   }
-  
+
   if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
@@ -550,7 +550,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer0.store(id_x, n);
     storer1.store(id_x, n);
   }
-  
+
   // Reduce amax over block
   if (requires_amax) {
     max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -559,7 +559,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       atomicMaxFloat(amax, max);
     }
   }
-  
+
   if constexpr (is_fp8<OutputType>::value) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv != nullptr) {
