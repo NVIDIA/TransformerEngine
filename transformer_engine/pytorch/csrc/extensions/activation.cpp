@@ -32,8 +32,17 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     // Compute activation directly
     NVTE_SCOPED_GIL_RELEASE(
         { act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream()); });
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    // Compute activation in high-precision fused together with amax, then quantize.
+
+    auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE(
+        { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
+    quantizer_cpp_cs->quantize_with_amax(temp_cpp, out_cpp);
   } else {
     // Compute activation in high-precision, then quantize
+
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
     NVTE_SCOPED_GIL_RELEASE(
         { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
@@ -70,6 +79,15 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       dact_func(grad_output_cpp.data(), input_cpp.data(), grad_input_cpp.data(),
                 at::cuda::getCurrentCUDAStream());
     });
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    // Compute activation backward in high-precision fused together with amax, then quantize.
+    auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
+    auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, fake_dtype);
+    NVTE_SCOPED_GIL_RELEASE({
+      dact_func(grad_output_cpp.data(), input_cpp.data(), temp_cpp.data(),
+                at::cuda::getCurrentCUDAStream());
+    });
+    quantizer_cpp_cs->quantize_with_amax(temp_cpp, grad_input_cpp);
   } else {
     // Compute activation backward in high-precision, then quantize
     auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(input_shape, fake_dtype);
