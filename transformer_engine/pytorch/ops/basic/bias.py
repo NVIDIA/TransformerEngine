@@ -10,15 +10,11 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
-from ...utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-)
+from ..op import BasicOperation, OperationContext
+from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
+from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.mxfp8_tensor import MXFP8Quantizer
 
 
 class Bias(BasicOperation):
@@ -141,7 +137,7 @@ class Bias(BasicOperation):
         dy = grad_output
         if dy.dim() > 1:
             quantizer = ctx.grad_input_quantizer
-            if quantizer is not None:
+            if isinstance(quantizer, (Float8Quantizer, MXFP8Quantizer)):
                 db, dy = tex.bgrad_quantize(dy, quantizer)
             else:
                 db = dy.sum(tuple(range(dy.dim() - 1)))
