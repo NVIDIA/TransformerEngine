@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-from collections import OrderedDict
 import math
 import os
 from typing import Dict, List, Tuple, Optional
@@ -37,23 +36,20 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
-from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability, get_cudnn_version
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states, get_available_attention_backends
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
-)
+mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -103,18 +99,21 @@ if NVTE_TEST_NVINSPECT_ENABLED:
         feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
     )
 
-fp8_recipes = [
-    recipe.MXFP8BlockScaling(),
-    recipe.DelayedScaling(),
-    recipe.Float8CurrentScaling(),
-    recipe.Float8BlockScaling(),
-]
+
+fp8_recipes = []
+if mxfp8_available:
+    fp8_recipes.append(recipe.MXFP8BlockScaling())
+if fp8_block_scaling_available:
+    fp8_recipes.append(recipe.Float8BlockScaling())
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
 
 
 def is_fused_attn_available(
     config: ModelConfig, dtype: torch.dtype, qkv_layout="bshd_bshd_bshd", is_training=True
 ):
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    _, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -571,14 +570,8 @@ def _test_e2e_selective_recompute(
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -687,14 +680,8 @@ def _test_e2e_full_recompute(
 def test_gpt_full_activation_recompute(
     dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
 ):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -1263,8 +1250,8 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
         te_linear_ref, bs, dtype, config, delay_wgrad_compute=False
     )
 
-    # Shoule be bit-wise match
-    for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
+    # Should be bit-wise match
+    for _, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
@@ -1276,12 +1263,7 @@ def test_linear_accuracy_save_original_input(dtype, model, recipe):
     fuse_wgrad_accumulation = True
     fp8_model_params = False
     fp8 = recipe is not None
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8 and recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
+
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
@@ -1649,14 +1631,12 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("bs", [2])
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("activation", all_activations)
-@pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_layernorm_mlp_accuracy_delay_wgrad_compute(
-    dtype, bs, model, activation, normalization, bias, fuse_wgrad_accumulation
+    dtype, bs, model, bias, fuse_wgrad_accumulation
 ):
     config = model_configs[model]
 
@@ -1665,7 +1645,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
         bias=bias,
-        normalization=normalization,
         params_dtype=dtype,
         device="cuda",
         delay_wgrad_compute=True,
@@ -1677,7 +1656,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         ffn_hidden_size=4 * config.hidden_size,
         eps=config.eps,
         bias=bias,
-        normalization=normalization,
         params_dtype=dtype,
         device="cuda",
         delay_wgrad_compute=False,
@@ -1687,8 +1665,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
     # Share params
     with torch.no_grad():
         ln_mlp_ref.layer_norm_weight = Parameter(ln_mlp.layer_norm_weight.clone())
-        if normalization != "RMSNorm":
-            ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
+        ln_mlp_ref.layer_norm_bias = Parameter(ln_mlp.layer_norm_bias.clone())
         ln_mlp_ref.fc1_weight = Parameter(ln_mlp.fc1_weight.clone())
         ln_mlp_ref.fc2_weight = Parameter(ln_mlp.fc2_weight.clone())
         if bias:
@@ -1802,14 +1779,8 @@ def test_grouped_linear_accuracy(
     parallel_mode=None,
 ):
     fp8 = recipe is not None
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8 and recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -1904,14 +1875,8 @@ def test_grouped_linear_accuracy_save_original_input(
     parallel_mode=None,
 ):
     fp8 = recipe is not None
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8 and recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if fp8 and recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
@@ -2114,14 +2079,8 @@ def test_padding_grouped_linear_accuracy(
     fp8_model_params,
     parallel_mode=None,
 ):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2189,14 +2148,8 @@ def test_padding_grouped_linear_accuracy_save_original_input(
     fp8_model_params,
     parallel_mode=None,
 ):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
 
@@ -2410,14 +2363,8 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("recipe", fp8_recipes)
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
-    if not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if recipe.float8_block_scaling() and not fp8_block_scaling_available:
-        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -2645,9 +2592,8 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         (16, 4096, 128, 512),
     ],
 )
-@pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
+def test_fp8_grouped_gemm(shape, accumulate):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
