@@ -194,8 +194,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  /*! @brief Construct a high precision tensor giving it this quantizer's amax 
-  
+  /*! @brief Construct a high precision tensor giving it this quantizer's amax
+
   Note: this member function also zeros out the amax, as it is meant to be used in conjunction with
         a kernel computing the amax, which might expect the amax to be initialized to zero
   */
