@@ -58,12 +58,12 @@ namespace transformer_engine::pytorch {
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float p_dropout, size_t num_attn_heads,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float p_dropout, size_t num_attn_heads,
     size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
     size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, attn_mask_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
+      bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
       max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right);
   return fused_attention_backend;
 }
@@ -72,7 +72,7 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
+    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
@@ -184,7 +184,7 @@ std::vector<py::object> fused_attn_fwd(
 
   // softmax offset
   TensorWrapper te_SoftmaxOffset;
-  if (SoftmaxOffset.has_value()) {
+  if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
     auto SoftmaxOffset_sizes = SoftmaxOffset.value().sizes().vec();
     std::vector<size_t> SoftmaxOffset_shape{SoftmaxOffset_sizes.begin(), SoftmaxOffset_sizes.end()};
     te_SoftmaxOffset =
@@ -214,7 +214,7 @@ std::vector<py::object> fused_attn_fwd(
         &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -235,7 +235,7 @@ std::vector<py::object> fused_attn_fwd(
   };
   // allocate memory for nvte_aux_tensor_pack.tensors
   // f16_max512: S [b, h, sq, skv]
-  // f16_arbitrary: S [b, h, sq, 1], (optional) L [1, h, 1, 1], rng_state [2], (optional) Bias [1, h, sq, skv]
+  // f16_arbitrary: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
   // fp8: M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
@@ -259,6 +259,10 @@ std::vector<py::object> fused_attn_fwd(
   if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
     set_tensor_param(i++, Bias.value());
   }
+  // softmax_offset
+  if ((softmax_type != NVTE_VANILLA_SOFTMAX) && (SoftmaxOffset.has_value())) {
+    set_tensor_param(i++, SoftmaxOffset.value());
+  }
 
   // execute the kernel
   NVTE_SCOPED_GIL_RELEASE({
@@ -267,7 +271,7 @@ std::vector<py::object> fused_attn_fwd(
         &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0],
+        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -281,7 +285,7 @@ std::vector<py::object> fused_attn_fwd(
 // fused attention BWD with separate Q, K and V
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
@@ -510,8 +514,8 @@ std::vector<py::object> fused_attn_bwd(
   // create dSoftmaxOffset the same shape as SoftmaxOffset
   at::Tensor dSoftmaxOffset;
   TensorWrapper te_dSoftmaxOffset;
-  int is_bias = int((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI));
-  if ((nvte_aux_tensor_pack.size - is_bias) == 3) {
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      options = torch::TensorOptions().dtype(at::kFloat).device(torch::kCUDA);
       dSoftmaxOffset = torch::empty({1, static_cast<int64_t>(h_q), 1, 1}, options);
       te_dSoftmaxOffset = makeTransformerEngineTensor(dSoftmaxOffset);
   }
@@ -526,7 +530,7 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(),  te_dBias.data(), te_dSoftmaxOffset.data(),
         te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
         te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1], deterministic,
+        qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0], window_size[1], deterministic,
         workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
@@ -542,7 +546,7 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(),  te_dBias.data(), te_dSoftmaxOffset.data(),
         te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
         te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1], deterministic,
+        qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0], window_size[1], deterministic,
         workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 

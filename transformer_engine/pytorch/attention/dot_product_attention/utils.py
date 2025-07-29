@@ -24,6 +24,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    SoftmaxType,
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -778,6 +779,7 @@ def get_attention_backend(
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
             attention_dropout,
             num_heads,
             num_gqa_groups,
@@ -822,10 +824,6 @@ def get_attention_backend(
     if softmax_type != "vanilla":
         logger.debug("Disabling FlashAttention for non-vanilla softmax types")
         use_flash_attention = False
-        if use_fused_attention and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-            logger.debug("Disabling FusedAttention max512 backend for non-vanilla softmax types")
-            use_fused_attention = False
-            fused_attention_backend = FusedAttnBackend["No_Backend"]
 
     # Filter: Determinism
     # backend                      | deterministic

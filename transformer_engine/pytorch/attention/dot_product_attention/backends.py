@@ -932,6 +932,7 @@ class FusedAttnFunc(torch.autograd.Function):
         qkv_layout,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         window_size,
         rng_gen,
         fused_attention_backend,
@@ -1013,6 +1014,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                softmax_type,
                 window_size,
                 rng_gen,
             )
@@ -1075,6 +1077,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_layout,
                 attn_bias_type,
                 attn_mask_type,
+                softmax_type,
                 window_size,
                 rng_gen,
                 softmax_offset,
@@ -1131,6 +1134,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.qkv_layout = qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
+        ctx.softmax_type = softmax_type
         ctx.window_size = window_size
         ctx.fused_attention_backend = (
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -1242,6 +1246,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.softmax_type,
                         ctx.window_size,
                         ctx.deterministic,
                     )
@@ -1305,6 +1310,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.qkv_layout,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
+                        ctx.softmax_type,
                         ctx.window_size,
                         ctx.deterministic,
                     )
@@ -1314,7 +1320,7 @@ class FusedAttnFunc(torch.autograd.Function):
         d_bias = None
         if ctx.attn_bias_type not in ["no_bias", "alibi"]:
             d_bias = rest[count]
-            count += 1
+        count += 1
         # if softmax type is "learnable"
         d_softmax_offset = None
         if not ctx.is_softmax_vanilla:
@@ -1333,6 +1339,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             d_bias,
+            None,
             None,
             None,
             None,
@@ -1626,6 +1633,7 @@ class FusedAttention(torch.nn.Module):
                     qkv_layout,
                     core_attention_bias_type,
                     attn_mask_type,
+                    self.softmax_type,
                     window_size,
                     None,  # rng_gen
                     fused_attention_backend,
