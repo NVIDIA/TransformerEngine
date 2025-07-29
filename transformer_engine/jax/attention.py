@@ -959,6 +959,7 @@ def _fused_attn_bwd_rule(
     ctx,
     dz,
 ):
+    del context_checkpoint_name
     (
         qkv,
         bias,
