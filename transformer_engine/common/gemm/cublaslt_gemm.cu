@@ -87,7 +87,7 @@ struct GemmParam {
  */
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                int m, int n, int k, bool grad) {
+                                int m, int n, int k) {
   using namespace transformer_engine;
   NVTE_CHECK(
       A.scaling_mode == B.scaling_mode ||
@@ -102,6 +102,20 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   // Transpose mode with column-major ordering
   bool is_A_transposed = transA == CUBLAS_OP_T;
   bool is_B_transposed = transB == CUBLAS_OP_T;
+
+  // Set conditions for MXFP8 and NVFP4 gemm execution.
+  // Only a TN layout GEMM with hybrid/full NVFP4 scaling indicates an NVFP4 GEMM.
+  const auto is_A_nvfp4 = is_nvfp_scaling(A.scaling_mode);
+  const auto is_B_nvfp4 = is_nvfp_scaling(B.scaling_mode);
+  const auto TN = transA != CUBLAS_OP_N && transB == CUBLAS_OP_N;
+  const auto nvfp4_gemm = is_A_nvfp4 && is_B_nvfp4 && TN;
+
+  // MXFP8 GEMM is either for a `non-TN layout NVFP4 scaling (backward)` or `MXFP8 scaling`.
+  const auto is_A_mxfp8 =
+      is_mxfp_scaling(A.scaling_mode) || (is_hybrid_nvfp4_scaling(A.scaling_mode) && !TN);
+  const auto is_B_mxfp8 =
+      is_mxfp_scaling(B.scaling_mode) || (is_hybrid_nvfp4_scaling(B.scaling_mode) && !TN);
+  const auto mxfp8_gemm = is_A_mxfp8 && is_B_mxfp8 && !nvfp4_gemm;
 
   // Configure A matrix
   if (is_tensor_scaling(A.scaling_mode)) {
@@ -123,7 +137,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         NVTE_CHECK(!is_fp8_dtype(ret.Atype), "Input A is missing column-wise usage");
       }
     }
-  } else if (is_hybrid_nvfp4_scaling(A.scaling_mode) && !grad) {
+  } else if (nvfp4_gemm) {
     NVTE_CHECK(is_A_transposed, "Incorrect GEMM layout for NVFP4");
     NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     ret.A = A.data.dptr;
@@ -131,7 +145,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = A.data.dtype;
     ret.A_scale_inv = A.scale_inv.dptr;
     ret.lda = k;
-  } else if (is_mxfp_scaling(A.scaling_mode) || is_hybrid_nvfp4_scaling(A.scaling_mode)) {
+  } else if (mxfp8_gemm) {
     // MXFP8 GEMM. Either for MXFP8 recipe or backward of Hybrid NVFP4 recipe.
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
@@ -190,7 +204,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
         NVTE_CHECK(!is_fp8_dtype(ret.Btype), "Input B is missing column-wise usage");
       }
     }
-  } else if (is_hybrid_nvfp4_scaling(B.scaling_mode) && !grad) {
+  } else if (nvfp4_gemm) {
     NVTE_CHECK(!is_B_transposed, "Incorrect GEMM layout for NVFP4");
     NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
     ret.B = B.data.dptr;
@@ -198,7 +212,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = B.data.dtype;
     ret.B_scale_inv = B.scale_inv.dptr;
     ret.ldb = k;
-  } else if (is_mxfp_scaling(B.scaling_mode) || is_hybrid_nvfp4_scaling(B.scaling_mode)) {
+  } else if (mxfp8_gemm) {
     // MXFP8
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
@@ -281,7 +295,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k, grad);
+  const GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
   void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
@@ -367,17 +381,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                      &math_sm_count, sizeof(math_sm_count)));
   }
 
-  // Set conditions for when MXFP8 and NVFP4 gemm execution.
-  bool hybrid_nvfp4_recipe = is_hybrid_nvfp4_scaling(inputA->scaling_mode) &&
-                             is_hybrid_nvfp4_scaling(inputB->scaling_mode);
-  bool mxfp8_gemm =
-      (is_mxfp_scaling(inputA->scaling_mode) && is_mxfp_scaling(inputB->scaling_mode)) ||
-      (grad && hybrid_nvfp4_recipe);
-  bool nvfp4_gemm = !grad && hybrid_nvfp4_recipe;
-
   // set fp8/fp4 attributes -- input and output types should already be set to fp8/fp4
   // as appropriate. Note: gelu fusion isn't available right now, and we don't need
   // amax(D) either (next op is high precision).
+  const bool mxfp8_gemm = !use_fp4 && (is_mxfp_scaling(inputA->scaling_mode) ||
+                                       is_hybrid_nvfp4_scaling(inputA->scaling_mode));
+
   if (use_fp8 || use_fp4) {
     // Fast accumulation is only supported for FP8.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : use_fp8;
@@ -389,7 +398,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     cublasLtMatmulMatrixScale_t scaling_mode_a;
     cublasLtMatmulMatrixScale_t scaling_mode_b;
 #endif  // CUBLAS_VERSION >= 120800
-    if ((is_tensor_scaling(inputA->scaling_mode) && is_tensor_scaling(inputB->scaling_mode))) {
+    if (is_tensor_scaling(inputA->scaling_mode)) {
       void *A_scale_inverse = param.A_scale_inv;
       void *B_scale_inverse = param.B_scale_inv;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -424,7 +433,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
-    } else if (nvfp4_gemm) {
+    } else if (use_fp4) {  // NVFP4 GEMM
       fp8e4m3 *A_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.A_scale_inv);
       fp8e4m3 *B_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
