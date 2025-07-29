@@ -260,7 +260,7 @@ void performTest(float (*OP)(const float),
     const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor input("input", shape, itype);
-    Tensor output("output", shape, otype, rowwise_true, colwise, NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
+    Tensor output("output", shape, otype, rowwise_true, colwise, NVTE_HYBRID_NVFP4_MXFP8_SCALING);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output_nvfp4;
     std::unique_ptr<OutputType[]> ref_output_mxfp8;

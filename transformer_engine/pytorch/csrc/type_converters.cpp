@@ -117,7 +117,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
 }
 
 TensorWrapper NVTETensorFromHybridNVFP4Tensor(py::handle tensor, Quantizer *quantizer) {
-  auto ret = TensorWrapper(NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
+  auto ret = TensorWrapper(NVTE_HYBRID_NVFP4_MXFP8_SCALING);
 
   bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());

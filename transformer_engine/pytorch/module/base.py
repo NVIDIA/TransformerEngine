@@ -45,7 +45,6 @@ from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..utils import is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from ..utils import torch_get_autocast_gpu_dtype
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor

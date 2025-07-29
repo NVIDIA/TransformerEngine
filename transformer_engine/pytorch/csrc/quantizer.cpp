@@ -558,7 +558,7 @@ std::pair<TensorWrapper, py::object> HybridNVFP4Quantizer::create_tensor(
     numel *= s;
   }
 
-  TensorWrapper tensor(NVTE_FWD_NVFP4_BWD_MXFP8_SCALING);
+  TensorWrapper tensor(NVTE_HYBRID_NVFP4_MXFP8_SCALING);
   at::TensorOptions bit4_opts, bit8_opts, bit32_opts;
   at::Tensor data, scale_inv, columnwise_data, rowwise_scale_inv, columnwise_scale_inv;
   bit4_opts = bit4_opts.dtype(torch::kUInt4).device(torch::kCUDA);

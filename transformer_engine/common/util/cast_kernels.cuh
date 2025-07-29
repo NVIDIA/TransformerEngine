@@ -2074,7 +2074,7 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
           workspace_tensor, stream);
       break;
     }
-    case NVTE_FWD_NVFP4_BWD_MXFP8_SCALING: {
+    case NVTE_HYBRID_NVFP4_MXFP8_SCALING: {
       nvfp4_quantize<IS_ACT, ParamOP, OP>(*input_tensor, &noop_tensor, output_tensor, stream);
       break;
     }

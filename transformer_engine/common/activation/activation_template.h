@@ -25,14 +25,14 @@ namespace transformer_engine {
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
 void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   using namespace detail;
-  // constexpr bool IS_DBIAS = false;
-  // constexpr bool IS_DACT = false;
-  // constexpr bool IS_ACT = true;
-  // constexpr NVTETensor dbias = nullptr;
-  // constexpr NVTETensor workspace = nullptr;
-  // constexpr const NVTETensor grad = nullptr;
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = true;
+  constexpr NVTETensor dbias = nullptr;
+  constexpr NVTETensor workspace = nullptr;
+  constexpr const NVTETensor grad = nullptr;
 
-  // quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace, nullptr, stream);
+  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, output, dbias, workspace, nullptr, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>

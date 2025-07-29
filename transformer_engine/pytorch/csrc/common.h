@@ -225,7 +225,7 @@ class HybridNVFP4Quantizer : public Quantizer {
 
   explicit HybridNVFP4Quantizer(const py::handle& quantizer);
 
-  NVTEScalingMode get_scaling_mode() const override { return NVTE_FWD_NVFP4_BWD_MXFP8_SCALING; }
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_HYBRID_NVFP4_MXFP8_SCALING; }
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
