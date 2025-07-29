@@ -2,6 +2,11 @@
 #
 # See LICENSE for license information.
 
+import jax
+import jax.numpy as jnp
 import transformer_engine.jax
+
+x = jax.device_put(jnp.array([1.0, 2.0, 3.0]), device=jax.devices("cuda")[0])
+print(x)
 
 print("OK")
