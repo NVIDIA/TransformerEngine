@@ -398,7 +398,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_hp_tensor_with_amax(
-    const std::vector<size_t>& shape, DType dtype) const {
+    const std::vector<size_t>& shape, DType dtype) {
+  amax.zero_();
   auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
   out_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
                    getTensorShape(amax));
