@@ -431,7 +431,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             tensor = self.fp8_tensor_object_map.pop(tensor_tag)
 
         if self.double_buffering:
-            tensor.do_not_clear = True
+            tensor._do_not_clear = True
 
         self.tensor_tag_to_buf.pop(tensor_tag, None)
         # the tensor should have been copied back in on_group_commit_backward()
