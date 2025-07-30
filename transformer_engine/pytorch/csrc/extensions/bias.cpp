@@ -4,18 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
+#include <ATen/ATen.h>
+#include <pybind11/pybind11.h>
 
 #include <utility>
 #include <vector>
 
-#include <ATen/ATen.h>
-#include <pybind11/pybind11.h>
+#include "common.h"
+#include "extensions.h"
+#include "pybind.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/transformer_engine.h"
-
-#include "common.h"
-#include "pybind.h"
 
 namespace transformer_engine {
 namespace pytorch {
@@ -56,8 +55,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   });
   if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
     workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(),
-                                                 workspace_nvte.shape(),
+    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
                                                  workspace_nvte.dtype());
   }
 
@@ -72,10 +70,9 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
 
 namespace {
 
-std::vector<py::object> dbias_dact(void (*nvte_func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
-                                                     cudaStream_t),
-                                   at::Tensor grad_output_torch,
-                                   at::Tensor act_input_torch,
+std::vector<py::object> dbias_dact(void (*nvte_func)(const NVTETensor, const NVTETensor, NVTETensor,
+                                                     NVTETensor, NVTETensor, cudaStream_t),
+                                   at::Tensor grad_output_torch, at::Tensor act_input_torch,
                                    py::handle quantizer_py) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
@@ -114,9 +111,8 @@ std::vector<py::object> dbias_dact(void (*nvte_func)(const NVTETensor, const NVT
   });
   if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
     workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(),
-                                               workspace_nvte.shape(),
-                                               workspace_nvte.dtype());
+    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
+                                                 workspace_nvte.dtype());
   }
 
   // Launch kernel
