@@ -22,6 +22,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     HybridNVFP4BlockScaling,
+    NVFP4BlockScaling,
 )
 
 from .constants import dist_group_type
@@ -826,6 +827,8 @@ class RecipeState(abc.ABC):
             cls = Float8BlockScalingRecipeState
         elif recipe.hybrid_nvfp4():
             cls = HybridNVFP4BlockScalingRecipeState
+        elif recipe.nvfp4():
+            cls = NVFP4BlockScalingRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1002,6 +1005,40 @@ class HybridNVFP4BlockScalingRecipeState(RecipeState):
         from .tensor.hybrid_nvfp4_tensor import HybridNVFP4Quantizer
 
         return [HybridNVFP4Quantizer(self.dtype) for i in range(self.num_quantizers)]
+
+
+class NVFP4BlockScalingRecipeState(RecipeState):
+    """Configuration for HybridNVFP4 quantization.
+
+    HybridNVFP4 quantization does not require state.
+
+    """
+
+    recipe: NVFP4BlockScaling
+    mode: str
+    dtype: tex.DType
+
+    def __init__(
+        self,
+        recipe: NVFP4BlockScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
+
+        # Allocate buffers
+        if device is None:
+            device = torch.device("cuda")
+
+    def make_quantizers(self) -> list:
+        from .tensor.hybrid_nvfp4_tensor import NVFP4Quantizer
+
+        return [NVFP4Quantizer(self.dtype) for i in range(self.num_quantizers)]
 
 
 class Float8BlockScalingRecipeState(RecipeState):

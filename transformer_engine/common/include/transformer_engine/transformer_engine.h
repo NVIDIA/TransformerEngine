@@ -92,6 +92,9 @@ enum NVTEScalingMode {
     and single MXFP8 scale per block of 32 contiguous elements in backward pass (BWD).
   */
   NVTE_HYBRID_NVFP4_MXFP8_SCALING = 4,
+  /*! Single scale per block of 16 elements consecutive in either
+      rowwise or columnwise direction */
+  NVTE_NVFP4_1D_SCALING = 5,
   NVTE_INVALID_SCALING = 100
 };
 

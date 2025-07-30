@@ -27,6 +27,7 @@ from ..fp8 import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     HybridNVFP4BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -680,14 +681,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
-            if recipe.nvfp4() and isinstance(recipe_state, HybridNVFP4BlockScalingRecipeState):
+            if recipe.hybrid_nvfp4() and isinstance(
+                recipe_state, HybridNVFP4BlockScalingRecipeState
+            ):
+                return
+            if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
-        if recipe.nvfp4() and not fwd:
+        if recipe.hybrid_nvfp4() and not fwd:
             recipe = MXFP8BlockScaling(
                 fp8_format=recipe.fp8_format, fp8_mha=recipe.fp8_mha, fp8_dpa=recipe.fp8_dpa
             )

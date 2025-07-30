@@ -298,6 +298,25 @@ class HybridNVFP4Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
+class NVFP4Quantizer : public Quantizer {
+ public:
+  explicit NVFP4Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_NVFP4_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+};
+
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
 std::vector<size_t> getTensorShape(const at::Tensor& t);

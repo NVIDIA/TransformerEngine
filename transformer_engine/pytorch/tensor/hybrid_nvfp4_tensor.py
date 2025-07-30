@@ -156,7 +156,7 @@ class HybridNVFP4Tensor(HybridNVFP4TensorBase, QuantizedTensor):
     Parameters
     ----------
     data: torch.Tensor
-          Raw FP8 data in a uint8 tensor
+          Raw data in a uint4/uint8 tensor
     fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
     fp8_scale_inv: torch.Tensor

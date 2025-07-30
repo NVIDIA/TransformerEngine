@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor class with MXFP8 data"""
+"""Tensor class with NVFP4 data"""
 from __future__ import annotations
 from collections.abc import Iterable
 import math
@@ -10,38 +10,27 @@ from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
-from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
+from ..constants import NVFP4_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
-from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
+from ._internal.nvfp4_tensor_base import NVFP4TensorBase, _FromNVFP4Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 
 aten = torch.ops.aten
 
 
-class MXFP8Quantizer(Quantizer):
-    """Builder class for FP8 tensors with MX block scaling
-
-    High-precision tensors (e.g. in FP32 or BF16) are quantized by
-    dividing them into groups of 32 elements, each scaled and cast
-    separately using current data.
-
-    """
-
-    dtype: TE_DType
+class NVFP4Quantizer(Quantizer):
+    """Builder class for NVFP4 tensors with NV block scaling"""
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
 
     def update_quantized(
         self,
@@ -51,7 +40,9 @@ class MXFP8Quantizer(Quantizer):
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
 
-        assert isinstance(dst, MXFP8Tensor), f"Cannot store quantized MXFP8 in {type(dst)} type."
+        assert isinstance(
+            dst, NVFP4Tensor
+        ), f"Cannot store quantized NVFP4 in {type(dst)} type."
 
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
@@ -62,18 +53,15 @@ class MXFP8Quantizer(Quantizer):
         # Launch cast kernel
         tex.quantize(src, self, dst, noop_flag)
 
-        # Update FP8 dtype
-        dst._fp8_dtype = self.dtype
-
         return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
-        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
@@ -84,28 +72,35 @@ class MXFP8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
-    ) -> MXFP8Tensor:
+    ) -> NVFP4Tensor:
 
         # Canonicalize tensor attributes
         if device is None:
             device = torch.device("cuda")
 
-        assert (
-            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
-            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
-        ), (
-            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
-            f" {MXFP8_BLOCK_SCALING_SIZE}"
+        assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
+            f" {NVFP4_BLOCK_SCALING_SIZE}"
         )
 
-        # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        assert math.prod(shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
+            f" {NVFP4_BLOCK_SCALING_SIZE}"
+        )
+
+        # Allocate FP4 data
+        data = torch.empty(shape, dtype=torch.uint4, device=device)
+
+        # Allocate block scale inverse. E4M3 format.
         scale_inv = torch.zeros(
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
+            round_up_to_nearest_multiple(shape[-1] // NVFP4_BLOCK_SCALING_SIZE, 4),
+            dtype=torch.uint4,
             device=device,
         )
+
+        # Allocate per tensor scale inverse. FP32 format.
+        per_tensor_scale_inv = torch.ones(1, dtype=torch.float32, device=device)
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -113,63 +108,35 @@ class MXFP8Quantizer(Quantizer):
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
             columnwise_scale_inv = torch.zeros(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // NVFP4_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
-                dtype=torch.uint8,
+                dtype=torch.uint4,
                 device=device,
             )
 
         # Construct FP8 tensor
-        return MXFP8Tensor(
+        return NVFP4Tensor(
             shape=shape,
             dtype=dtype,
-            fp8_dtype=self.dtype,
             rowwise_data=data,
             rowwise_scale_inv=scale_inv,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
+            per_tensor_rowwise_scale_inv=per_tensor_scale_inv,
             quantizer=self,
             requires_grad=requires_grad,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
-        # TODO(ksivamani): No calibration needed for mxfp8?
+        # TODO(ksivamani): No calibration?
         pass
 
-    def create_tensor_from_data(
-        self,
-        data: torch.Tensor,
-        scale_inv: torch.Tensor,
-        fake_dtype: torch.dtype,
-        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
-    ) -> MXFP8Tensor:
-        """Create a new MXFP8Tensor from data and scale_inv."""
-        return MXFP8Tensor(
-            shape=data.shape,
-            dtype=fake_dtype,
-            rowwise_data=data,
-            rowwise_scale_inv=scale_inv,
-            columnwise_data=None,
-            columnwise_scale_inv=None,
-            fp8_dtype=fp8_dtype,
-            quantizer=self,
-        )
-
-    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
-        if tensor.dtype != torch.float32:
-            tensor = tensor.to(dtype=torch.float32)
-        data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
-        return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
-
-    def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
-        return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
-
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
-        return MXFP8BlockScaling
+        return NVFP4BlockScaling
 
 
-class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
-    """Experimental tensor class with FP8 data
+class NVFP4Tensor(NVFP4TensorBase, QuantizedTensor):
+    """Experimental tensor class with Hybrid FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
     but the data itself is (scaled) FP8. For most tensor operations,
@@ -179,9 +146,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
     Parameters
     ----------
     data: torch.Tensor
-          Raw FP8 data in a uint8 tensor
-    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+          Raw FP8 data in a uint4 tensor
     fp8_scale_inv: torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
@@ -189,52 +154,28 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                    precision.
     dtype: torch.dtype, default = torch.float32
            Nominal tensor datatype.
-
     """
 
-    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorBase with positional args,
-    # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
-    def __new__(
-        cls,
-        *args,
-        rowwise_data: Optional[torch.Tensor],
-        rowwise_scale_inv: Optional[torch.Tensor],
-        columnwise_data: Optional[torch.Tensor],
-        columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
-        quantizer: Optional[Quantizer],
-        **kwargs,
-    ):
-        instance = super().__new__(
-            cls,
-            rowwise_data,
-            rowwise_scale_inv,
-            columnwise_data,
-            columnwise_scale_inv,
-            fp8_dtype,
-            quantizer,
-            *args,
-            **kwargs,
-        )
-        return instance
-
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return (
+            f"NVFP4Tensor,"
+            f" data={self.dequantize(dtype=self.dtype)})"
+        )
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
-        Construct plain PyTorch tensor from MXFP8Tensor
+        Construct plain PyTorch tensor from NVFP4Tensor
 
         By default the resulting tensor's dtype is the
-        MXFP8Tensor's nominal dtype.
+        NVFP4Tensor's nominal dtype.
         """
         # Convert PyTorch dtype to TE dtype
         if dtype is None:
             dtype = self.dtype
 
         if torch.is_grad_enabled():
-            return _FromMXFP8Func.apply(self, dtype)
-        return _FromMXFP8Func.forward(None, self, dtype)
+            return _FromNVFP4Func.apply(self, dtype)
+        return _FromNVFP4Func.forward(None, self, dtype)
 
     def _get_quantizer(self) -> Quantizer:
         """Get builder for quantized tensor
@@ -244,16 +185,14 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         """
         if self._quantizer is not None:
             return self._quantizer
-        return MXFP8Quantizer(
-            fp8_dtype=self._fp8_dtype,
-        )
+        return NVFP4Quantizer()
 
     def quantize_(
         self,
         tensor: torch.Tensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> MXFP8Tensor:
+    ) -> NVFP4Tensor:
         """Update FP8 data
 
         Parameters
@@ -269,12 +208,12 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
 
-    def detach(self) -> MXFP8Tensor:
+    def detach(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         # TODO(ksivamani): Fix the detach bug
-        return MXFP8Tensor.make_like(self)
+        return NVFP4Tensor.make_like(self)
 
-    def clone(self) -> MXFP8Tensor:
+    def clone(self) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         assert self._rowwise_data is not None
         rowwise_data = self._rowwise_data.detach().clone()
@@ -289,18 +228,18 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             },
         )
 
-    def view(self, *shape: Tuple[int]) -> MXFP8Tensor:
+    def view(self, *shape: Tuple[int]) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
 
-    def reshape(self, *shape: Tuple[int]) -> MXFP8Tensor:
+    def reshape(self, *shape: Tuple[int]) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
     def contiguous(
         self,
         memory_format: torch.memory_format = torch.contiguous_format,
-    ) -> MXFP8Tensor:
+    ) -> NVFP4Tensor:
         """Returns tensor with data in provided memory format
 
         Returns `self` if data is already in correct memory format.
@@ -314,7 +253,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             memory_format=memory_format
         ):
             return self
-        raise ValueError("MXFP8Tensor does not support different memory formats!")
+        raise ValueError("NVFP4Tensor does not support different memory formats!")
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -330,16 +269,16 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 kwargs,
             )
             out_shape = out_data.size()
-            return MXFP8Tensor(
+            return NVFP4Tensor(
                 shape=out_shape,
                 dtype=tensor.dtype,
                 rowwise_data=out_data,
                 rowwise_scale_inv=tensor._rowwise_scale_inv,
                 columnwise_data=tensor._columnwise_data,
                 columnwise_scale_inv=tensor._columnwise_scale_inv,
+                per_tensor_rowwise_scale_inv=tensor._per_tensor_rowwise_scale_inv,
                 quantizer=tensor._quantizer,
                 requires_grad=False,
-                fp8_dtype=tensor._fp8_dtype,
             )
 
         # Default case
@@ -352,45 +291,42 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
         columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        per_tensor_rowwise_scale_inv: torch.Tensor,
         dtype: torch.dtype,
         shape: torch.shape,
-        quantizer: Optional[Quantizer] = None,
-    ) -> MXFP8Tensor:
-        """Build MXFP8Tensor, for use in __reduce__
+    ) -> NVFP4Tensor:
+        """Build NVFP4Tensor, for use in __reduce__
 
         __reduce_ex__ assumes object constructor has positional
         arguments.
 
         """
-        return MXFP8Tensor(
+        return NVFP4Tensor(
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
-            fp8_dtype=fp8_dtype,
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
+            per_tensor_rowwise_scale_inv=per_tensor_rowwise_scale_inv,
             dtype=dtype,
             shape=shape,
-            quantizer=quantizer,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling"""
         return (
-            MXFP8Tensor._make_in_reduce_ex,
+            NVFP4Tensor._make_in_reduce_ex,
             (
                 self._rowwise_data,
                 self._rowwise_scale_inv,
                 self._columnwise_data,
                 self._columnwise_scale_inv,
-                self._fp8_dtype,
+                self._per_tensor_rowwise_scale_inv,
                 self.dtype,
                 self.shape,
-                self._quantizer,
             ),
         )
 
-    def _get_data(self) -> MXFP8Tensor:
+    def _get_data(self) -> NVFP4Tensor:
         """Get tensor data property"""
         return super().data
 
@@ -398,7 +334,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
     def _set_data(self, tensor: torch.Tensor) -> None:
         """Set tensor data property
 
-        Just takes FP8 data if setting from a MXFP8Tensor. Otherwise
+        Just takes FP8 data if setting from a NVFP4Tensor. Otherwise
         casts to FP8.
 
         """
@@ -408,8 +344,8 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         if not devices_match(new_device, tensor.device):
             tensor = tensor.to(device=new_device)
 
-        # Just copy FP8 data if other tensor is MXFP8Tensor
-        if isinstance(tensor, MXFP8Tensor):
+        # Just copy FP8 data if other tensor is NVFP4Tensor
+        if isinstance(tensor, NVFP4Tensor):
             if (  # pylint: disable=too-many-boolean-expressions
                 self.size() != tensor.size()
                 or self.stride() != tensor.stride()
@@ -419,7 +355,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 or not devices_match(self.device, new_device)
             ):
                 dummy_tensor = torch.Tensor._make_wrapper_subclass(
-                    MXFP8Tensor,
+                    NVFP4Tensor,
                     tensor.size(),
                     strides=tensor.stride(),
                     storage_offset=tensor.storage_offset(),
@@ -429,39 +365,38 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                     device=new_device,
                 )
                 # pylint: disable=unnecessary-dunder-call
-                super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
+                super(NVFP4Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
-            self._quantizer = tensor._quantizer.copy()
-            self._fp8_dtype = tensor._fp8_dtype
+            self._quantizer = tensor._quantizer
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
+            self._per_tensor_rowwise_scale_inv = tensor._per_tensor_rowwise_scale_inv
             return
 
         # Quantize to FP8
         assert self._quantizer is not None, "Can't quantize without a quantizer"
-        self._quantizer.internal = False
         self.data = self._quantizer.quantize(tensor)
         if self.requires_grad != tensor.requires_grad:
             self.requires_grad_(requires_grad=tensor.requires_grad)
 
-    # Cast to FP8 when setting MXFP8Tensor.data
+    # Cast to FP8 when setting NVFP4Tensor.data
     data = property(_get_data, _set_data)
 
 
 class _ViewFunc(torch.autograd.Function):
     """View function
 
-    View the MXFP8Tensor using the provided shape.
+    View the NVFP4Tensor using the provided shape.
 
     """
 
     @staticmethod
     def forward(
         ctx,
-        tensor: MXFP8Tensor,
+        tensor: NVFP4Tensor,
         shape: Optional[list[int]] = None,
-    ) -> MXFP8Tensor:
+    ) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
@@ -483,7 +418,7 @@ class _ViewFunc(torch.autograd.Function):
                     break
         if shape[-1] != ctx.shape[-1]:
             raise RuntimeError(
-                "MXFP8Tensor does not support reshaping inner dimension "
+                "NVFP4Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
             )
 
@@ -493,15 +428,16 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.view(*shape)
         if tensor._columnwise_data is not None:
-            new_columnwise_data = tensor._columnwise_data.view(*shape)
-        return MXFP8Tensor(
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+        return NVFP4Tensor(
             shape,
             tensor.dtype,
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=tensor._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=tensor._columnwise_scale_inv,
-            fp8_dtype=tensor._fp8_dtype,
+            per_tensor_rowwise_scale_inv=tensor._per_tensor_rowwise_scale_inv,
             quantizer=tensor._quantizer,
         )
 
@@ -512,22 +448,22 @@ class _ViewFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
 
-        if isinstance(grad, MXFP8Tensor):
+        if isinstance(grad, NVFP4Tensor):
             new_data = (
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
             if grad._columnwise_data is not None:
-                new_columnwise_data = grad._columnwise_data.view(*ctx.shape)
+                new_columnwise_data = grad._columnwise_data.view(ctx.shape[-1], -1)
             else:
                 new_columnwise_data = None
-            dgrad = MXFP8Tensor(
+            dgrad = NVFP4Tensor(
                 ctx.shape,
                 grad.dtype,
                 rowwise_data=new_data,
                 rowwise_scale_inv=grad._rowwise_scale_inv,
                 columnwise_data=new_columnwise_data,
                 columnwise_scale_inv=grad._columnwise_scale_inv,
-                fp8_dtype=grad._fp8_dtype,
+                per_tensor_rowwise_scale_inv=grad._per_tensor_rowwise_scale_inv,
                 quantizer=grad._quantizer,
             )
             return dgrad, None
@@ -537,16 +473,16 @@ class _ViewFunc(torch.autograd.Function):
 class _ReshapeFunc(torch.autograd.Function):
     """Reshape function
 
-    Reshape the MXFP8Tensor using the provided shape.
+    Reshape the NVFP4Tensor using the provided shape.
 
     """
 
     @staticmethod
     def forward(
         ctx,
-        tensor: MXFP8Tensor,
+        tensor: NVFP4Tensor,
         shape: Optional[list[int]] = None,
-    ) -> MXFP8Tensor:
+    ) -> NVFP4Tensor:
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
@@ -568,7 +504,7 @@ class _ReshapeFunc(torch.autograd.Function):
                     break
         if shape[-1] != ctx.shape[-1]:
             raise RuntimeError(
-                "MXFP8Tensor does not support reshaping inner dimension "
+                "NVFP4Tensor does not support reshaping inner dimension "
                 f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
             )
 
@@ -578,16 +514,17 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.reshape(*shape)
         if tensor._columnwise_data is not None:
-            new_columnwise_data = tensor._columnwise_data.view(*shape)
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
 
-        return MXFP8Tensor(
+        return NVFP4Tensor(
             shape,
             tensor.dtype,
             rowwise_data=new_rowwise_data,
             rowwise_scale_inv=tensor._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=tensor._columnwise_scale_inv,
-            fp8_dtype=tensor._fp8_dtype,
+            per_tensor_rowwise_scale_inv=tensor._per_tensor_rowwise_scale_inv,
             quantizer=tensor._quantizer,
         )
 
@@ -598,21 +535,22 @@ class _ReshapeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
 
-        if isinstance(grad, MXFP8Tensor):
+        if isinstance(grad, NVFP4Tensor):
             new_rowwise_data = None
             new_columnwise_data = None
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
             if grad._columnwise_data is not None:
-                new_columnwise_data = grad._columnwise_data.view(*ctx.shape)
-            dgrad = MXFP8Tensor(
+                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
+                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
+            dgrad = NVFP4Tensor(
                 ctx.shape,
                 grad.dtype,
                 rowwise_data=new_rowwise_data,
                 rowwise_scale_inv=grad._rowwise_scale_inv,
                 columnwise_data=new_columnwise_data,
                 columnwise_scale_inv=grad._columnwise_scale_inv,
-                fp8_dtype=grad._fp8_dtype,
+                per_tensor_rowwise_scale_inv=grad._per_tensor_rowwise_scale_inv,
                 quantizer=grad._quantizer,
             )
             return dgrad, None

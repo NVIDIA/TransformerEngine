@@ -65,6 +65,8 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_MXFP8_1D_SCALING";
     case NVTE_HYBRID_NVFP4_MXFP8_SCALING:
       return "NVTE_HYBRID_NVFP4_MXFP8_SCALING";
+    case NVTE_NVFP4_1D_SCALING:
+      return "NVTE_NVFP4_1D_SCALING";
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -95,12 +97,13 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
     }
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING ||
-        t.scaling_mode == NVTE_HYBRID_NVFP4_MXFP8_SCALING) {
+        t.scaling_mode == NVTE_HYBRID_NVFP4_MXFP8_SCALING ||
+        t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
       const size_t block_size_rowwise = (t.scaling_mode == NVTE_MXFP8_1D_SCALING) ? 32 : 16;
-      const size_t block_size_colwise = 32;
+      const size_t block_size_colwise = (t.scaling_mode == NVTE_NVFP4_1D_SCALING) ? 16 : 32;
 
       if (t.has_data()) {
         alignment = block_alignment[0];
