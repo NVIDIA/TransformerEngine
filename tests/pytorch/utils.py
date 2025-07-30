@@ -280,7 +280,6 @@ def get_available_attention_backends(
         _attention_backends["fused_attention_backend"] = fused_attention_backend
         _attention_backends["use_unfused_attention"] = use_unfused_attention
         _attention_backends["backend_selection_requires_update"] = False
-        print("return", available_backends, flash_attention_backend, fused_attention_backend)
         return available_backends, flash_attention_backend, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
