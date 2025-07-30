@@ -47,11 +47,12 @@ def start_offload_if_offload_enabled(*tensors: torch.Tensor, offload_base_tensor
     for tensor in tensors:
         if tensor is not None:
             if hasattr(tensor, "get_data_tensors"):
-                for data_tensor in tensor.get_data_tensors():
-                    data_tensor.start_reload_event = torch.cuda.Event()
-                    data_tensor.start_reload_event.record(torch.cuda.current_stream())  
-                    if offload_base_tensor:
-                        setattr(data_tensor, "offload_base_tensor", True)
+                for data_tensor in tensor.get_data_tensors(scales=True):
+                    if data_tensor is not None: 
+                        data_tensor.start_reload_event = torch.cuda.Event()
+                        data_tensor.start_reload_event.record(torch.cuda.current_stream())  
+                        if offload_base_tensor:
+                            setattr(data_tensor, "offload_base_tensor", True)
             else:
                 tensor.start_reload_event = torch.cuda.Event()
                 tensor.start_reload_event.record(torch.cuda.current_stream())
