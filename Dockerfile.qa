@@ -9,6 +9,9 @@ ARG FRAMEWORK
 WORKDIR /opt/transformerengine/
 SHELL ["bash", "-c"]
 
+# Copy artifacts for testing
+COPY te_ci_artifacts/ /opt/transformerengine/artifacts/
+
 # Remove PyTorch tests if not needed
 RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
     && rm -rf /opt/transformerengine/qa/L?_pytorch_* \
