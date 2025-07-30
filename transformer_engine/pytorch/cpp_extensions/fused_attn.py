@@ -445,6 +445,10 @@ def fused_attn_bwd(
             len(aux_ctx_tensors) == 3
         ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
+    print('bwddddd types',
+        fake_dtype,
+        dqkv_dtype,
+        )
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,

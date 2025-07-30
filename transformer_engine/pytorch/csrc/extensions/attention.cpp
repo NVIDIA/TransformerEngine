@@ -80,38 +80,59 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
-  TensorWrapper te_Q, te_K, te_V, te_O, te_S;
-
   auto none = py::none();
-  std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
-  std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
 
+  TensorWrapper te_Q, te_K, te_V;
   te_Q = makeTransformerEngineTensor(Q, none);
   te_K = makeTransformerEngineTensor(K, none);
   te_V = makeTransformerEngineTensor(V, none);
 
-  // If qkv has FP8 dtype, fake_dtype_te is equal to the fake dtype of q, k, v - needed since torch do not have fp8 types.
-  const DType qkv_type = te_Q.dtype();
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
+  TensorWrapper te_S;
+  py::object py_S;
+  std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
+  std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
 
-  std::vector<size_t> q_shape = convertShape(te_Q.shape());
-  std::vector<size_t> k_shape = convertShape(te_K.shape());
-  std::vector<size_t> v_shape = convertShape(te_V.shape());
-  auto options = torch::TensorOptions().dtype(GetATenDType(qkv_type)).device(torch::kCUDA);
   // create output tensor O
-
+  std::vector<size_t> q_shape = convertShape(te_Q.shape());
+  std::vector<size_t> v_shape = convertShape(te_V.shape());
   auto o_shape = std::vector<size_t>{q_shape.begin(), q_shape.end()};
   o_shape[o_shape.size() - 1] = v_shape[v_shape.size() - 1];
-  py::object o_python, s_python;
-  std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
-  std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  auto o_shape_int64 = std::vector<int64_t>{o_shape.begin(), o_shape.end()};
+
+  std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
+  //auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(O_quantizer.get());
+  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
+  bool is_float8 = transformer_engine::pytorch::detail::IsFloat8Quantizers(o_quantizer.ptr());
+  //IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())
+  bool force_unfused_kernel = is_float8;
+  printf("force unfused %d\n", int(force_unfused_kernel));
+
+  TensorWrapper te_O;
+  py::object py_O;
+  if (!force_unfused_kernel) {
+  std::tie(te_O, py_O) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
+  } else {
+  auto my_o_quantizer = static_cast<Float8Quantizer *>(O_quantizer.get());
+  NoneQuantizer temp_quantizer{none};
+  std::tie(te_O, py_O) = temp_quantizer.create_tensor(o_shape, fake_dtype_te);
+  te_O.set_scale(my_o_quantizer->scale.data_ptr(),
+		  GetTransformerEngineDType(my_o_quantizer->scale.scalar_type()),
+                  getTensorShape(my_o_quantizer->scale));
+  te_O.set_amax(my_o_quantizer->amax.data_ptr(),
+		  GetTransformerEngineDType(my_o_quantizer->amax.scalar_type()),
+                  getTensorShape(my_o_quantizer->amax));
+  }
+
+  //TensorWrapper &te_O = force_unfused_kernel ? te_O_unquantized : te_O_quantized;
+  ////TensorWrapper &te_O = te_O_unquantized;// : te_O_quantized;
+  //py::object &py_O = force_unfused_kernel ? py_O_unquantized : py_O_quantized;
+  ////py::object &py_O = py_O_unquantized; // : py_O_quantized;
 
   // construct NVTE tensors
   TensorWrapper te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
   TensorWrapper te_page_table_k, te_page_table_v;
+  const DType qkv_type = te_Q.dtype();
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     auto h = q_shape[q_shape.size() - 2];
@@ -173,7 +194,8 @@ std::vector<py::object> fused_attn_fwd(
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
-  auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
+  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  auto rng_state = torch::empty({2}, options);
   unpack(philox_args, static_cast<int64_t *>(rng_state.data_ptr()));
   auto te_rng_state = makeTransformerEngineTensor(rng_state);
 
@@ -202,7 +224,7 @@ std::vector<py::object> fused_attn_fwd(
 
   // output_tensors = [O, nvte_aux_tensor_pack.tensors]
   std::vector<py::object> output_tensors;
-  output_tensors.push_back(o_python);
+  output_tensors.push_back(py_O);
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
     // allocate memory for nvte_aux_tensor_pack.tensors
     at::Tensor output_tensor;
@@ -270,22 +292,20 @@ std::vector<py::object> fused_attn_bwd(
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer) {
   auto none = py::none();
-  TensorWrapper te_Q, te_K, te_V, te_O, te_dO, te_S, te_dP, te_dQ, te_dK, te_dV;
+
+  TensorWrapper te_Q, te_K, te_V, te_O, te_dO;
   te_Q = makeTransformerEngineTensor(Q, none);
   te_K = makeTransformerEngineTensor(K, none);
   te_V = makeTransformerEngineTensor(V, none);
   te_O = makeTransformerEngineTensor(O, none);
   te_dO = makeTransformerEngineTensor(dO, none);
-  // qkv type from the te_Q
-  std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
-  const DType qkv_type = te_Q.dtype();
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
 
-  py::object s_python, dp_python;
+  TensorWrapper te_S, te_dP;
+  py::object py_S, py_dP;
   std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
   std::unique_ptr<Quantizer> dP_quantizer = convert_quantizer(dp_quantizer);
-  std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  std::tie(te_dP, dp_python) = dP_quantizer->create_tensor({0}, DType::kFloat32);
+  std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
+  std::tie(te_dP, py_dP) = dP_quantizer->create_tensor({0}, DType::kFloat32);
 
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
@@ -294,14 +314,19 @@ std::vector<py::object> fused_attn_bwd(
   auto h_kv = k_shape[k_shape.size() - 2];
   auto d_qk = q_shape[q_shape.size() - 1];
   auto d_v = v_shape[v_shape.size() - 1];
-  auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
-  std::vector<size_t> o_shape{q_shape.begin(), q_shape.end()};
-  o_shape[o_shape.size() - 1] = d_v;
 
   at::Tensor dQ, dK, dV, dQKV, dKV;
-  py::object py_dQ, py_dK, py_dV;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   std::vector<int64_t> tmp_shape;
+  auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
+
+  bool is_float8 = transformer_engine::pytorch::detail::IsFloat8Quantizers(dqkv_quantizer.ptr());
+  //IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())
+  bool force_unfused_kernel = is_float8;
+  printf("force unfused %d\n", int(force_unfused_kernel));
+  if (force_unfused_kernel) {
+    options = options.dtype(fake_dtype);
+  }
 
   switch (layout_group) {
     case NVTE_QKV_Layout_Group::NVTE_3HD:
@@ -374,12 +399,51 @@ std::vector<py::object> fused_attn_bwd(
     default:
       NVTE_ERROR("QKV layout not supported!");
   }
+
+  TensorWrapper te_dQ, te_dK, te_dV;
+  py::object py_dQ, py_dK, py_dV;
+  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
+  std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
+  auto my_dqkv_quantizer = static_cast<Float8Quantizer *>(dQKV_quantizer.get());
+  if (!force_unfused_kernel) {
   std::tie(te_dQ, py_dQ) = dQKV_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
   std::tie(te_dK, py_dK) = dQKV_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
   std::tie(te_dV, py_dV) = dQKV_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
+  } else {
+  NoneQuantizer dq_temp_quantizer{none};
+  std::tie(te_dQ, py_dQ) = dq_temp_quantizer.create_tensor(q_shape, fake_dtype_te, dQ);
+  te_dQ.set_scale(my_dqkv_quantizer->scale.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->scale));
+  te_dQ.set_amax(my_dqkv_quantizer->amax.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->amax));
+  NoneQuantizer dk_temp_quantizer{none};
+  std::tie(te_dK, py_dK) = dk_temp_quantizer.create_tensor(k_shape, fake_dtype_te, dK);
+  te_dK.set_scale(my_dqkv_quantizer->scale.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->scale));
+  te_dK.set_amax(my_dqkv_quantizer->amax.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->amax));
+  NoneQuantizer dv_temp_quantizer{none};
+  std::tie(te_dV, py_dV) = dv_temp_quantizer.create_tensor(v_shape, fake_dtype_te, dV);
+  te_dV.set_scale(my_dqkv_quantizer->scale.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->scale));
+  te_dV.set_amax(my_dqkv_quantizer->amax.data_ptr(),
+		  GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                  getTensorShape(my_dqkv_quantizer->amax));
+  }
+
+
+  ////TensorWrapper &te_O = force_unfused_kernel ? te_O_unquantized : te_O_quantized;
+  //TensorWrapper &te_O = te_O_unquantized;// : te_O_quantized;
+  ////py::object &o_python = force_unfused_kernel ? o_python_unquantized : o_python_quantized;
+  //py::object &o_python = o_python_unquantized; // : o_python_quantized;
 
   // construct NVTE tensors
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
     // FP8
     if (set_zero && ((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
         dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous() &&
@@ -393,7 +457,7 @@ std::vector<py::object> fused_attn_bwd(
       dV.fill_(0);
     }
 
-  } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
+  } else if (dqkv_type == DType::kBFloat16 || dqkv_type == DType::kFloat16) {
     if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
       dK.fill_(0);

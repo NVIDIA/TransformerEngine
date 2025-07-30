@@ -1606,8 +1606,8 @@ def _rmse(a, b):
 
 
 def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    print(a.view(-1)[:16])
-    print(b.view(-1)[:16])
+    print(name_a, a.view(-1)[:16])
+    print(name_b, b.view(-1)[:16])
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:

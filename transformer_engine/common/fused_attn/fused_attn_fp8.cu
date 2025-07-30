@@ -1656,7 +1656,7 @@ void fused_attn_fp8_fwd_impl_v1(
     void* devPtrM, void* devPtrZInv, void* devPtrO, void* devPtrDescaleQ, void* devPtrDescaleK,
     void* devPtrDescaleV, void* devPtrDescaleS, void* devPtrScaleS, void* devPtrScaleO,
     void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
-    void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t fwd_tensor_type,cudnn_frontend::DataType_t output_tensor_type,
+    void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t fwd_tensor_type, cudnn_frontend::DataType_t output_tensor_type,
     void* workspace, size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
