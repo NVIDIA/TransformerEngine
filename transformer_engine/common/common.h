@@ -271,7 +271,7 @@ struct QuantizationConfig {
 };
 
 template <typename T>
-constexpr T DIVUP(const T &x, const T &y) {
+constexpr __device__ __host__ __forceinline__ T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
 }
 

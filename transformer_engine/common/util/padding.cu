@@ -35,6 +35,7 @@ struct MultiPaddingArgs {
   int padded_num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
   int row_length_list[kMaxTensorsPerKernel];
+  // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
   int block_range[kMaxTensorsPerKernel + 1];
   // Number of tensors being processed by kernel

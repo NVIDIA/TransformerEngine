@@ -95,10 +95,12 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
   std::vector<transformer_engine::TensorWrapper> wrappers;
   std::vector<NVTETensor> input_tensors, output_tensors;
 
-  // Collect scale_inv shapes
+  // Collect scale_inv shapes and calculate buffer size and offsets for scale_invs
   std::vector<std::vector<size_t>> scale_inv_shapes;
+  std::vector<void*> scale_inv_dptrs;
   size_t buffer_size = 0;
   std::vector<size_t> scale_inv_offsets;
+  constexpr size_t scale_elem_size = 1;
   for (auto& tensor : tensors) {
     NVTEBasicTensor scale_inv;
     if (rowwise) {
@@ -107,27 +109,19 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
       scale_inv = tensor.get_columnwise_scale_inv();
     }
     auto scale_inv_shape = nvte_shape_to_vector(scale_inv.shape);
+    buffer_size = roundup(buffer_size, 16);  // align to 16B
+    scale_inv_offsets.push_back(buffer_size);
+    buffer_size += product(scale_inv_shape) * scale_elem_size;
     scale_inv_shapes.emplace_back(scale_inv_shape);
+    scale_inv_dptrs.push_back(scale_inv.data_ptr);
   }
-  // Calculate buffer size and offsets for scale_invs
-  constexpr size_t scale_elem_size = 1;
-  for (size_t i = 0; i < scale_inv_shapes.size(); ++i) {
-      buffer_size = roundup(buffer_size, 16);  // align to 16B
-      scale_inv_offsets.push_back(buffer_size);
-      buffer_size += product(scale_inv_shapes[i]) * scale_elem_size;
-  }
+
   // Allocate full buffer
   auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
  
   for (size_t i = 0; i < tensors.size(); ++i) {
     auto& tensor = tensors[i];
-    NVTEBasicTensor scale_inv;
-    if (rowwise) {
-      scale_inv = tensor.get_rowwise_scale_inv();
-    } else {
-      scale_inv = tensor.get_columnwise_scale_inv();
-    }
-    void* scale_inv_dptr = scale_inv.data_ptr;
+    void* scale_inv_dptr = scale_inv_dptrs[i];
     void* swizzled_scale_inv_dptr = getDataPtr(buffer, scale_inv_offsets[i]);
     auto input_shape = nvte_shape_to_vector(tensor.shape());
 
