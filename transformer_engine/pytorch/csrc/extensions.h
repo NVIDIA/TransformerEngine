@@ -252,7 +252,8 @@ std::vector<py::object> dropout_fwd(const at::Tensor &input, const float dropout
 std::vector<py::object> dropout_fwd_fp8(const py::handle &input, at::Tensor &output,
                                         const float dropout_probability);
 
-py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask, const float dropout_probability);
+py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
+                       const float dropout_probability);
 
 /***************************************************************************************************
  * Softmax

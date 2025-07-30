@@ -27,9 +27,8 @@ extern "C" {
  *  \param[in]     dropout_probability Dropout probability.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
-void nvte_dropout_fwd(NVTETensor input, NVTETensor output, NVTETensor mask,
-                      NVTETensor rng_state, float dropout_probability,
-                      cudaStream_t stream);
+void nvte_dropout_fwd(NVTETensor input, NVTETensor output, NVTETensor mask, NVTETensor rng_state,
+                      float dropout_probability, cudaStream_t stream);
 
 /*!  \brief Dropout forward kernel with FP8 input.
  *
@@ -41,8 +40,7 @@ void nvte_dropout_fwd(NVTETensor input, NVTETensor output, NVTETensor mask,
  *  \param[in]     stream           CUDA stream used for this operation.
  */
 void nvte_dropout_fwd_fp8(NVTETensor input, NVTETensor output, NVTETensor mask,
-                          NVTETensor rng_state, float dropout_probability,
-                          cudaStream_t stream);
+                          NVTETensor rng_state, float dropout_probability, cudaStream_t stream);
 
 /*!  \brief Dropout backward kernel.
  *

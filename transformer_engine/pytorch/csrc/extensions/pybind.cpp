@@ -105,14 +105,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
-  m.def("dropout_fwd", transformer_engine::pytorch::dropout_fwd,
-        "Dropout using 8-bit rng", py::arg("input"), py::arg("dropout_probability"),
-        py::arg("is_training"));
+  m.def("dropout_fwd", transformer_engine::pytorch::dropout_fwd, "Dropout using 8-bit rng",
+        py::arg("input"), py::arg("dropout_probability"), py::arg("is_training"));
   m.def("dropout_fwd_fp8", transformer_engine::pytorch::dropout_fwd_fp8,
         "Dropout using 8-bit rng with FP8 input", py::arg("input"), py::arg("output"),
         py::arg("dropout_probability"));
   m.def("dropout_bwd", transformer_engine::pytorch::dropout_bwd,
-        "Backward of Dropout using 8-bit rng", py::arg("grad_output"), py::arg("mask"), py::arg("dropout_probability"));
+        "Backward of Dropout using 8-bit rng", py::arg("grad_output"), py::arg("mask"),
+        py::arg("dropout_probability"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
         py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),

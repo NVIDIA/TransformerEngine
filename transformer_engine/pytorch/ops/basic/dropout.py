@@ -45,7 +45,9 @@ class Dropout(BasicOperation):
         mask = None
         if is_training:
             if input_.numel() % 16 != 0:
-                assert not isinstance(input_, Float8TensorBase), "fp8 dropout does not support non-16-element aligned inputs"
+                assert not isinstance(
+                    input_, Float8TensorBase
+                ), "fp8 dropout does not support non-16-element aligned inputs"
                 keep_prob = 1 - self.dropout_probability
                 mask = torch.empty_like(input_)
                 mask.bernoulli_(keep_prob)
@@ -54,18 +56,23 @@ class Dropout(BasicOperation):
             else:
                 if isinstance(input_, Float8TensorBase):
                     assert self.otype is not None, "otype is not set for fp8 dropout"
-                    assert self.otype in [torch.half, torch.bfloat16], "fp8 dropout only supports half and bfloat16 output types but got %s" % self.otype
+                    assert self.otype in [torch.half, torch.bfloat16], (
+                        "fp8 dropout only supports half and bfloat16 output types but got %s"
+                        % self.otype
+                    )
                     out = torch.empty_like(input_, dtype=self.otype)
                     _, mask = tex.dropout_fwd_fp8(input_, out, self.dropout_probability)
                 else:
                     out, mask = tex.dropout_fwd(input_, self.dropout_probability, is_training)
         else:
-            assert not isinstance(input_, Float8TensorBase), "fp8 dropout does not support non-training mode"
+            assert not isinstance(
+                input_, Float8TensorBase
+            ), "fp8 dropout does not support non-training mode"
         # Save context for backward
         if ctx.requires_grad:
             ctx.save_for_backward(mask)
             ctx.dropout_probability = self.dropout_probability
-            #ctx.is_training = is_training
+            # ctx.is_training = is_training
         return out
 
     def op_backward(

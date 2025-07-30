@@ -1773,7 +1773,7 @@ class TestBasicOps:
         # below the 0.5th or above the 99.5th percentiles, then the
         # p-value is less than 1% and we assume that the dropout
         # distribution is incorrect.
-        #if is_training:
+        # if is_training:
         #    prob_observed = 1 - torch.count_nonzero(y).item() / y.numel()
         #    z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y.numel())
         #    assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
@@ -1824,10 +1824,11 @@ class TestBasicOps:
         # below the 0.5th or above the 99.5th percentiles, then the
         # p-value is less than 1% and we assume that the dropout
         # distribution is incorrect.
-        #if is_training:
+        # if is_training:
         #    prob_observed = 1 - torch.count_nonzero(y).item() / y.numel()
         #    z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y.numel())
         #    assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
+
 
 class TestFusedOps:
     """Tests for fused operations"""
