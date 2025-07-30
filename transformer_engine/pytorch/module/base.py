@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe
+from transformer_engine.common.recipe import Recipe, MXFP8BlockScaling
 
 from ._common import _ParameterInitMeta, noop_cat
 from ..fp8 import (
@@ -686,6 +686,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+
+        if recipe.nvfp4() and not fwd:
+            recipe = MXFP8BlockScaling(
+                fp8_format=recipe.fp8_format, fp8_mha=recipe.fp8_mha, fp8_dpa=recipe.fp8_dpa
+            )
 
         # Initialize recipe state and quantizers
         recipe_state = RecipeState.create(

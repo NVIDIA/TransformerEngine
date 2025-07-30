@@ -92,7 +92,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   NVTE_CHECK(
       A.scaling_mode == B.scaling_mode ||
           (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
-          (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
+          (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D) ||
+          (A.scaling_mode == NVTE_HYBRID_NVFP4_MXFP8_SCALING &&
+           B.scaling_mode == NVTE_MXFP8_1D_SCALING) ||
+          (A.scaling_mode == NVTE_MXFP8_1D_SCALING &&
+           B.scaling_mode == NVTE_HYBRID_NVFP4_MXFP8_SCALING),
       "Inputs A and B to GEMM need to have compatible scaling modes, but got A.scaling_mode = " +
           to_string(A.scaling_mode) + ", B.scaling_mode = " + to_string(B.scaling_mode));
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");

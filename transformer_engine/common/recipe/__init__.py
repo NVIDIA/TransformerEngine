@@ -388,6 +388,8 @@ class HybridNVFP4BlockScaling(Recipe):
     """
 
     fp8_format: Format = Format.E4M3
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
 
     def __post_init__(self) -> None:
         assert (
