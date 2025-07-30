@@ -135,7 +135,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
       idx += VEC_COLS_PER_LDG;
     }
   }
-  
+
   // Reduce amax over block
   if (requires_amax) {
     amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
@@ -144,9 +144,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
       atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
     }
   }
-  
+
   if (params.fp8_out) {
-  // Update scale-inverse
+    // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
       reciprocal<compute_t>(reinterpret_cast<compute_t *>(params.scale_inv), scale);
     }

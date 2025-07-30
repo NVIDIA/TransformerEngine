@@ -52,7 +52,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp_scaling(z->scaling_mode);
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
-    cudnn_backend = false; // cuDNN does not currently support amax output for non quantized output
+    cudnn_backend = false;  // cuDNN does not currently support amax output for non quantized output
   }
 
   bool training =

@@ -111,8 +111,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   py::object unquantized_out;
   if (force_unfused_kernel) {
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-      std::tie(unquantized_out_cu, unquantized_out) = my_quantizer_cs->create_hp_tensor_with_amax(size, out_dtype);
+      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+      std::tie(unquantized_out_cu, unquantized_out) =
+          my_quantizer_cs->create_hp_tensor_with_amax(size, out_dtype);
     } else {
       NoneQuantizer q{none};
       std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
@@ -145,7 +146,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       my_quantizer_cs->quantize_with_amax(unquantized_out_cu, out_cu);
     } else {
       my_quantizer->quantize(unquantized_out_cu, out_cu);
@@ -244,8 +245,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   py::object unquantized_out;
   if (force_unfused_kernel) {
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-      std::tie(unquantized_out_cu, unquantized_out) = my_quantizer_cs->create_hp_tensor_with_amax(size, out_dtype);
+      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+      std::tie(unquantized_out_cu, unquantized_out) =
+          my_quantizer_cs->create_hp_tensor_with_amax(size, out_dtype);
     } else {
       NoneQuantizer q{none};
       std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
@@ -278,7 +280,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
     if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+      auto my_quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       my_quantizer_cs->quantize_with_amax(unquantized_out_cu, out_cu);
     } else {
       my_quantizer->quantize(unquantized_out_cu, out_cu);
