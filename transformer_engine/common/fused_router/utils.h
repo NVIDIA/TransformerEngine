@@ -41,7 +41,7 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncT
     default_val = 0;
   } else if (type == ReduceFuncType::MAX) {
     reduce_func = max;
-    default_val = -1e30;
+    default_val = -std::numeric_limits<double>::infinity();
   }
 
   // Some value is hanlded in local thread
@@ -80,7 +80,7 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
     default_val = 0;
   } else if (type == ReduceFuncType::MAX) {
     reduce_func = max;
-    default_val = -1e30;
+    default_val = -std::numeric_limits<double>::infinity();
   }
 
   // Some value is hanlded in local thread
@@ -184,13 +184,13 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
     volatile double val =
-        (lane_id < data_size && !is_masked(k, lane_id)) ? static_cast<double>(scores[lane_id]) : static_cast<double>(-1e30);
+        (lane_id < data_size && !is_masked(k, lane_id)) ? static_cast<double>(scores[lane_id]) : -std::numeric_limits<double>::infinity();
     volatile int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      volatile double cur_val = (is_masked(k, i)) ? static_cast<double>(-1e30) : static_cast<double>(scores[i]);
+      volatile double cur_val = (is_masked(k, i)) ? -std::numeric_limits<double>::infinity() : static_cast<double>(scores[i]);
       if (cur_val > val) {
         val = cur_val;
         index = i;
