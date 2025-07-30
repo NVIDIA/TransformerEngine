@@ -23,7 +23,7 @@ extern "C" {
  *  \param[in]     input            Input tensor.
  *  \param[out]    output           Output tensor.
  *  \param[out]    mask             Mask tensor.
- *  \param[in]     rng_engine_inputs RNG engine inputs.
+ *  \param[in]     rng_state        RNG engine inputs.
  *  \param[in]     dropout_probability Dropout probability.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
@@ -34,10 +34,9 @@ void nvte_dropout_fwd(NVTETensor input, NVTETensor output, NVTETensor mask,
 /*!  \brief Dropout forward kernel with FP8 input.
  *
  *  \param[in]     input            Input tensor (FP8).
- *  \param[in]     scale_inv        Inverse scale tensor for FP8 dequantization.
  *  \param[out]    output           Output tensor (dequantized to FP16/BF16).
  *  \param[out]    mask             Mask tensor.
- *  \param[in]     rng_engine_inputs RNG engine inputs.
+ *  \param[in]     rng_state        RNG engine inputs.
  *  \param[in]     dropout_probability Dropout probability.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
@@ -50,6 +49,7 @@ void nvte_dropout_fwd_fp8(NVTETensor input, NVTETensor output, NVTETensor mask,
  *  \param[in]     grad_output      Gradient of output tensor.
  *  \param[in]     mask             Mask tensor.
  *  \param[out]    grad_input       Gradient of input tensor.
+ *  \param[in]     dropout_probability Dropout probability.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
 void nvte_dropout_bwd(NVTETensor grad_output, NVTETensor mask, NVTETensor grad_input,
