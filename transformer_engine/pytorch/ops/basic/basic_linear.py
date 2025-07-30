@@ -22,8 +22,7 @@ from ...distributed import (
 from ...fp8 import FP8GlobalStateManager, Recipe
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer
-from ...tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ...tensor.mxfp8_tensor import MXFP8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize, is_quantized_tensor
@@ -480,18 +479,11 @@ class BasicLinear(BasicOperation):
                 raise ValueError("Output tensor is quantized, but quantizer was not provided")
         else:
             output_quantizer = None
-        if isinstance(output_quantizer, MXFP8Quantizer):
-            raise RuntimeError(
-                "Attempting to generate MXFP8 output tensor, "
-                "but GEMM with MXFP8 output is not supported"
-            )
-        if isinstance(output_quantizer, Float8BlockQuantizer):
-            raise RuntimeError(
-                "Attempting to generate Float8BlockQuantized output tensor, "
-                "but GEMM with Float8BlockQuantized output is not supported"
-            )
-
         if output_quantizer is not None:
+            if not isinstance(output_quantizer, Float8Quantizer):
+                raise RuntimeError(
+                    "Attempting to generate quantized output tensor with unsupported quantizer"
+                )
             output_quantizer.set_usage(rowwise=True, columnwise=False)
 
         # Check if accumulating into output tensor
@@ -765,11 +757,12 @@ class BasicLinear(BasicOperation):
                     )
             else:
                 grad_input_quantizer = None
-            if isinstance(grad_input_quantizer, MXFP8Quantizer):
-                raise RuntimeError(
-                    "Attempting to generate MXFP8 grad input tensor, "
-                    "but GEMM with MXFP8 output is not supported"
-                )
+            if grad_input_quantizer is not None:
+                if not isinstance(grad_input_quantizer, Float8Quantizer):
+                    raise RuntimeError(
+                        "Attempting to generate quantized grad input tensor "
+                        "with unsupported quantizer"
+                    )
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
