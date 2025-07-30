@@ -22,7 +22,6 @@ from .quantize import (
     TensorUsage,
 )
 
-from .sharding import get_sequence_parallel_dim
 
 DENSE_BATCH_FIRST_WARNING_ISSUED = False
 
@@ -42,7 +41,6 @@ def dense(
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     batch_first: bool = True,
-    sequence_parallel_output: bool = False,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -57,8 +55,6 @@ def dense(
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
         batch_first: Assume that X is batched in the first dimension.
-        sequence_parallel_output: Produce an output that sharded in the first non-batched dim. Only
-                                  supported for TE custom GEMM with row-parallel kernel axes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -73,31 +69,13 @@ def dense(
             output += jnp.reshape(bias, bias_new_shape)
     else:
         output = _dense(
-            x,
-            kernel,
-            bias,
-            contracting_dims,
-            input_axes,
-            kernel_axes,
-            batch_first,
-            sequence_parallel_output,
-            quantizer_set,
+            x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
         )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
-def _dense(
-    x,
-    kernel,
-    bias,
-    contracting_dims,
-    input_axes,
-    kernel_axes,
-    batch_first,
-    sequence_parallel_output,
-    quantizer_set,
-):
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set):
     """Internal implementation of dense layer transformation with custom VJP.
 
     This function implements the core dense layer transformation logic with support
@@ -110,38 +88,20 @@ def _dense(
         contracting_dims: Contracting dimensions specification
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
-        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
-        sequence_parallel_output: Produce an output that sharded in the first non-batched dim. Only
-                                  supported for TE custom GEMM with row-parallel kernel axes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
 
     Returns:
         Transformed output tensor
     """
     output, _ = _dense_fwd_rule(
-        x,
-        kernel,
-        bias,
-        contracting_dims,
-        input_axes,
-        kernel_axes,
-        batch_first,
-        sequence_parallel_output,
-        quantizer_set,
+        x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
     )
     return output
 
 
 def _dense_fwd_rule(
-    x,
-    kernel,
-    bias,
-    contracting_dims,
-    input_axes,
-    kernel_axes,
-    batch_first,
-    sequence_parallel_output,
-    quantizer_set,
+    x, kernel, bias, contracting_dims, input_axes, kernel_axes, batch_first, quantizer_set
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -201,7 +161,6 @@ def _dense_fwd_rule(
         batched_dims=((x_bdim,), ()),
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
-        sequence_parallel_output=sequence_parallel_output and not tex.gemm_uses_jax_dot(),
     )
 
     if use_bias and tex.gemm_uses_jax_dot():
@@ -222,7 +181,7 @@ def _dense_fwd_rule(
 
 
 def _dense_bwd_rule(
-    contracting_dims, input_axes, kernel_axes, batch_first, sequence_parallel_output, ctx, grad
+    contracting_dims, input_axes, kernel_axes, batch_first, ctx, grad
 ):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
@@ -261,22 +220,11 @@ def _dense_bwd_rule(
     k_contracting_dim = tuple(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
-
-    # Get sequence-parallel dimension of the FWD input (if it exists)
-    sequence_dim = get_sequence_parallel_dim(input_axes, fwd_x_contracting_dims, (x_bdim,))
     dgrad = tex.gemm(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
         batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=(
-            sequence_dim is not None
-            and not sequence_parallel_output
-            and not tex.gemm_uses_jax_dot()
-        ),
-        sequence_dim=(
-            None if sequence_parallel_output or tex.gemm_uses_jax_dot() else sequence_dim
-        ),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 

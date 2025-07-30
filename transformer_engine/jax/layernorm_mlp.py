@@ -29,10 +29,7 @@ from .quantize import (
     noop_quantizer_set,
     TensorUsage,
 )
-from .sharding import (
-    get_non_contracting_logical_axes,
-    get_sequence_parallel_dim,
-)
+from .sharding import get_non_contracting_logical_axes
 
 
 LAYERNORM_MLP_BATCH_FIRST_WARNING_ISSUED = False
@@ -345,7 +342,6 @@ def _layernorm_mlp_fwd_rule(
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_out, hidden_in)
-    sequence_dim = get_sequence_parallel_dim(norm_input_axes, x_contracting_dims, (x_bdim,))
     dot_2_output = tex.gemm(
         casted_act_out.get_tensor(TensorUsage.LHS),
         casted_kernel_2.get_tensor(TensorUsage.RHS),
@@ -353,8 +349,6 @@ def _layernorm_mlp_fwd_rule(
         batched_dims=((x_bdim,), ()),
         bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
-        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
-        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     if use_bias_2 and tex.gemm_uses_jax_dot():
@@ -383,7 +377,6 @@ def _layernorm_mlp_fwd_rule(
         use_bias_2,
         quantizer_sets,
         x_bdim,
-        sequence_dim,
     )
 
     return dot_2_output, ctx
@@ -438,7 +431,6 @@ def _layernorm_mlp_bwd_rule(
         use_bias_2,
         quantizer_sets,
         x_bdim,
-        sequence_dim,
     ) = ctx
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
@@ -509,8 +501,6 @@ def _layernorm_mlp_bwd_rule(
         casted_kernel_1,
         contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
         batched_dims=((x_bdim,), ()),
-        sequence_parallel_output=sequence_dim is not None and not tex.gemm_uses_jax_dot(),
-        sequence_dim=sequence_dim if not tex.gemm_uses_jax_dot() else None,
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
