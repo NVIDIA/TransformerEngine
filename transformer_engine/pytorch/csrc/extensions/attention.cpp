@@ -112,13 +112,13 @@ std::vector<py::object> fused_attn_fwd(
     NoneQuantizer temp_quantizer{none};
     std::tie(te_O, py_O) = temp_quantizer.create_tensor(o_shape, fake_dtype_te);
     te_O.set_scale(my_o_quantizer->scale.data_ptr(),
-		    GetTransformerEngineDType(my_o_quantizer->scale.scalar_type()),
-                    getTensorShape(my_o_quantizer->scale));
+                   GetTransformerEngineDType(my_o_quantizer->scale.scalar_type()),
+                   getTensorShape(my_o_quantizer->scale));
     te_O.set_amax(my_o_quantizer->amax.data_ptr(),
-          	    GetTransformerEngineDType(my_o_quantizer->amax.scalar_type()),
-                    getTensorShape(my_o_quantizer->amax));
+                  GetTransformerEngineDType(my_o_quantizer->amax.scalar_type()),
+                  getTensorShape(my_o_quantizer->amax));
   }
-/*  py::object o_python, s_python;
+  /*  py::object o_python, s_python;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // Initialize FP8 tensor with scale-inverse
     auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
@@ -135,7 +135,7 @@ std::vector<py::object> fused_attn_fwd(
   }
   auto o_shape_int64 = std::vector<int64_t>{o_shape.begin(), o_shape.end()};
 */
-  
+
   // construct NVTE tensors
   TensorWrapper te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
@@ -315,7 +315,7 @@ std::vector<py::object> fused_attn_bwd(
   std::unique_ptr<Quantizer> dP_quantizer = convert_quantizer(dp_quantizer);
   std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
   std::tie(te_dP, py_dP) = dP_quantizer->create_tensor({0}, DType::kFloat32);
-/*
+  /*
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
     auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
@@ -434,26 +434,26 @@ std::vector<py::object> fused_attn_bwd(
     NoneQuantizer temp_quantizer{none};
     std::tie(te_dQ, py_dQ) = temp_quantizer.create_tensor(q_shape, fake_dtype_te, dQ);
     te_dQ.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-		    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
                     getTensorShape(my_dqkv_quantizer->scale));
     te_dQ.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-          	    GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->amax));
+                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                   getTensorShape(my_dqkv_quantizer->amax));
     std::tie(te_dK, py_dK) = temp_quantizer.create_tensor(k_shape, fake_dtype_te, dK);
     te_dK.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-          	    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
                     getTensorShape(my_dqkv_quantizer->scale));
     te_dK.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-          	    GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->amax));
+                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                   getTensorShape(my_dqkv_quantizer->amax));
     std::tie(te_dV, py_dV) = temp_quantizer.create_tensor(v_shape, fake_dtype_te, dV);
     te_dV.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-          	    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
+                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
                     getTensorShape(my_dqkv_quantizer->scale));
     te_dV.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-          	    GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->amax));
-/*
+                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
+                   getTensorShape(my_dqkv_quantizer->amax));
+    /*
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
     NVTE_CHECK(fp8_quantizer != nullptr, "Expected Float8Quantizer when dtype is FP8");
