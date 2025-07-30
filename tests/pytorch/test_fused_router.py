@@ -2,8 +2,7 @@
 #
 # See LICENSE for license information.
 import torch
-import math
-from typing import Optional, Dict
+from typing import Optional
 from transformer_engine.pytorch.router import (
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
