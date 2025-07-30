@@ -47,8 +47,7 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncT
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile double val =
-      lane_id < data_size ? static_cast<double>(data_ptr[lane_id]) : default_val;
+  volatile double val = lane_id < data_size ? static_cast<double>(data_ptr[lane_id]) : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     val = reduce_func(val, data_ptr[i]);
   }
@@ -86,9 +85,8 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile double val = lane_id < data_size && mask[lane_id]
-                            ? static_cast<double>(data_ptr[lane_id])
-                            : default_val;
+  volatile double val =
+      lane_id < data_size && mask[lane_id] ? static_cast<double>(data_ptr[lane_id]) : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);
@@ -152,14 +150,16 @@ __device__ inline void apply_softmax_bwd_on_float(DataType *grad, DataType *fwd_
 template <typename DataType>
 __device__ inline void apply_softmax_on_float(DataType *scores, int data_size, int lane_id) {
   // 1. compute the max of value
-  float max_val = static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::MAX, lane_id));
+  float max_val =
+      static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::MAX, lane_id));
   // 2. value -> exp_value
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     scores[i] = static_cast<float>(exp(static_cast<float>(scores[i]) - max_val));
   }
   __syncwarp();
   // 3. compute the sum of exp_value
-  float sum_val = static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::SUM, lane_id));
+  float sum_val =
+      static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::SUM, lane_id));
   // 4. update the softmax value
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     scores[i] = static_cast<float>(scores[i]) / sum_val;
@@ -183,14 +183,16 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
   // After looping topk times, the topk_indices will be the topk indices
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
-    volatile double val =
-        (lane_id < data_size && !is_masked(k, lane_id)) ? static_cast<double>(scores[lane_id]) : -std::numeric_limits<double>::infinity();
+    volatile double val = (lane_id < data_size && !is_masked(k, lane_id))
+                              ? static_cast<double>(scores[lane_id])
+                              : -std::numeric_limits<double>::infinity();
     volatile int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      volatile double cur_val = (is_masked(k, i)) ? -std::numeric_limits<double>::infinity() : static_cast<double>(scores[i]);
+      volatile double cur_val = (is_masked(k, i)) ? -std::numeric_limits<double>::infinity()
+                                                  : static_cast<double>(scores[i]);
       if (cur_val > val) {
         val = cur_val;
         index = i;
