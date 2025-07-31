@@ -13,6 +13,7 @@ from utils import (
     assert_tree_like_allclose,
     is_devices_enough,
     pytest_parametrize_wrapper,
+    use_jax_gemm,
 )
 
 from transformer_engine.common import recipe
@@ -147,7 +148,15 @@ class TestDistributedLayernormMLP:
         )
 
     def _test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        use_shardy,
+        with_jax_gemm,
     ):
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
@@ -157,72 +166,83 @@ class TestDistributedLayernormMLP:
             input_shape, activation_type, use_bias, dtype
         )
         static_inputs = [layernorm_type, activation_type]
-        value_and_grad_func = jax.value_and_grad(
-            self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
-        )
 
-        # Single GPU
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-            single_jitter = jax.jit(
-                value_and_grad_func,
-                static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
-            )
-            single_fwd, single_grads = single_jitter(*inputs, *static_inputs)
-
-        # Multi GPUs
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
-            k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
-            k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
-            k1_ = jax.device_put(k1, k1_sharding)
-            k2_ = jax.device_put(k2, k2_sharding)
-            if use_bias:
-                b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
-                b1_ = jax.device_put(b1, b1_sharding)
-            else:
-                b1_sharding = b1_ = None
-            multi_inputs = [*inputs[:2], k1_, k2_, b1_, *inputs[5:]]
-
-            # Position ref for sharding pspec lists
-            #   x, gamma, k1, k2, b1,
-            #   b2
-            in_shardings = (
-                None,
-                None,
-                k1_sharding,
-                k2_sharding,
-                b1_sharding,
-                None,
-            )
-            out_shardings = (
-                None,
-                (None, None, k1_sharding, k2_sharding, b1_sharding, None),
+        with use_jax_gemm(enabled=with_jax_gemm):
+            value_and_grad_func = jax.value_and_grad(
+                self.layernorm_fp8_mlp_prim_func, argnums=range(len(inputs))
             )
 
-            multi_jitter = jax.jit(
-                value_and_grad_func,
-                in_shardings=in_shardings,
-                out_shardings=out_shardings,
-                static_argnums=range(len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1),
-            )  # +1 for multi_gpus
+            # Single GPU
+            with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+                single_jitter = jax.jit(
+                    value_and_grad_func,
+                    static_argnums=range(len(inputs), len(static_inputs) + len(inputs)),
+                )
+                single_fwd, single_grads = single_jitter(*inputs, *static_inputs)
 
-            multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
+            # Multi GPUs
+            devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
+            mesh = Mesh(devices, mesh_axes)
+            with mesh, fp8_autocast(
+                enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+            ):
+                k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
+                k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
+                k1_ = jax.device_put(k1, k1_sharding)
+                k2_ = jax.device_put(k2, k2_sharding)
+                if use_bias:
+                    b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
+                    b1_ = jax.device_put(b1, b1_sharding)
+                else:
+                    b1_sharding = b1_ = None
+                multi_inputs = [*inputs[:2], k1_, k2_, b1_, *inputs[5:]]
 
-        assert_allclose(multi_fwd, single_fwd, dtype=dtype)
+                # Position ref for sharding pspec lists
+                #   x, gamma, k1, k2, b1,
+                #   b2
+                in_shardings = (
+                    None,
+                    None,
+                    k1_sharding,
+                    k2_sharding,
+                    b1_sharding,
+                    None,
+                )
+                out_shardings = (
+                    None,
+                    (None, None, k1_sharding, k2_sharding, b1_sharding, None),
+                )
+
+                multi_jitter = jax.jit(
+                    value_and_grad_func,
+                    in_shardings=in_shardings,
+                    out_shardings=out_shardings,
+                    static_argnums=range(
+                        len(multi_inputs), len(static_inputs) + len(multi_inputs) + 1
+                    ),
+                )  # +1 for multi_gpus
+
+                multi_fwd, multi_grads = multi_jitter(*multi_inputs, *static_inputs, True)
+
+        fwd_test_type = dtype if fp8_recipe is None else jnp.float8_e4m3fn
+        bwd_test_type = dtype if fp8_recipe is None else jnp.float8_e5m2
+        assert_allclose(multi_fwd, single_fwd, dtype=fwd_test_type)
         for i in range(len(inputs)):
             if multi_grads[i] is not None:
                 if isinstance(multi_grads[i], list):
                     assert isinstance(single_grads[i], list)
                     for m_grad, s_grad in zip(multi_grads[i], single_grads[i]):
                         assert_allclose(
-                            m_grad, s_grad, dtype=dtype, err_msg=f"multi_grads[{i}] is not close"
+                            m_grad,
+                            s_grad,
+                            dtype=bwd_test_type,
+                            err_msg=f"multi_grads[{i}] is not close",
                         )
                 else:
                     assert_allclose(
                         multi_grads[i],
                         single_grads[i],
-                        dtype=dtype,
+                        dtype=bwd_test_type,
                         err_msg=f"multi_grads[{i}] is not close",
                     )
 
@@ -233,8 +253,16 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        with_jax_gemm,
     ):
         self._test_layernorm_mlp_grad(
             mesh_config,
@@ -244,6 +272,7 @@ class TestDistributedLayernormMLP:
             dtype,
             fp8_recipe,
             use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -252,19 +281,29 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_grad_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        fp8_recipe,
+        with_jax_gemm,
     ):
-        # We don't test block scaling with Shardy because at the time of writing,
-        # it is not supported in JAX's scaled_matmul_stablehlo.
+        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
         self._test_layernorm_mlp_grad(
             mesh_config,
             activation_type,
             use_bias,
             input_shape,
             dtype,
-            fp8_recipe=recipe.DelayedScaling(),
+            fp8_recipe=fp8_recipe,
             use_shardy=True,
+            with_jax_gemm=with_jax_gemm,
         )
 
     def _test_layernorm_mlp(
@@ -277,6 +316,7 @@ class TestDistributedLayernormMLP:
         use_fp8,
         fp8_recipe,
         use_shardy,
+        with_jax_gemm,
     ):
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
@@ -288,48 +328,49 @@ class TestDistributedLayernormMLP:
         x = jax.random.normal(subkeys[0], (batch, seqlen, hidden_in), dtype)
         init_rngs = {"params": subkeys[1]}
 
-        # Single GPUs
-        with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-            ln_mlp_single = LayerNormMLP(
-                layernorm_type=layernorm_type,
-                transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
-                intermediate_dim=INTERMEDIATE,
-                activations=activation_type,
-                use_bias=use_bias,
-            )
-            params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
-            mlp_out_single, ln_out_single = ln_mlp_single.apply(
-                params_single, x, deterministic=True
-            )
+        with use_jax_gemm(enabled=with_jax_gemm):
+            # Single GPUs
+            with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+                ln_mlp_single = LayerNormMLP(
+                    layernorm_type=layernorm_type,
+                    transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
+                    intermediate_dim=INTERMEDIATE,
+                    activations=activation_type,
+                    use_bias=use_bias,
+                )
+                params_single = ln_mlp_single.init(init_rngs, x, deterministic=True)
+                mlp_out_single, ln_out_single = ln_mlp_single.apply(
+                    params_single, x, deterministic=True
+                )
 
-        # Multi GPUs
-        device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
-        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
-        mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(
-            enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
-        ):
-            ln_mlp_sharded = LayerNormMLP(
-                layernorm_type=layernorm_type,
-                transpose_batch_sequence=False,
-                intermediate_dim=INTERMEDIATE,
-                activations=activation_type,
-                scale_axes=LN_SCALE_AXES,
-                ln_bias_axes=LN_BIAS_AXES,
-                kernel_axes_1=KERNEL_1_AXES,
-                kernel_axes_2=KERNEL_2_AXES,
-                use_bias=use_bias,
-                bias_axes_1=BIAS_1_AXES,
-                bias_axes_2=BIAS_2_AXES,
-                layernorm_input_axes=LAYERNORM_INPUT_AXES,
-                dot_1_input_axes=DOT_1_INPUT_AXES,
-                dot_2_input_axes=DOT_2_INPUT_AXES,
-                name="mlp",
-            )
-            params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
-            mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
-                params_sharded, x, deterministic=True
-            )
+            # Multi GPUs
+            device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
+            devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
+            mesh = Mesh(devices, mesh_axes)
+            with mesh, fp8_autocast(
+                enabled=use_fp8, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+            ):
+                ln_mlp_sharded = LayerNormMLP(
+                    layernorm_type=layernorm_type,
+                    transpose_batch_sequence=False,
+                    intermediate_dim=INTERMEDIATE,
+                    activations=activation_type,
+                    scale_axes=LN_SCALE_AXES,
+                    ln_bias_axes=LN_BIAS_AXES,
+                    kernel_axes_1=KERNEL_1_AXES,
+                    kernel_axes_2=KERNEL_2_AXES,
+                    use_bias=use_bias,
+                    bias_axes_1=BIAS_1_AXES,
+                    bias_axes_2=BIAS_2_AXES,
+                    layernorm_input_axes=LAYERNORM_INPUT_AXES,
+                    dot_1_input_axes=DOT_1_INPUT_AXES,
+                    dot_2_input_axes=DOT_2_INPUT_AXES,
+                    name="mlp",
+                )
+                params_sharded = ln_mlp_sharded.init(init_rngs, x, deterministic=True)
+                mlp_out_sharded, ln_out_sharded = ln_mlp_sharded.apply(
+                    params_sharded, x, deterministic=True
+                )
 
         # Make sure params values are the same
         assert_tree_like_allclose(params_sharded["params"], params_single["params"])
@@ -348,6 +389,24 @@ class TestDistributedLayernormMLP:
             atol = 0.04
             rtol = 11
 
+        # JAX's FP8 GEMM, jax.lax.dot_general, now uses the
+        # Triton backend by default. The error of
+        # the Triton FP8 gemm has been verified to be less than or equal
+        # to the error of the cuDNN FP8 gemm w.r.t a float32 ground truth.
+        # However, Triton can auto-tune a different kernel for the single GPU
+        # and multi-GPU run in this test, meaning the diff between single GPU
+        # and multi-GPU can be larger in some cases, even though both are
+        # within tolerance to the float32 ground truth.
+        jax_triton_gemm_precision_tolerance_update = (
+            with_jax_gemm
+            and isinstance(fp8_recipe, recipe.Float8CurrentScaling)
+            and dtype == jnp.bfloat16
+            and activation_type == ("gelu", "linear")
+        )
+        if jax_triton_gemm_precision_tolerance_update:
+            atol = 0.08
+            rtol = 15
+
         assert_allclose(mlp_out_sharded, mlp_out_single, dtype=dtype, atol=atol, rtol=rtol)
 
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
@@ -355,9 +414,9 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
     ):
         self._test_layernorm_mlp(
             mesh_config,
@@ -367,7 +426,8 @@ class TestDistributedLayernormMLP:
             dtype,
             use_fp8=False,
             fp8_recipe=None,
-            use_shardy=use_shardy,
+            use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
@@ -377,8 +437,9 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
     def test_layernorm_mlp_layer_fp8(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
     ):
         self._test_layernorm_mlp(
             mesh_config,
@@ -389,4 +450,51 @@ class TestDistributedLayernormMLP:
             use_fp8=True,
             fp8_recipe=fp8_recipe,
             use_shardy=False,
+            with_jax_gemm=with_jax_gemm,
+        )
+
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
+    def test_layernorm_mlp_layer_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
+    ):
+        self._test_layernorm_mlp(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=False,
+            fp8_recipe=None,
+            use_shardy=True,
+            with_jax_gemm=with_jax_gemm,
+        )
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
+    @pytest_parametrize_wrapper("use_bias", [True, False])
+    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
+    @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
+    def test_layernorm_mlp_layer_fp8_shardy(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, with_jax_gemm
+    ):
+        if with_jax_gemm and isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+            pytest.skip("`jax.nn.scaled_matmul()` does not support the Shardy partitioner.")
+        self._test_layernorm_mlp(
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=True,
+            fp8_recipe=fp8_recipe,
+            use_shardy=True,
+            with_jax_gemm=with_jax_gemm,
         )

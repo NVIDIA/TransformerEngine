@@ -6,7 +6,7 @@ Wrapper module for Transformer related layers with FP8 support.
 """
 from functools import reduce
 import operator
-from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union, NewType
 
 import numpy as np
 import jax.numpy as jnp
@@ -15,12 +15,12 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from ..dense import dense
+from ..dense import dense, _issue_batch_first_warning as _dense_warning
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
-from ..layernorm_dense import layernorm_dense
-from ..layernorm_mlp import layernorm_mlp
+from ..layernorm_dense import layernorm_dense, _issue_batch_first_warning as _ln_dense_warning
+from ..layernorm_mlp import layernorm_mlp, _issue_batch_first_warning as _ln_mlp_warning
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -35,8 +35,8 @@ from ..sharding import get_non_contracting_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
-DType = jnp.dtype
-Array = jnp.ndarray
+DType = NewType("DType", jnp.dtype)
+Array = NewType("Array", jnp.ndarray)
 PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
@@ -415,6 +415,8 @@ class DenseGeneral(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    sequence_parallel_output: bool, default = False
+        Produce a sequence-parallel output with the first non-batch dimension sharded over
 
     Optimization parameters
     -----------------------
@@ -439,8 +441,15 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
+    sequence_parallel_output: bool = False
 
     def __post_init__(self):
+        if self.transpose_batch_sequence:
+            _dense_warning(
+                "TE/JAX DenseGeneral() module does not officially support sequence-first inputs "
+                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
+                "sequence-first inputs at your own discretion."
+            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype
@@ -505,6 +514,7 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
+            sequence_parallel_output=self.sequence_parallel_output,
         )
 
         if self.enable_low_rank_adaptation:
@@ -657,6 +667,12 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     depth_scaling: float = None
 
     def __post_init__(self):
+        if self.transpose_batch_sequence:
+            _ln_dense_warning(
+                "TE/JAX LayerNormDenseGeneral() module does not officially support sequence-first "
+                "inputs and may produce incorrect results when `transpose_batch_sequence=True`. "
+                "Use sequence-first inputs at your own discretion."
+            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0,
@@ -924,6 +940,11 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input of 2nd dot, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    ffn1_ckpt_name: str = "ffn1"
+        Checkpoint name for the output of the first fully-connected layer in the MLP block.
+    ffn2_ckpt_name: str = "ffn2"
+        Checkpoint name for the output of the second fully-connected layer in the MLP block.
+
 
     Optimization parameters
     -----------------------
@@ -965,8 +986,16 @@ class LayerNormMLP(TransformerEngineBase):
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
     dot_2_input_axes: Tuple[str, ...] = None
+    ffn1_ckpt_name: str = "ffn1"
+    ffn2_ckpt_name: str = "ffn2"
 
     def __post_init__(self):
+        if self.transpose_batch_sequence:
+            _ln_mlp_warning(
+                "TE/JAX LayerNormMLP() module does not officially support sequence-first inputs "
+                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
+                "sequence-first inputs at your own discretion."
+            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype
@@ -1128,9 +1157,6 @@ class LayerNormMLP(TransformerEngineBase):
             bias_1 = None
             bias_2 = None
 
-        ffn1_ckpt_name = "ffn1"
-        ffn2_ckpt_name = "ffn2"
-
         if use_fused_layernorm_mlp:
             out = layernorm_mlp(
                 y,
@@ -1146,8 +1172,8 @@ class LayerNormMLP(TransformerEngineBase):
                 dot_2_input_axes=self.dot_2_input_axes,
                 kernel_1_axes=self.kernel_axes_1,
                 kernel_2_axes=self.kernel_axes_2,
-                ffn1_ckpt_name=ffn1_ckpt_name,
-                ffn2_ckpt_name=ffn2_ckpt_name,
+                ffn1_ckpt_name=self.ffn1_ckpt_name,
+                ffn2_ckpt_name=self.ffn2_ckpt_name,
                 activation_type=normalized_acts,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
             )
@@ -1229,7 +1255,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 x += jnp.reshape(bias_1, bias_1_shape)
 
-            x = checkpoint_name(x, ffn1_ckpt_name)
+            x = checkpoint_name(x, self.ffn1_ckpt_name)
             if is_act_implemented:
                 z = activation(x, normalized_acts)
             else:
@@ -1292,7 +1318,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
-            out = checkpoint_name(out, ffn2_ckpt_name)
+            out = checkpoint_name(out, self.ffn2_ckpt_name)
 
         assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output

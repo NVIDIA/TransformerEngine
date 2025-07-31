@@ -136,6 +136,34 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
+    def create_tensor_from_data(
+        self,
+        data: torch.Tensor,
+        scale_inv: torch.Tensor,
+        fake_dtype: torch.dtype,
+        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+    ) -> MXFP8Tensor:
+        """Create a new MXFP8Tensor from data and scale_inv."""
+        return MXFP8Tensor(
+            shape=data.shape,
+            dtype=fake_dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=fp8_dtype,
+            quantizer=self,
+        )
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(dtype=torch.float32)
+        data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
+        return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
+        return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
+
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
 
@@ -405,7 +433,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
