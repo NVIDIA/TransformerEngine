@@ -110,12 +110,11 @@ void init_hybrid_nvfp4_extensions() {
 
 void init_nvfp4_extensions() {
   if (NVFP4TensorPythonClass) return;
-  auto nvfp4_module =
-      py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
+  auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
   NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Quantizer"));
-  NVFP4TensorPythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Tensor"));
+  NVFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Tensor"));
   auto nvfp4_base_module =
       py::module_::import("transformer_engine.pytorch.tensor._internal.nvfp4_tensor_base");
   NVFP4TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
