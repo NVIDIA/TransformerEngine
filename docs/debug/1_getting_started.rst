@@ -21,7 +21,7 @@ Transformer Engine provides a set of precision debug tools which allow you to ea
 There are 4 things one needs to do to use Transformer Engine debug features:
 
 1. Create a configuration YAML file to configure the desired features.
-2. Import, and initialize the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool, which is installed as the dependency of the Transformer Engine.
+2. Import, initialize, and install the `Nvidia-DL-Framework-Inspect <https://github.com/NVIDIA/nvidia-dlfw-inspect>`_ tool.
 3. One can pass ``name="..."`` when creating TE layers to easier identify layer names. If this is not provided, names will be inferred automatically.
 4. Invoke ``debug_api.step()`` at the end of one forward-backward pass.
 
@@ -141,7 +141,7 @@ Adjusting Python file
 In the modified code above, the following changes were made:
 
 1. Added an import for ``nvdlfw_inspect.api``.
-2. Initialized the Nvidia-DL-Framework-Inspect by calling ``debug_api.initialize()`` with appropriate configuration, specifying the path to the config file, feature directories, and log directory.
+2. Initialized the Nvidia-DL-Framework-Inspect by calling ``debug_api.initialize()`` with appropriate configuration, specifying the path to the config file, feature directories, and log directory. The directory with Transformer Engine features is located `here <https://github.com/NVIDIA/TransformerEngine/tree/main/transformer_engine/debug/features>`_. The full parameters description could be found :doc:`here <3_api_debug_setup>`.
 3. Added ``debug_api.step()`` after each of the forward-backward pass.
 
 Inspecting the logs

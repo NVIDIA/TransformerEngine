@@ -5,11 +5,13 @@
 """Single tensor operations supported by the operation fuser."""
 
 from .activation import GELU, ReLU, GEGLU, ReGLU, SwiGLU
-from .add_in_place import AddInPlace
+from .add_extra_input import AddExtraInput
 from .all_gather import AllGather
 from .all_reduce import AllReduce
 from .basic_linear import BasicLinear
 from .bias import Bias
+from .constant_scale import ConstantScale
+from .dropout import Dropout
 from .identity import Identity
 from .l2normalization import L2Normalization
 from .layer_norm import LayerNorm
