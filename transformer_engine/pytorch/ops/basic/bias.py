@@ -13,8 +13,6 @@ import transformer_engine_torch as tex
 from ..op import BasicOperation, OperationContext
 from ...utils import canonicalize_device, canonicalize_dtype
 from ...tensor import Quantizer
-from ...tensor.float8_tensor import Float8Quantizer
-from ...tensor.mxfp8_tensor import MXFP8Quantizer
 
 
 class Bias(BasicOperation):
