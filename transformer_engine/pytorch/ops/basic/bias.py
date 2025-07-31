@@ -137,10 +137,10 @@ class Bias(BasicOperation):
         dy = grad_output
         if dy.dim() > 1:
             quantizer = ctx.grad_input_quantizer
-            if isinstance(quantizer, (Float8Quantizer, MXFP8Quantizer)):
-                db, dy = tex.bgrad_quantize(dy, quantizer)
-            else:
+            if quantizer is None:
                 db = dy.sum(tuple(range(dy.dim() - 1)))
+            else:
+                db, dy = tex.bgrad_quantize(dy, ctx.grad_input_quantizer)
         else:
             db = dy
         return dy, (db,)
