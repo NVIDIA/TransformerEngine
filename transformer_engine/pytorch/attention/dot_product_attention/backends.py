@@ -47,7 +47,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled
+from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled
 
 # Import attention utils
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
@@ -503,6 +503,10 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
+        start_offload_if_offload_enabled(
+            query_layer, key_layer, value_layer, offload_base_tensor=True
+        )
+
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
@@ -919,6 +923,10 @@ class FusedAttnFunc(torch.autograd.Function):
         # FP8 attn, is_output_fp8 = True:  fake_dtype = torch.float8_e4m3fn
         fake_dtype = q.dtype
 
+        start_offload_if_offload_enabled(
+            q, k, v, offload_base_tensor=True
+        )
+
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
             dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
@@ -1121,15 +1129,6 @@ class FusedAttnFunc(torch.autograd.Function):
             *other_tensors,
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
 
-
-        if is_cpu_offload_enabled():
-            # Offloading supports interleaved tensor offload for multihead attention 
-            # (look for start_offload_if_offload_enabled() in multi_head_attention.py),
-            # but sometimes one uses DotProductAttention directly with interleaved tensors.
-            # They become contiguous after the reload, so the attention layout needs to be changed.
-            if q.is_contiguous() and k.is_contiguous() and v.is_contiguous():
-                # if q, k, v become contiguous, they stopped being views of the original qkv tensor
-                ctx.qkv_layout = "bshd_bshd_bshd"
 
         aux_ctx_tensors = other_tensors
 

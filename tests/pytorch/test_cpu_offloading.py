@@ -710,16 +710,14 @@ class TestTELayers:
             retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
         )
 
-        layers = torch.nn.ModuleList([Utils.create_layer(layer_type) for _ in range(2)])
         
         class Callable(torch.nn.Module):
-            def __init__(self, use_offload=True):
+            def __init__(self, offload_ctx=None, sync_function=None):
                 super().__init__()
-                self.layers = layers
+                self.layers = torch.nn.ModuleList([Utils.create_layer(layer_type) for _ in range(2)])
+                self.offload_ctx = offload_ctx
                 self.sync_function = sync_function
-                self.offload_ctx = offload_ctx if use_offload else contextlib.nullcontext()
-                self.use_offload = use_offload
-                
+
             def forward(self, x):
                 m_splits = (
                     {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
@@ -729,16 +727,21 @@ class TestTELayers:
                 for layer in self.layers:
                     with self.offload_ctx, recipe_ctx():
                         x = layer(x, **m_splits)
-                    if self.use_offload:
+                    if self.sync_function is not None:
                         x = self.sync_function(x)
                 return x
         
-        callable_offload = Callable(use_offload=True)
-        callable_no_offload = Callable(use_offload=False)
+        callable_offload = Callable(offload_ctx=offload_ctx, sync_function=sync_function)
+        callable_no_offload = Callable(offload_ctx=contextlib.nullcontext(), sync_function=None)
+
+        # copy parameters
+        for param_offload, param_no_offload in zip(callable_offload.parameters(), callable_no_offload.parameters()):
+            param_offload.data.copy_(param_no_offload.data)
 
         x = Utils.create_tensor("high precision")
 
         if use_cuda_graphs:
+            torch.cuda.reset_peak_memory_stats()
             callable_offload = te.make_graphed_callables(
                 callable_offload, (x,),
                 fp8_enabled=recipe_name != "high precision", 
@@ -752,7 +755,7 @@ class TestTELayers:
             out = callable_no_offload(x)
             out.sum().backward()
 
-        callable_offload.zero_grad(set_to_none=True) 
+        callable_offload.zero_grad(set_to_none=True)
         out_offload = callable_offload(x)
         out_offload.sum().backward()
         
@@ -761,9 +764,10 @@ class TestTELayers:
         for param in callable_offload.parameters():
             offload_outs.append(param.detach().clone())
         
-        out_no_offload = callable_offload(x)
+        torch.cuda.reset_peak_memory_stats()
+        out_no_offload = callable_no_offload(x)
         out_no_offload.sum().backward()
-    
+
         # collect gradients
         no_offload_outs = [out_no_offload]
         for param in callable_no_offload.parameters():
