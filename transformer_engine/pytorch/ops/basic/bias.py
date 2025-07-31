@@ -140,7 +140,7 @@ class Bias(BasicOperation):
             if quantizer is None:
                 db = dy.sum(tuple(range(dy.dim() - 1)))
             else:
-                db, dy = tex.bgrad_quantize(dy, ctx.grad_input_quantizer)
+                db, dy = tex.bgrad_quantize(dy, quantizer)
         else:
             db = dy
         return dy, (db,)
