@@ -26,7 +26,6 @@ pip3 uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-
 VERSION=`cat $TE_PATH/build_tools/VERSION.txt`
 WHL_BASE="transformer_engine-${VERSION}"
 
-# PIP_FLAGS="--no-build-isolation --no-deps -vvv"
 PIP_FLAGS="--no-build-isolation --no-deps -vvv"
 
 # Core wheel.
