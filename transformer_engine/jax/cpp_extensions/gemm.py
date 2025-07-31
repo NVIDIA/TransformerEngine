@@ -522,8 +522,8 @@ class GemmPrimitive(BasePrimitive):
         # Non-batch leading dimension specs
         lspecs = tuple(specs[i] for i in range(ndims) if i not in cdims + bdims)
 
-        # Non-batch contracting dimension specs
-        cspecs = tuple(specs[i] for i in range(ndims) if i in cdims and i not in bdims)
+        # contracting dimension specs
+        cspecs = tuple(specs[i] for i in range(ndims) if i in cdims)
 
         return bspecs, lspecs, cspecs
 
