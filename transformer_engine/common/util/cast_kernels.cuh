@@ -1117,6 +1117,52 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 break;
               }
               case ScalingType::BIDIMENSIONAL: {
+                using traits = spec::CastTraits<IType, OType, true, true>;
+                auto kernel = spec::cast_mxfp8_kernel<traits>;
+
+                if (traits::smem > 48 * 1024) {
+                  cudaFuncSetAttribute(
+                    kernel,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                    traits::smem
+                  );
+                }
+                // TMA for loading, so that we don't need STS for transposing
+                alignas(64) CUtensorMap tensor_map_input{};
+                constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+                create_2D_tensor_map(tensor_map_input,
+                                     input.data,
+                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+                                     rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N,
+                                     /*stride_elems=*/cols, 
+                                     /*offset_elems=*/0,
+                                     input_type_bit_size);
+                alignas(64) CUtensorMap tensor_map_colwise_output{};
+                constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+                create_2D_tensor_map(tensor_map_colwise_output,
+                                     output->columnwise_data,
+                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_32B,
+                                     rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N,
+                                     cols, 0, output_type_bit_size);
+
+                dim3 block(traits::rowThreadLayout::num,
+                           traits::warpLayout::num + 1);
+                dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
+                          (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
+                kernel<<<grid, block, traits::smem, stream>>>(
+                  tensor_map_input,
+                  reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                  tensor_map_colwise_output,
+                  scales_rowwise_ptr,
+                  scales_colwise_ptr,
+                  rows,
+                  cols,
+                  scale_stride_rowwise,
+                  scale_stride_colwise
+                );
+
                 break;
               }
               default: {
