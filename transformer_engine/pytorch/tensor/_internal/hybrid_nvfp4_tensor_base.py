@@ -133,7 +133,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         self._rowwise_scale_inv = tensors[2]
         self._columnwise_scale_inv = tensors[3]
         self._per_tensor_rowwise_scale_inv = tensors[4]
-        return tensors[4:]
+        return tensors[5:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""

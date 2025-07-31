@@ -153,6 +153,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // MXFP8 GEMM. Either for MXFP8 recipe or backward of Hybrid NVFP4 recipe.
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
+
     if (is_A_transposed) {
       NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
     } else {
@@ -342,6 +343,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
   if (is_fp4_dtype(outputD->data.dtype)) {
     NVTE_ERROR("FP4 GEMM output is not supported!");
+  }
+  if (use_fp4 && (D_type == CUDA_R_16F)) {
+    NVTE_ERROR("FP4 GEMM does not support FP16 output!");
   }
 
   float one = 1.0;
