@@ -101,7 +101,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Mark input tensors as not deletable in backward
         for tensor in (input_,) + params_and_extra_inputs:
-            tensor.do_not_clear = True
+            tensor._do_not_clear = True
 
         # Unflatten list of parameters and extra tensor inputs
         extra_inputs = params_and_extra_inputs[-fuser.num_extra_inputs :]
@@ -196,6 +196,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
             func_ctx.with_quantized_compute = with_quantized_compute
+
+        # Mark output tensors as not deletable in backward
+        for tensor in [x] + extra_outputs_flat:
+            tensor._do_not_clear = True
 
         x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 

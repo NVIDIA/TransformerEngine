@@ -12,7 +12,7 @@
 
 namespace transformer_engine::pytorch {
 
-std::vector<size_t> getTensorShape(at::Tensor t) {
+std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
     shape.push_back(s);
