@@ -55,8 +55,8 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   }
 
   // Unfused impl if quantizer is not supported
-  const bool with_fused_dbias_quantize_kernel
-    = detail::IsFloat8Quantizers(quantizer.ptr()) || detail::IsMXFP8Quantizers(quantizer.ptr());
+  const bool with_fused_dbias_quantize_kernel =
+      detail::IsFloat8Quantizers(quantizer.ptr()) || detail::IsMXFP8Quantizers(quantizer.ptr());
   if (!with_fused_dbias_quantize_kernel) {
     at::sum_out(grad_bias_torch, grad_output_torch.reshape({-1, bias_size}), {0});
     quantizer_cpp->quantize(grad_output_nvte, grad_input_nvte);
@@ -90,13 +90,11 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
 
 namespace {
 
-std::vector<py::object> dact_dbias(void (*dact_dbias_func)(const NVTETensor, const NVTETensor,
-                                                           NVTETensor, NVTETensor, NVTETensor,
-                                                           cudaStream_t),
-                                   void (*dact_func)(const NVTETensor, const NVTETensor,
-                                                     NVTETensor, cudaStream_t),
-                                   at::Tensor grad_output_torch, at::Tensor act_input_torch,
-                                   py::handle quantizer_py) {
+std::vector<py::object> dact_dbias(
+    void (*dact_dbias_func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
+                            cudaStream_t),
+    void (*dact_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t),
+    at::Tensor grad_output_torch, at::Tensor act_input_torch, py::handle quantizer_py) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -111,8 +109,8 @@ std::vector<py::object> dact_dbias(void (*dact_dbias_func)(const NVTETensor, con
 
   // Construct tensors
   auto quantizer_cpp = convert_quantizer(quantizer_py);
-  auto [grad_input_nvte, grad_input_py] = quantizer_cpp->create_tensor(input_shape,
-                                                                       grad_output_dtype);
+  auto [grad_input_nvte, grad_input_py] =
+      quantizer_cpp->create_tensor(input_shape, grad_output_dtype);
   const int64_t bias_size = static_cast<int64_t>(input_shape.back());
   auto grad_bias_torch = allocateTorchTensor(bias_size, grad_output_dtype);
   auto grad_bias_nvte = makeTransformerEngineTensor(grad_bias_torch);
@@ -124,10 +122,10 @@ std::vector<py::object> dact_dbias(void (*dact_dbias_func)(const NVTETensor, con
   }
 
   // Choose implementation
-  enum class Impl {UNFUSED, FUSED_DACT_DBIAS_QUANTIZE, FUSED_DACT_AMAX};
+  enum class Impl { UNFUSED, FUSED_DACT_DBIAS_QUANTIZE, FUSED_DACT_AMAX };
   Impl impl = Impl::UNFUSED;
-  if (detail::IsFloat8Quantizers(quantizer_py.ptr())
-      || detail::IsMXFP8Quantizers(quantizer_py.ptr())) {
+  if (detail::IsFloat8Quantizers(quantizer_py.ptr()) ||
+      detail::IsMXFP8Quantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_DBIAS_QUANTIZE;
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
     impl = Impl::FUSED_DACT_AMAX;
@@ -136,60 +134,62 @@ std::vector<py::object> dact_dbias(void (*dact_dbias_func)(const NVTETensor, con
   // Perform compute
   auto stream = at::cuda::getCurrentCUDAStream();
   switch (impl) {
-  case Impl::UNFUSED:
-    // Unfused dact, dbias, quantize
-    {
-      auto [temp_nvte, temp_py] = NoneQuantizer(py::none()).create_tensor(input_shape,
-                                                                          grad_output_dtype);
-      NVTE_SCOPED_GIL_RELEASE({
+    case Impl::UNFUSED:
+      // Unfused dact, dbias, quantize
+      {
+        auto [temp_nvte, temp_py] =
+            NoneQuantizer(py::none()).create_tensor(input_shape, grad_output_dtype);
+        NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
-      const auto temp_torch = temp_py.cast<at::Tensor>();
-      at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
-      quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
-      break;
-    }
-  case Impl::FUSED_DACT_DBIAS_QUANTIZE:
-    // Fused dact-dbias-quantize kernel
-    {
-      // Query workspace size
-      TensorWrapper workspace_nvte;
-      NVTE_SCOPED_GIL_RELEASE({
-          dact_dbias_func(grad_output_nvte.data(), act_input_nvte.data(), grad_input_nvte.data(),
-                          grad_bias_nvte.data(), workspace_nvte.data(), stream);
-        });
-
-      // Allocate workspace
-      at::Tensor workspace_torch;
-      if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
-        workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
-        workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
-                                                     workspace_nvte.dtype());
+        const auto temp_torch = temp_py.cast<at::Tensor>();
+        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        quantizer_cpp->quantize(temp_nvte, grad_input_nvte);
+        break;
       }
-
-      // Launch kernel
-      NVTE_SCOPED_GIL_RELEASE({
+    case Impl::FUSED_DACT_DBIAS_QUANTIZE:
+      // Fused dact-dbias-quantize kernel
+      {
+        // Query workspace size
+        TensorWrapper workspace_nvte;
+        NVTE_SCOPED_GIL_RELEASE({
           dact_dbias_func(grad_output_nvte.data(), act_input_nvte.data(), grad_input_nvte.data(),
                           grad_bias_nvte.data(), workspace_nvte.data(), stream);
         });
-      break;
-    }
-  case Impl::FUSED_DACT_AMAX:
-    // Fused dact-amax kernel, unfused dbias and quantize
-    {
-      auto *quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
-      NVTE_CHECK(quantizer_cpp_cs != nullptr, "Invalid quantizer for fused dact-amax kernel impl");
-      auto [temp_nvte, temp_py] = quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape,
-                                                                               grad_output_dtype);
-      NVTE_SCOPED_GIL_RELEASE({
+
+        // Allocate workspace
+        at::Tensor workspace_torch;
+        if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
+          workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+          workspace_nvte = makeTransformerEngineTensor(
+              workspace_torch.data_ptr(), workspace_nvte.shape(), workspace_nvte.dtype());
+        }
+
+        // Launch kernel
+        NVTE_SCOPED_GIL_RELEASE({
+          dact_dbias_func(grad_output_nvte.data(), act_input_nvte.data(), grad_input_nvte.data(),
+                          grad_bias_nvte.data(), workspace_nvte.data(), stream);
+        });
+        break;
+      }
+    case Impl::FUSED_DACT_AMAX:
+      // Fused dact-amax kernel, unfused dbias and quantize
+      {
+        auto *quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+        NVTE_CHECK(quantizer_cpp_cs != nullptr,
+                   "Invalid quantizer for fused dact-amax kernel impl");
+        auto [temp_nvte, temp_py] =
+            quantizer_cpp_cs->create_hp_tensor_with_amax(input_shape, grad_output_dtype);
+        NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
-      const auto temp_torch = temp_py.cast<at::Tensor>();
-      at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
-      quantizer_cpp_cs->quantize_with_amax(temp_nvte, grad_input_nvte);
-      break;
-    }
-  default: NVTE_ERROR("Invalid implementation");
+        const auto temp_torch = temp_py.cast<at::Tensor>();
+        at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
+        quantizer_cpp_cs->quantize_with_amax(temp_nvte, grad_input_nvte);
+        break;
+      }
+    default:
+      NVTE_ERROR("Invalid implementation");
   }
 
   return {py::cast(std::move(grad_bias_torch)), std::move(grad_input_py)};
