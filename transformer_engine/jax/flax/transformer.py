@@ -274,6 +274,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
+    context_checkpoint_name: str = "context"
 
     @nn.compact
     def __call__(
@@ -322,6 +323,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
@@ -348,6 +350,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
@@ -369,6 +372,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_checkpoint_name=self.context_checkpoint_name,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -501,6 +505,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
     context_parallel_axis (str): The name of the context parallel axis.
+    context_checkpoint_name (str): The name of the context checkpoint in the forward pass of fused attention.
 
     Optimization parameters
     -----------------------
@@ -524,6 +529,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
+    context_checkpoint_name: str = "context"
 
     @nn.compact
     def __call__(
@@ -690,6 +696,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
+                context_checkpoint_name=self.context_checkpoint_name,
             )(
                 query,
                 key,
@@ -1425,6 +1432,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             dtype=self.dtype,
             name="out",
+            sequence_parallel_output=self.enable_sequence_parallel,
         )(x)
         out = checkpoint_name(out, "out_proj")
 

@@ -863,15 +863,6 @@ valid_fp8_gemm_operand_types = [
 ]
 
 
-def _use_jax_fp8_gemm(enabled=False):
-    import os
-
-    if enabled:
-        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
-    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
-        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
-
-
 class TestDense:
     def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
         if data_layout[0] == "T":
