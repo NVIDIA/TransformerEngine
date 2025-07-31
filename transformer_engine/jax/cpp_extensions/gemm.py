@@ -512,20 +512,17 @@ class GemmPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def _decompose_operand_specs(specs, contracting_dims, batch_dims):
+    def _decompose_operand_specs(specs, contracting_dims):
         ndims = len(specs)
-        cdims, bdims = map(sanitize_dims, (ndims, ndims), (contracting_dims, batch_dims))
+        cdims = map(sanitize_dims, ndims, contracting_dims)
 
-        # Batch specs
-        bspecs = tuple(specs[i] for i in bdims)
+        # non-contracting dimension specs
+        non_cspecs = tuple(specs[i] for i in range(ndims) if i not in cdims)
 
-        # Non-batch leading dimension specs
-        lspecs = tuple(specs[i] for i in range(ndims) if i not in cdims + bdims)
+        # Contracting dimension specs
+        cspecs = tuple(specs[i] for i in range(ndims) if i in cdims)
 
-        # Non-batch contracting dimension specs
-        cspecs = tuple(specs[i] for i in range(ndims) if i in cdims and i not in bdims)
-
-        return bspecs, lspecs, cspecs
+        return non_cspecs, cspecs
 
     @staticmethod
     def _parse_operand_output_specs(
@@ -537,27 +534,18 @@ class GemmPrimitive(BasePrimitive):
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
+        # TODO: remove bdims
         lhs_cdims, rhs_cdims, lhs_bdims, rhs_bdims = map(
             sanitize_dims, 2 * [lhs_ndim, rhs_ndim], contracting_dims + batched_dims
         )
         (
-            (lhs_bspecs, lhs_lspecs, lhs_cspecs),
-            (rhs_bspecs, rhs_lspecs, rhs_cspecs),
+            (lhs_non_cspec, lhs_cspecs),
+            (rhs_non_cspec, rhs_cspecs)
         ) = map(
             GemmPrimitive._decompose_operand_specs,
             (lhs_specs, rhs_specs),
             (lhs_cdims, rhs_cdims),
-            (lhs_bdims, rhs_bdims),
         )
-
-        # Batched dimensions must have the same sharding
-        if len(lhs_bdims) > 0 and len(rhs_bdims) > 0:
-            assert all(
-                lhs_bspec == rhs_bspec for lhs_bspec, rhs_bspec in zip(lhs_bspecs, rhs_bspecs)
-            ), (
-                "cuBLAS GEMM operand batch dimensions must have the same sharding: "
-                f"{lhs_specs} @ idx {lhs_bdims} x {rhs_specs} @ idx {rhs_bdims}."
-            )
 
         # Only one each of the non-batched leading dimensions and non-batched contracting
         # dimensions can be sharded
