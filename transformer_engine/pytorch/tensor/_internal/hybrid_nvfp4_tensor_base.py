@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Mixin class holding data specific for NVFP4Tensor"""
+"""Mixin class holding data specific for HybridNVFP4Tensor"""
 
 from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple
@@ -20,13 +20,13 @@ from ..quantized_tensor import Quantizer
 from ...utils import _empty_tensor
 
 
-class _FromNVFP4Func(torch.autograd.Function):
+class _FromHybridNVFP4Func(torch.autograd.Function):
     """Cast from NVFP4 to other dtype"""
 
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
-        tensor: NVFP4TensorBase,
+        tensor: HybridNVFP4TensorBase,
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -47,10 +47,10 @@ class _FromNVFP4Func(torch.autograd.Function):
         return grad, None
 
 
-class NVFP4TensorBase(QuantizedTensorBase):
-    """Mixin class that holds data attributes of NVFP4Tensor.
+class HybridNVFP4TensorBase(QuantizedTensorBase):
+    """Mixin class that holds data attributes of HybridNVFP4Tensor.
 
-    NVFP4Tensor inherits from the PyTorch tensor class and this mixin
+    HybridNVFP4Tensor inherits from the PyTorch tensor class and this mixin
     class. If this class is instantiated directly, it has the same
     data, lower CPU overhead, and less functionality. It should only
     be instantiated directly for performance-critical internal usage.
@@ -60,6 +60,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
     _rowwise_data: Optional[torch.Tensor]
     _columnwise_data: Optional[torch.Tensor]
     _quantizer: Optional[Quantizer]
+    _fp8_dtype: TE_DType
     _rowwise_scale_inv: torch.Tensor
     _columnwise_scale_inv: torch.Tensor
     _per_tensor_rowwise_scale_inv: torch.Tensor
@@ -72,6 +73,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         per_tensor_rowwise_scale_inv: torch.Tensor,
+        fp8_dtype: TE_DType,
         quantizer: Optional[Quantizer] = None,
         **kwargs,
     ):
@@ -79,6 +81,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer
+        instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._per_tensor_rowwise_scale_inv = per_tensor_rowwise_scale_inv
@@ -105,10 +108,11 @@ class NVFP4TensorBase(QuantizedTensorBase):
             "columnwise_data": self._columnwise_data,
             "columnwise_scale_inv": self._columnwise_scale_inv,
             "per_tensor_rowwise_scale_inv": self._per_tensor_rowwise_scale_inv,
+            "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
         }
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], NVFP4TensorBase]:
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], HybridNVFP4TensorBase]:
         """Prepare the tensor base for saving for backward"""
         tensors = [
             self._rowwise_data,
@@ -133,7 +137,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         self._rowwise_scale_inv = tensors[2]
         self._columnwise_scale_inv = tensors[3]
         self._per_tensor_rowwise_scale_inv = tensors[4]
-        return tensors[5:]
+        return tensors[4:]
 
     def get_data_tensors(self):
         """Get this Tensor's data."""
@@ -141,7 +145,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
-        return _FromNVFP4Func.forward(None, self, dtype)
+        return _FromHybridNVFP4Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
@@ -153,7 +157,8 @@ class NVFP4TensorBase(QuantizedTensorBase):
         data_rowwise = self.dequantize()
 
         return (
-            "NVFP4TensorBase("
+            "HybridNVFP4TensorBase("
+            f"fp8_dtype={self._fp8_dtype}, "
             f"rowwise_scaled_data={data_rowwise},"
             f"rowwise_scale_inv={self._rowwise_scale_inv},"
             f"per_tensor_rowwise_scale_inv={self._per_tensor_rowwise_scale_inv},"
@@ -166,7 +171,7 @@ class NVFP4TensorBase(QuantizedTensorBase):
         columnwise_usage: Optional[bool] = None,
     ):
         """
-        For the NVFP4 format, columnwise scaled output is only produced by x2
+        For the Hybrid NVFP4 format, columnwise scaled output is only produced by x2
         scaling kernels, so this function only disables usages.
         """
 
@@ -180,15 +185,17 @@ class NVFP4TensorBase(QuantizedTensorBase):
         if rowwise_usage:
             if self._rowwise_data is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, but NVFP4Tensor is missing row-scaled NVFP4 data"
+                    "Requested row-wise usage, but HybridNVFP4Tensor is missing row-scaled NVFP4"
+                    " data"
                 )
             if self._rowwise_scale_inv is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, but NVFP4Tensor is missing row-scaled scale-inverses"
+                    "Requested row-wise usage, but HybridNVFP4Tensor is missing row-scaled"
+                    " scale-inverses"
                 )
             if self._per_tensor_rowwise_scale_inv is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, but NVFP4Tensor is missing per tensor"
+                    "Requested row-wise usage, but HybridNVFP4Tensor is missing per tensor"
                     " row-scaled scale-inverse"
                 )
         else:
@@ -199,12 +206,13 @@ class NVFP4TensorBase(QuantizedTensorBase):
         if columnwise_usage:
             if self._columnwise_data is None:
                 raise RuntimeError(
-                    "Requested column-wise usage, but NVFP4Tensor is missing column-scaled FP8 data"
+                    "Requested column-wise usage, but HybridNVFP4Tensor is missing column-scaled"
+                    " FP8 data"
                 )
             if self._columnwise_scale_inv is None:
                 raise RuntimeError(
                     "Requested column-wise usage, "
-                    "but NVFP4Tensor is missing column-scaled scale-inverses"
+                    "but HybridNVFP4Tensor is missing column-scaled scale-inverses"
                 )
         else:
             self._columnwise_data = None

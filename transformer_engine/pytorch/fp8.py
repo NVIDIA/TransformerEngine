@@ -1036,9 +1036,9 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             device = torch.device("cuda")
 
     def make_quantizers(self) -> list:
-        from .tensor.hybrid_nvfp4_tensor import NVFP4Quantizer
+        from .tensor.nvfp4_tensor import NVFP4Quantizer
 
-        return [NVFP4Quantizer(self.dtype) for i in range(self.num_quantizers)]
+        return [NVFP4Quantizer() for i in range(self.num_quantizers)]
 
 
 class Float8BlockScalingRecipeState(RecipeState):
