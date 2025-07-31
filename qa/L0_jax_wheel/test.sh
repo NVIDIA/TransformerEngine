@@ -31,7 +31,7 @@ PIP_FLAGS="--no-build-isolation --no-deps -vvv"
 
 # Core wheel.
 NVTE_RELEASE_BUILD=1 pip3 wheel ${PIP_FLAGS} --wheel-dir ./dist . || error_exit "Failed to setup bdist_wheel"
-wheel unpack "dist/${WHL_BASE}-py3-none-any.whl" || error_exit "Failed to unpack dist/${WHL_BASE}-py3-none-any.whl"
+wheel unpack dist/${WHL_BASE}-* || error_exit "Failed to unpack dist/${WHL_BASE}-*.whl"
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info" || error_exit "Failed to move ${WHL_BASE}.dist-info to transformer_engine_cu12-${VERSION}.dist-info"
