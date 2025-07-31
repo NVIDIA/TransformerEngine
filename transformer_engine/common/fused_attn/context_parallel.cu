@@ -246,6 +246,7 @@ __device__ IndexMapping build_mapping_sbhd(int index, int s_size, int b_size, in
   int s = index / bhd_size;
   int b = index / hd_size % b_size;
   int h = index / d_size % h_size;
+  // int d = index % d_size;
 
   IndexMapping mapping;
   // index = s * bhd_size + b * hd_size + h * d_size + d;
@@ -267,10 +268,14 @@ __device__ IndexMapping build_mapping_thd(int index, int h_size, int d_size, int
   int t = index / hd_size;
   int h = index / d_size % h_size;
   int seq_id = binary_search(t, cu_seqlens, batch + 1);
+  // int d = index % d_size;
 
   IndexMapping mapping;
+  // index = t * hd_size + h * d_size + d;
   mapping.out = index;
+  // mapping.out_first_half = (t + cu_seqlens[seq_id]) * hd_size + h * d_size + d;
   mapping.out_first_half = index + cu_seqlens[seq_id] * hd_size;
+  // mapping.out_first_half = (t + cu_seqlens[seq_id] + cu_seqlens[seq_id+1] - cu_seqlens[seq_id]) * hd_size + h * d_size + d;
   mapping.out_second_half = index + cu_seqlens[seq_id + 1] * hd_size;
   if (packed_lse) {
     // lse is in HT format
@@ -618,27 +623,6 @@ void thd_read_second_half_lse(const Tensor &lse, const Tensor &cu_seqlens, Tenso
   * Support BSHD, SBHD, and THD formats for Context Parallel: Fused out correction in forward
   **************************************************************************************************/
 
-#define DISPATCH_SBHD_BSHD_AND_THD(TYPE, LEVEL, NAME, ...)                   \
-  switch (TYPE) {                                                            \
-    case NVTE_QKV_Format::NVTE_SBHD: {                                       \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_SBHD;          \
-      __VA_ARGS__;                                                           \
-      break;                                                                 \
-    }                                                                        \
-    case NVTE_QKV_Format::NVTE_BSHD: {                                       \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_BSHD;          \
-      __VA_ARGS__;                                                           \
-      break;                                                                 \
-    }                                                                        \
-    case NVTE_QKV_Format::NVTE_THD: {                                        \
-      constexpr NVTE_QKV_Format LEVEL = NVTE_QKV_Format::NVTE_THD;           \
-      __VA_ARGS__;                                                           \
-      break;                                                                 \
-    }                                                                        \
-    default:                                                                 \
-      NVTE_ERROR("only implemented for NVTE_THD, NVTE_BSHD and NVTE_SBHD "); \
-  }
-
 template <typename dtype, bool causal>
 void fused_out_correction_helper(Tensor &out, const NVTETensorPack *out_per_step, const Tensor &lse,
                                  const NVTETensorPack *lse_per_step, const Tensor &cu_seqlens,
@@ -705,7 +689,7 @@ void fused_out_correction_helper(Tensor &out, const NVTETensorPack *out_per_step
     NVTE_CHECK(!(softmax_lse_in_packed_format == true && qkv_format != NVTE_QKV_Format::NVTE_THD),
                "Packed lse only supports THD format.");
 
-    DISPATCH_SBHD_BSHD_AND_THD(
+    TRANSFORMER_ENGINE_QKV_FORMAT_SWITCH(
         qkv_format, qkv_format_type, "fused_out_correction",
         TRANSFORMER_ENGINE_SWITCH_CONDITION(
             softmax_lse_in_packed_format, bool_softmax_lse_in_packed_format,
