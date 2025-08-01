@@ -248,7 +248,7 @@ def test_dot_product_attention(
                 print('dsink unfused:')
                 print(unfused_attn_bwd[i][0,:h,0,0])
                 print('dsink fused:')
-                print(fused_attn_bwd[i][0,:h,0,0])
+                print(fused_attn_bwd[i][:h])
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
