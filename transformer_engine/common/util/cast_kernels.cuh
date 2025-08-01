@@ -1138,8 +1138,17 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                      /*stride_elems=*/cols, 
                                      /*offset_elems=*/0,
                                      input_type_bit_size);
+                alignas(64) CUtensorMap tensor_map_rowwise_output{};
                 alignas(64) CUtensorMap tensor_map_colwise_output{};
                 constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+                create_2D_tensor_map(tensor_map_rowwise_output,
+                                     output->data,
+                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+                                     rows, cols,
+                                     traits::blockIterDim::M, traits::blockIterDim::N,
+                                     /*stride_elems=*/cols, 
+                                     /*offset_elems=*/0,
+                                     output_type_bit_size);
                 create_2D_tensor_map(tensor_map_colwise_output,
                                      output->columnwise_data,
                                      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
@@ -1153,7 +1162,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                           (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
                 kernel<<<grid, block, traits::smem, stream>>>(
                   tensor_map_input,
-                  reinterpret_cast<typename traits::OType *>(output->data.dptr),
+                  tensor_map_rowwise_output,
                   tensor_map_colwise_output,
                   scales_rowwise_ptr,
                   scales_colwise_ptr,

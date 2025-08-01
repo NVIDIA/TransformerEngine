@@ -731,9 +731,6 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
     static constexpr int32_t numStages = 3;
 
-    static constexpr int32_t numRegStages = 2;
-    static constexpr int32_t numPrefetch = numRegStages - 1;
-
     using inputUnitType = uint4;
     static constexpr int32_t rowNumElemsPerUnit = sizeof(inputUnitType) / sizeof(IType);
     static constexpr int32_t rowNumUnitsPerChunk = rowChunkElems / rowNumElemsPerUnit;
@@ -745,19 +742,27 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
     using rowOutputUnitType = uint4;
     static constexpr int32_t rowNumOutUnitsPerChunk = rowChunkElems * sizeof(OType) / sizeof(rowOutputUnitType);
+    static constexpr int32_t rowOutNumElemsPerUnit = sizeof(rowOutputUnitType) / sizeof(OType);
 
+    using rowOutputChunkSwz = swz::Swizzle<2, 0, 3>;
     using colOutputSwz = swz::Swizzle<2, 4, 3>;
 
     static constexpr bool _use_cvt_4x = true;
 
-    static constexpr int32_t numThreads = (warpLayout::num + 1) * 32;
-    static constexpr size_t smemPerWarp = warpDim::num * sizeof(IType);
-    static constexpr size_t smemPerBlock = smemPerWarp * warpLayout::num;
+    static constexpr size_t smemInputPerWarp = warpDim::num * sizeof(IType);
+    static constexpr size_t smemInputPerBlock = smemInputPerWarp * warpLayout::num;
 
-    static constexpr size_t smemOutputPerWarp = warpDim::num * sizeof(OType);
-    static constexpr size_t smemOutputPerBlock = smemOutputPerWarp * warpLayout::num;
+    static constexpr size_t smemRowwiseOutputPerWarp = warpDim::num * sizeof(OType);
+    static constexpr size_t smemRowwiseOutputPerBlock = smemRowwiseOutputPerWarp * warpLayout::num;
 
-    static constexpr size_t smem = smemPerBlock * numStages + smemOutputPerBlock * numStages + 1024ul;
+    static constexpr size_t smemColwiseOutputPerWarp = warpDim::num * sizeof(OType);
+    static constexpr size_t smemColwiseOutputPerBlock = smemColwiseOutputPerWarp * warpLayout::num;
+
+    static constexpr size_t smemInput = smemInputPerBlock * numStages;
+    static constexpr size_t smemRowwiseOutput = smemRowwiseOutputPerBlock * numStages;
+    static constexpr size_t smemColwiseOutput = smemColwiseOutputPerBlock * numStages;
+
+    static constexpr size_t smem = std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + 1024ul;
 };
 
 #define ALIGN_TO(x, align) (((x) + (align) - 1) & ~((align) - 1))
@@ -767,7 +772,7 @@ template <typename CastTraits,
           std::enable_if_t<CastTraits::isRowwise && CastTraits::isColwise, int> = 0>
 __global__ void cast_mxfp8_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
-    typename CastTraits::OType * __restrict__ rowwise_output,
+    const __grid_constant__ CUtensorMap tensor_map_rowwise_output,
     const __grid_constant__ CUtensorMap tensor_map_colwise_output,
     e8m0_t * __restrict__ scales_rowwise,
     e8m0_t * __restrict__ scales_colwise,
@@ -791,8 +796,15 @@ __global__ void cast_mxfp8_kernel(
     char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, 1024));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
-    typename CastTraits::OType *sColOutput = reinterpret_cast<typename CastTraits::OType *>(
-        sInput + CastTraits::blockIterDim::num * CastTraits::numStages);
+
+    typename CastTraits::OType *sRowOutput = reinterpret_cast<typename CastTraits::OType *>(
+        sInput + CastTraits::blockIterDim::num * CastTraits::numStages
+    );
+    typename CastTraits::rowOutputUnitType *sRowOutputUnit = 
+        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sRowOutput);
+
+    // colwise output will reuse input buffer
+    typename CastTraits::OType *sColOutput = reinterpret_cast<typename CastTraits::OType *>(sInput);
 
     // TODO: maybe we can assign a different barrier for each warp
     __shared__ uint64_t producer[CastTraits::numStages], consumer[CastTraits::numStages];
@@ -926,12 +938,12 @@ __global__ void cast_mxfp8_kernel(
                                 rOutput2[i] = out;
                             }
                         }
-                        typename CastTraits::rowOutputUnitType *rowOutputUnit = 
-                            reinterpret_cast<typename CastTraits::rowOutputUnitType *>(
-                                rowwise_output + coords.y * cols + coords.x);
                         #pragma unroll
                         for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
-                            rowOutputUnit[i] = rOutput[i];
+                            int32_t offset = (threadIdx.x / CastTraits::rowThreadLayout::N) * CastTraits::blockIterDim::N / CastTraits::rowOutNumElemsPerUnit
+                                            + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems / CastTraits::rowOutNumElemsPerUnit;
+                            offset += (warp_offset / CastTraits::rowOutNumElemsPerUnit + i);
+                            sRowOutputUnit[CastTraits::rowOutputChunkSwz::swz(offset)] = rOutput[i];
                         }
                     }
                 }
@@ -945,13 +957,6 @@ __global__ void cast_mxfp8_kernel(
                         int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
                         rInput[i] = sInput[CastTraits::inputElemSwz::swz(offset)];
                     }
-                    cuda_ptx::mbarrier_arrive_expect_tx(
-                        cuda_ptx::sem_release,
-                        cuda_ptx::scope_cta,
-                        cuda_ptx::space_shared,
-                        &consumer[read_state.index()],
-                        0u
-                    );
 
                     if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
 
@@ -997,8 +1002,7 @@ __global__ void cast_mxfp8_kernel(
                                 rOutput2[i] = out;
                             }
                         }
-                        ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
-                        ptx::numbered_barrier_sync(CastTraits::warpLayout::num * 32, 8);
+                        
                         #pragma unroll
                         for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
                             int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
@@ -1008,6 +1012,15 @@ __global__ void cast_mxfp8_kernel(
                         ptx::fence_proxy_async_shared_cta();
                         ptx::numbered_barrier_sync(CastTraits::warpLayout::num * 32, 8);
                         if (warpId == 0 && leader) {
+                            cuda_ptx::cp_async_bulk_tensor(
+                                cuda_ptx::space_global,
+                                cuda_ptx::space_shared,
+                                &tensor_map_rowwise_output,
+                                /*tensorCoords=*/{int32_t(block_coords.x + iter_n * CastTraits::blockIterDim::N),
+                                                  int32_t(block_coords.y + iter_m * CastTraits::blockIterDim::M)},
+                                /*srcMem=*/sRowOutput + read_state.index() * CastTraits::blockIterDim::num
+                            );
+
                             cuda_ptx::cp_async_bulk_tensor(
                                 cuda_ptx::space_global,
                                 cuda_ptx::space_shared,
@@ -1022,6 +1035,14 @@ __global__ void cast_mxfp8_kernel(
                 }
                 
             }
+            ptx::cp_async_bulk_wait_group_read<CastTraits::numStages - 1>();
+            cuda_ptx::mbarrier_arrive_expect_tx(
+                cuda_ptx::sem_release,
+                cuda_ptx::scope_cta,
+                cuda_ptx::space_shared,
+                &consumer[read_state.index()],
+                0u
+            );
             read_state++;
         }
         ptx::cp_async_bulk_wait_group_read<0>();
