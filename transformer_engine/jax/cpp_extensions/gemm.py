@@ -539,7 +539,8 @@ class GemmPrimitive(BasePrimitive):
         for l in lhs_cspecs:
             for r in rhs_cspecs:
                 if l != None and l == r:
-                    if len(lhs_specs) >= 1:
+                    # This if condition is here only to suppress warning, no functional effects
+                    if len(lhs_cspecs) >= 1: 
                         assert(reduce_spec is None, "Multiple reduce dimension is detected!")
                     reduce_spec = l
         
@@ -555,7 +556,7 @@ class GemmPrimitive(BasePrimitive):
             rhs_cspecs = (None,) * len(rhs_cspecs)
 
         # Non-batched non-contracting dims of LHS to be unsharded, i.e gather SP dim
-        # (This cause MaxText TP does gather Y1 for dW2 = Y1^T * dY2 which is unexpected)
+        # (This cause MaxText TP (= Megatron TP + activation_hidden sharding) gathering Y1 for dW2 = Y1^T * dY2 which is unexpected)
         lhs_non_cspecs = tuple(None if i not in lhs_bdims else lhs_non_cspecs[i] for i in lhs_non_cdims)
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
