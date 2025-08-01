@@ -1080,6 +1080,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                 )
+                        softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1) if self.softmax_offset is not None else None
 
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
