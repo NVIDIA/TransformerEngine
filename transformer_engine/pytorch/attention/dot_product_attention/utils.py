@@ -1803,6 +1803,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         dP_quantizer.interal = True
     if fp8_meta["recipe"].float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
         dP_quantizer = Float8Quantizer(torch.ones(1), torch.zeros(1), dP_quantizer.dtype)
         dP_quantizer.set_usage(rowwise=True, columnwise=False)

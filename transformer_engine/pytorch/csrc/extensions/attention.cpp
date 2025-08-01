@@ -79,10 +79,12 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer) {
   } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
     // delayed scaling; this helps initialize scale_inv
     auto *T_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(T_quantizer.get());
-    std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(
-                   {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
+    std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
+                                                          std::nullopt, std::nullopt);
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    NVTE_ERROR("In FP8 current scaling, S_quantizer should be None and dP_quantizer should be Float8Quantizer!");
+    NVTE_ERROR(
+        "In FP8 current scaling, S_quantizer should be None and dP_quantizer should be "
+        "Float8Quantizer!");
   }
   return {std::move(te_T), std::move(py_T)};
 }
@@ -128,11 +130,11 @@ std::vector<py::object> fused_attn_fwd(
   } else if (detail::IsFloat8Quantizers(o_quantizer.ptr())) {
     // delayed scaling; initialize scale_inv
     auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
-    std::tie(te_O, py_O) = O_quantizer_fp8->create_tensor(
-	    o_shape, fake_dtype_te, std::nullopt, std::nullopt, std::nullopt);
+    std::tie(te_O, py_O) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te, std::nullopt,
+                                                          std::nullopt, std::nullopt);
   } else if (detail::IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())) {
     // current scaling; compute tensor in high precision and quantize
-    auto *O_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(O_quantizer.get());
+    auto *O_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(O_quantizer.get());
     std::tie(te_O, py_O) = O_quantizer_fp8->create_hp_tensor_with_amax(o_shape, fake_dtype_te);
   }
 
@@ -416,18 +418,21 @@ std::vector<py::object> fused_attn_bwd(
   } else if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // delayed scaling; initialize scale_inv
     auto *dQKV_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
-    std::tie(te_dQ, py_dQ) = dQKV_quantizer_fp8->create_tensor(
-	    q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
-    std::tie(te_dK, py_dK) = dQKV_quantizer_fp8->create_tensor(
-	    k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
-    std::tie(te_dV, py_dV) = dQKV_quantizer_fp8->create_tensor(
-	    v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
+    std::tie(te_dQ, py_dQ) =
+        dQKV_quantizer_fp8->create_tensor(q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
+    std::tie(te_dK, py_dK) =
+        dQKV_quantizer_fp8->create_tensor(k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
+    std::tie(te_dV, py_dV) =
+        dQKV_quantizer_fp8->create_tensor(v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
   } else if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
     // current scaling; compute tensor in high precision and quantize
-    auto *dQKV_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(dQKV_quantizer.get());
-    std::tie(te_dQ, py_dQ) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(q_shape, fake_dtype_te, dQ);
-    std::tie(te_dK, py_dK) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(k_shape, fake_dtype_te, dK);
-    std::tie(te_dV, py_dV) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(v_shape, fake_dtype_te, dV);
+    auto *dQKV_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(dQKV_quantizer.get());
+    std::tie(te_dQ, py_dQ) =
+        dQKV_quantizer_fp8->create_hp_tensor_with_amax(q_shape, fake_dtype_te, dQ);
+    std::tie(te_dK, py_dK) =
+        dQKV_quantizer_fp8->create_hp_tensor_with_amax(k_shape, fake_dtype_te, dK);
+    std::tie(te_dV, py_dV) =
+        dQKV_quantizer_fp8->create_hp_tensor_with_amax(v_shape, fake_dtype_te, dV);
   }
 
   // construct NVTE tensors

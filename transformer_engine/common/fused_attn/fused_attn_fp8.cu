@@ -1785,15 +1785,15 @@ void fused_attn_fp8_fwd_impl_v1(
       descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
 
       if (output_tensor_type == fwd_tensor_type) {
-          // delayed scaling
-          descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
-          scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
-          scale_o = mha_graph->tensor_like(descale_q, "Scale_O");
+        // delayed scaling
+        descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
+        scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
+        scale_o = mha_graph->tensor_like(descale_q, "Scale_O");
       } else {
-          // current scaling
-          descale_s = mha_graph->tensor(1.0f/448.0f);
-          scale_s = mha_graph->tensor(448.0f);
-          scale_o = mha_graph->tensor(1.0f);
+        // current scaling
+        descale_s = mha_graph->tensor(1.0f / 448.0f);
+        scale_s = mha_graph->tensor(448.0f);
+        scale_o = mha_graph->tensor(1.0f);
       }
 
       fe::graph::SDPA_fp8_attributes sdpa_options;
@@ -1856,17 +1856,17 @@ void fused_attn_fp8_fwd_impl_v1(
           .set_data_type(fe::DataType_t::FLOAT);
 
       if (output_tensor_type == fwd_tensor_type) {
-          // delayed scaling
-          amax_s->set_output(true)
-              .set_dim({1, 1, 1, 1})
-              .set_stride({1, 1, 1, 1})
-              .set_data_type(fe::DataType_t::FLOAT);
+        // delayed scaling
+        amax_s->set_output(true)
+            .set_dim({1, 1, 1, 1})
+            .set_stride({1, 1, 1, 1})
+            .set_data_type(fe::DataType_t::FLOAT);
       } else {
-          // current scaling
-          amax_s->set_output(false)
-              .set_dim({1, 1, 1, 1})
-              .set_stride({1, 1, 1, 1})
-              .set_data_type(fe::DataType_t::FLOAT);
+        // current scaling
+        amax_s->set_output(false)
+            .set_dim({1, 1, 1, 1})
+            .set_stride({1, 1, 1, 1})
+            .set_data_type(fe::DataType_t::FLOAT);
       }
 
       Stats->set_output(true)
@@ -2160,7 +2160,7 @@ void fused_attn_fp8_bwd_impl_v1(
         scale_dV = mha_graph->tensor_like(descale_q, "Scale_dV");
       } else {
         // current scaling
-        descale_s = mha_graph->tensor(1.0f/448.0f);
+        descale_s = mha_graph->tensor(1.0f / 448.0f);
         scale_s = mha_graph->tensor(448.0f);
         //descale_dP = mha_graph->tensor(1.0f/448.0f);
         //scale_dP = mha_graph->tensor(448.0f);

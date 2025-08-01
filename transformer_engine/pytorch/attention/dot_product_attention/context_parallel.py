@@ -543,7 +543,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_CP_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=True)
+        ) = dpa_utils.get_attention_quantizers(
+            fp8, fp8_meta, quantizers, cp_specific_quantizers=True
+        )
 
         if fp8:
             if use_fused_attention:
@@ -1327,7 +1329,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                     if fp8:
                         if fp8_meta["recipe"].delayed():
-                            out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
+                            out_per_step[i - 1] = out_per_step[i - 1].dequantize(
+                                dtype=torch.float32
+                            )
                         if fp8_meta["recipe"].float8_current_scaling():
                             out_per_step[i - 1] = out_per_step[i - 1].to(dtype=torch.float32)
                     if i == 1:
@@ -1625,9 +1629,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     dout = ctx.dO_quantizer(dout)
                 fused_attn_dqkv_dtype = ctx.dO_quantizer.dtype
-                dq_fp8 = torch.empty((cp_size, *q.shape), dtype=TE_DType_To_Torch[fused_attn_dqkv_dtype], device=q.device)
+                dq_fp8 = torch.empty(
+                    (cp_size, *q.shape),
+                    dtype=TE_DType_To_Torch[fused_attn_dqkv_dtype],
+                    device=q.device,
+                )
                 dkv_fp8 = torch.empty(
-                    (cp_size, *kv.shape), dtype=TE_DType_To_Torch[fused_attn_dqkv_dtype], device=kv.device
+                    (cp_size, *kv.shape),
+                    dtype=TE_DType_To_Torch[fused_attn_dqkv_dtype],
+                    device=kv.device,
                 )
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
                 p2p_comm_buffers = [[kv, dkv_fp8], [torch.empty_like(kv), dkv_fp8_]]
@@ -3326,7 +3336,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         is_output_fp8 = False
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(
+                fp8, fp8_meta, quantizers, cp_specific_quantizers=False
+            )
         )
         if fp8:
             if use_fused_attention:

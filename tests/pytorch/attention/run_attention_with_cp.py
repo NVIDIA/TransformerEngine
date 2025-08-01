@@ -15,7 +15,11 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
@@ -323,13 +327,13 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for i,x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
+    for i, x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
 
     # compare results with and without CP
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        dq, dk, dv, out= [
+        dq, dk, dv, out = [
             x.view(
                 *x.shape[:seq_dim],
                 2 * world_size,

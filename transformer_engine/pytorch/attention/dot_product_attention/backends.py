@@ -800,7 +800,7 @@ class FlashAttention(torch.nn.Module):
                         # when fp8_mha = True, force fp8_output = True; should have been set
                         # correctly by users
                         if fp8_meta["recipe"].fp8_mha:
-                            fp8_output =  True
+                            fp8_output = True
                         assert isinstance(key_layer, query_layer.__class__) and isinstance(
                             value_layer, query_layer.__class__
                         ), "q, k, and v must have the same type."
@@ -945,7 +945,9 @@ class FusedAttnFunc(torch.autograd.Function):
         fake_dtype = q.dtype
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(
+                fp8, fp8_meta, quantizers, cp_specific_quantizers=False
+            )
         )
 
         if fp8:
@@ -1282,12 +1284,16 @@ class FusedAttnFunc(torch.autograd.Function):
                             if qkv_group == 1:
                                 dim = ctx.qkv_layout.find("3")
                                 dqkv = combine_tensors([dq_fp8, dk_fp8, dv_fp8], dim)
-                                dqkv_c = dqkv.view(-1, dqkv.shape[-3] * dqkv.shape[-2] * dqkv.shape[-1])
+                                dqkv_c = dqkv.view(
+                                    -1, dqkv.shape[-3] * dqkv.shape[-2] * dqkv.shape[-1]
+                                )
                                 dqkv_fp8 = ctx.dQKV_quantizer(dqkv_c).view(dqkv.shape)
                                 dq, dk, dv = SplitAlongDim.apply(dqkv_fp8, dim, [1, 1, 1], True)
                             if qkv_group == 2:
                                 dq = ctx.dQKV_quantizer(dq_fp8)
-                                dim = ctx.qkv_layout.replace("paged_kv_", "").split("_")[1].find("2")
+                                dim = (
+                                    ctx.qkv_layout.replace("paged_kv_", "").split("_")[1].find("2")
+                                )
                                 dkv = combine_tensors([dk_fp8, dv_fp8], dim)
                                 dkv_c = dkv.view(-1, dkv.shape[-3] * dkv.shape[-2] * dkv.shape[-1])
                                 dkv_fp8 = ctx.dQKV_quantizer(dkv)
