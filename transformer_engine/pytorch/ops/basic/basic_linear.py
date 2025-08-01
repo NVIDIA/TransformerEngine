@@ -404,7 +404,7 @@ class BasicLinear(BasicOperation):
         if dtype is None:
             if out is not None and isinstance(out, torch.Tensor):
                 dtype = out.dtype
-            elif weight is not None and isinstance(out, torch.Tensor):
+            elif weight is not None and isinstance(weight, torch.Tensor):
                 dtype = weight.dtype
             else:
                 raise ValueError(
