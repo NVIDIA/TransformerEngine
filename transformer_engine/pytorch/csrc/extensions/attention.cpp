@@ -68,6 +68,25 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
   return fused_attention_backend;
 }
 
+// helper function for S and dP quantizers
+std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer) {
+  std::unique_ptr<Quantizer> T_quantizer = convert_quantizer(quantizer);
+  TensorWrapper te_T;
+  py::object py_T;
+  if (quantizer.is_none()) {
+    // high precision or current scaling
+    std::tie(te_T, py_T) = T_quantizer->create_tensor({0}, DType::kFloat32);
+  } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+    // delayed scaling; this helps initialize scale_inv
+    auto *T_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(T_quantizer.get());
+    std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(
+                   {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    NVTE_ERROR("In FP8 current scaling, S_quantizer should be None and dP_quantizer should be Float8Quantizer!");
+  }
+  return {std::move(te_T), std::move(py_T)};
+}
+
 // fused attention FWD with separate Q, K and V tensors
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -92,18 +111,7 @@ std::vector<py::object> fused_attn_fwd(
   // create S tensor
   TensorWrapper te_S;
   py::object py_S;
-  std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
-  if (s_quantizer.is_none()) {
-    // high precision or current scaling
-    std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  } else if (detail::IsFloat8Quantizers(s_quantizer.ptr())) {
-    // delayed scaling; this helps initialize scale_inv
-    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-    std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor(
-                   {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-  } else if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr())) {
-    NVTE_ERROR("In FP8 current scaling, S_quantizer should be None!");
-  }
+  std::tie(te_S, py_S) = quantizer_helper(s_quantizer);
 
   // create O tensor
   TensorWrapper te_O;
@@ -304,23 +312,8 @@ std::vector<py::object> fused_attn_bwd(
   // create S and dP tensors
   TensorWrapper te_S, te_dP;
   py::object py_S, py_dP;
-  std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
-  std::unique_ptr<Quantizer> dP_quantizer = convert_quantizer(dp_quantizer);
-  if (s_quantizer.is_none() && dp_quantizer.is_none()) {
-    // high precision or current scaling
-    std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
-    std::tie(te_dP, py_dP) = dP_quantizer->create_tensor({0}, DType::kFloat32);
-  } else if (detail::IsFloat8Quantizers(s_quantizer.ptr()) && detail::IsFloat8Quantizers(dp_quantizer.ptr())) {
-    // delayed scaling; this helps initialize scale_inv
-    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-    auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
-    std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor(
-                   {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    std::tie(te_dP, py_dP) = dP_quantizer_fp8->create_tensor(
-                   {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-  } else if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr()) && detail::IsFloat8CurrentScalingQuantizers(dp_quantizer.ptr())) {
-    NVTE_ERROR("In FP8 current scaling, S_quantizer and dP_quantizer should be None!");
-  }
+  std::tie(te_S, py_S) = quantizer_helper(s_quantizer);
+  std::tie(te_dP, py_dP) = quantizer_helper(dp_quantizer);
 
   // create dQ, dK, dV tensors
   TensorWrapper te_dQ, te_dK, te_dV;
