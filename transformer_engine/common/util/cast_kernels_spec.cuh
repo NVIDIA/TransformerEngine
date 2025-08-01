@@ -790,6 +790,7 @@ __global__ void cast_mxfp8_kernel(
     extern __shared__ char smem[];
     char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, 1024));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
+    typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
     typename CastTraits::OType *sColOutput = reinterpret_cast<typename CastTraits::OType *>(
         sInput + CastTraits::blockIterDim::num * CastTraits::numStages);
 
@@ -867,38 +868,19 @@ __global__ void cast_mxfp8_kernel(
                 // rowwise
                 {
                     typename CastTraits::inputUnitType rInput[CastTraits::rowNumUnitsPerChunk];
-                    typename CastTraits::inputUnitType *sInputUnitWarp = 
-                        reinterpret_cast<typename CastTraits::inputUnitType *>(
-                            sInput + read_state.index() * CastTraits::blockIterDim::num
-                            + warp_coords.y * CastTraits::blockIterDim::N
-                            + warp_coords.x
-                        );
+
+                    int32_t warp_offset = read_state.index() * CastTraits::blockIterDim::num
+                                            + warp_coords.y * CastTraits::blockIterDim::N
+                                            + warp_coords.x;
+                    warp_offset /= CastTraits::rowNumElemsPerUnit;
+
                     #pragma unroll
                     for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
-                        int32_t offset = (threadIdx.x / CastTraits::rowThreadLayout::N) * CastTraits::blockIterDim::N
-                                        + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems;
-                        offset = offset / CastTraits::rowNumElemsPerUnit + i;
-
-                        {
-                            if (warpId == 3 && threadIdx.x == 31) {
-                                int32_t swz_offset = CastTraits::inputUnitSwz::swz(offset);
-                                printf("i: %d, offset: %d, swz_offset: %d\n", i, offset, swz_offset);
-                            }
-                        }
-
-                        rInput[i] = sInputUnitWarp[CastTraits::inputUnitSwz::swz(offset)];
+                        int32_t offset = (threadIdx.x / CastTraits::rowThreadLayout::N) * CastTraits::blockIterDim::N / CastTraits::rowNumElemsPerUnit
+                                        + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems / CastTraits::rowNumElemsPerUnit;
+                        offset += (warp_offset + i);
+                        rInput[i] = sInputUnit[CastTraits::inputUnitSwz::swz(offset)];
                     }
-
-
-                    {
-                        if (warpId == 3 && threadIdx.x == 31) {
-                            typename CastTraits::IType *rInput_ = reinterpret_cast<typename CastTraits::IType *>(rInput);
-                            for (int32_t i = 0; i < CastTraits::rowChunkElems; i++) {
-                                printf("i: %d, %.4f\n", i, (float)rInput_[i]);
-                            }
-                        }
-                    }
-
 
                     if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
 
