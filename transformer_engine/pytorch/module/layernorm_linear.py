@@ -761,21 +761,31 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can't reuse the grad output that was gathered
                     # for the dgrad GEMM. We work around by explicitly
                     # overlapping the NCCL operation with the dgrad GEMM.
+
+                    # Get the communication stream from the dgrad GEMM to use for the AG
+                    dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
+
+                    ub_obj_wgrad = None
+                    if ctx.ub_overlap_ag:
+                        ub_obj_wgrad = get_ub("wgrad")
+
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
-                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    dgrad_comm_stream = ub_obj_dgrad.get_communication_stream()
-                    with torch.cuda.stream(dgrad_comm_stream):
-                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                        grad_output, mxfp8_grad_output_work = gather_along_first_dim(
+                    # We use the send stream to copy into the userbuffers.
+                    # This is the same stream that we will use to access the data in the AG,
+                    # so we dont need to add any syncs yet.
+                    with torch.cuda.stream(dgrad_send_stream):
+                        grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                            ub_obj_wgrad,
                             grad_outputs[0],
+                            ctx.grad_output_quantizer,
                             ctx.tp_group,
-                            async_op=True,
-                            quantizer=ctx.grad_output_quantizer,
                         )
-                    # Synchronize with the main stream
-                    mxfp8_grad_output_work.wait()
+
+                    # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
+                    tex.bulk_overlap_ag_with_external_gemm(
+                        grad_outputs[0], ub_obj_wgrad, dgrad_send_stream, dgrad_recv_stream
+                    )
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and

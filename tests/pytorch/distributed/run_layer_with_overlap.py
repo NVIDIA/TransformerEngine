@@ -519,6 +519,7 @@ def _train(opts):
         if opts.use_cuda_graphs:
             del test_graph
 
+    torch.cuda.synchronize()
     te.module.base.destroy_ub()
     dist_print("Destroying Userbuffers objects...", debug=True)
 
