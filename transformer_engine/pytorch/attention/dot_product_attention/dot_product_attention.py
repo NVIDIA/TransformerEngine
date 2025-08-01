@@ -1185,7 +1185,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
                         inference_params=inference_params,
-                        softmax_offset=self.softmax_offset,
+                        softmax_offset=softmax_offset,
                     )
                 return self.unfused_attention(
                     _alibi_cache,
