@@ -18,6 +18,7 @@
 namespace transformer_engine {
 namespace {
 
+constexpr __device__ __host__ int MXFP8_BLOCK_SIZE = 32;
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -200,14 +201,18 @@ __global__ void swizzle_row_scaling_kernel(const void* input, void* output, cons
 constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
 
 struct MultiSwizzleArgs {
-  // (input) Data buffers for input tensors
+  // (input) Data buffers for input scaling factors
   void* input_list[kMaxTensorsPerKernel];
-  // (output) Data buffers for cast output tensors
+  // (output) Data buffers for swizzled scaling factors
   void* output_list[kMaxTensorsPerKernel];
-  // Input matrix heights
+  // Input scaling factor m
   int m_list[kMaxTensorsPerKernel];
-  // Input matrix heights (padded)
+  // Input scaling factor k
   int k_list[kMaxTensorsPerKernel];
+  // Input scaling factor m before padding
+  int original_m_list[kMaxTensorsPerKernel];
+  // Input scaling factor k before padding
+  int original_k_list[kMaxTensorsPerKernel];
   // Prefix sum (with leading zero) of CUDA blocks needed for each
   // tensor
   int block_range[kMaxTensorsPerKernel + 1];
@@ -228,6 +233,8 @@ __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_
   void* output = kernel_args.output_list[tensor_id];
   const int M = kernel_args.m_list[tensor_id];
   const int K = kernel_args.k_list[tensor_id];
+  const int original_M = kernel_args.original_m_list[tensor_id];
+  const int original_K = kernel_args.original_k_list[tensor_id];
 
   constexpr int N_TILE_PER_TD = sizeof(LType) / sizeof(int);
   constexpr int N_TILES_IN_TB = TB_DIM * N_TILE_PER_TD;
@@ -250,8 +257,11 @@ __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_
     n_tiles_in_tb = (K_i32 - 1) % N_TILES_IN_TB + 1;
   }
 
-  const int* input_i32 = reinterpret_cast<const int*>(input) + bid_y * SF_TILE_DIM_M_I32 * K_i32 +
-                         bid_x * N_TILES_IN_TB;
+  bool padding_m = (bid_y == grid_dim_y - 1) && (original_M < M);
+  bool padding_k = (bid_x == grid_dim_x - 1) && (original_K < K);
+
+  const int input_offset = bid_y * SF_TILE_DIM_M_I32 * K_i32 + bid_x * N_TILES_IN_TB;
+  const int* input_i32 = reinterpret_cast<const int*>(input) + input_offset;
   int* output_i32 = reinterpret_cast<int*>(output) + bid_y * SF_TILE_DIM_M_I32 * K_i32 +
                     bid_x * N_TILES_IN_TB * SF_TILE_SIZE_I32;
 
@@ -262,8 +272,16 @@ __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_
   if (threadIdx.x * N_TILE_PER_TD < n_tiles_in_tb) {
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
-      regs_vec[i] = __ldg(reinterpret_cast<const LType*>(
-          input_i32 + (i * TB_DIM + threadIdx.y) * K_i32 + threadIdx.x * N_TILE_PER_TD));
+      const int thread_offset = (i * TB_DIM + threadIdx.y) * K_i32 + threadIdx.x * N_TILE_PER_TD;
+      regs_vec[i] = __ldg(reinterpret_cast<const LType*>(input_i32 + thread_offset));
+      if (padding_m || padding_k) {
+        for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
+          const int index = (input_offset + thread_offset) * sizeof(int) + j;
+          if (index / K >= original_M || index % K >= original_K) {
+            reinterpret_cast<uint8_t*>(regs_vec + i)[j] = 0;
+          }
+        }
+      }
     }
 
     // shuffle regs
@@ -301,6 +319,8 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
   void* output = kernel_args.output_list[tensor_id];
   const int M = kernel_args.m_list[tensor_id];
   const int K = kernel_args.k_list[tensor_id];
+  const int original_M = kernel_args.original_m_list[tensor_id];
+  const int original_K = kernel_args.original_k_list[tensor_id];
 
   constexpr int N_TILE_PER_TD = sizeof(LType) / sizeof(int);
   constexpr int N_SF_PER_TD = N_TILE_PER_TD * N_SF_PER_TD_PER_TILE;
@@ -330,9 +350,12 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
     m_tiles_in_tb = (M_i32 / SF_TILE_DIM_M_I32 - 1) % m_tiles_in_tb + 1;
   }
 
-  const int32_t* input_i32 = reinterpret_cast<const int32_t*>(input) +
-                             bid_x * TB_DIM * SF_TILE_DIM_K_I32 * M_i32 +
-                             bid_y * N_TILE_PER_TD * SF_TILE_DIM_M_I32;
+  bool padding_m = (bid_y == grid_dim_y - 1) && (original_M < M);
+  bool padding_k = (bid_x == grid_dim_x - 1) && (original_K < K);
+
+  const int input_offset =
+      bid_x * TB_DIM * SF_TILE_DIM_K_I32 * M_i32 + bid_y * N_TILE_PER_TD * SF_TILE_DIM_M_I32;
+  const int32_t* input_i32 = reinterpret_cast<const int32_t*>(input) + input_offset;
   int32_t* output_i32[N_TILE_PER_TD];
 #pragma unroll
   for (int i = 0; i < m_tiles_in_tb; i++) {
@@ -347,8 +370,16 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
       threadIdx.y < k_tiles_in_tb) {
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
-      regs_vec[i] = __ldg(reinterpret_cast<const LType*>(
-          input_i32 + (threadIdx.y * SF_TILE_DIM_K_I32 + i) * M_i32 + threadIdx.x * N_TILE_PER_TD));
+      const int thread_offset = (threadIdx.y * SF_TILE_DIM_K_I32 + i) * M_i32 + threadIdx.x * N_TILE_PER_TD;
+      regs_vec[i] = __ldg(reinterpret_cast<const LType*>(input_i32 + thread_offset));
+      if (padding_m || padding_k) {
+        for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
+          const int index = (input_offset + thread_offset) * sizeof(int) + j;
+          if (index / K >= original_M || index % K >= original_K) {
+            reinterpret_cast<uint8_t*>(regs_vec + i)[j] = 0;
+          }
+        }
+      }
     }
 
     // local shuffle
@@ -650,6 +681,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
+      kernel_args.original_m_list[pos] = input[i]->data.shape[0];
+      kernel_args.original_k_list[pos] = input[i]->data.shape[1] / MXFP8_BLOCK_SIZE;
       kernel_args.num_tensors++;
     }
     // Launch the remaining tensors
@@ -697,6 +730,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
+      kernel_args.original_m_list[pos] = input[i]->columnwise_data.shape[1];
+      kernel_args.original_k_list[pos] = input[i]->columnwise_data.shape[0] / MXFP8_BLOCK_SIZE;
       kernel_args.num_tensors++;
     }
     // Launch the remaining tensors
