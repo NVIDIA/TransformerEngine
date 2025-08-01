@@ -422,9 +422,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   // Optionally swizzle the scaling factors
   // Keep the swizzled scaling factor tensors alive during the GEMMs.
-  auto swizzled_scale_inverses_list_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
-  auto swizzled_scale_inverses_list_B =
-      multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
+  auto swizzled_scale_inv_A = multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa);
+  auto swizzled_scale_inv_B = multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb);
 
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),

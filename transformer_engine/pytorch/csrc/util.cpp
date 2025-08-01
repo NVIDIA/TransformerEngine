@@ -80,6 +80,10 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
     std::vector<transformer_engine::TensorWrapper>& tensors, bool rowwise) {
   using namespace transformer_engine::pytorch;
 
+  if (tensors.empty()) {
+    return std::nullopt;
+  }
+
   bool all_same_scaling_mode = std::all_of(
       tensors.cbegin(), tensors.cend(), [&tensors](const transformer_engine::TensorWrapper& val) {
         return val.scaling_mode() == tensors.front().scaling_mode();
