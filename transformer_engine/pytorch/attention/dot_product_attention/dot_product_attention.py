@@ -456,6 +456,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         fast_zero_fill: bool = True,
         inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
+        fp8_output: bool = False,
     ) -> torch.Tensor:
         """
         Dot Product Attention Layer.
@@ -628,6 +629,8 @@ class DotProductAttention(TransformerEngineBaseModule):
         pad_between_seqs: Optional[bool], default = `None`
             If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
             If true, there are padding tokens between individual sequences in a packed batch.
+        fp8_output: bool, default = False
+            Whether to output in FP8 or not. Only useful when fp8_recipe.fp8_dpa = True.
         """
 
         with torch.cuda.device(query_layer.device), self.prepare_forward(
@@ -645,8 +648,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
             # checks for FP8
+            if "recipe" not in self.fp8_meta:
+                fp8_output = False
             if self.fp8:
                 if self.fp8_meta["recipe"].fp8_mha:
+                    fp8_output = True
                     if not self.fp8_meta["recipe"].fp8_dpa:
                         self.fp8_meta["recipe"].fp8_dpa = True
                         self.logger.warning(
@@ -1053,6 +1059,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
+                    fp8_output=fp8_output,
                 )
 
             if use_fused_attention:
@@ -1101,6 +1108,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         pad_between_seqs=pad_between_seqs,
                         inference_params=inference_params,
+                        fp8_output=fp8_output,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -1129,6 +1137,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
+                    fp8_output=fp8_output,
                 )
 
             from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled

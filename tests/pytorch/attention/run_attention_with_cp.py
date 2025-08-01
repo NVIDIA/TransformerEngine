@@ -15,8 +15,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -83,8 +83,15 @@ def run_dpa_with_cp(
             if rank in sub_ranks:
                 cp_comm_sub_groups.append(sub_group)
 
+    is_training = True
+    #is_training = False
+    #scaling_mode = "current"
+    scaling_mode = "delayed"
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "delayed":
+            fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "current":
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=True, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -197,11 +204,17 @@ def run_dpa_with_cp(
     k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
-    dout_quantizer = Float8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
-        scale=torch.tensor([1], dtype=torch.float32).cuda(),
-        amax=torch.tensor([0], dtype=torch.float32).cuda(),
-    )
+    if scaling_mode == "delayed":
+        dout_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+    if scaling_mode == "current":
+        dout_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            device="cuda",
+        )
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -231,12 +244,14 @@ def run_dpa_with_cp(
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
-        if fp8_mha:
-            dout_fp8 = dout_quantizer(dout)
-            out.backward(dout_fp8)
-        else:
-            out.backward(dout)
+        if is_training:
+            if fp8_mha:
+                dout_fp8 = dout_quantizer(dout)
+                out.backward(dout_fp8)
+            else:
+                out.backward(dout)
 
+    print("===================================")
     # run core_attn wit CP
     q_, k_, v_, dout_, *rest = [
         x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
@@ -301,11 +316,12 @@ def run_dpa_with_cp(
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
-        if fp8_mha:
-            dout_fp8_ = dout_quantizer(dout_)
-            out_.backward(dout_fp8_)
-        else:
-            out_.backward(dout_)
+        if is_training:
+            if fp8_mha:
+                dout_fp8_ = dout_quantizer(dout_)
+                out_.backward(dout_fp8_)
+            else:
+                out_.backward(dout_)
 
     if fp8_mha:
         assert isinstance(out, Float8Tensor)
@@ -313,26 +329,48 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for x in [out_, q_.grad, k_.grad, v_.grad]:
-        assert torch.all(~torch.isnan(x))
-        assert torch.all(~torch.isinf(x))
+    if is_training:
+        for i,x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
+            print('iiiiiii', i, x.shape, torch.isnan(x).sum())
+            assert torch.all(~torch.isnan(x))
+            assert torch.all(~torch.isinf(x))
+    else:
+        for x in [out_]:
+            assert torch.all(~torch.isnan(x))
+            assert torch.all(~torch.isinf(x))
 
     # compare results with and without CP
     if qkv_format == "bshd" or qkv_format == "sbhd":
-        dq, dk, dv, out = [
-            x.view(
-                *x.shape[:seq_dim],
-                2 * world_size,
-                x.shape[seq_dim] // (2 * world_size),
-                *x.shape[(seq_dim + 1) :],
-            )
-            for x in [q.grad, k.grad, v.grad, out]
-        ]
-        dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
-        dq_, dk_, dv_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
-            for x in [q_.grad, k_.grad, v_.grad, out_]
-        ]
+        if is_training:
+            dq, dk, dv, out= [
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                for x in [q.grad, k.grad, v.grad, out]
+            ]
+            dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
+            dq_, dk_, dv_, out_ = [
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                for x in [q_.grad, k_.grad, v_.grad, out_]
+            ]
+        else:
+            out, *_= [
+                x.view(
+                    *x.shape[:seq_dim],
+                    2 * world_size,
+                    x.shape[seq_dim] // (2 * world_size),
+                    *x.shape[(seq_dim + 1) :],
+                )
+                for x in [out]
+            ]
+            out = out.index_select(seq_dim, seq_idx)
+            out_, *_ = [
+                x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+                for x in [out_]
+            ]
     elif qkv_format == "thd":
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
@@ -410,9 +448,14 @@ def run_dpa_with_cp(
             )
 
     if qkv_format == "bshd":
-        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-            _error(a[:, 0], b[:, 0])
-            _error(a[:, 1], b[:, 1])
+        if is_training:
+            for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+                _error(a[:, 0], b[:, 0])
+                _error(a[:, 1], b[:, 1])
+        else:
+            for a, b in zip([out_], [out]):
+                _error(a[:, 0], b[:, 0])
+                _error(a[:, 1], b[:, 1])
     elif qkv_format == "sbhd":
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
             _error(a[0], b[0])

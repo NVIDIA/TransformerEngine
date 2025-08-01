@@ -721,6 +721,7 @@ class MultiheadAttention(torch.nn.Module):
             and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
         )
 
+        print("xxxxxxxxxxxx", self.attention_type, self.input_layernorm, self.return_layernorm_output)
         layernorm_output = None
         if self.attention_type == "self":
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn]
@@ -734,6 +735,7 @@ class MultiheadAttention(torch.nn.Module):
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
                 else:
                     mixed_x_layer = layernorm_qkv_outputs
+                print("self input_layernorm", mixed_x_layer.__class__, mixed_x_layer._scale_inv, mixed_x_layer._quantizer, mixed_x_layer._quantizer.scale, mixed_x_layer._quantizer.amax, mixed_x_layer._quantizer.dtype, fp8_mha and rotary_pos_emb is None, mixed_x_layer.dequantize().isnan().sum(), mixed_x_layer.numel())
             else:
                 mixed_x_layer = self.qkv(
                     hidden_states,
@@ -933,6 +935,7 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
 
         if self.q_norm is not None and not self.qk_norm_before_rope:
+            print("Apply normalization to query and key tensors ")
             query_layer = self.q_norm(query_layer)
             key_layer = self.k_norm(key_layer)
 
