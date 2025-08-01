@@ -235,15 +235,20 @@ def test_dot_product_attention(
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if unfused_attn_supported and fused_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
-        print('unfused_attn_fwd min/max', unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
-        print('fused_attn_fwd min/max', fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
+        print('unfused_attn_fwd min/max   ', unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
+        print('fused_attn_fwd min/max     ', fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(unfused_attn_bwd):
-            print('bwd output',i)
             if unfused_attn_bwd[i] is not None:
-                print('unfused_attn_bwd min/max', unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
+                print(f'unfused_attn_bwd[{i}] min/max', unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
             if fused_attn_bwd[i] is not None:
-                print('fused_attn_bwd min/max', fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+                print(f'fused_attn_bwd[{i}] min/max  ', fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
+            if i==3 and config.softmax_type != "vanilla":
+                h = 10 if config.num_heads >= 10 else config.num_heads
+                print('dsink unfused:')
+                print(unfused_attn_bwd[i][0,:h,0,0])
+                print('dsink fused:')
+                print(fused_attn_bwd[i][0,:h,0,0])
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
@@ -259,9 +264,21 @@ def test_dot_product_attention(
 
 model_configs_softmax = {
     #     test:             b,  sq, h,  d
-    "base_1_0": ModelConfig(8, 128, 16, 64),
-    "base_1_1": ModelConfig(8, 128, 16, 64, softmax_type="off-by-one"),
-    "base_1_2": ModelConfig(8, 128, 16, 64, softmax_type="learnable"),
+    "softmax_1_0": ModelConfig(2, 2048, 64, 64),
+    "softmax_1_1": ModelConfig(2, 2048, 64, 64, softmax_type="off-by-one"),
+    "softmax_1_2": ModelConfig(2, 2048, 64, 64, softmax_type="learnable"),
+    "softmax_2_0": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal"),
+    "softmax_2_1": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal", softmax_type="off-by-one"),
+    "softmax_2_2": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal", softmax_type="learnable"),
+    "softmax_3_0": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding"),
+    "softmax_3_1": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding", softmax_type="off-by-one"),
+    "softmax_3_2": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding", softmax_type="learnable"),
+    "softmax_4_0": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal"),
+    "softmax_4_1": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal", softmax_type="off-by-one"),
+    "softmax_4_2": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal", softmax_type="learnable"),
+    "softmax_5_0": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal"),
+    "softmax_5_1": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="off-by-one"),
+    "softmax_5_2": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="learnable"),
 }
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -271,6 +288,7 @@ model_configs_softmax = {
 def test_dpa_softmax(dtype, model_configs, model):
     """Test DotProductAttention module with various softmax types"""
     test_dot_product_attention(dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False)
+    #test_dot_product_attention(dtype, model_configs, model, True, True, "thd_thd_thd", False, False)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
@@ -1013,6 +1031,8 @@ def _run_dot_product_attention(
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()
+    if is_training and config.softmax_type != "vanilla":
+        block.softmax_offset.requires_grad = True
 
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:

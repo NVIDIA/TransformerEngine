@@ -344,13 +344,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_probs = self.scale_mask_softmax(
             matmul_result, attention_mask, attn_mask_type, softmax_scale
         )
-        if self.softmax_type != "vanilla":
-            attention_probs = attention_probs[..., :-1]
 
         # mask out the pad positions in softmax results, mostly for the rows (pad tokens from q)
         # the columns (pad tokens from k) are already zeroed out during softmax
         if "padding" in attn_mask_type:
             attention_probs = attention_probs.masked_fill(attention_mask, 0)
+
+        # remove attention sink
+        if self.softmax_type != "vanilla":
+            attention_probs = attention_probs[..., :-1]
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
