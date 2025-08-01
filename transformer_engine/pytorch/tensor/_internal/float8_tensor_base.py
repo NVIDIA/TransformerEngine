@@ -20,9 +20,21 @@ from ..quantized_tensor import Quantizer
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
+from ...constants import TE_DType_To_Torch
+
 
 class _FromFloat8Func(torch.autograd.Function):
     """Cast from FP8 to other dtype"""
+
+    @staticmethod
+    def torch_impl(tensor: Float8TensorBase, dtype: torch.dtype) -> torch.Tensor:
+        fp8_tensor_data = tensor._data
+        fp8_scale_inv = tensor._scale_inv
+        fp8_dtype = tensor._fp8_dtype
+        fp8_dtype_torch = TE_DType_To_Torch[fp8_dtype]
+        fp8_tensor_data = fp8_tensor_data.view(fp8_dtype_torch)
+        hp_data = (fp8_tensor_data.to(torch.float32) * fp8_scale_inv).to(dtype)
+        return hp_data
 
     @staticmethod
     def forward(
@@ -38,7 +50,9 @@ class _FromFloat8Func(torch.autograd.Function):
             if tensor._data.numel() == 0:
                 return torch.empty_like(tensor._data, dtype=dtype)
             # Cast from FP8
-            return tex.dequantize(tensor, te_dtype)
+            # TODO: fix this cuda dequantize impl when being used with async cp
+            # return tex.dequantize(tensor, te_dtype)
+            return _FromFloat8Func.torch_impl(tensor, dtype)
 
         raise NotImplementedError("Casting back from the transpose not implemented yet!")
 
