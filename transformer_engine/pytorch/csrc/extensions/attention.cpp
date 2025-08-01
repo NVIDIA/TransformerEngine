@@ -68,50 +68,6 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
   return fused_attention_backend;
 }
 
-/*
-template <void (*attn_func)(const NVTETensor, NVTETensor, cudaStream_t)>
-py::object attention_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1) {
-  init_extension();
-
-  // Input tensor
-  auto input_tensor = input.contiguous();
-  const TensorWrapper& input_cpp = makeTransformerEngineTensor(input_tensor);
-
-  // Construct output tensor
-  auto quantizer_cpp = convert_quantizer(quantizer);
-  const auto input_shape = input_cpp.shape();
-  std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
-  output_shape.back() /= shape_divisor;
-  auto fake_dtype = GetTransformerEngineDType(input_tensor.scalar_type());
-  auto [out_cpp, out_py] = quantizer_cpp->create_tensor(output_shape, fake_dtype);
-
-  // Compute activation
-  if (quantizer.is_none() || detail::IsFloat8Quantizers(quantizer.ptr()) ||
-      detail::IsMXFP8Quantizers(quantizer.ptr())) {
-    // Compute activation directly
-    NVTE_SCOPED_GIL_RELEASE(
-        { act_func(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream()); });
-  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    // Compute activation in high-precision fused together with amax, then quantize.
-
-    auto quantizer_cpp_cs = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
-    auto [temp_cpp, _] = quantizer_cpp_cs->create_hp_tensor_with_amax(output_shape, fake_dtype);
-    NVTE_SCOPED_GIL_RELEASE(
-        { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
-    quantizer_cpp_cs->quantize_with_amax(temp_cpp, out_cpp);
-  } else {
-    // Compute activation in high-precision, then quantize
-
-    auto [temp_cpp, _] = NoneQuantizer(py::none()).create_tensor(output_shape, fake_dtype);
-    NVTE_SCOPED_GIL_RELEASE(
-        { act_func(input_cpp.data(), temp_cpp.data(), at::cuda::getCurrentCUDAStream()); });
-    quantizer_cpp->quantize(temp_cpp, out_cpp);
-  }
-
-  return out_py;
-}
-*/
-
 // fused attention FWD with separate Q, K and V tensors
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
@@ -133,7 +89,6 @@ std::vector<py::object> fused_attn_fwd(
   te_V = makeTransformerEngineTensor(V, none);
   const DType qkv_type = te_Q.dtype();
 
-  printf("enter fwd \n");
   // create S tensor
   TensorWrapper te_S;
   py::object py_S;
@@ -146,14 +101,13 @@ std::vector<py::object> fused_attn_fwd(
     auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
     std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor(
                    {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    printf("created S ds\n");
   } else if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr())) {
     NVTE_ERROR("In FP8 current scaling, S_quantizer should be None!");
   }
 
   // create O tensor
-  TensorWrapper te_O; //, te_O_temp;
-  py::object py_O; //, py_O_temp;
+  TensorWrapper te_O;
+  py::object py_O;
   std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
@@ -168,103 +122,11 @@ std::vector<py::object> fused_attn_fwd(
     auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
     std::tie(te_O, py_O) = O_quantizer_fp8->create_tensor(
 	    o_shape, fake_dtype_te, std::nullopt, std::nullopt, std::nullopt);
-  printf("created O ds\n");
   } else if (detail::IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())) {
     // current scaling; compute tensor in high precision and quantize
     auto *O_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(O_quantizer.get());
-    //std::tie(te_O_temp, py_O_temp) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te);
     std::tie(te_O, py_O) = O_quantizer_fp8->create_hp_tensor_with_amax(o_shape, fake_dtype_te);
-  printf("created O cs\n");
   }
-
-  /*
-  const DType qkv_type = te_Q.dtype();
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    if (detail::IsFloat8Quantizers(o_quantizer.ptr())) {
-  printf("O: ds\n");
-      auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
-      //std::tie(te_O, py_O) = O_quantizer_fp8->create_tensor(
-//                   o_shape, fake_dtype_te, std::nullopt, std::nullopt, std::nullopt);
-      NoneQuantizer temp_quantizer{none};
-      std::tie(te_O, py_O) = temp_quantizer.create_tensor(o_shape, fake_dtype_te);
-      te_O.set_scale(O_quantizer_fp8->scale.data_ptr(),
-                     GetTransformerEngineDType(O_quantizer_fp8->scale.scalar_type()),
-                     getTensorShape(O_quantizer_fp8->scale));
-      te_O.set_amax(O_quantizer_fp8->amax.data_ptr(),
-                    GetTransformerEngineDType(O_quantizer_fp8->amax.scalar_type()),
-                    getTensorShape(O_quantizer_fp8->amax));
-    }
-    if (detail::IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())) {
-  printf("O: cs\n");
-      auto *O_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(O_quantizer.get());
-      NoneQuantizer temp_quantizer{none};
-      std::tie(te_O, py_O) = temp_quantizer.create_tensor(o_shape, fake_dtype_te);
-      te_O.set_scale(O_quantizer_fp8->scale.data_ptr(),
-                     GetTransformerEngineDType(O_quantizer_fp8->scale.scalar_type()),
-                     getTensorShape(O_quantizer_fp8->scale));
-      te_O.set_amax(O_quantizer_fp8->amax.data_ptr(),
-                    GetTransformerEngineDType(O_quantizer_fp8->amax.scalar_type()),
-                    getTensorShape(O_quantizer_fp8->amax));
-    }
-    if (detail::IsFloat8Quantizers(s_quantizer.ptr())) {
-  printf("S: ds\n");
-      auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-      std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor(
-                     {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    }
-    if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr())) {
-  printf("S: cs\n");
-      auto *S_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(S_quantizer.get());
-      //NoneQuantizer temp_quantizer{none};
-      //std::tie(te_S, py_S) = temp_quantizer.create_tensor({0}, DType::kFloat32);
-      std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32);
-      //te_S.set_scale(S_quantizer_fp8->scale.data_ptr(),
-      //               GetTransformerEngineDType(S_quantizer_fp8->scale.scalar_type()),
-      //               getTensorShape(S_quantizer_fp8->scale));
-      //te_S.set_amax(S_quantizer_fp8->amax.data_ptr(),
-      //              GetTransformerEngineDType(S_quantizer_fp8->amax.scalar_type()),
-      //              getTensorShape(S_quantizer_fp8->amax));
-      //te_S.set_rowwise_scale_inv(S_quantizer_fp8->scale_inv.data_ptr(),
-      //               GetTransformerEngineDType(S_quantizer_fp8->scale_inv.scalar_type()),
-      //               getTensorShape(S_quantizer_fp8->scale_inv));
-    }
-  } else {
-    std::tie(te_O, py_O) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
-    std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  }
-  */
-
-  /*
-  if (!force_unfused_kernel) {
-    std::tie(te_O, py_O) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
-  } else {
-    auto my_o_quantizer = static_cast<Float8Quantizer *>(O_quantizer.get());
-    NoneQuantizer temp_quantizer{none};
-    std::tie(te_O, py_O) = temp_quantizer.create_tensor(o_shape, fake_dtype_te);
-    te_O.set_scale(my_o_quantizer->scale.data_ptr(),
-                   GetTransformerEngineDType(my_o_quantizer->scale.scalar_type()),
-                   getTensorShape(my_o_quantizer->scale));
-    te_O.set_amax(my_o_quantizer->amax.data_ptr(),
-                  GetTransformerEngineDType(my_o_quantizer->amax.scalar_type()),
-                  getTensorShape(my_o_quantizer->amax));
-  }
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    // Initialize FP8 tensor with scale-inverse
-    auto *O_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(O_quantizer.get());
-    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-    NVTE_CHECK(O_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_O, o_python) = O_quantizer_fp8->create_tensor(o_shape, fake_dtype_te, std::nullopt,
-                                                              std::nullopt, std::nullopt);
-    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
-                                                              std::nullopt, std::nullopt);
-  } else {
-    std::tie(te_O, o_python) = O_quantizer->create_tensor(o_shape, fake_dtype_te);
-    std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  }
-  printf("after create_tensor \n");
-*/
 
   // construct NVTE tensors
   TensorWrapper te_Bias;
@@ -411,13 +273,6 @@ std::vector<py::object> fused_attn_fwd(
         window_size[1], workspace.data(), at::cuda::getCurrentCUDAStream());
   });
 
-//  if (detail::IsFloat8CurrentScalingQuantizers(o_quantizer.ptr())) {
-//    // current scaling; quantize after computing tensor in high precision
-//    auto *O_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(O_quantizer.get());
-//    O_quantizer_fp8->quantize_with_amax(te_O, te_O_temp);
-//  printf("converted O cs\n");
-//  }
-
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
 
@@ -463,14 +318,13 @@ std::vector<py::object> fused_attn_bwd(
                    {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
     std::tie(te_dP, py_dP) = dP_quantizer_fp8->create_tensor(
                    {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    printf("created S dP ds\n");
   } else if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr()) && detail::IsFloat8CurrentScalingQuantizers(dp_quantizer.ptr())) {
     NVTE_ERROR("In FP8 current scaling, S_quantizer and dP_quantizer should be None!");
   }
 
   // create dQ, dK, dV tensors
-  TensorWrapper te_dQ, te_dK, te_dV; //, te_dQ_temp, te_dK_temp, te_dV_temp;
-  py::object py_dQ, py_dK, py_dV; //, py_dQ_temp, py_dK_temp, py_dV_temp;
+  TensorWrapper te_dQ, te_dK, te_dV;
+  py::object py_dQ, py_dK, py_dV;
   std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
@@ -485,15 +339,9 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<int64_t> tmp_shape;
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
   if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-    printf("--------- fake dtype %d\n", int(GetTransformerEngineDType(fake_dtype)));
     options = options.dtype(fake_dtype);
   }
 
-////  if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-//  if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr()) || detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-//         printf("--------- fake dtype %d\n", int(GetTransformerEngineDType(fake_dtype)));
-//    options = options.dtype(fake_dtype);
-//  }
   switch (layout_group) {
     case NVTE_QKV_Layout_Group::NVTE_3HD:
       tmp_shape = std::vector<int64_t>{q_shape.begin(), q_shape.end()};
@@ -581,190 +429,13 @@ std::vector<py::object> fused_attn_bwd(
 	    k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
     std::tie(te_dV, py_dV) = dQKV_quantizer_fp8->create_tensor(
 	    v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
-  printf("created dQKV ds\n");
   } else if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
     // current scaling; compute tensor in high precision and quantize
     auto *dQKV_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(dQKV_quantizer.get());
-    //std::tie(te_dQ_temp, py_dQ_temp) = dQKV_quantizer_fp8->create_tensor(q_shape, fake_dtype_te);
-    //std::tie(te_dK_temp, py_dK_temp) = dQKV_quantizer_fp8->create_tensor(k_shape, fake_dtype_te);
-    //std::tie(te_dV_temp, py_dV_temp) = dQKV_quantizer_fp8->create_tensor(v_shape, fake_dtype_te);
     std::tie(te_dQ, py_dQ) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(q_shape, fake_dtype_te, dQ);
     std::tie(te_dK, py_dK) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(k_shape, fake_dtype_te, dK);
     std::tie(te_dV, py_dV) = dQKV_quantizer_fp8->create_hp_tensor_with_amax(v_shape, fake_dtype_te, dV);
-  printf("created dQKV cs, dtype %d\n", int(fake_dtype_te));
   }
-
-  /*
-  TensorWrapper te_S, te_dP;
-  py::object py_S, py_dP;
-  std::unique_ptr<Quantizer> S_quantizer = convert_quantizer(s_quantizer);
-  std::unique_ptr<Quantizer> dP_quantizer = convert_quantizer(dp_quantizer);
-  //std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
-  //std::tie(te_dP, py_dP) = dP_quantizer->create_tensor({0}, DType::kFloat32);
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-    auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
-    NVTE_CHECK(S_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    NVTE_CHECK(dP_quantizer_fp8 != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_S, s_python) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
-                                                              std::nullopt, std::nullopt);
-    std::tie(te_dP, dp_python) = dP_quantizer_fp8->create_tensor({0}, DType::kFloat32, std::nullopt,
-                                                                 std::nullopt, std::nullopt);
-  } else {
-    std::tie(te_S, s_python) = S_quantizer->create_tensor({0}, DType::kFloat32);
-    std::tie(te_dP, dp_python) = dP_quantizer->create_tensor({0}, DType::kFloat32);
-  }
-  TensorWrapper te_dQ, te_dK, te_dV;
-  py::object py_dQ, py_dK, py_dV;
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
-  std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
-
-  const DType qkv_type = te_Q.dtype();
-           printf("qkv type %d\n", int(qkv_type));
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
-           printf("create te_dQ \n");
-      auto *dQKV_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
-//      std::tie(te_dQ, py_dQ) = dQKV_quantizer_fp8->create_tensor(
-//                   q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
-//      std::tie(te_dK, py_dK) = dQKV_quantizer_fp8->create_tensor(
-//                   k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
-//      std::tie(te_dV, py_dV) = dQKV_quantizer_fp8->create_tensor(
-//                   v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
-      NoneQuantizer temp_quantizer{none};
-      std::tie(te_dQ, py_dQ) = temp_quantizer.create_tensor(q_shape, fake_dtype_te, dQ);
-      te_dQ.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dQ.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-      std::tie(te_dK, py_dK) = temp_quantizer.create_tensor(k_shape, fake_dtype_te, dK);
-      te_dK.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dK.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-      std::tie(te_dV, py_dV) = temp_quantizer.create_tensor(v_shape, fake_dtype_te, dV);
-      te_dV.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dV.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-    }
-    if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-      auto *dQKV_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(dQKV_quantizer.get());
-      NoneQuantizer temp_quantizer{none};
-      std::tie(te_dQ, py_dQ) = temp_quantizer.create_tensor(q_shape, fake_dtype_te, dQ);
-      te_dQ.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dQ.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-      std::tie(te_dK, py_dK) = temp_quantizer.create_tensor(k_shape, fake_dtype_te, dK);
-      te_dK.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dK.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-      std::tie(te_dV, py_dV) = temp_quantizer.create_tensor(v_shape, fake_dtype_te, dV);
-      te_dV.set_scale(dQKV_quantizer_fp8->scale.data_ptr(),
-                      GetTransformerEngineDType(dQKV_quantizer_fp8->scale.scalar_type()),
-                      getTensorShape(dQKV_quantizer_fp8->scale));
-      te_dV.set_amax(dQKV_quantizer_fp8->amax.data_ptr(),
-                     GetTransformerEngineDType(dQKV_quantizer_fp8->amax.scalar_type()),
-                     getTensorShape(dQKV_quantizer_fp8->amax));
-    }
-    if (detail::IsFloat8Quantizers(s_quantizer.ptr())) {
-      auto *S_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(S_quantizer.get());
-      auto *dP_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(dP_quantizer.get());
-      std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor(
-                     {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-      std::tie(te_dP, py_dP) = dP_quantizer_fp8->create_tensor(
-                     {0}, DType::kFloat32, std::nullopt, std::nullopt, std::nullopt);
-    }
-    if (detail::IsFloat8CurrentScalingQuantizers(s_quantizer.ptr())) {
-      auto *S_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(S_quantizer.get());
-      auto *dP_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(dP_quantizer.get());
-      std::tie(te_S, py_S) = S_quantizer_fp8->create_tensor({0}, DType::kFloat32);
-      std::tie(te_dP, py_dP) = dP_quantizer_fp8->create_tensor({0}, DType::kFloat32);
-      //Float8Quantizer temp_quantizer{none};
-      //std::tie(te_S, py_S) = temp_quantizer.create_tensor({0}, DType::kFloat32);
-      //std::tie(te_dP, py_dP) = temp_quantizer.create_tensor({0}, DType::kFloat32);
-      //te_S.set_scale(S_quantizer_fp8->scale.data_ptr(),
-      //               GetTransformerEngineDType(S_quantizer_fp8->scale.scalar_type()),
-      //               getTensorShape(S_quantizer_fp8->scale));
-      //te_S.set_amax(S_quantizer_fp8->amax.data_ptr(),
-      //              GetTransformerEngineDType(S_quantizer_fp8->amax.scalar_type()),
-      //              getTensorShape(S_quantizer_fp8->amax));
-      //te_dP.set_scale(dP_quantizer_fp8->scale.data_ptr(),
-      //               GetTransformerEngineDType(dP_quantizer_fp8->scale.scalar_type()),
-      //               getTensorShape(dP_quantizer_fp8->scale));
-      //te_dP.set_amax(dP_quantizer_fp8->amax.data_ptr(),
-      //              GetTransformerEngineDType(dP_quantizer_fp8->amax.scalar_type()),
-      //              getTensorShape(dP_quantizer_fp8->amax));
-    }
-  } else {
-    auto *none_quantizer = dynamic_cast<NoneQuantizer *>(dQKV_quantizer.get());
-    std::tie(te_dQ, py_dQ) = none_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
-    std::tie(te_dK, py_dK) = none_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
-    std::tie(te_dV, py_dV) = none_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
-    std::tie(te_S, py_S) = S_quantizer->create_tensor({0}, DType::kFloat32);
-    std::tie(te_dP, py_dP) = dP_quantizer->create_tensor({0}, DType::kFloat32);
-  }
-*/
-
-
-    /*
-  if (!force_unfused_kernel) {
-    std::tie(te_dQ, py_dQ) = dQKV_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
-    std::tie(te_dK, py_dK) = dQKV_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
-    std::tie(te_dV, py_dV) = dQKV_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
-  } else {
-    auto my_dqkv_quantizer = static_cast<Float8Quantizer *>(dQKV_quantizer.get());
-    NoneQuantizer temp_quantizer{none};
-    std::tie(te_dQ, py_dQ) = temp_quantizer.create_tensor(q_shape, fake_dtype_te, dQ);
-    te_dQ.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->scale));
-    te_dQ.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                   getTensorShape(my_dqkv_quantizer->amax));
-    std::tie(te_dK, py_dK) = temp_quantizer.create_tensor(k_shape, fake_dtype_te, dK);
-    te_dK.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->scale));
-    te_dK.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                   getTensorShape(my_dqkv_quantizer->amax));
-    std::tie(te_dV, py_dV) = temp_quantizer.create_tensor(v_shape, fake_dtype_te, dV);
-    te_dV.set_scale(my_dqkv_quantizer->scale.data_ptr(),
-                    GetTransformerEngineDType(my_dqkv_quantizer->scale.scalar_type()),
-                    getTensorShape(my_dqkv_quantizer->scale));
-    te_dV.set_amax(my_dqkv_quantizer->amax.data_ptr(),
-                   GetTransformerEngineDType(my_dqkv_quantizer->amax.scalar_type()),
-                   getTensorShape(my_dqkv_quantizer->amax));
-  if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    auto *fp8_quantizer = dynamic_cast<Float8Quantizer *>(dQKV_quantizer.get());
-    NVTE_CHECK(fp8_quantizer != nullptr, "Expected Float8Quantizer when dtype is FP8");
-    std::tie(te_dQ, py_dQ) =
-        fp8_quantizer->create_tensor(q_shape, fake_dtype_te, dQ, std::nullopt, std::nullopt);
-    std::tie(te_dK, py_dK) =
-        fp8_quantizer->create_tensor(k_shape, fake_dtype_te, dK, std::nullopt, std::nullopt);
-    std::tie(te_dV, py_dV) =
-        fp8_quantizer->create_tensor(v_shape, fake_dtype_te, dV, std::nullopt, std::nullopt);
-  } else {
-    auto *none_quantizer = dynamic_cast<NoneQuantizer *>(dQKV_quantizer.get());
-    NVTE_CHECK(none_quantizer != nullptr, "Expected NoneQuantizer when dtype is not FP8");
-    std::tie(te_dQ, py_dQ) = none_quantizer->create_tensor(q_shape, fake_dtype_te, dQ);
-    std::tie(te_dK, py_dK) = none_quantizer->create_tensor(k_shape, fake_dtype_te, dK);
-    std::tie(te_dV, py_dV) = none_quantizer->create_tensor(v_shape, fake_dtype_te, dV);
-  }
-*/
 
   // construct NVTE tensors
   if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
@@ -879,15 +550,6 @@ std::vector<py::object> fused_attn_bwd(
         qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1], deterministic,
         workspace.data(), at::cuda::getCurrentCUDAStream());
   });
-
-//  if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-//    // current scaling; quantize after computing tensor in high precision
-//    auto *dQKV_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer*>(dQKV_quantizer.get());
-//    dQKV_quantizer_fp8->quantize_with_amax(te_dQ, te_dQ_temp);
-//    dQKV_quantizer_fp8->quantize_with_amax(te_dK, te_dK_temp);
-//    dQKV_quantizer_fp8->quantize_with_amax(te_dV, te_dV_temp);
-//  printf("converted dQKV cs\n");
-//  }
 
   // destroy tensor wrappers
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
