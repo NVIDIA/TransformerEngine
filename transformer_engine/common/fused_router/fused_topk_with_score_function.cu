@@ -220,7 +220,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     // score_function == 0 means sigmoid
     if (score_function == 0) {
       if (topk > 1) {
-        double sum_scores = warp_reduce_on_shmem(topk_scores, topk, sum, lane_id);
+        double sum_scores = warp_reduce_on_shmem(topk_scores, topk, ReduceFuncType::SUM, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
           topk_scores[i] = static_cast<double>(topk_scores[i]) / (sum_scores + epsilon);
         }
@@ -362,7 +362,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
           /*data ptr = */ local_act_from_fwd,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
-          /*reduce func = */ sum, lane_id);
+          /*reduce func = */ ReduceFuncType::SUM, lane_id);
       // Put the result of output * grad to the comp_buf
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_comp_buf[i] = (local_routing_map[i] ? static_cast<double>(local_grad[i]) *
@@ -374,7 +374,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
           /*data ptr = */ local_comp_buf,
           /*mask ptr = */ local_routing_map,
           /*data size = */ num_experts,
-          /*reduce func = */ sum, lane_id);
+          /*reduce func = */ ReduceFuncType::SUM, lane_id);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         if (local_routing_map[i]) {

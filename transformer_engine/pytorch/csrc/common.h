@@ -98,9 +98,21 @@ class Quantizer {
 
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
-  virtual std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const = 0;
+  /*! @brief Construct a tensor with uninitialized data */
+  virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                             DType dtype) const = 0;
+
+  /*! @brief Convert a PyTorch tensor into a Transformer Engine C++ tensor
+   *
+   * The PyTorch tensor's attributes are modified to match the
+   * quantizer's configuration.
+   */
+  virtual std::pair<TensorWrapper, py::object> convert_and_update_tensor(
+      py::object tensor) const = 0;
+
+  /*! @brief Convert to a quantized data format */
+  virtual void quantize(const TensorWrapper& input, TensorWrapper& out,
+                        const std::optional<TensorWrapper>& noop_flag = std::nullopt) = 0;
 
   virtual ~Quantizer() = default;
 
@@ -121,9 +133,17 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  /*! @brief Construct a tensor with pre-initialized data */
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     at::Tensor data) const;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object tensor) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 };
 
 class Float8Quantizer : public Quantizer {
@@ -139,9 +159,19 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  /*! @brief Construct a tensor with pre-initialized data */
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
+                                                     std::optional<at::Tensor> data,
+                                                     std::optional<at::Tensor> transpose,
+                                                     std::optional<at::Tensor> scale_inv) const;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 };
 
 class Float8CurrentScalingQuantizer : public Quantizer {
@@ -161,9 +191,29 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  /*! @brief Construct a high precision tensor giving it this quantizer's amax
+
+  Note: this member function also zeros out the amax, as it is meant to be used in conjunction with
+        a kernel computing the amax, which might expect the amax to be initialized to zero
+  */
+  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
+                                                                  DType dtype);
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  /*! @brief Convert to a quantized data format avoiding amax computation */
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
+                          const std::optional<TensorWrapper>& noop_flag = std::nullopt);
+
+ private:
+  void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
 
 class Float8BlockQuantizer : public Quantizer {
@@ -195,9 +245,13 @@ class Float8BlockQuantizer : public Quantizer {
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
@@ -212,16 +266,20 @@ class MXFP8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(
-      const std::vector<size_t>& shape, DType dtype,
-      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
-std::vector<size_t> getTensorShape(at::Tensor t);
+std::vector<size_t> getTensorShape(const at::Tensor& t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
