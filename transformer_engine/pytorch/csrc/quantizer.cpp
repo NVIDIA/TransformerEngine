@@ -766,7 +766,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::convert_and_update_te
       } else {
         // assert we are doing 1D scaling
         NVTE_CHECK(block_scaling_dim == 1,
-                    "Compact columnwise format is not supported for 128x128 2D block scaling.");
+                   "Compact columnwise format is not supported for 128x128 2D block scaling.");
         torch_columnwise_shape = torch_shape;
         columnwise_shape = shape;
       }
