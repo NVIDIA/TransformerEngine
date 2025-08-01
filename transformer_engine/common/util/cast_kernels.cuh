@@ -1142,7 +1142,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
                 create_2D_tensor_map(tensor_map_colwise_output,
                                      output->columnwise_data,
-                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
                                      rows, cols,
                                      traits::blockIterDim::M, traits::blockIterDim::N,
                                      cols, 0, output_type_bit_size);
