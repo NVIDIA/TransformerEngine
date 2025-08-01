@@ -71,11 +71,11 @@ struct KernelConfig {
 
     // L1 cache efficiency
     constexpr size_t cache_line_size = 128;
-    bytes_per_load = std::min(cache_line_size, warp_size * vector_size);  // Contiguous reads
-    bytes_per_store = bytes_per_load;
+    bytes_per_store = std::min(cache_line_size, warp_size * vector_size);  // Contiguous writes
+    bytes_per_load = bytes_per_store;
     if (dim2 % (vector_size * warp_size) != 0) {
-      // Some warps are writing to two non-contiguous regions
-      bytes_per_store /= 2;
+      // Some warps are reading from two non-contiguous regions
+      bytes_per_load /= 2;
     }
   }
 
@@ -107,11 +107,11 @@ __global__ void __launch_bounds__(block_size)
   const size_t gid = threadIdx.x + blockIdx.x * block_size;
   const size_t nthreads = gridDim.x * block_size;
   for (size_t idx = gid; idx < dim0 * dim1 * dim2; idx += nthreads) {
-    const size_t idx2 = idx % dim2;
-    const size_t idx1 = (idx / dim2) % dim1;
-    const size_t idx0 = (idx / dim2) / dim1;
-    const size_t out_offset = idx1 * dim0 * dim2 + idx0 * dim2 + idx2;
-    output[out_offset] = input[idx];
+    const auto idx2 = idx % dim2;
+    const auto idx1 = (idx / dim2) % dim1;
+    const auto idx0 = (idx / dim2) / dim1;
+    const auto in_offset = idx1 * dim0 * dim2 + idx0 * dim2 + idx2;
+    output[idx] = input[in_offset];
   }
 }
 
@@ -146,13 +146,13 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
   }
 
   // Reinterpret tensors as 3D tensors of bytes
-  const size_t dim0 = input_shape[0];
-  const size_t dim1 = input_shape[1];
+  const size_t dim0 = output_shape[0];
+  const size_t dim1 = output_shape[1];
   size_t dim2 = 1;
-  for (size_t i = 2; i < input_shape.size(); ++i) {
-    dim2 *= input_shape[i];
+  for (size_t i = 2; i < output_shape.size(); ++i) {
+    dim2 *= output_shape[i];
   }
-  dim2 = get_buffer_size_bytes(dim2, input.dtype());
+  dim2 = get_buffer_size_bytes(dim2, output.dtype());
 
   // Choose kernel config with performance heuristics
   const size_t sm_count = static_cast<size_t>(cuda::sm_count());
@@ -164,7 +164,6 @@ void swap_first_dims(const Tensor &input, Tensor &output, cudaStream_t stream) {
         config = new_config;
       }
     };
-    try_config(32);
     try_config(16);
     try_config(8);
     try_config(4);

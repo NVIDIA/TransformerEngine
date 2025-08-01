@@ -31,7 +31,7 @@ __global__ void __launch_bounds__(block_size)
     const auto idx2 = idx % dim2;
     const auto idx1 = (idx / dim2) % dim1;
     const auto idx0 = (idx / dim2) / dim1;
-    const auto out_offset = idx1 * dim0 * dim2 + idx0 * dim2 + idx2;
-    output[out_offset] = input[idx];
+    const auto in_offset = idx1 * dim0 * dim2 + idx0 * dim2 + idx2;
+    output[idx] = input[in_offset];
   }
 }
