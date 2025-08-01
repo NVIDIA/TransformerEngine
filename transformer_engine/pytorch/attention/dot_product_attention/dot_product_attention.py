@@ -1156,7 +1156,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
-                    softmax_offset=self.softmax_offset,
+                    softmax_offset=softmax_offset,
                 )
 
             from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
