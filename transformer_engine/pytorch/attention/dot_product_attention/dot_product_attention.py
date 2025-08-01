@@ -1127,7 +1127,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         quantizers=self.quantizers,
                         pad_between_seqs=pad_between_seqs,
                         inference_params=inference_params,
-                        softmax_offset=self.softmax_offset,
+                        softmax_offset=softmax_offset,
                     )
                 return self.fused_attention(
                     query_layer,
