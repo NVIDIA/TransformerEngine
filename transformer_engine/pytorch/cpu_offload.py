@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from .tensor.quantized_tensor import QuantizedTensorBase
-
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -20,6 +20,9 @@ CPUOffloadEnabled = False
 
 def mark_activation_offload(*tensors):
     """Set the type of the offloading needed for a tensor."""
+    if TEDebugState.debug_enabled:
+        raise RuntimeError("CPU offload is not supported in debug mode.")
+
     for tensor in tensors:
         if tensor is None:
             continue
@@ -428,7 +431,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             tensor = self.fp8_tensor_object_map.pop(tensor_tag)
 
         if self.double_buffering:
-            tensor.do_not_clear = True
+            tensor._do_not_clear = True
 
         self.tensor_tag_to_buf.pop(tensor_tag, None)
         # the tensor should have been copied back in on_group_commit_backward()
@@ -553,21 +556,33 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             for tensor_label, state in self.tensor_tag_to_state.items():
                 group_id, _ = tensor_label
                 if group_id == group_to_reload:
+                    if self.double_buffering:
+                        reload_buffer = self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                    else:
+                        reload_buffer = None
+
                     if isinstance(state, tuple):
                         recovered_tensor = SynchronizedGroupOffloadHandler.reload(
-                            state, True, self.reload_double_buffer[double_buffer_idx][buffer_idx]
+                            state, True, reload_buffer
                         )
                         buffer_idx = buffer_idx + 1
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
                     elif isinstance(state, list):
                         tensor_list = []
                         for state_tuple in state:
+                            if self.double_buffering:
+                                reload_buffer = self.reload_double_buffer[double_buffer_idx][
+                                    buffer_idx
+                                ]
+                            else:
+                                reload_buffer = None
+
                             if isinstance(state_tuple, tuple):
                                 tensor_list.append(
                                     SynchronizedGroupOffloadHandler.reload(
                                         state_tuple,
                                         True,
-                                        self.reload_double_buffer[double_buffer_idx][buffer_idx],
+                                        reload_buffer,
                                     )
                                 )
                                 buffer_idx = buffer_idx + 1

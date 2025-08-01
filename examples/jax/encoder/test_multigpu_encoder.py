@@ -21,6 +21,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 from common import is_bf16_supported, get_fp8_recipe_from_name_string
 import transformer_engine.jax as te
+import transformer_engine.jax.cpp_extensions as tex
 import transformer_engine.jax.flax as te_flax
 from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
@@ -258,7 +259,13 @@ def train_and_evaluate(args):
         fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu,))
-    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)) as mesh:
+    with jax.sharding.Mesh(
+        devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)
+    ) as mesh, te.fp8_autocast(
+        enabled=args.use_fp8,
+        fp8_recipe=fp8_recipe,
+        mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None),
+    ):
 
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -269,17 +276,14 @@ def train_and_evaluate(args):
         mask_shape = [args.batch_size, 1, args.max_seq_len, args.max_seq_len]
         label_shape = [args.batch_size]
 
-        with te.fp8_autocast(
-            enabled=args.use_fp8,
-            fp8_recipe=fp8_recipe,
-            mesh_resource=te.MeshResource(DEVICE_DP_AXIS, None, None, None),
-        ):
+        # Add TE logical axis rules to our Flax logical axis rule context. This must be done inside fp8_autocast
+        sharding_rules = te_flax.extend_logical_axis_rules(tuple())
+        with flax.linen.logical_axis_rules(sharding_rules):
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
             masks = jnp.zeros(mask_shape, dtype=jnp.uint8)
             abs_var_collect = jax.eval_shape(encoder.init, init_rngs, inputs, masks)
 
-            sharding_rules = te_flax.extend_logical_axis_rules(tuple())
             params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
             inputs_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None))
             masks_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None, None, None))
@@ -430,14 +434,14 @@ class TestEncoder(unittest.TestCase):
     is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     def setUp(self):
-        """Run 3 epochs for testing"""
-        self.args = encoder_parser(["--epochs", "3"])
+        """Run 5 epochs for testing"""
+        self.args = encoder_parser(["--epochs", "5"])
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8(self):
@@ -445,7 +449,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8(self):
@@ -453,7 +457,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
     def test_te_mxfp8(self):
@@ -461,14 +465,14 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "MXFP8BlockScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_shardy(self):
         """Test Transformer Engine with BF16"""
         self.args.enable_shardy = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_delayed_scaling_fp8_shardy(self):
@@ -477,9 +481,7 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "DelayedScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
-
-    # TODO(jreiffers): Add mxfp8 Shardy tests once supported in JAX.
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
     @unittest.skipIf(not is_fp8_supported, fp8_reason)
     def test_te_current_scaling_fp8_shardy(self):
@@ -488,7 +490,19 @@ class TestEncoder(unittest.TestCase):
         self.args.use_fp8 = True
         self.args.fp8_recipe = "Float8CurrentScaling"
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.535 and actual[1] > 0.73
+        assert actual[0] < 0.52 and actual[1] > 0.74
+
+    @unittest.skipIf(not is_mxfp8_supported, mxfp8_reason)
+    @unittest.skipIf(
+        tex.gemm_uses_jax_dot(), "`jax.nn.scaled_matmul()` does not support the Shardy partitioner."
+    )
+    def test_te_mxfp8_shardy(self):
+        """Test Transformer Engine with MXFP8"""
+        self.args.enable_shardy = True
+        self.args.use_fp8 = True
+        self.args.fp8_recipe = "MXFP8BlockScaling"
+        actual = train_and_evaluate(self.args)
+        assert actual[0] < 0.52 and actual[1] > 0.74
 
 
 if __name__ == "__main__":

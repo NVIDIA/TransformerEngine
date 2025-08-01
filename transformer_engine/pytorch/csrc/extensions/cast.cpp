@@ -28,60 +28,6 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
-void quantize_impl(const TensorWrapper &input, py::handle &quantizer_py,
-                   std::unique_ptr<Quantizer> &quantizer_cpp, TensorWrapper &output,
-                   TensorWrapper &noop_flag) {
-  // Check tensor dims
-  NVTE_CHECK(get_tensor_shape(input) == get_tensor_shape(output),
-             "Input tensor (shape=", get_tensor_shape(input),
-             ") and output tensor (shape=", get_tensor_shape(output), ") do not match");
-  if (input.numel() == 0) {
-    return;
-  }
-
-  // Recipe-specific configuration
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_noop_tensor(noop_flag.data());
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_SCOPED_GIL_RELEASE(
-        { nvte_compute_amax(input.data(), output.data(), at::cuda::getCurrentCUDAStream()); });
-    // check if we need to do amax reudction (depending on model parallel configs)
-    if (my_quantizer_cs->with_amax_reduction) {
-      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
-      // construct torch tesnor from NVTEBasicTensor without reallocating memory
-      at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
-      std::vector<at::Tensor> tensors = {amax_tensor_torch};
-      // allreduce amax tensor
-      c10d::AllreduceOptions allreduce_opts;
-      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
-      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
-    }
-    // this config is used for cs scaling factor computation
-    // because compute scale is cannot be fused with quantize kernel
-    // so in nvte_quantize_v2 with current scaling, the quant config is not used again
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_scale_from_amax(output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-    });
-    // set amax ptr to null in output TensorWrapper to avoid atomic amax updates in kernel
-    output.set_amax(nullptr, DType::kFloat32, output.defaultShape);
-  } else if (detail::IsFloat8BlockwiseQuantizers(quantizer_py.ptr())) {
-    auto my_quantizer_bw = static_cast<Float8BlockQuantizer *>(quantizer_cpp.get());
-    quant_config.set_force_pow_2_scales(my_quantizer_bw->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_bw->amax_epsilon);
-    if (my_quantizer_bw->all_gather_usage) {
-      quant_config.set_float8_block_scale_tensor_format(Float8BlockScaleTensorFormat::COMPACT);
-    }
-  }
-
-  // Perform quantization
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_quantize_v2(input.data(), output.data(), quant_config, at::cuda::getCurrentCUDAStream());
-  });
-}
-
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -101,18 +47,17 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
     const auto fake_dtype = input_cpp.dtype();
     std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
   } else {
-    output_py = output;
-    output_cpp = makeTransformerEngineTensor(output_py, quantizer);
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
   }
 
   // Initialize no-op flag
-  TensorWrapper noop_flag_cpp;
+  std::optional<TensorWrapper> noop_flag_cpp;
   if (noop_flag.has_value()) {
     noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
   }
 
   // Perform quantization
-  quantize_impl(input_cpp, quantizer, quantizer_cpp, output_cpp, noop_flag_cpp);
+  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
   return output_py;
 }
@@ -160,7 +105,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       with_fused_kernel = false;
       break;
     }
-    if (nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
+    if (nvte_tensor_data(output_list[i].data()) == nullptr ||
+        nvte_tensor_columnwise_data(output_list[i].data()) == nullptr) {
       with_fused_kernel = false;
       break;
     }
@@ -181,10 +127,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     });
   } else {
     // Quantize kernels individually
-    TensorWrapper dummy_noop_flag;
     for (size_t i = 0; i < num_tensors; ++i) {
-      quantize_impl(input_list[i], quantizer_py_list[i], quantizer_cpp_list[i], output_list[i],
-                    dummy_noop_flag);
+      quantizer_cpp_list[i]->quantize(input_list[i], output_list[i]);
     }
   }
 }
@@ -387,6 +331,162 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   return retval;
 }
 
+std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mxfp8_tensors(
+    std::vector<std::vector<size_t>> &shape_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<MXFP8Quantizer *> &quantizer_cpp_list) {
+  init_extension();
+  std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> retval;
+  auto &tensor_py_list = std::get<0>(retval);
+  auto &tensor_cpp_list = std::get<1>(retval);
+
+  // Number of tensors
+  const size_t num_tensors = shape_list.size();
+  if (num_tensors == 0) {
+    return retval;
+  }
+
+  // Quantization parameters
+  const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
+  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
+  const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
+  constexpr size_t fp8_elem_size = 1;
+  constexpr size_t scale_elem_size = 1;
+
+  // Helper function to construct tensor view
+  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
+  // will survive until all views are deleted.
+  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
+                            size_t offset, at::ScalarType dtype) -> at::Tensor {
+    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+    // in the case where full buffer is empty because local rank receives no tokens for all the experts
+    // then the data_ptr is nullptr, we need to return an empty tensor instead of calling from_blob
+    // but in the case where some experts receive tokens, some not, we want to leverage from_blob
+    // as much as possible to avoid CPU overhead
+    if (buffer->data_ptr<uint8_t>() == nullptr) {
+      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
+    }
+    return at::from_blob(
+        buffer->data_ptr<uint8_t>() + offset, shape_int64,
+        [buffer](void *) {},  // deleter holds shared_ptr
+        at::device(at::kCUDA).dtype(dtype));
+  };
+
+  // Allocate row-wise data
+  std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
+  std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
+  if (rowwise_usage) {
+    // Tensor sizes
+    for (size_t i = 0; i < num_tensors; ++i) {
+      rowwise_data_shapes.emplace_back(shape_list[i]);
+      rowwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 256);  // align to 256B
+      data_offsets.push_back(buffer_size);
+      buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
+    }
+
+    // Allocate full buffer
+    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
+    auto buffer = std::make_shared<at::Tensor>(
+        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    // auto buffer = std::make_shared<at::Tensor>(
+    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i = 0; i < num_tensors; ++i) {
+      rowwise_data_list.emplace_back(
+          make_torch_view(buffer, rowwise_data_shapes[i], data_offsets[i], torch::kUInt8));
+      rowwise_scale_list.emplace_back(
+          make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+    }
+  }
+
+  // Allocate column-wise data
+  std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list;
+  std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
+  if (columnwise_usage) {
+    // Tensor sizes
+    for (size_t i = 0; i < num_tensors; ++i) {
+      // For MXFP8, the columnwise data doesn't need transpose
+      // because of TN, NT, NN layout support in SM100
+      columnwise_data_shapes.emplace_back(shape_list[i]);
+      columnwise_scale_shapes.emplace_back(
+          quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
+    }
+
+    // Offsets in full buffer
+    size_t buffer_size = 0;
+    std::vector<size_t> data_offsets, scale_offsets;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 256);  // align to 256B
+      data_offsets.push_back(buffer_size);
+      buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
+    }
+    for (size_t i = 0; i < num_tensors; ++i) {
+      buffer_size = roundup(buffer_size, 16);  // align to 16B
+      scale_offsets.push_back(buffer_size);
+      buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
+    }
+
+    // Allocate full buffer
+    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
+    auto buffer = std::make_shared<at::Tensor>(
+        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+    // auto buffer = std::make_shared<at::Tensor>(
+    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+
+    // Construct tensor views
+    for (size_t i = 0; i < num_tensors; ++i) {
+      columnwise_data_list.emplace_back(
+          make_torch_view(buffer, columnwise_data_shapes[i], data_offsets[i], torch::kUInt8));
+      columnwise_scale_list.emplace_back(
+          make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+    }
+  }
+
+  // Construct mxfp8 tensors
+  py::handle MXFP8TensorClass(reinterpret_cast<PyObject *>(MXFP8TensorBasePythonClass));
+  for (size_t i = 0; i < num_tensors; ++i) {
+    // Create tensor objects with proper reference counting
+    py::object rowwise_data = rowwise_usage ? py::cast(rowwise_data_list[i]) : py::none();
+    py::object rowwise_scale = rowwise_usage ? py::cast(rowwise_scale_list[i]) : py::none();
+    py::object columnwise_data =
+        (columnwise_usage ? py::cast(columnwise_data_list[i]) : py::none());
+    py::object columnwise_scale =
+        (columnwise_usage ? py::cast(columnwise_scale_list[i]) : py::none());
+
+    // Construct Python tensor
+    tensor_py_list.emplace_back(MXFP8TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, fp8_dtype,
+                                                 quantizer_py_list[i]));
+
+    // Construct C++ tensor
+    tensor_cpp_list.emplace_back(makeTransformerEngineTensor(
+        rowwise_usage ? rowwise_data_list[i].data_ptr() : nullptr,
+        columnwise_usage ? columnwise_data_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_data_shapes[i] : std::vector<size_t>{},
+        columnwise_usage ? columnwise_data_shapes[i] : std::vector<size_t>{}, fp8_dtype, nullptr,
+        nullptr, rowwise_usage ? rowwise_scale_list[i].data_ptr() : nullptr,
+        columnwise_usage ? columnwise_scale_list[i].data_ptr() : nullptr,
+        rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{},
+        columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{}, scaling_mode));
+  }
+
+  return retval;
+}
+
 }  // namespace
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
@@ -441,9 +541,11 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   }
 
   // For FP8 block-scaling, we construct output tensors with bulk allocations
+  // For MXFP8, we also use bulk allocations
   bool use_fused_bulk_alloc = true;
   for (size_t i = 0; i < quantizer_list.size(); i++) {
-    if (!detail::IsFloat8BlockwiseQuantizers(quantizer_list[i].ptr())) {
+    if (!detail::IsFloat8BlockwiseQuantizers(quantizer_list[i].ptr()) &&
+        !detail::IsMXFP8Quantizers(quantizer_list[i].ptr())) {
       use_fused_bulk_alloc = false;
       break;
     }
@@ -461,13 +563,28 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       output_py_list.emplace_back(std::move(output_py));
     }
   } else {
-    // FP8 block-scaling: construct output tensors with bulk allocations
-    std::vector<Float8BlockQuantizer *> blockwise_quantizers;
-    for (auto &quantizer : quantizer_cpp_list) {
-      blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
+    // TODO(zhongbo): make a better api to make this part less hacky
+    bool is_fp8_blockwise = detail::IsFloat8BlockwiseQuantizers(quantizer_list[0].ptr());
+    bool is_mxfp8 = detail::IsMXFP8Quantizers(quantizer_list[0].ptr());
+    if (is_fp8_blockwise) {
+      // FP8 block-scaling: construct output tensors with bulk allocations
+      std::vector<Float8BlockQuantizer *> blockwise_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        blockwise_quantizers.push_back(static_cast<Float8BlockQuantizer *>(quantizer.get()));
+      }
+      std::tie(output_py_list, output_cpp_list) =
+          bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
+    } else if (is_mxfp8) {
+      // MXFP8: construct output tensors with bulk allocations
+      std::vector<MXFP8Quantizer *> mxfp8_quantizers;
+      for (auto &quantizer : quantizer_cpp_list) {
+        mxfp8_quantizers.push_back(static_cast<MXFP8Quantizer *>(quantizer.get()));
+      }
+      std::tie(output_py_list, output_cpp_list) =
+          bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
+    } else {
+      NVTE_CHECK(false, "Expected either FP8 block-scaling or MXFP8 quantizer");
     }
-    std::tie(output_py_list, output_cpp_list) =
-        bulk_allocate_fp8_blockwise_tensors(split_shapes, quantizer_list, blockwise_quantizers);
   }
 
   // Perform multi-tensor quantization

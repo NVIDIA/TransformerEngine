@@ -9,14 +9,44 @@ import pandas as pd
 import pathlib
 
 from transformer_engine.pytorch.module import GroupedLinear
-from transformer_engine.common.recipe import Float8BlockScaling
-from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.common.recipe import Float8BlockScaling, MXFP8BlockScaling
+from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager
 from contextlib import nullcontext
+
+"""
+# Profile BF16 recipe with Nsight Systems
+nsys profile \
+    --output=./benchmarks/linear/b200_mkn_4096_4096_4096_numgemm_8_bf16 \
+    --force-overwrite true \
+    --trace=cuda,nvtx,cudnn,cublas \
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe bf16
+
+# Profile FP8 sub-channel recipe with Nsight Systems
+nsys profile \
+    --output=./benchmarks/linear/h100hbm_mkn_4096_4096_4096_numgemm_8_fp8_sub_channel \
+    --force-overwrite true \
+    --trace=cuda,nvtx,cudnn,cublas \
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe fp8_sub_channel
+
+# Profile MXFP8 recipe with Nsight Systems
+nsys profile \
+    --output=./benchmarks/linear/b200_mkn_4096_4096_4096_numgemm_8_mxfp8 \
+    --force-overwrite true \
+    --trace=cuda,nvtx,cudnn,cublas \
+    python benchmarks/linear/benchmark_grouped_linear.py --profile --recipe mxfp8
+
+"""
 
 RECIPES = {
     "bf16": None,
     "fp8_sub_channel": Float8BlockScaling(),
+    "mxfp8": MXFP8BlockScaling(),
 }
+
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 
 def run_linear_multiple_steps(layer, x, m_splits, mode, gradient, run_num_steps=1, recipe=None):
@@ -187,36 +217,43 @@ if __name__ == "__main__":
         default="benchmark_output/",
         help="output path for report",
     )
+    # arguments for recipe, options are fp8_sub_channel, mxfp8, bf16, all
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default="bf16",
+        help="Recipe to use, options are fp8_sub_channel, mxfp8, bf16, or all",
+    )
     args = parser.parse_args()
 
     use_bias = False
     # Set the MKN values to benchmark
     mkns = []
-    for m in [1024]:
+    for m in [8192]:
         # for m in [4096, 8192, 16384]:
         # for n in [1024, 2048, 4096, 8192, 16384]:
-        for n in [3072]:
+        for n in [8192]:
             for k in [4096]:
                 mkns.append((m, k, n))
 
-    # recipe_list = [
-    #     "bf16", "fp8_sub_channel",
-    # ]
-    recipe_list = [
-        "fp8_sub_channel",
-    ]
+    # default recipes to run if not specified
+    recipe_list = ["bf16"]
 
-    # num_gemms_list = [16, 32]
-    num_gemms_list = [4]
+    if args.recipe == "all":
+        recipe_list = ["bf16", "fp8_sub_channel", "mxfp8"]
+    else:
+        recipe_list = [args.recipe]
+
+    num_gemms_list = [8]
 
     if args.profile:
-        # nsys profile --output=./benchmarks/linear/mkn_4096_4096_4096_numgemm_1_bf16 --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
-        # nsys profile --output=./benchmarks/linear/mkn_8192_8192_8192_numgemm_32_bf16 --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
-        # nsys profile --output=./benchmarks/linear/mkn_4096_4096_4096_numgemm_8_fp8_sub_channel --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
-        # nsys profile --output=./benchmarks/linear/mkn_8192_8192_8192_numgemm_2_fp8_sub_channel --trace=cuda,nvtx,cudnn,cublas python benchmarks/linear/benchmark_grouped_linear.py --profile
         mkns = [(4096, 4096, 4096)]
-        recipe_list = ["fp8_sub_channel"]
-        # recipe_list = ["bf16"]
+        # in profile mode, only run one recipe specified in args.recipe
+        assert args.recipe != "all", (
+            "In profile mode, only one recipe can be specified, please specify the recipe as"
+            " fp8_sub_channel, mxfp8, or bf16"
+        )
+        recipe_list = [args.recipe]
         num_gemms_list = [8]
         torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
 
@@ -227,6 +264,18 @@ if __name__ == "__main__":
     for num_gemms in num_gemms_list:
         print(f"========== Benchmarking with num_gemms={num_gemms} ==========")
         for recipe_name in recipe_list:
+            assert recipe_name in [
+                "bf16",
+                "fp8_sub_channel",
+                "mxfp8",
+            ], "Recipe must be one of bf16, fp8_sub_channel, or mxfp8"
+            if recipe_name == "mxfp8" and not mxfp8_available:
+                print(f"MXFP8 is not available, skipping {recipe_name}")
+                continue
+            if recipe_name == "fp8_sub_channel" and not fp8_block_scaling_available:
+                print(f"FP8 block scaling is not available, skipping {recipe_name}")
+                continue
+
             df = run_benchmark_linear(
                 mkns,
                 recipe_name,
