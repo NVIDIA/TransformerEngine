@@ -524,10 +524,8 @@ def _make_graphed_callables(
                             to_deallocate_idx = previous_per_callable_bwd_idx
                             previous_per_callable_bwd_idx = per_callable_bwd_idx
                         if to_deallocate_idx is not None:
-                            per_callable_static_grad_inputs[to_deallocate_idx] = (
-                                make_weak_ref(
-                                    per_callable_static_grad_inputs[to_deallocate_idx]
-                                )
+                            per_callable_static_grad_inputs[to_deallocate_idx] = make_weak_ref(
+                                per_callable_static_grad_inputs[to_deallocate_idx]
                             )
 
                 bwd_idx[m_chunk] += 1
