@@ -247,7 +247,7 @@ if __name__ == "__main__":
     num_gemms_list = [8]
 
     if args.profile:
-        mkns = [(4096*8, 4096, 4096)]
+        mkns = [(4096 * 8, 4096, 4096)]
         # in profile mode, only run one recipe specified in args.recipe
         assert args.recipe != "all", (
             "In profile mode, only one recipe can be specified, please specify the recipe as"

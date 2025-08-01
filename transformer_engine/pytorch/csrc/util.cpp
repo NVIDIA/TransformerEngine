@@ -118,7 +118,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
 
   // Allocate full buffer
   auto buffer = at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8));
- 
+
   for (size_t i = 0; i < tensors.size(); ++i) {
     auto& tensor = tensors[i];
     void* scale_inv_dptr = scale_inv_dptrs[i];
@@ -147,8 +147,8 @@ std::optional<at::Tensor> multi_tensor_swizzle_scaling_factors(
                                         scale_inv_shapes[i]);
       output_cu.set_columnwise_data(tensor.columnwise_dptr(),
                                     transformer_engine::DType::kFloat8E4M3, input_shape);
-      output_cu.set_columnwise_scale_inv(swizzled_scale_inv_dptr,
-                                         transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);
+      output_cu.set_columnwise_scale_inv(
+          swizzled_scale_inv_dptr, transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);
       // Set the swizzled scaling factor to the original tensor.
       tensor.set_columnwise_scale_inv(swizzled_scale_inv_dptr,
                                       transformer_engine::DType::kFloat8E8M0, scale_inv_shapes[i]);

@@ -35,7 +35,7 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  \param[in]     inputs       Input tensors with non-swizzled scale_inv.
  *  \param[in,out] outputs      Output tensors which hosts swizzled scale_inv.
  *  \param[in]     stream       CUDA stream used for the operation.
- * 
+ *
  *  Requirements:
  *  - scale_inv is stored in row-major.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
