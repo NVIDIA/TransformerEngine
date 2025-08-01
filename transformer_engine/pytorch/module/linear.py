@@ -1271,6 +1271,11 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        if self.wgrad_store.delay_wgrad_compute():
+            for name, param in self.named_parameters():
+                if name in self.weight_names or name in self.bias_names:
+                    param.skip_backward_post_hook = True
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
