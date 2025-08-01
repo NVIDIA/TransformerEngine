@@ -105,7 +105,7 @@ __device__ void swizzle_col_scaling_kernel_impl(const void* input, void* output,
       if (padding_m || padding_k) {
         for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
           const int index = (input_offset + thread_offset) * sizeof(int) + j;
-          if (index / K >= original_M || index % K >= original_K) {
+          if (index / M >= original_K || index % M >= original_M) {
             reinterpret_cast<uint8_t*>(regs_vec + i)[j] = 0;
           }
         }
