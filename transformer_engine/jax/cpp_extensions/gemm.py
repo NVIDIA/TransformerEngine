@@ -512,19 +512,6 @@ class GemmPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def _decompose_operand_specs(specs, contracting_dims):
-        ndims = len(specs)
-        cdims = map(sanitize_dims, ndims, contracting_dims)
-
-        # non-contracting dimension specs
-        non_cspecs = tuple(specs[i] for i in range(ndims) if i not in cdims)
-
-        # Contracting dimension specs
-        cspecs = tuple(specs[i] for i in range(ndims) if i in cdims)
-
-        return non_cspecs, cspecs
-
-    @staticmethod
     def _parse_operand_output_specs(
         arg_infos,
         contracting_dims,
@@ -533,102 +520,63 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
+
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-        # TODO: remove bdims
-        lhs_cdims, rhs_cdims, lhs_bdims, rhs_bdims = map(
-            sanitize_dims, 2 * [lhs_ndim, rhs_ndim], contracting_dims + batched_dims
-        )
-        (
-            (lhs_non_cspec, lhs_cspecs),
-            (rhs_non_cspec, rhs_cspecs)
-        ) = map(
-            GemmPrimitive._decompose_operand_specs,
-            (lhs_specs, rhs_specs),
+        lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
+        lhs_bdims, rhs_bdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), batched_dims)
+        lhs_non_cdims, rhs_non_cdims = map(
+            lambda ndim, cdims: tuple(i for i in range(ndim) if i not in cdims),
+            (lhs_ndim, rhs_ndim),
             (lhs_cdims, rhs_cdims),
         )
-
-        # Only one each of the non-batched leading dimensions and non-batched contracting
-        # dimensions can be sharded
-        lhs_ldims, rhs_ldims = map(
-            lambda ndim, exclude: tuple(dim for dim in range(ndim) if dim not in exclude),
-            (lhs_ndim, rhs_ndim),
-            (lhs_bdims + lhs_cdims, rhs_bdims + rhs_cdims),
-        )
-        (lhs_lspec_not_none, rhs_lspec_not_none, lhs_cspec_not_none, rhs_cspec_not_none) = map(
-            lambda specs: tuple(spec for spec in specs if spec is not None),
-            (lhs_lspecs, rhs_lspecs, lhs_cspecs, rhs_cspecs),
-        )
-        assert len(lhs_lspec_not_none) <= 1 and len(rhs_lspec_not_none) <= 1, (
-            "cuBLAS GEMM operands can have only one sharded non-batched leading dimension: "
-            f"{lhs_specs} @ idx {lhs_ldims} x {rhs_specs} @ idx {rhs_ldims}."
-        )
-        assert len(lhs_cspec_not_none) <= 1 and len(rhs_cspec_not_none) <= 1, (
-            "cuBLAS GEMM operands can have only one sharded non-batched contracting dimension: "
-            f"{lhs_specs} @ idx {lhs_cdims} x {rhs_specs} @ idx {rhs_cdims}."
+        lhs_non_cspecs, lhs_cspecs, rhs_non_cspecs, rhs_cspecs = map(
+            lambda specs, cdims: tuple(specs[i] for i in cdims),
+            (lhs_specs, lhs_specs, rhs_specs, rhs_specs),
+            (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims)
         )
 
-        # Extract single leading and contracting dimension specs
-        (lhs_cspec, rhs_cspec) = map(
-            lambda specs: None if len(specs) == 0 else specs[0],
-            (lhs_cspec_not_none, rhs_cspec_not_none),
-        )
-
-        # Partitioning rules:
-        # ([B], M, K1) x ([B], N, K2)^T = ([B], M, N)
-        # 1. K1 == K2 != None
-        #   - Require non-batched non-contracting dims of both LHS and RHS to be unsharded.
-        #   - If `sequence_parallel_output=True`, then reduce-scatter the output.
-        #   - Otherwise, all-reduce the output.
-        # 2. Otherwise
-        #   - Require contracting dimensions of both LHS and RHS to be unsharded.
-        #   - Require non-batched non-contracting dims of LHS to be unsharded.
-        reduce_output = rhs_cspec is not None and lhs_cspec == rhs_cspec
-        reduce_spec = scatter_dim = None
-        if reduce_output:
-            reduce_spec = rhs_cspec
-            if sequence_parallel_output:
-                # If the sequence dimension is not specified, assume it to be the first
-                # non-batched non-contracting dimension of the LHS operand.
-                scatter_dim = sequence_dim if sequence_dim is not None else lhs_ldims[0]
-
-        # Always require the non-batched non-contracting dims of LHS to be unsharded
-        # NOTE: This will all-gather sequence-parallel inputs and preserve tensor-parallel params.
-        lhs_specs = tuple(
-            lhs_specs[i] if i in set(lhs_bdims + lhs_cdims) else None for i in range(lhs_ndim)
-        )
-        if reduce_output:
-            # When reducing GEMM output, require non-batched non-contracting dims of the RHS
-            # operand to be unsharded (i.e. FSDP)
-            rhs_specs = tuple(
-                None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
-                for i in range(rhs_ndim)
-            )
+        reduce_spec = None
+        for l in lhs_cspecs:
+            for r in rhs_cspecs:
+                if l != None and l == r:
+                    if len(lhs_specs) >= 1:
+                        assert(reduce_spec is None, "Multiple reduce dimension is detected!")
+                    reduce_spec = l
+        
+        if reduce_spec is not None:
+            # Other non-reduce cdims (if exists) need to be unsharded
+            lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
+            rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
+            # Non-batched non-contracting dims of RHS needs to be unsharded (i.e. FSDP)
+            rhs_non_cspecs = tuple(None if i not in rhs_bdims else rhs_non_cspecs[i] for i in rhs_non_cdims)
         else:
             # Otherwise, require contracting dims of both operands to be unsharded
-            lhs_specs = tuple(None if i in lhs_cdims else lhs_specs[i] for i in range(lhs_ndim))
-            rhs_specs = tuple(None if i in rhs_cdims else rhs_specs[i] for i in range(rhs_ndim))
+            lhs_cspecs = (None,) * len(lhs_cspecs)
+            rhs_cspecs = (None,) * len(rhs_cspecs)
 
-        # Combine modified LHS and RHS specs into the output
-        lhs_non_contracting_specs, rhs_non_contracting_specs = map(
-            lambda specs, cdims: tuple(specs[i] for i in range(len(specs)) if i not in cdims),
-            (lhs_specs, rhs_specs),
+        # Non-batched non-contracting dims of LHS to be unsharded, i.e gather SP dim
+        # (This cause MaxText TP does gather Y1 for dW2 = Y1^T * dY2 which is unexpected)
+        lhs_non_cspecs = tuple(None if i not in lhs_bdims else lhs_non_cspecs[i] for i in lhs_non_cdims)
+
+        out_specs = lhs_non_cspecs + rhs_non_cspecs
+
+        # specs = merge(cspecs, non_cspecs) 
+        lhs_specs, rhs_specs = map(
+            lambda cdims, cspecs, non_cspecs: cspecs + non_cspecs if cdims[0] == 0 else non_cspecs + cspecs,
             (lhs_cdims, rhs_cdims),
-        )
-        out_specs = [*lhs_non_contracting_specs, *rhs_non_contracting_specs]
+            (lhs_cspecs, rhs_cspecs),
+            (lhs_non_cspecs, rhs_non_cspecs)
+        ) 
 
         # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
-        bias_specs = tuple(list(out_specs[len(lhs_non_contracting_specs) :]).copy())
+        bias_specs = tuple(list(rhs_non_cspecs).copy())
         gelu_specs = tuple(list(out_specs).copy())
-
-        # Set output scatter dim to the tensor-parallel spec
-        if sequence_parallel_output:
-            out_specs[scatter_dim] = reduce_spec
 
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
             (out_specs, bias_specs, gelu_specs),
             reduce_spec,
-            scatter_dim,
+            0,
         )
 
     @staticmethod
@@ -773,12 +721,7 @@ class GemmPrimitive(BasePrimitive):
 
             # All-Reduce/Reduce-Scatter GEMM output
             if reduce_spec is not None:
-                if scatter_dim is None:
-                    outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
-                else:
-                    outputs[0] = jax.lax.psum_scatter(
-                        outputs[0], reduce_spec, scatter_dimension=scatter_dim, tiled=True
-                    )
+                outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 
             return outputs
 
