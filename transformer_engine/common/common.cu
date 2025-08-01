@@ -239,8 +239,12 @@ void create_2D_tensor_map(
   uint64_t size[rank] = {globalX, globalY};
 
   uint64_t stride[rank - 1] = {(stride_elems * type_num_bits) / 8};
+  NVTE_CHECK(stride[0] % 16u == 0, "Stride must be 16B aligned");
 
   uint32_t boxSize[rank] = {shmemX, shmemY};
+  NVTE_CHECK(boxSize[0] <= 256u, "Box size must be less than 256");
+  NVTE_CHECK(boxSize[1] <= 256u, "Box size must be less than 256");
+
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
@@ -252,6 +256,24 @@ void create_2D_tensor_map(
   const int32_t TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
              "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
+
+  int32_t swizzle_size = [&]() {
+        switch (swizzle) {
+            case CU_TENSOR_MAP_SWIZZLE_32B:
+                return 32;
+            case CU_TENSOR_MAP_SWIZZLE_64B:
+                return 64;
+            case CU_TENSOR_MAP_SWIZZLE_128B:
+                return 128;
+            case CU_TENSOR_MAP_SWIZZLE_NONE:
+            default:
+                return 0;
+        }
+    }();
+  if (swizzle != CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE) {
+    NVTE_CHECK(boxSize[0] * (type_num_bits / 8) <= swizzle_size,
+               "boxSize[0]:", boxSize[0], " must be less than swizzle size:", swizzle_size);
+  }
 
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
     &tensorMap,
