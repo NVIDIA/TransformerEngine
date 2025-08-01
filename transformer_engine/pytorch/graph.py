@@ -423,7 +423,7 @@ def _make_graphed_callables(
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
         static_grad_outputs_dict = {}
-        previous_per_callable_bwd_idx = None
+        previous_chunk_last_callable_bwd_idx = None
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
@@ -446,6 +446,7 @@ def _make_graphed_callables(
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
+                previous_per_callable_bwd_idx = None
                 for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
                     per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
@@ -513,13 +514,21 @@ def _make_graphed_callables(
                         # grad input to another pipeline parallel rank and that the
                         # communication is finished before the end of the next backward
                         # pass.
-                        if previous_per_callable_bwd_idx is not None:
-                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
+                        if l_no == 0:
+                            # The backward pass of this chunk is finished. Weak ref the previous
+                            # chunk's buffer.
+                            to_deallocate_idx = previous_chunk_last_callable_bwd_idx
+                            previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
+                        else:
+                            # Weak ref last layer's buffer inside the same chunk.
+                            to_deallocate_idx = previous_per_callable_bwd_idx
+                            previous_per_callable_bwd_idx = per_callable_bwd_idx
+                        if to_deallocate_idx is not None:
+                            per_callable_static_grad_inputs[to_deallocate_idx] = (
                                 make_weak_ref(
-                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
+                                    per_callable_static_grad_inputs[to_deallocate_idx]
                                 )
                             )
-                        previous_per_callable_bwd_idx = per_callable_bwd_idx
 
                 bwd_idx[m_chunk] += 1
     else:
