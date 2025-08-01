@@ -1636,9 +1636,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
                 for i in range(cp_size):
-                    if ctx.fp8_meta["recipe"].delayed():
-                        dP_quantizer_per_step[i] = ctx.dP_quantizer.copy()
-                        dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
+                    dP_quantizer_per_step[i] = ctx.dP_quantizer.copy()
+                    dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     dQKV_CP_quantizer_per_step[i] = ctx.dQKV_CP_quantizer.copy()
                     dQKV_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
             else:
@@ -2578,8 +2577,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if ctx.fp8 and ctx.use_fused_attention:
             amax_cp_bwd = amax_per_step.amax(dim=1)
-            if ctx.fp8_meta["recipe"].delayed():
-                ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
             ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
             dq = ctx.dQKV_CP_quantizer.create_tensor_from_data(
                 dq_fp8, fake_dtype=torch.float32, internal=True

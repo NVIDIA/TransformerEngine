@@ -2148,13 +2148,13 @@ void fused_attn_fp8_bwd_impl_v1(
       descale_v = mha_graph->tensor_like(descale_q, "Descale_V");
       descale_o = mha_graph->tensor_like(descale_q, "Descale_O");
       descale_dO = mha_graph->tensor_like(descale_q, "Descale_dO");
+      descale_dP = mha_graph->tensor_like(descale_q, "Descale_dP");
+      scale_dP = mha_graph->tensor_like(descale_q, "Scale_dP");
 
       if (output_tensor_type == bwd_tensor_type) {
         // delayed scaling
         descale_s = mha_graph->tensor_like(descale_q, "Descale_S");
         scale_s = mha_graph->tensor_like(descale_q, "Scale_S");
-        descale_dP = mha_graph->tensor_like(descale_q, "Descale_dP");
-        scale_dP = mha_graph->tensor_like(descale_q, "Scale_dP");
         scale_dQ = mha_graph->tensor_like(descale_q, "Scale_dQ");
         scale_dK = mha_graph->tensor_like(descale_q, "Scale_dK");
         scale_dV = mha_graph->tensor_like(descale_q, "Scale_dV");
@@ -2162,8 +2162,8 @@ void fused_attn_fp8_bwd_impl_v1(
         // current scaling
         descale_s = mha_graph->tensor(1.0f/448.0f);
         scale_s = mha_graph->tensor(448.0f);
-        descale_dP = mha_graph->tensor(1.0f/448.0f);
-        scale_dP = mha_graph->tensor(448.0f);
+        //descale_dP = mha_graph->tensor(1.0f/448.0f);
+        //scale_dP = mha_graph->tensor(448.0f);
         scale_dQ = mha_graph->tensor(1.0f);
         scale_dK = mha_graph->tensor(1.0f);
         scale_dV = mha_graph->tensor(1.0f);
@@ -2244,20 +2244,23 @@ void fused_attn_fp8_bwd_impl_v1(
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
-
-      if (output_tensor_type == bwd_tensor_type) {
-        // delayed scaling
-        amax_dP->set_output(true)
-            .set_dim({1, 1, 1, 1})
-            .set_stride({1, 1, 1, 1})
-            .set_data_type(fe::DataType_t::FLOAT);
-      } else {
-        // current scaling
-        amax_dP->set_output(false)
-            .set_dim({1, 1, 1, 1})
-            .set_stride({1, 1, 1, 1})
-            .set_data_type(fe::DataType_t::FLOAT);
-      }
+      amax_dP->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
+      //if (output_tensor_type == bwd_tensor_type) {
+      //  // delayed scaling
+      //  amax_dP->set_output(true)
+      //      .set_dim({1, 1, 1, 1})
+      //      .set_stride({1, 1, 1, 1})
+      //      .set_data_type(fe::DataType_t::FLOAT);
+      //} else {
+      //  // current scaling
+      //  amax_dP->set_output(false)
+      //      .set_dim({1, 1, 1, 1})
+      //      .set_stride({1, 1, 1, 1})
+      //      .set_data_type(fe::DataType_t::FLOAT);
+      //}
 
       dO->set_data_type(bwd_tensor_type);
       dQ->set_data_type(output_tensor_type);
@@ -2345,24 +2348,27 @@ void fused_attn_fp8_bwd_impl_v1(
         {descale_v, devPtrDescaleV},
         {descale_o, devPtrDescaleO},
         {descale_dO, devPtrDescaledO},
+        {descale_dP, devPtrDescaledP},
+        {scale_dP, devPtrScaledP},
         {dQ, devPtrdQ},
         {dK, devPtrdK},
         {dV, devPtrdV},
         {amax_dQ, devPtrAmaxdQ},
         {amax_dK, devPtrAmaxdK},
         {amax_dV, devPtrAmaxdV},
+        {amax_dP, devPtrAmaxdP},
     };
 
     if (output_tensor_type == bwd_tensor_type) {
       // delayed scaling
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[scale_s] = devPtrScaleS;
-      variant_pack[descale_dP] = devPtrDescaledP;
-      variant_pack[scale_dP] = devPtrScaledP;
+      //variant_pack[descale_dP] = devPtrDescaledP;
+      //variant_pack[scale_dP] = devPtrScaledP;
       variant_pack[scale_dQ] = devPtrScaledQ;
       variant_pack[scale_dK] = devPtrScaledK;
       variant_pack[scale_dV] = devPtrScaledV;
-      variant_pack[amax_dP] = devPtrAmaxdP;
+      //variant_pack[amax_dP] = devPtrAmaxdP;
     }
 
     /* if (is_bias) {
