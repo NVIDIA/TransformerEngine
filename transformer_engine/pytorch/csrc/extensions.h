@@ -427,8 +427,8 @@ void nvshmem_finalize();
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-void bulk_overlap_ag_with_external_gemm(py::handle input, CommOverlapP2P &allgather_communicator,
-                                        CommOverlapP2P &gemm_communicator);
+void bulk_overlap_ag_with_external_gemm(py::handle input, CommOverlap &allgather_communicator,
+                                        at::Stream send_stream, at::Stream recv_stream);
 
 }  // namespace transformer_engine::pytorch
 
@@ -479,7 +479,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  at::Stream get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlap
 
@@ -500,7 +500,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  at::Stream get_communication_stream();
+  std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
 

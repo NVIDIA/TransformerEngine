@@ -138,6 +138,11 @@ CommOverlapCore::~CommOverlapCore() {
     cudaStreamDestroy(_stream_compute[i]);
   }
 
+  auto error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    NVTE_WARN("Error detected while destroying communicator: ", cudaGetErrorString(error));
+  }
+
   if (_comm_created) {
     try {
 #ifdef NVTE_UB_WITH_MPI
@@ -289,6 +294,7 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
 
 CommOverlapBase::~CommOverlapBase() {
   cudaEventDestroy(_start_d2dcopy);
+  cudaStreamSynchronize(_stream_comm);
   cudaStreamDestroy(_stream_comm);
 }
 
@@ -590,6 +596,29 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }  // CommOverlapBase::split_overlap_rs
+
+void CommOverlapBase::bulk_overlap_external_ag(const TensorWrapper &input, cudaStream_t send_stream,
+                                               cudaStream_t recv_stream, cudaStream_t stream_main) {
+  int comm_bytes = _ubuf.bytes();
+  int comm_bytes_per_rank = comm_bytes / _tp_size;
+
+  // TODO: Check if pull mode syncs before pulling the data
+  NVTE_CHECK(_ub_comm->push == 1,
+             "Userbuffer is populated on the send stream, so push mode must be enabled for proper "
+             "sequencing");
+  NVTE_CHECK(_tp_size == _ub_comm->nvsize,
+             "TP size did not match the number of ranks in the communicator");
+  // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
+  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _ub_comm, send_stream);
+  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _ub_comm, recv_stream);
+
+  for (auto stream : {send_stream, recv_stream}) {
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+    // We sync with the comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _stop_comm, 0));
+  }
+}
 
 /***************************************************************************************************
  * Comm+GEMM Overlap P2P Base (Ring-Exchange)
@@ -1114,25 +1143,6 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   }
 
   _ub_comm->sms = ori_sms;
-}
-
-void CommOverlapP2PBase::bulk_overlap_columnwise_ag(const TensorWrapper &input,
-                                                    CommOverlapCore *overlap_gemm,
-                                                    cudaStream_t stream_main) {
-  auto *overlap_gemm_p2p = static_cast<CommOverlapP2PBase *>(overlap_gemm);
-  int comm_bytes = input.numel() * input.element_size();
-  assert(comm_bytes % _tp_size == 0);
-  int comm_bytes_per_rank = comm_bytes / _tp_size;
-  // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
-  userbuffers_send_all(_ub_reg, 0, _ub_reg, comm_bytes, comm_bytes_per_rank, _ub_comm,
-                       overlap_gemm_p2p->_stream_send[0]);
-  userbuffers_recv_all(_ub_reg, 0, _ub_reg, comm_bytes, comm_bytes_per_rank, _ub_comm,
-                       overlap_gemm_p2p->_stream_recv);
-
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, overlap_gemm_p2p->_stream_send[0]));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_recv, overlap_gemm_p2p->_stream_recv));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
 }
 
 }  // namespace transformer_engine

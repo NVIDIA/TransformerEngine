@@ -379,7 +379,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("input"),
-        py::arg("allgather_communicator"), py::arg("gemm_communicator"));
+        py::arg("allgather_communicator"), py::arg("send_stream"), py::arg("recv_stream"));
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

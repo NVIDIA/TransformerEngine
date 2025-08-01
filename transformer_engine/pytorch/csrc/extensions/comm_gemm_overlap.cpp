@@ -216,8 +216,10 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk, std::optional<std::vector<i
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
-at::Stream CommOverlap::get_communication_stream() {
-  return at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device());
+std::pair<at::Stream, at::Stream> CommOverlap::get_communication_stream() {
+  // Return the same stream for both send and recv
+  return {at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device()),
+          at::cuda::getStreamFromExternal(_stream_comm, at::cuda::current_device())};
 }
 
 /***************************************************************************************************
@@ -305,14 +307,16 @@ at::Tensor CommOverlapP2P::get_buffer(bool local_chunk, std::optional<std::vecto
   return torch::from_blob(ubuf_ptr, *shape, at::dtype(dtype).device(torch::kCUDA));
 }
 
-at::Stream CommOverlapP2P::get_communication_stream() {
-  return at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device());
+std::pair<at::Stream, at::Stream> CommOverlapP2P::get_communication_stream() {
+  return {at::cuda::getStreamFromExternal(_stream_send[0], at::cuda::current_device()),
+          at::cuda::getStreamFromExternal(_stream_recv, at::cuda::current_device())};
 }
 
 void transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm(
-    py::handle input, CommOverlapP2P &allgather_communicator, CommOverlapP2P &gemm_communicator) {
+    py::handle input, CommOverlap &allgather_communicator, at::Stream send_stream,
+    at::Stream recv_stream) {
   auto main_stream = at::cuda::getCurrentCUDAStream();
   auto tensor_wrapper = transformer_engine::pytorch::makeTransformerEngineTensor(input, py::none());
-  allgather_communicator.bulk_overlap_columnwise_ag(tensor_wrapper, &gemm_communicator,
-                                                    main_stream);
+  allgather_communicator.bulk_overlap_external_ag(tensor_wrapper, at::cuda::CUDAStream(send_stream),
+                                                  at::cuda::CUDAStream(recv_stream), main_stream);
 }

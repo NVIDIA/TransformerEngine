@@ -849,41 +849,38 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
-                    ub_obj_fc2_wgrad = None
-                    if ctx.ub_overlap_ag:
-                        ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
                     # UB does not support overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
                     # for the dgrad GEMM. We work around by explicitly
                     # overlapping the NCCL operation with the dgrad GEMM.
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    # dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
-                    # with torch.cuda.stream(dgrad_comm_stream):
-                    #     # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                    #     # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                    #     grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
-                    #         grad_outputs[0],
-                    #         ctx.tp_group,
-                    #         async_op=True,
-                    #         quantizer=ctx.fc2_grad_output_quantizer,
-                    #     )
-                    # # Synchronize with the main stream
-                    # mxfp8_fc2_grad_output_work.wait()
+
+                    # Get the communication stream from the dgrad GEMM to use for the AG
+                    dgrad_send_stream, dgrad_recv_stream = (
+                        ub_obj_fc2_dgrad.get_communication_stream()
+                    )
+
+                    ub_obj_fc2_wgrad = None
+                    if ctx.ub_overlap_ag:
+                        ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
 
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    grad_output, _ = fill_userbuffers_buffer_for_all_gather(
-                        ub_obj_fc2_wgrad,
-                        grad_outputs[0],
-                        ctx.fc2_grad_output_quantizer,
-                        ctx.tp_group,
-                    )
-                    # Allgather grad_outputs[0] using ub_obj_fc2_wgrad to do the copy,
-                    # while overlapping with the fc2_dgrad gemm
+
+                    # We use the send stream to copy into the userbuffers.
+                    # This is the same stream that we will use to access the data in the AG,
+                    # so we dont need to add any syncs yet.
+                    with torch.cuda.stream(dgrad_send_stream):
+                        grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                            ub_obj_fc2_wgrad,
+                            grad_outputs[0],
+                            ctx.fc2_grad_output_quantizer,
+                            ctx.tp_group,
+                        )
+
+                    # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                     tex.bulk_overlap_ag_with_external_gemm(
-                        grad_outputs[0], ub_obj_fc2_wgrad, ub_obj_fc2_dgrad
+                        grad_outputs[0], ub_obj_fc2_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
                 # Prepare input tensor
