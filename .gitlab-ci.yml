@@ -1408,6 +1408,25 @@ L0_pytorch_unittest--GB200_1GPU:
     - .L0_test
     - .GB200_1GPU
 
+
+L0_pytorch_debug_unittest--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test
+    - .H100_1GPU
+
+L0_pytorch_debug_unittest--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+      ARCH: amd64
+    needs: [ pytorch-py3-devel-amd64 ]
+    extends:
+    - .L0_test_on_cluster
+    - .B200_1GPU
+
 L1_pytorch_mcore_integration--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
