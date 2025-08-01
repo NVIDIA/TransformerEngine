@@ -82,7 +82,7 @@ struct SimpleTensor {
     return {dptr, static_cast<NVTEDType>(dtype), shape};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
@@ -116,7 +116,7 @@ struct Tensor {
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto dim : shape()) {
       acc *= dim;
