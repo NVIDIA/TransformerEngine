@@ -33,7 +33,7 @@ log:
       stats: [
         {stats}
       ]
-      tensors: [activation, gradient, weight, output]
+      tensors: [activation, gradient, weight]
       freq: 2
       start_step: 0
       end_step: 10

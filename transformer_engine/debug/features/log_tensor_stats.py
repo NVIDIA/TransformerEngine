@@ -4,7 +4,7 @@
 
 """LogTensorStats Feature support for nvidia-dlframework-inspect"""
 
-from typing import Dict, Union
+from typing import Dict, Optional
 
 import torch
 
@@ -107,7 +107,10 @@ class LogTensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: Union[torch.Tensor, QuantizedTensor],
+        tensor: torch.Tensor,
+        rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
+        columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
+        quantizer: Optional[Quantizer] = None,
     ):
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
