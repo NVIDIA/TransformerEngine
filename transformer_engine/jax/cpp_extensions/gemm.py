@@ -532,7 +532,7 @@ class GemmPrimitive(BasePrimitive):
         lhs_non_cspecs, lhs_cspecs, rhs_non_cspecs, rhs_cspecs = map(
             lambda specs, cdims: tuple(specs[i] for i in cdims),
             (lhs_specs, lhs_specs, rhs_specs, rhs_specs),
-            (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims)
+            (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
 
         reduce_spec = None
@@ -540,16 +540,18 @@ class GemmPrimitive(BasePrimitive):
             for r in rhs_cspecs:
                 if l != None and l == r:
                     # This if condition is here only to suppress warning, no functional effects
-                    if len(lhs_cspecs) >= 1: 
-                        assert(reduce_spec is None, "Multiple reduce dimension is detected!")
+                    if len(lhs_cspecs) >= 1:
+                        assert (reduce_spec is None, "Multiple reduce dimension is detected!")
                     reduce_spec = l
-        
+
         if reduce_spec is not None:
             # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
             # Non-batched non-contracting dims of RHS needs to be unsharded (i.e. FSDP)
-            rhs_non_cspecs = tuple(None if i not in rhs_bdims else rhs_non_cspecs[i] for i in rhs_non_cdims)
+            rhs_non_cspecs = tuple(
+                None if i not in rhs_bdims else rhs_non_cspecs[i] for i in rhs_non_cdims
+            )
         else:
             # Otherwise, require contracting dims of both operands to be unsharded
             lhs_cspecs = (None,) * len(lhs_cspecs)
@@ -557,17 +559,21 @@ class GemmPrimitive(BasePrimitive):
 
         # Non-batched non-contracting dims of LHS to be unsharded, i.e gather SP dim
         # (This cause MaxText TP (= Megatron TP + activation_hidden sharding) gathering Y1 for dW2 = Y1^T * dY2 which is unexpected)
-        lhs_non_cspecs = tuple(None if i not in lhs_bdims else lhs_non_cspecs[i] for i in lhs_non_cdims)
+        lhs_non_cspecs = tuple(
+            None if i not in lhs_bdims else lhs_non_cspecs[i] for i in lhs_non_cdims
+        )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
-        # specs = merge(cspecs, non_cspecs) 
+        # specs = merge(cspecs, non_cspecs)
         lhs_specs, rhs_specs = map(
-            lambda cdims, cspecs, non_cspecs: cspecs + non_cspecs if cdims[0] == 0 else non_cspecs + cspecs,
+            lambda cdims, cspecs, non_cspecs: (
+                cspecs + non_cspecs if cdims[0] == 0 else non_cspecs + cspecs
+            ),
             (lhs_cdims, rhs_cdims),
             (lhs_cspecs, rhs_cspecs),
-            (lhs_non_cspecs, rhs_non_cspecs)
-        ) 
+            (lhs_non_cspecs, rhs_non_cspecs),
+        )
 
         # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
         bias_specs = tuple(list(rhs_non_cspecs).copy())
