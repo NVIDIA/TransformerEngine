@@ -246,7 +246,7 @@ def test_dot_product_attention(
             if i==3 and config.softmax_type != "vanilla":
                 h = 10 if config.num_heads >= 10 else config.num_heads
                 print('dsink unfused:')
-                print(unfused_attn_bwd[i][0,:h,0,0])
+                print(unfused_attn_bwd[i][:h])
                 print('dsink fused:')
                 print(fused_attn_bwd[i][:h])
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
