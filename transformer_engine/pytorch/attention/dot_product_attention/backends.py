@@ -338,7 +338,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 softmax_offset.to(dtype=matmul_result.dtype).expand(matmul_result.size(0), -1, matmul_result.size(2), -1),
             ], dim=-1)
             attention_mask = F.pad(attention_mask, (0, 1), mode='constant', value=False)
-
+            attn_mask_type = "arbitrary"
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
