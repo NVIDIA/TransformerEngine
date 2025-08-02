@@ -1813,7 +1813,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
 
         # 2) use Float8CurrentScalingQuantizer but set scale to pre-selected value
         #    and update scale_inv in extension/attention.cpp
-        dP_quantizer.scale.fill_(float(os.getenv('NVTE_CS_dP_SCALE', 1.0)))
+        dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
 
         dP_quantizer.set_usage(rowwise=True, columnwise=False)
         dP_quantizer.interal = True

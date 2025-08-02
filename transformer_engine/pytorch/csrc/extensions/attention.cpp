@@ -69,7 +69,10 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 }
 
 // helper function for S and dP quantizers
-std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer, const std::vector<size_t>& shape, DType dtype, bool create_hp_tensor_for_cs, std::optional<at::Tensor> data) {
+std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
+                                                      const std::vector<size_t> &shape, DType dtype,
+                                                      bool create_hp_tensor_for_cs,
+                                                      std::optional<at::Tensor> data) {
   std::unique_ptr<Quantizer> T_quantizer = convert_quantizer(quantizer);
   TensorWrapper te_T;
   py::object py_T;
@@ -84,20 +87,23 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer, cons
   } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
     // delayed scaling; this helps initialize scale_inv
     auto *T_quantizer_fp8 = dynamic_cast<Float8Quantizer *>(T_quantizer.get());
-    std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype, data,
-                                                          std::nullopt, std::nullopt);
+    std::tie(te_T, py_T) =
+        T_quantizer_fp8->create_tensor(shape, dtype, data, std::nullopt, std::nullopt);
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // current scaling
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_hp_tensor_with_amax(shape, dtype, data.value());
+        std::tie(te_T, py_T) =
+            T_quantizer_fp8->create_hp_tensor_with_amax(shape, dtype, data.value());
       } else {
         std::tie(te_T, py_T) = T_quantizer_fp8->create_hp_tensor_with_amax(shape, dtype);
       }
     } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
-	NVTE_CHECK(!data.has_value(), "Float8CurrentScalingQuantizer::create_tensor() does not take data tensor as input!");
+      std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
+      NVTE_CHECK(
+          !data.has_value(),
+          "Float8CurrentScalingQuantizer::create_tensor() does not take data tensor as input!");
     }
   }
   return {std::move(te_T), std::move(py_T)};
@@ -317,10 +323,11 @@ std::vector<py::object> fused_attn_bwd(
   TensorWrapper te_S, te_dP;
   py::object py_S, py_dP;
   std::tie(te_S, py_S) = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
-  std::tie(te_dP, py_dP) = quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
+  std::tie(te_dP, py_dP) =
+      quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
   if (detail::IsFloat8CurrentScalingQuantizers(dp_quantizer.ptr())) {
     // update scale_inv when dP is current scaling
-    const at::Tensor& scale = dp_quantizer.attr("scale").cast<at::Tensor>();
+    const at::Tensor &scale = dp_quantizer.attr("scale").cast<at::Tensor>();
     auto scale_inv = py_dP.attr("_scale_inv").cast<at::Tensor>();
     scale_inv = at::reciprocal(scale);
     te_dP.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});

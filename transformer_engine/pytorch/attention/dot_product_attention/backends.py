@@ -1245,7 +1245,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    print('ctx.dP_quantizer ', ctx.dP_quantizer.scale, ctx.dP_quantizer.amax)
+                    print("ctx.dP_quantizer ", ctx.dP_quantizer.scale, ctx.dP_quantizer.amax)
                     # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
                     # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2
                     dq, dk, dv = None, None, None
