@@ -1157,7 +1157,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                      cols, 0, output_type_bit_size);
 
                 dim3 block(traits::rowThreadLayout::num,
-                           traits::warpLayout::num + 1);
+                           traits::numWarps);
                 dim3 grid((cols + traits::blockDIM::N - 1) / traits::blockDIM::N,
                           (rows + traits::blockDIM::M - 1) / traits::blockDIM::M);
                 kernel<<<grid, block, traits::smem, stream>>>(
