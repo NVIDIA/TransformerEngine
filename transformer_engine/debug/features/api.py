@@ -5,7 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
-from typing import Dict, Union, Tuple
+from typing import Dict, Union, Tuple, Optional
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
 
@@ -107,15 +107,15 @@ class TEDefaultFeatures:
         layer_name: str,
         gemm: str,
         iteration: int,
-    ) -> bool | Tuple[bool, int | float]:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
         If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
         then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
         If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
 
-        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
-        It can return float("inf") if the feature will never be enabled for that layer and gemm.
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer and gemm.
         Returning the next enabled iteration can help optimize CPU usage.
 
         Parameters
@@ -134,9 +134,7 @@ class TEDefaultFeatures:
 
         bool - default is True
         """
-        return True, float(
-            "inf"
-        )  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
+        return True, None  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
         self,
@@ -145,13 +143,13 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool | Tuple[bool, int | float]:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
         It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
 
-        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
-        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor.
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
 
         Parameters
@@ -170,9 +168,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False, float("inf")
+        return False, None
 
     def modify_tensor(
         self,
@@ -315,12 +313,12 @@ class TEDefaultFeatures:
         layer_name: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool | Tuple[bool, int | float]:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
 
-        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
-        It can return float("inf") if the feature will never be enabled for that layer and tensor.
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
 
         Parameters
@@ -337,9 +335,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False, float("inf")
+        return False, None
 
     def inspect_tensor_postquantize_enabled(
         self,
@@ -348,14 +346,14 @@ class TEDefaultFeatures:
         gemm: str,
         tensor_name: str,
         iteration: int,
-    ) -> bool | Tuple[bool, int | float]:
+    ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
         a given GEMM and tensor will be invoked.
 
-        This method may return a tuple (bool, int | float), where the int indicates the next iteration when the feature will be enabled.
-        It can return float("inf") if the feature will never be enabled for that layer, gemm and tensor name.
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor name.
         Returning the next enabled iteration can help optimize CPU usage,
         especially when the interval between inspect_tensor_postquantize is large.
 
@@ -375,9 +373,9 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        Union[bool, Tuple[bool, int | float]] - default is (False, float("inf"))
+        Union[bool, Tuple[bool, Optional[int]]] - default is (False, None)
         """
-        return False, float("inf")
+        return False, None
 
 
 @Registry.register_namespace_api(namespace="transformer_engine")
@@ -465,11 +463,12 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         Handle multi-tensor output of the API calls.
         """
         if "enabled" in api_name:
-            # *_enabled feature calls can return bool, or tuple (bool, int | float).
+            # *_enabled feature calls can return bool, or tuple (bool, Optional[int]).
             # If any of them returns bool, then we return bool - this means that we cannot state anything
             # about enablement in the next steps.
-            # If all of them return a tuple (bool, int | float), we return the minimum value,
+            # If all of them return a tuple (bool, Optional[int]), we return the minimum value,
             # representing the number of steps after the feature will be enabled next time.
+            # If the second value is None, that means that the feature will never be enabled.
             all_ret_tuple = all(
                 isinstance(feature_output, tuple)
                 for feature_output in multi_feature_outputs.values()

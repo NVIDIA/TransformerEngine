@@ -980,6 +980,13 @@ def _all_gather_fp8(
 
     return out, handle
 
+def _get_quantizer_format(quantizer: Quantizer) -> Optional[bool]:
+    """Get quantizer format."""
+    if isinstance(quantizer, DebugQuantizer):
+        quantizer = quantizer.parent_quantizer
+    if isinstance(quantizer, Float8BlockQuantizer):
+        return quantizer.all_gather_usage
+    return None
 
 def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
     """Make quantizer compact"""
@@ -1399,7 +1406,7 @@ def gather_along_first_dim(
             )
             out_obj.columnwise_gemm_tensor = columnwise_total
         else:
-            out_obj.rowwise_gemm_tensor = out_obj.rowwise_gemm_tensor
+            out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
         return out_obj, None
 
     # High-precision communication for quantized tensors
@@ -1412,6 +1419,7 @@ def gather_along_first_dim(
             inp = inp.dequantize()
         # Falling back to high-precision all-gather for Float8BlockQuantizer
         # means that it should directly output GEMM_READY format
+        compact = _get_quantizer_format(quantizer)
         _set_quantizer_format(quantizer, compact=False)
         out = torch.empty(
             out_shape,
@@ -1421,6 +1429,7 @@ def gather_along_first_dim(
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
+        _set_quantizer_format(quantizer, compact=compact)
         return out, None
 
     # Dequantize quantized tensor if not supported

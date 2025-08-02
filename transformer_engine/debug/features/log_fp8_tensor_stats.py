@@ -100,6 +100,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
             config.get("freq", 1),
             iteration,
         )
+        STATS_BUFFERS.layers_to_next_iter[layer_name] = next_iter
         return run_current, next_iter
 
     @api_method

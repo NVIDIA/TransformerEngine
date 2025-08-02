@@ -1404,7 +1404,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
 
-    def validate_debug(self):
+    def is_debug_iter(self) -> bool:
         """
         This function checks if the debug should be enabled for this layer.
         """

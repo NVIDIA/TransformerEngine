@@ -16,8 +16,8 @@ def any_feature_enabled(quantizers):
 
 
 def _as_pair(x):
-    """If x is a tuple, return x, otherwise return (x, None)"""
+    """If x is a tuple, return x, otherwise return (x, -1)"""
     if isinstance(x, tuple):
         assert len(x) == 2, "Expected a tuple of length 2"
         return x
-    return x, None
+    return x, -1

@@ -72,10 +72,10 @@ class DebugQuantizer(Quantizer):
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
         # next iteration when this quantizer will call any API
-        # it is inf at the init and it is computed after_enabled api calls.
-        # inf at the beginning means that if nothing will be done,
+        # it is None at the init and it is computed after_enabled api calls.
+        # None at the beginning means that if nothing will be done,
         # this quantizer will never call any API.
-        self.next_debug_iter = float("inf")
+        self.next_debug_iter = None
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
         # rowwise_tensor_plan, and columnwise_tensor_plan are computed.
@@ -502,7 +502,7 @@ class DebugQuantizer(Quantizer):
 
         self._call_inspect_tensor_api(src, dst.rowwise_gemm_tensor, dst.columnwise_gemm_tensor)
 
-    def get_next_debug_iter(self) -> int | float:
+    def get_next_debug_iter(self) -> Optional[int]:
         """
         Returns the next iteration for which the debug is enabled for this tensor.
         If the next iteration is inf, then the debug is not enabled for this tensor.
@@ -518,11 +518,13 @@ class DebugQuantizer(Quantizer):
         If there is _enabled API that returned some next_iter,
         this function updates the next_debug_iter field accordingly.
         """
-        if next_iter is None:
+        if next_iter == -1:
             # If api returned only bool, then we do not know when it will be enabled next time,
             # so we need to run debug quantizer next time to check if it will be enabled.
             next_iter = self.iteration + 1
-        self.next_debug_iter = min(self.next_debug_iter, next_iter)
+        if next_iter is not None:
+            # If next iter is None, that means that call will never be enabled.
+            self.next_debug_iter = min(self.next_debug_iter, next_iter)
 
 
 class DebugQuantizedTensor(QuantizedTensorBase):

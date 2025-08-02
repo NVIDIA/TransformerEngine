@@ -1725,7 +1725,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp)
-        debug = self.validate_debug()
+
+        debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
