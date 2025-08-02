@@ -2078,7 +2078,7 @@ class TestFusedOps:
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
-        if with_quantization and quantization in ["fp8_delayed_scaling", "mxfp8"]:
+        if with_quantization:
             assert len(backward_ops) == 2
             assert isinstance(backward_ops[0][0], BackwardActivationBias)
             assert isinstance(backward_ops[1][0], te_ops.Quantize)
@@ -2093,6 +2093,7 @@ class TestFusedOps:
         if with_quantization:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
+        # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
         db_test = model[1].bias.grad.to(dtype=torch.float64, device="cpu")
