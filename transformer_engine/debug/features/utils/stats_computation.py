@@ -213,7 +213,7 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     stats_to_num[stat_pct] = len(stats_to_num)
 
     STATS[stat_num] = (
-        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum(),
+        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum() - (x == 0).sum(),
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
     STATS[stat_pct] = (

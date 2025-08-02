@@ -1129,6 +1129,10 @@ def _all_gather_fp8_blockwise(
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
         inp = quantizer(inp.dequantize())
+    
+    # Construct Float8BlockwiseQTensor output tensor
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
     quantizer.all_gather_usage = orig_all_gather_usage
 
     # Begin to do network communication, need to make sure compact format
@@ -1138,8 +1142,6 @@ def _all_gather_fp8_blockwise(
             f"but found data_format={inp._data_format}"
         )
 
-    # Construct Float8BlockwiseQTensor output tensor
-    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
     # Coalesce NCCL collectives
     with torch.distributed._coalescing_manager(

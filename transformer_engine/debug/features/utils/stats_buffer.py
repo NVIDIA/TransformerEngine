@@ -191,7 +191,6 @@ class StatsBuffers:
             for _, buffer in changed_buffers:
                 stats = buffer.log()
                 output.update(stats)
-
         return output
 
 
