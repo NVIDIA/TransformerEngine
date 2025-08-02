@@ -113,8 +113,6 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-
-
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
