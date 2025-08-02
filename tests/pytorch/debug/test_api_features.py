@@ -272,7 +272,9 @@ def test_statistics_collection(configs_dir, feature_dirs):
             "decoder.2.mlp.fc1", tensor_name="activation", iteration=200
         )
 
-        expected_underflows = ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
+        expected_underflows = (
+            ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
+        )
 
         # TE FP8 tensor stats --
         assert debug_api.transformer_engine.inspect_tensor_enabled(
