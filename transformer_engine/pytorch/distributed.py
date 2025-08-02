@@ -1129,7 +1129,7 @@ def _all_gather_fp8_blockwise(
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
         inp = quantizer(inp.dequantize())
-    
+
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
@@ -1141,7 +1141,6 @@ def _all_gather_fp8_blockwise(
             "All-gather with FP8 block-wise quantized tensor requires compact data format, "
             f"but found data_format={inp._data_format}"
         )
-
 
     # Coalesce NCCL collectives
     with torch.distributed._coalescing_manager(
