@@ -1782,7 +1782,7 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=False):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         num_of_nones = 8 if cp_specific_quantizers else 6
@@ -1792,18 +1792,37 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
     O_quantizer = quantizers["scaling_fwd"][META_O]
     O_quantizer.set_usage(rowwise=True, columnwise=False)
-    S_quantizer = quantizers["scaling_fwd"][META_S]
-    S_quantizer.internal = True
-    S_quantizer.set_usage(rowwise=True, columnwise=False)
+    S_quantizer = None
+    dP_quantizer = None
+    if fp8_meta["recipe"].delayed():
+        S_quantizer = quantizers["scaling_fwd"][META_S]
+        S_quantizer.internal = True
+        S_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer = quantizers["scaling_bwd"][META_DP]
+        dP_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer.interal = True
+    if fp8_meta["recipe"].float8_current_scaling():
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+        dP_quantizer = quantizers["scaling_bwd"][META_DP]
+
+        # two options:
+        # 1) convert to Float8Quantizer to keep track of dP.scale_inv based on dP.scale;
+        #    need to think about amax reduction (DS reduction in CS scheme)
+        # dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
+
+        # 2) use Float8CurrentScalingQuantizer but set scale to pre-selected value
+        #    and update scale_inv in extension/attention.cpp
+        dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
+
+        dP_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer.interal = True
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
     dO_quantizer.internal = True
-    dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dP_quantizer.interal = True
     dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
     dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
     dQKV_CP_quantizer.internal = True

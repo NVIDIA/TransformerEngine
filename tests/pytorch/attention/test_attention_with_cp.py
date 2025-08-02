@@ -137,7 +137,8 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 @pytest.mark.parametrize("fp8_mha", [False, True])
-def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha):
+@pytest.mark.parametrize("scaling_mode", [None, "delayed", "current"])
+def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha, scaling_mode):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
@@ -179,6 +180,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         )
     if dtype != "fp8" and fp8_mha:
         pytest.skip("Only fp8 works with fp8_mha=True!")
+    if (dtype != "fp8" or not fp8_mha) and scaling_mode is not None:
+        pytest.skip("Only fp8 works with scaling_mode != None!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
@@ -204,6 +207,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
             kernel_backend="FusedAttention",
             cp_comm_type=cp_comm_type,
             fp8_mha=fp8_mha,
+            scaling_mode=scaling_mode,
         ),
         check=True,
     )

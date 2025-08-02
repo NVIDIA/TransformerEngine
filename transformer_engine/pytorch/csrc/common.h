@@ -201,6 +201,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   */
   std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
                                                                   DType dtype);
+  std::pair<TensorWrapper, py::object> create_hp_tensor_with_amax(const std::vector<size_t>& shape,
+                                                                  DType dtype, at::Tensor data);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 

@@ -15,8 +15,12 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 import transformer_engine_torch as tex
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -28,6 +32,7 @@ def run_dpa_with_cp(
     kernel_backend="FlashAttention",
     cp_comm_type="p2p",
     fp8_mha=False,
+    scaling_mode="delayed",
 ):
     """Test DotProductAttention module with context parallelism"""
 
@@ -84,7 +89,10 @@ def run_dpa_with_cp(
                 cp_comm_sub_groups.append(sub_group)
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "delayed":
+            fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        if scaling_mode == "current":
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=True, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -197,11 +205,17 @@ def run_dpa_with_cp(
     k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
-    dout_quantizer = Float8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
-        scale=torch.tensor([1], dtype=torch.float32).cuda(),
-        amax=torch.tensor([0], dtype=torch.float32).cuda(),
-    )
+    if scaling_mode == "delayed":
+        dout_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+    if scaling_mode == "current":
+        dout_quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            device="cuda",
+        )
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -313,7 +327,7 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for x in [out_, q_.grad, k_.grad, v_.grad]:
+    for i, x in enumerate([out_, q_.grad, k_.grad, v_.grad]):
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
 
