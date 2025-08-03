@@ -1069,6 +1069,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         from transformer_engine.pytorch.cpu_offload import (
             CPUOffloadEnabled,
+            CPUOffloadedLayer,
             mark_activation_offload,
         )
 
@@ -1078,7 +1079,6 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 tensor_list = [q, k, v, out_save]
 
-            qkv_layout = "sbhd_sbhd_sbhd"
             mark_activation_offload(*tensor_list)
             mark_activation_offload(*aux_ctx_tensors)
 
@@ -1112,6 +1112,9 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
 
+        # If interleaved tensor is offloaded, reloaded tensor will be
+        # non-interleaved, so we need to modify the QKV layout 
+        # for backward
         if CPUOffloadedLayer and CPUOffloadEnabled:
             reload_layout = ""
             split_list = qkv_layout.split("_")
