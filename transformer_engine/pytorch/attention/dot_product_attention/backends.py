@@ -1116,7 +1116,7 @@ class FusedAttnFunc(torch.autograd.Function):
         )
 
         # If interleaved tensor is offloaded, reloaded tensor will be
-        # non-interleaved, so we need to modify the QKV layout 
+        # non-interleaved, so we need to modify the QKV layout
         # for backward
         if CPUOffloadedLayer and CPUOffloadEnabled:
             reload_layout = ""
@@ -1131,7 +1131,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         rep_count = int(s)
                 for i in range(rep_count):
                     reload_layout = reload_layout + temp_layout + "_"
-            ctx.qkv_layout = reload_layout[:-1] 
+            ctx.qkv_layout = reload_layout[:-1]
         else:
             ctx.qkv_layout = qkv_layout
 
