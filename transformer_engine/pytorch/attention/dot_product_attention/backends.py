@@ -1111,7 +1111,24 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
-        ctx.qkv_layout = qkv_layout
+
+        if CPUOffloadedLayer and CPUOffloadEnabled:
+            reload_layout = ""
+            split_list = qkv_layout.split("_")
+            for split in split_list:
+                temp_layout = ""
+                rep_count = 1
+                for s in split:
+                    if s.isalpha():
+                        temp_layout = temp_layout + s
+                    else:
+                        rep_count = int(s)
+                for i in range(rep_count):
+                    reload_layout = reload_layout + temp_layout + "_"
+            ctx.qkv_layout = reload_layout[:-1] 
+        else:
+            ctx.qkv_layout = qkv_layout
+
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.window_size = window_size
