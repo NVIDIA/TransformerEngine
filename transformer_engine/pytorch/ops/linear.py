@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -166,3 +166,44 @@ class Linear(FusedOperation):
                     )
             else:
                 self.basic_ops[self._bias_idx].bias = param
+
+    def state_dict(self, *, prefix: str = "", **kwargs) -> dict[str, Any]:
+        state_dict = super().state_dict(prefix=prefix, **kwargs)
+
+        # Remove basic op params from state dict
+        # Note: Logically, basic ops own params and fused ops are
+        # considered as stateless. However, we register weight and
+        # bias params in the linear op for convenience. We remove
+        # these redudant params from the checkpoint for backward
+        # compatibility.
+        if f"{prefix}weight" in state_dict:
+            del state_dict[f"{prefix}weight"]
+        if f"{prefix}bias" in state_dict:
+            del state_dict[f"{prefix}bias"]
+
+        return state_dict
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        prefix: str,
+        *args,
+        **kwargs,
+    ) -> None:
+
+        # Add basic op params to state dict
+        # Note: Logically, basic ops own params and fused ops are
+        # considered as stateless. However, we register weight and
+        # bias params in the linear op for convenience. We remove
+        # these redudant params from the checkpoint for backward
+        # compatibility.
+        if f"{prefix}weight" not in state_dict:
+            state_dict[f"{prefix}weight"] = state_dict[f"{prefix}basic_ops.{self._linear_idx}.weight"]
+        if f"{prefix}bias" not in state_dict:
+            if self._bias_idx is None:
+                state_dict[f"{prefix}bias"] = None
+            else:
+                state_dict[f"{prefix}bias"] = state_dict[f"{prefix}basic_ops.{self._bias_idx}.bias"]
+
+        # Load state dict
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
