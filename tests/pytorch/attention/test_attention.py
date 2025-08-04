@@ -235,20 +235,8 @@ def test_dot_product_attention(
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if unfused_attn_supported and fused_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
-        print('unfused_attn_fwd min/max   ', unfused_attn_fwd.min().item(), unfused_attn_fwd.max().item())
-        print('fused_attn_fwd min/max     ', fused_attn_fwd.min().item(), fused_attn_fwd.max().item())
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(unfused_attn_bwd):
-            if unfused_attn_bwd[i] is not None:
-                print(f'unfused_attn_bwd[{i}] min/max', unfused_attn_bwd[i].min().item(), unfused_attn_bwd[i].max().item())
-            if fused_attn_bwd[i] is not None:
-                print(f'fused_attn_bwd[{i}] min/max  ', fused_attn_bwd[i].min().item(), fused_attn_bwd[i].max().item())
-            if i==3 and config.softmax_type != "vanilla":
-                h = 10 if config.num_heads >= 10 else config.num_heads
-                print('dsink unfused:')
-                print(unfused_attn_bwd[i][:h])
-                print('dsink fused:')
-                print(fused_attn_bwd[i][:h])
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
