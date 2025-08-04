@@ -519,12 +519,11 @@ class GemmPrimitive(BasePrimitive):
         sequence_parallel_output,
         sequence_dim,
     ):
-        del sequence_dim, sequence_parallel_output
+        del sequence_dim, sequence_parallel_output, batched_dims
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
-        lhs_bdims, rhs_bdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), batched_dims)
         lhs_non_cdims, rhs_non_cdims = map(
             lambda ndim, cdims: tuple(i for i in range(ndim) if i not in cdims),
             (lhs_ndim, rhs_ndim),
@@ -547,10 +546,12 @@ class GemmPrimitive(BasePrimitive):
             # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
+
             # Non-batched non-contracting dims of RHS needs to be unsharded (i.e. FSDP)
+            # Check if spec is not the batch-dim is not needed as rhs_non_cspecs never includes batch-dim
+            # rhs_specs only includes batch-dim in the Wgrad GEMM, but there batch-dim belongs to rhs_cspecs
             rhs_non_cspecs = tuple(
-                None if i not in rhs_bdims else spec
-                for i, spec in zip(rhs_non_cdims, rhs_non_cspecs)
+                None if spec in lhs_non_cspecs else spec for spec in rhs_non_cspecs
             )
         else:
             # Otherwise, require contracting dims of both operands to be unsharded
@@ -558,10 +559,12 @@ class GemmPrimitive(BasePrimitive):
             rhs_cspecs = (None,) * len(rhs_cspecs)
 
         # Non-batched non-contracting dims of LHS to be unsharded, i.e gather SP dim
-        # (This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering Y1 for dW2 = Y1^T * dY2 which is unexpected)
-        lhs_non_cspecs = tuple(
-            None if i not in lhs_bdims else spec for i, spec in zip(lhs_non_cdims, lhs_non_cspecs)
-        )
+        # The spec for batch_dim in lhs_non_cspecs won't ever appear in the rhs_non_cspecs as
+        # rhs_non_cspecs never has batch-dim. Hence, spec for batch_dim of lhs_non_cspecs won't be
+        # overwrite
+        # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
+        # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
+        lhs_non_cspecs = tuple(None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs)
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
