@@ -527,6 +527,11 @@ class DebugQuantizer(Quantizer):
         elif next_iter is not None:
             # If next iter is None, that means that call will never be enabled.
             self.next_debug_iter = min(self.next_debug_iter, next_iter)
+    
+    def supports_only_rowwise_all_gather(self) -> bool:
+        if self.parent_quantizer is not None:
+            return self.parent_quantizer.supports_only_rowwise_all_gather()
+        return False
 
 
 class DebugQuantizedTensor(QuantizedTensorBase):
@@ -558,6 +563,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
             if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor
             else [self.rowwise_gemm_tensor]
         )
+
         tensor_list, tensor_objects_list = prepare_for_saving(*self.tensors_to_save)
         self.tensors_to_save = tensor_objects_list
         # pylint: disable=unbalanced-tuple-unpacking
@@ -576,6 +582,7 @@ class DebugQuantizedTensor(QuantizedTensorBase):
         else:
             self.rowwise_gemm_tensor = tensor_objects_list[0]
             self.columnwise_gemm_tensor = self.rowwise_gemm_tensor
+
         return saved_tensors
 
     def quantize_(self, tensor, *, noop_flag=None):
@@ -599,10 +606,15 @@ class DebugQuantizedTensor(QuantizedTensorBase):
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""
-        if rowwise_usage is False:
-            self.rowwise_gemm_tensor = None
-        if columnwise_usage is False:
-            self.columnwise_gemm_tensor = None
+        if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor:
+            # If the same object is used both for rowwise and columnwise gemms,
+            # there is no benefit in erasing the usage of one of them.
+            # And there are scenarios when not deleting the usage of one of them is needed.
+            # For example when we want to recreate columnwise from rowwise.
+            if rowwise_usage is False:
+                self.rowwise_gemm_tensor = None
+            if columnwise_usage is False:
+                self.columnwise_gemm_tensor = None
 
         if isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
             self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)

@@ -1352,6 +1352,42 @@ def gather_along_first_dim(
             inp = quantizer(inp)
         return inp, None
 
+
+    # Debug case - call gather_along_first_dim on each tensor
+    if isinstance(inp, DebugQuantizedTensor):
+        out_obj = DebugQuantizedTensor(
+            rowwise_gemm_tensor=inp.rowwise_gemm_tensor,
+            columnwise_gemm_tensor=inp.columnwise_gemm_tensor,
+            quantizer=inp.quantizer,
+            layer_name=inp._layer_name,
+            tensor_name=inp._tensor_name,
+        )
+        rowwise = inp.get_tensor(False)
+        columnwise = inp.get_tensor(True)
+        # shapes
+        final_quantizer = (
+            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
+        )
+        rowwise_total = None
+        if rowwise is not None:
+            rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
+        out_obj.rowwise_gemm_tensor = rowwise_total
+        if rowwise is not columnwise:
+            final_quantizer_columnwise = (
+                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
+            )
+            columnwise_total = None
+            if columnwise is not None:
+                columnwise_total, _ = gather_along_first_dim(
+                    columnwise, process_group, False, final_quantizer_columnwise
+                )
+            out_obj.columnwise_gemm_tensor = columnwise_total
+        else:
+            out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
+        
+        return out_obj, None
+
+
     # Output tensor dims
     out_shape = list(inp.size())
     out_shape[0] *= world_size
@@ -1388,28 +1424,6 @@ def gather_along_first_dim(
             quantizer=quantizer,
             out_shape=out_shape,
         )
-
-    # Debug case - call gather_along_first_dim on each tensor
-    if isinstance(inp, DebugQuantizedTensor):
-        out_obj = inp
-        rowwise = inp.get_tensor(False)
-        columnwise = inp.get_tensor(True)
-        final_quantizer = (
-            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
-        )
-        rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
-        out_obj.rowwise_gemm_tensor = rowwise_total
-        if rowwise is not columnwise:
-            final_quantizer_columnwise = (
-                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
-            )
-            columnwise_total, _ = gather_along_first_dim(
-                columnwise, process_group, False, final_quantizer_columnwise
-            )
-            out_obj.columnwise_gemm_tensor = columnwise_total
-        else:
-            out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
-        return out_obj, None
 
     # High-precision communication for quantized tensors
     if quantizer is not None:

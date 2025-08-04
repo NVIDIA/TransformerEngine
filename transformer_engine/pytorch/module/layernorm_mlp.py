@@ -242,9 +242,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if fc1_input_quantizer is None:
                 raise ValueError("Missing quantizer for FC1 input tensor")
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
-            if sequence_parallel and isinstance(
-                fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-            ):
+            if sequence_parallel and fc1_input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
                 fc1_input_quantizer.set_usage(columnwise=False)
 

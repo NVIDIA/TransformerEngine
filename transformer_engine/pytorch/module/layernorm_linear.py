@@ -63,7 +63,6 @@ from ..tensor.quantized_tensor import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
@@ -185,9 +184,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
-            if with_input_all_gather and isinstance(
-                input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-            ):
+            if with_input_all_gather and input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
                 input_quantizer.set_usage(columnwise=False)
 
@@ -644,7 +641,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.input_quantizer is not None:
                     quantizer = ctx.input_quantizer
-                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                    if quantizer.supports_only_rowwise_all_gather():
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     else:

@@ -39,4 +39,4 @@ def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
         if candidate <= e:
             return run_current, candidate
 
-    raise RuntimeError("No next iteration found")
+    return run_current, None # No next iteration found
