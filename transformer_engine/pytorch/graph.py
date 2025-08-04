@@ -206,9 +206,10 @@ def _make_graphed_callables(
                 for per_callable_fwd_idx in fwd_sample_idx:
                     sample_args_keys = tuple(
                         (t.shape, t.dtype, t.layout) for t in sample_args[per_callable_fwd_idx]
-                        )
+                    )
                     sample_kwargs_keys = tuple(
-                        (k, v.shape, v.dtype, v.layout) for k, v in sorted(sample_kwargs[per_callable_fwd_idx].items())
+                        (k, v.shape, v.dtype, v.layout)
+                        for k, v in sorted(sample_kwargs[per_callable_fwd_idx].items())
                     )
                     sample_keys = sample_args_keys + sample_kwargs_keys
 
@@ -222,7 +223,9 @@ def _make_graphed_callables(
                 num_consumed_samples = min(
                     len(fwd_sample_qs[m_chunk]), _num_layers_per_chunk[m_chunk]
                 )
-                for sample_keys, per_callable_fwd_idx in fwd_sample_qs[m_chunk][:num_consumed_samples]:
+                for sample_keys, per_callable_fwd_idx in fwd_sample_qs[m_chunk][
+                    :num_consumed_samples
+                ]:
                     if sample_keys not in consumed_sample_q:
                         consumed_sample_q[sample_keys] = []
                     consumed_sample_q[sample_keys].append(per_callable_fwd_idx)
@@ -519,7 +522,7 @@ def _make_graphed_callables(
                         # Weak ref the static grad inputs of the previous backward pass within the
                         # same chunk.
                         if previous_per_callable_bwd_idx is not None:
-                            idx = previous_per_callable_bwd_idx 
+                            idx = previous_per_callable_bwd_idx
                             per_callable_static_grad_inputs[idx] = make_weak_ref(
                                 per_callable_static_grad_inputs[idx]
                             )
