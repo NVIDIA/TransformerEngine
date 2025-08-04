@@ -140,8 +140,8 @@ class Linear(FusedOperation):
         super().__init__(ops)
 
         # Register parameters
-        self._linear_idx = linear_idx
-        self._bias_idx = bias_idx
+        self._linear_idx: Optional[int] = linear_idx
+        self._bias_idx: Optional[int] = bias_idx
         self.register_parameter("weight", self.basic_ops[self._linear_idx].weight)
         bias = None
         if self._bias_idx is not None:
@@ -149,6 +149,11 @@ class Linear(FusedOperation):
         self.register_parameter("bias", bias)
 
     def register_parameter(self, name: str, param: Optional[torch.nn.Parameter]) -> None:
+        """Add a parameter to the module
+
+        Also updates the basic operation that owns the parameter.
+
+        """
         super().register_parameter(name, param)
         if name == "weight":
             self.basic_ops[self._linear_idx].weight = param
