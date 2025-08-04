@@ -140,6 +140,29 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
                       NVTETensor workspace, const int multiprocessorCount,
                       const bool zero_centered_gamma, cudaStream_t stream);
 
+/*! \brief Compute backward of RMSNorm and add additional tensor to output gradient
+ *
+ * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * but instead set the shape and type of the workspace tensor to the required values.
+ *
+ *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
+ *  \param[in]     x                   Forward input tensor of shape [N, H].
+ *  \param[in]     add                 Additional tensor to add to output gradient [N, H].
+ *  \param[in]     rsigma              Reciprocal of the root mean square of the input
+ *                                     calculated over the last dimension. Shape: [N].
+ *  \param[in]     gamma               Gamma tensor of shape [H].
+ *  \param[out]    dx                  Output gradient of shape [N, H].
+ *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
+ *  \param[out]    workspace           Workspace tensor.
+ *  \param[in]     multiprocessorCount Number of SMs in the device.
+ *  \param[in]     zero_centered_gamma Multiply normalized values by @f$ \gamma+1 @f$ instead of @f$ \gamma @f$
+ *  \param[in]     stream              CUDA stream used for the operation.
+ */
+void nvte_rmsnorm_bwd_add(const NVTETensor dz, const NVTETensor x, const NVTETensor add,
+                          const NVTETensor rsigma, const NVTETensor gamma, NVTETensor dx,
+                          NVTETensor dgamma, NVTETensor workspace, const int multiprocessorCount,
+                          const bool zero_centered_gamma, cudaStream_t stream);
+
 /*! \brief Helper to enable cuDNN backend for normalization
  *
  *  \param[in]     bool              Enable if True
