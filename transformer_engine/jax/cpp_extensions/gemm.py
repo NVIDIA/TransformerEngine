@@ -530,7 +530,7 @@ class GemmPrimitive(BasePrimitive):
             (lhs_cdims, rhs_cdims),
         )
         lhs_non_cspecs, lhs_cspecs, rhs_non_cspecs, rhs_cspecs = map(
-            lambda specs, cdims: tuple(specs[i] for i in cdims),
+            lambda specs, dims: tuple(specs[i] for i in dims),
             (lhs_specs, lhs_specs, rhs_specs, rhs_specs),
             (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
@@ -549,19 +549,15 @@ class GemmPrimitive(BasePrimitive):
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
             # Non-batched non-contracting dims of RHS needs to be unsharded (i.e. FSDP)
-            rhs_non_cspecs = tuple(
-                None if i not in rhs_bdims else rhs_non_cspecs[i] for i in rhs_non_cdims
-            )
+            rhs_non_cspecs = tuple(None if i not in rhs_bdims else spec for i, spec in zip(rhs_non_cdims, rhs_non_cspecs))
         else:
             # Otherwise, require contracting dims of both operands to be unsharded
             lhs_cspecs = (None,) * len(lhs_cspecs)
             rhs_cspecs = (None,) * len(rhs_cspecs)
 
         # Non-batched non-contracting dims of LHS to be unsharded, i.e gather SP dim
-        # (This cause MaxText TP (= Megatron TP + activation_hidden sharding) gathering Y1 for dW2 = Y1^T * dY2 which is unexpected)
-        lhs_non_cspecs = tuple(
-            None if i not in lhs_bdims else lhs_non_cspecs[i] for i in lhs_non_cdims
-        )
+        # (This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering Y1 for dW2 = Y1^T * dY2 which is unexpected)
+        lhs_non_cspecs = tuple(None if i not in lhs_bdims else spec for i, spec in zip(lhs_non_cdims, lhs_non_cspecs))
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
