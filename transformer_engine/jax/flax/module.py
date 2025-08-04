@@ -31,7 +31,6 @@ from ..cpp_extensions import (
     jax_scaled_upper_triang_masked_softmax,
 )
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
-from ..sharding import get_non_contracting_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -1206,14 +1205,6 @@ class LayerNormMLP(TransformerEngineBase):
                     quantizer_set=ffn1_quantizer_set,
                 )
 
-            if self.dot_1_input_axes is not None and self.kernel_axes_1 is not None:
-                dot_1_output_axes = (
-                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                    *get_non_contracting_logical_axes(
-                        kernel_1.ndim, self.kernel_axes_1, contract_ind
-                    ),
-                )
-                x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (

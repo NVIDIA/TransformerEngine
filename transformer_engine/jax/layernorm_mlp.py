@@ -30,7 +30,6 @@ from .quantize import (
     TensorUsage,
 )
 from .sharding import (
-    get_non_contracting_logical_axes,
     get_sequence_parallel_dim,
 )
 
@@ -317,13 +316,6 @@ def _layernorm_mlp_fwd_rule(
         bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
     )
-
-    if dot_1_input_axes is not None and kernel_1_axes is not None:
-        dot_1_output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
-        )
-        dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
         bias_1_shape = bias_1.shape
