@@ -198,7 +198,9 @@ class Linear(FusedOperation):
         # these redudant params from the checkpoint for backward
         # compatibility.
         if f"{prefix}weight" not in state_dict:
-            state_dict[f"{prefix}weight"] = state_dict[f"{prefix}basic_ops.{self._linear_idx}.weight"]
+            state_dict[f"{prefix}weight"] = state_dict[
+                f"{prefix}basic_ops.{self._linear_idx}.weight"
+            ]
         if f"{prefix}bias" not in state_dict:
             if self._bias_idx is None:
                 state_dict[f"{prefix}bias"] = None
