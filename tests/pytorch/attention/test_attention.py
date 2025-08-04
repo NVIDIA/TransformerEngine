@@ -252,21 +252,21 @@ def test_dot_product_attention(
 
 model_configs_softmax = {
     #     test:             b,  sq, h,  d
-    "softmax_1_0": ModelConfig(2, 2048, 64, 64),
-    "softmax_1_1": ModelConfig(2, 2048, 64, 64, softmax_type="off-by-one"),
-    "softmax_1_2": ModelConfig(2, 2048, 64, 64, softmax_type="learnable"),
-    "softmax_2_0": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal"),
-    "softmax_2_1": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal", softmax_type="off-by-one"),
-    "softmax_2_2": ModelConfig(2, 2048, 64, 64, attn_mask_type="causal", softmax_type="learnable"),
-    "softmax_3_0": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding"),
-    "softmax_3_1": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding", softmax_type="off-by-one"),
-    "softmax_3_2": ModelConfig(2, 2048, 64, 64, attn_mask_type="padding", softmax_type="learnable"),
-    "softmax_4_0": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal"),
-    "softmax_4_1": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal", softmax_type="off-by-one"),
-    "softmax_4_2": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="causal", softmax_type="learnable"),
-    "softmax_5_0": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal"),
-    "softmax_5_1": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="off-by-one"),
-    "softmax_5_2": ModelConfig(2, 2048, 64, 64, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="learnable"),
+    "softmax_1_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8),
+    "softmax_1_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="off-by-one"),
+    "softmax_1_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="learnable"),
+    "softmax_2_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal"),
+    "softmax_2_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"),
+    "softmax_2_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"),
+    "softmax_3_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding"),
+    "softmax_3_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="off-by-one"),
+    "softmax_3_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="learnable"),
+    "softmax_4_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal"),
+    "softmax_4_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal", softmax_type="off-by-one"),
+    "softmax_4_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="causal", softmax_type="learnable"),
+    "softmax_5_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal"),
+    "softmax_5_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="off-by-one"),
+    "softmax_5_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, window_size=(128,0), attn_mask_type="padding_causal", softmax_type="learnable"),
 }
 
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
