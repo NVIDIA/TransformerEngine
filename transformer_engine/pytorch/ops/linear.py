@@ -168,6 +168,7 @@ class Linear(FusedOperation):
                 self.basic_ops[self._bias_idx].bias = param
 
     def state_dict(self, *, prefix: str = "", **kwargs) -> dict[str, Any]:
+        """Save state"""
         state_dict = super().state_dict(prefix=prefix, **kwargs)
 
         # Remove basic op params from state dict
