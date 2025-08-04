@@ -60,5 +60,19 @@ struct Swizzle {
         return apply(offset);
     }
 };
+
+struct Linear {
+    template <class Offset>
+    __host__ __device__ __forceinline__
+    constexpr static int32_t apply(Offset const &offset) {
+        return offset;
+    }
+
+    __host__ __device__ __forceinline__
+    constexpr static int32_t swz(int32_t const &offset) {
+        return offset;
+    }
+};
+
 } // namespace swz
 } // namespace transformer_engine
