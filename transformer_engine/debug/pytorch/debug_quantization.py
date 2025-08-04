@@ -522,7 +522,9 @@ class DebugQuantizer(Quantizer):
             # If api returned only bool, then we do not know when it will be enabled next time,
             # so we need to run debug quantizer next time to check if it will be enabled.
             next_iter = self.iteration + 1
-        if next_iter is not None:
+        if self.next_debug_iter is None:
+            self.next_debug_iter = next_iter
+        elif next_iter is not None:
             # If next iter is None, that means that call will never be enabled.
             self.next_debug_iter = min(self.next_debug_iter, next_iter)
 
