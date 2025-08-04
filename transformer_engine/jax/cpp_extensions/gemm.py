@@ -519,6 +519,7 @@ class GemmPrimitive(BasePrimitive):
         sequence_parallel_output,
         sequence_dim,
     ):
+        del sequence_dim, sequence_parallel_output
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
@@ -538,10 +539,8 @@ class GemmPrimitive(BasePrimitive):
         reduce_spec = None
         for l in lhs_cspecs:
             for r in rhs_cspecs:
-                if l != None and l == r:
-                    # This if condition is here only to suppress warning, no functional effects
-                    if len(lhs_cspecs) >= 1:
-                        assert (reduce_spec is None, "Multiple reduce dimension is detected!")
+                if l is not None and l == r:
+                    assert reduce_spec is None, "Multiple reduce dimension is detected!"
                     reduce_spec = l
 
         if reduce_spec is not None:
@@ -661,7 +660,7 @@ class GemmPrimitive(BasePrimitive):
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
             reduce_spec,
-            scatter_dim,
+            _,
         ) = GemmPrimitive._parse_operand_output_specs(
             arg_infos,
             contracting_dims,
