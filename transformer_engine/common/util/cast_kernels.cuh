@@ -1088,12 +1088,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 using traits = spec::CastTraits<IType, OType, true, false>;
                 auto kernel = spec::cast_mxfp8_kernel<traits>;
 
-                if (traits::smem > 48 * 1024) {
-                  cudaFuncSetAttribute(
-                    kernel,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    traits::smem);
-                }
+                cudaFuncSetAttribute(
+                  kernel,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                  traits::smem);
 
                 dim3 block(traits::threadLayout::num,
                            traits::warpLayout::N,
@@ -1120,19 +1118,17 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 using traits = spec::CastTraits<IType, OType, true, true>;
                 auto kernel = spec::cast_mxfp8_kernel<traits>;
 
-                if (traits::smem > 48 * 1024) {
-                  cudaFuncSetAttribute(
-                    kernel,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    traits::smem
-                  );
-                }
+                cudaFuncSetAttribute(
+                  kernel,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                  traits::smem
+                );
                 // TMA for loading, so that we don't need STS for transposing
                 alignas(64) CUtensorMap tensor_map_input{};
                 constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
                 create_2D_tensor_map(tensor_map_input,
                                      input.data,
-                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+                                     traits::input_swizzle_pattern,
                                      rows, cols,
                                      traits::blockIterDim::M, traits::blockIterDim::N,
                                      /*stride_elems=*/cols, 
@@ -1143,7 +1139,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
                 create_2D_tensor_map(tensor_map_rowwise_output,
                                      output->data,
-                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+                                     traits::output_swizzle_pattern,
                                      rows, cols,
                                      traits::blockIterDim::M, traits::blockIterDim::N,
                                      /*stride_elems=*/cols, 
@@ -1151,7 +1147,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                                      output_type_bit_size);
                 create_2D_tensor_map(tensor_map_colwise_output,
                                      output->columnwise_data,
-                                     CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+                                     traits::output_swizzle_pattern,
                                      rows, cols,
                                      traits::blockIterDim::M, traits::blockIterDim::N,
                                      cols, 0, output_type_bit_size);
