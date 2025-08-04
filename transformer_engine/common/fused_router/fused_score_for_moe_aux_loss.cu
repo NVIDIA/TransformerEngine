@@ -107,7 +107,8 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
 
     if (score_function == 0) {
       if (topk > 1) {
-        auto sum_logits = warp_reduce_on_shmem(local_logits, num_experts, sum, lane_id);
+        auto sum_logits =
+            warp_reduce_on_shmem(local_logits, num_experts, ReduceFuncType::SUM, lane_id);
         for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
           local_logits[i] = static_cast<DataType>(static_cast<double>(local_logits[i]) /
                                                   (static_cast<double>(sum_logits) + epsilon));
@@ -231,13 +232,15 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const DataType *int
          */
     // Sigmoid Post-processing bwd when topk > 1
     if (topk > 1 && score_function == 0) {
-      auto sum_fwd_input = warp_reduce_on_shmem(local_act_from_fwd, num_experts, sum, lane_id);
+      auto sum_fwd_input =
+          warp_reduce_on_shmem(local_act_from_fwd, num_experts, ReduceFuncType::SUM, lane_id);
       // Put the result of output * grad to the comp_buf
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_comp_buf[i] = local_grad[i] * local_act_from_fwd[i];
       }
       __syncwarp();
-      auto sum_Output_x_Grad = warp_reduce_on_shmem(local_comp_buf, num_experts, sum, lane_id);
+      auto sum_Output_x_Grad =
+          warp_reduce_on_shmem(local_comp_buf, num_experts, ReduceFuncType::SUM, lane_id);
       // In-place update
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_grad[i] =
