@@ -980,6 +980,7 @@ def _all_gather_fp8(
 
     return out, handle
 
+
 def _get_quantizer_format(quantizer: Quantizer) -> Optional[bool]:
     """Get quantizer format."""
     if isinstance(quantizer, DebugQuantizer):
@@ -987,6 +988,7 @@ def _get_quantizer_format(quantizer: Quantizer) -> Optional[bool]:
     if isinstance(quantizer, Float8BlockQuantizer):
         return quantizer.all_gather_usage
     return None
+
 
 def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
     """Make quantizer compact"""
