@@ -1352,7 +1352,6 @@ def gather_along_first_dim(
             inp = quantizer(inp)
         return inp, None
 
-
     # Debug case - call gather_along_first_dim on each tensor
     if isinstance(inp, DebugQuantizedTensor):
         out_obj = DebugQuantizedTensor(
@@ -1370,7 +1369,9 @@ def gather_along_first_dim(
         )
         rowwise_total = None
         if rowwise is not None:
-            rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
+            rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[
+                0
+            ]
         out_obj.rowwise_gemm_tensor = rowwise_total
         if rowwise is not columnwise:
             final_quantizer_columnwise = (
@@ -1384,9 +1385,8 @@ def gather_along_first_dim(
             out_obj.columnwise_gemm_tensor = columnwise_total
         else:
             out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
-        
-        return out_obj, None
 
+        return out_obj, None
 
     # Output tensor dims
     out_shape = list(inp.size())

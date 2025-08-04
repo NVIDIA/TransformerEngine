@@ -190,6 +190,7 @@ class Float8Quantizer(Quantizer):
         """
         return True
 
+
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
 
@@ -365,7 +366,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8CurrentScaling
-    
+
     def supports_only_rowwise_all_gather(self) -> bool:
         """
         Float8CurrentScalingQuantizer supports only rowwise all-gather

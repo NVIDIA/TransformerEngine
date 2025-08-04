@@ -527,7 +527,7 @@ class DebugQuantizer(Quantizer):
         elif next_iter is not None:
             # If next iter is None, that means that call will never be enabled.
             self.next_debug_iter = min(self.next_debug_iter, next_iter)
-    
+
     def supports_only_rowwise_all_gather(self) -> bool:
         if self.parent_quantizer is not None:
             return self.parent_quantizer.supports_only_rowwise_all_gather()
