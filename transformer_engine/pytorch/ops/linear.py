@@ -91,6 +91,8 @@ class Linear(FusedOperation):
 
         # Construct basic ops
         ops = []
+        linear_idx = None
+        bias_idx = None
         linear_kwargs = {
             "in_features": in_features,
             "out_features": out_features,
@@ -111,14 +113,16 @@ class Linear(FusedOperation):
         }
         if tensor_parallel_mode == "row":
             # Row TP: GEMM + bias + reduction
+            linear_idx = len(ops)
             linear_kwargs["in_features"] = local_in_features
             linear_kwargs["out_features"] = local_out_features
             linear_kwargs["tensor_parallel_mode"] = None
             linear_kwargs["tensor_parallel_group"] = None
             linear_kwargs["sequence_parallel"] = False
-            bias_kwargs["size"] *= tensor_parallel_size
             ops.append(BasicLinear(**linear_kwargs))
             if bias:
+                bias_idx = len(ops)
+                bias_kwargs["size"] *= tensor_parallel_size
                 ops.append(Bias(**bias_kwargs))
             if sequence_parallel:
                 ops.append(ReduceScatter(tensor_parallel_group))
@@ -126,45 +130,34 @@ class Linear(FusedOperation):
                 ops.append(AllReduce(tensor_parallel_group))
         else:
             # Column TP or no TP: (gather + GEMM) + bias
+            linear_idx = len(ops)
             ops.append(BasicLinear(**linear_kwargs))
             if bias:
+                bias_idx = len(ops)
                 ops.append(Bias(**bias_kwargs))
 
         # Initialize base class
         super().__init__(ops)
 
-        self._has_bias: bool = bias
+        # Register parameters
+        self._linear_idx = linear_idx
+        self._bias_idx = bias_idx
+        self.register_parameter("weight", self.basic_ops[self._linear_idx].weight)
+        bias = None
+        if self._bias_idx is not None:
+            bias = self.basic_ops[self._bias_idx].bias
+        self.register_parameter("bias", bias)
 
-    @property
-    def weight(self) -> torch.nn.Parameter:
-        """Weight tensor
-
-        Parameter is owned by `BasicLinear` operation.
-
-        """
-        return self.basic_ops[0].weight
-
-    @weight.setter
-    def weight(self, value: Optional[torch.nn.Parameter]) -> None:
-        self.basic_ops[0].weight = value
-
-    @property
-    def bias(self) -> Optional[torch.nn.Parameter]:
-        """Bias tensor
-
-        Parameter is owned by `Bias` operation.
-
-        """
-        if self._has_bias:
-            return self.basic_ops[1].bias
-        return None
-
-    @bias.setter
-    def bias(self, value: Optional[torch.nn.Parameter]) -> None:
-        if self._has_bias:
-            self.basic_ops[1].bias = value
-        elif value is not None:
-            raise ValueError(
-                "Attempted to set bias parameter in Linear operation "
-                "that does not have bias enabled"
-            )
+    def register_parameter(self, name: str, param: Optional[torch.nn.Parameter]) -> None:
+        super().register_parameter(name, param)
+        if name == "weight":
+            self.basic_ops[self._linear_idx].weight = param
+        elif name == "bias":
+            if self._bias_idx is None:
+                if param is not None:
+                    raise ValueError(
+                        "Attempted to set bias parameter in Linear operation "
+                        "that does not have bias enabled"
+                    )
+            else:
+                self.basic_ops[self._bias_idx].bias = param
