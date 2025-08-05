@@ -2536,22 +2536,22 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 }
 
 void userbuffers_send_all(const int srchandler, const size_t srcoffset, const int dsthandler,
-                          const size_t dstoffset, const size_t bytes_per_slice, communicator *comm,
-                          cudaStream_t stream) {
-  for (int j = 1; j < comm->nvsize; j++) {
-    int i = (comm->myrank + j) % comm->nvsize;
-    int send_offset = srcoffset + bytes_per_slice * comm->myrank;
-    int recv_offset = dstoffset + bytes_per_slice * comm->myrank;
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream) {
+  for (int j = 1; j < tp_size; j++) {
+    int i = (tp_rank + j) % tp_size;
+    int send_offset = srcoffset + bytes_per_slice * tp_rank;
+    int recv_offset = dstoffset + bytes_per_slice * tp_rank;
     userbuffers_send(srchandler, send_offset, dsthandler, recv_offset, bytes_per_slice, comm, i,
                      stream);
   }
 }
 
 void userbuffers_recv_all(const int srchandler, const size_t srcoffset, const int dsthandler,
-                          const size_t dstoffset, const size_t bytes_per_slice, communicator *comm,
-                          cudaStream_t stream) {
-  for (int j = comm->nvsize - 1; j > 0; j--) {
-    int i = (comm->myrank + j) % comm->nvsize;
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream) {
+  for (int j = tp_size - 1; j > 0; j--) {
+    int i = (tp_rank + j) % tp_size;
     int send_offset = srcoffset + bytes_per_slice * i;
     int recv_offset = dstoffset + bytes_per_slice * i;
     userbuffers_recv(srchandler, send_offset, dsthandler, recv_offset, bytes_per_slice, comm, i,
