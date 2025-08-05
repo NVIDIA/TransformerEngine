@@ -9,8 +9,8 @@ from typing import Optional
 
 def next_iter_when_debug_should_be_run(quantizers) -> Optional[int]:
     """
-        Returns next iteration at which the debug should be run.
-        If debug will never be run for this layer, returns None.
+    Returns next iteration at which the debug should be run.
+    If debug will never be run for this layer, returns None.
     """
 
     out = None

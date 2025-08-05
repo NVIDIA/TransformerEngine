@@ -504,7 +504,9 @@ class DebugQuantizer(Quantizer):
         """Probably not needed for debug quantizer"""
         return None
 
-    def process_enabled_api_call(self, enabled_call_output: bool | Tuple[bool, Optional[int]]) -> bool:
+    def process_enabled_api_call(
+        self, enabled_call_output: bool | Tuple[bool, Optional[int]]
+    ) -> bool:
         """
         Process enabled API call output.
         Updates self.next_debug_iter field accordingly.
@@ -516,13 +518,13 @@ class DebugQuantizer(Quantizer):
         else:
             enabled_bool = enabled_call_output
             next_iter = self.iteration + 1
-        
+
         if self.next_debug_iter is None:
             self.next_debug_iter = next_iter
         elif next_iter is not None:
             # If next iter is None, that means that call will never be enabled.
             self.next_debug_iter = min(self.next_debug_iter, next_iter)
-        
+
         return enabled_bool
 
     def supports_only_rowwise_all_gather(self) -> bool:
