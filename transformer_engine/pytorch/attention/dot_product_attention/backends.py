@@ -21,6 +21,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
 )
 from transformer_engine.pytorch.utils import attention_mask_func
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
@@ -923,8 +924,7 @@ class FusedAttnFunc(torch.autograd.Function):
         qkv_layout,
         attn_bias_type,
         attn_mask_type,
-        window_size,
-        rng_gen,
+        window_size, rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
         fp8,
@@ -949,6 +949,17 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8, fp8_meta, quantizers, cp_specific_quantizers=False
             )
         )
+        for i,x in enumerate([
+            QKV_quantizer,
+            S_quantizer,
+            O_quantizer,
+            dO_quantizer,
+            dP_quantizer,
+            dQKV_quantizer,
+            ]):
+            names = ["QKV", "S", "O", "dO", "dP", "dQKV"]
+            if x is not None and torch.cuda.current_device()==0:
+                print(f'non-CP, {names[i]}, {x.scale}, {x.amax}, {x.dtype}')
 
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
@@ -958,6 +969,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
             is_input_fp8 = isinstance(q, Float8Tensor)
             q_fp8, k_fp8, v_fp8 = None, None, None
+            print(f'non-CP, {is_input_fp8=}, {is_output_fp8=}')
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
@@ -1607,10 +1619,18 @@ class FusedAttention(torch.nn.Module):
                 " is required for FP8 attention!"
             )
             assert fp8_meta is not None, "FP8 metadata fp8_meta is required for FP8 attention!"
-            assert not context_parallel or fp8_meta["recipe"].reduce_amax, (
-                "Amax reduction across TP+CP group is necessary when using context parallelism with"
-                " FP8!"
-            )
+            if fp8_meta["recipe"].delayed():
+                assert not context_parallel or fp8_meta["recipe"].reduce_amax, (
+                    "Amax reduction across TP+CP group is necessary when using context parallelism with"
+                    " FP8!"
+                )
+            #if fp8_meta["recipe"].float8_current_scaling() and context_parallel:
+            #    all_quantizers = dpa_utils.get_attention_quantizers(
+            #        fp8, fp8_meta, quantizers, cp_specific_quantizers=True
+            #    )
+            #    for q in all_quantizers:
+            #        if isinstance(q, Float8CurrentScalingQuantizer):
+            #            q.with_amax_reduction = True
 
         if context_parallel:
             assert (
