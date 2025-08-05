@@ -178,9 +178,9 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
-    #if dtype != "fp8" and fp8_mha:
+    # if dtype != "fp8" and fp8_mha:
     #    pytest.skip("Only fp8 works with fp8_mha=True!")
-    #if (dtype != "fp8" or not fp8_mha) and scaling_mode is not None:
+    # if (dtype != "fp8" or not fp8_mha) and scaling_mode is not None:
     #    pytest.skip("Only fp8 works with scaling_mode != None!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")

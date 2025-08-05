@@ -1801,7 +1801,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
         dP_quantizer.set_usage(rowwise=True, columnwise=False)
         dP_quantizer.interal = True
-    if True: #fp8_meta["recipe"].float8_current_scaling():
+    if True:  # fp8_meta["recipe"].float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
@@ -1809,7 +1809,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         # two options:
         # 1) convert to Float8Quantizer to keep track of dP.scale_inv based on dP.scale;
         #    need to think about amax reduction (DS reduction in CS scheme)
-        #dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
+        # dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
 
         # 2) use Float8CurrentScalingQuantizer but set scale to pre-selected value
         #    and update scale_inv in extension/attention.cpp

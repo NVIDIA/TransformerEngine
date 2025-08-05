@@ -245,7 +245,7 @@ def run_dpa_with_cp(
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
-        print('out ', out.dtype, out.__class__)
+        print("out ", out.dtype, out.__class__)
         if fp8_mha:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
@@ -305,9 +305,9 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         if scaling_mode == "delayed":
             core_attn.reset_fp8_meta_tensors()
-        #core_attn.fp8_meta_tensors_initialized = False
-        #core_attn.init_fp8_meta_tensors()
-        #FP8GlobalStateManager.reset()
+        # core_attn.fp8_meta_tensors_initialized = False
+        # core_attn.init_fp8_meta_tensors()
+        # FP8GlobalStateManager.reset()
         else:
             core_attn.fp8_meta_tensors_initialized = False
             core_attn.init_fp8_meta_tensors(fp8_recipe)
@@ -424,8 +424,8 @@ def run_dpa_with_cp(
         return torch.sqrt((a - b).square().mean()).item()
 
     def _error(a, b):
-        print('with cp   ', a.reshape(-1)[:16])
-        print('without cp', b.reshape(-1)[:16])
+        print("with cp   ", a.reshape(-1)[:16])
+        print("without cp", b.reshape(-1)[:16])
         if dtype != "fp8":
             torch.testing.assert_close(a, b, **tols)
         else:
@@ -436,23 +436,30 @@ def run_dpa_with_cp(
 
             rmse = _rmse(a, b)
             rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-            #assert (
+            # assert (
             #    rmse < rmse_tol * rmse_range
-            #), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            # ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
             #    rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-            #)
+            # )
 
     if qkv_format == "bshd":
         count = 0
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-            if torch.cuda.current_device()==0:
-                print(f'count {count}')
+            if torch.cuda.current_device() == 0:
+                print(f"count {count}")
                 _error(a[:, 0], b[:, 0])
                 _error(a[:, 1], b[:, 1])
                 count += 2
     elif qkv_format == "sbhd":
-        #for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-        for a, b in zip([out_, ], [out, ]):
+        # for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+        for a, b in zip(
+            [
+                out_,
+            ],
+            [
+                out,
+            ],
+        ):
             _error(a[0], b[0])
             _error(a[1], b[1])
     elif qkv_format == "thd":

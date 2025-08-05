@@ -1580,10 +1580,10 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 model_configs_fp8_vs_f16 = {
     #  test:             b,   sq, hq,   d
     "fp8_9": ModelConfig(2, 2048, 16, 128),
-    #"fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
+    # "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
     "fp8_10": ModelConfig(1, 4096, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
     "fp8_11": ModelConfig(1, 4096, 32, 128, max_seqlen_kv=2048, num_gqa_groups=8),
-    #"fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
+    # "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
     "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
     "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
     "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
@@ -1621,7 +1621,7 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     rmse = _rmse(a, b)
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    #if '2' in name_a or '1' in name_a:
+    # if '2' in name_a or '1' in name_a:
     #    assert rmse < rmse_tol * rmse_range, (
     #        name_a
     #        + " vs "
