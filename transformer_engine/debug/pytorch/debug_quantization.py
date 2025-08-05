@@ -23,7 +23,6 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
 )
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.debug.pytorch.utils import _as_pair
 
 aten = torch.ops.aten
 
@@ -109,14 +108,13 @@ class DebugQuantizer(Quantizer):
         """
         import nvdlfw_inspect.api as debug_api
 
-        inspect_tensor_enabled, next_iter = _as_pair(
+        inspect_tensor_enabled = self.process_enabled_api_call(
             debug_api.transformer_engine.inspect_tensor_enabled(
                 layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
             )
         )
-        self.update_next_iter(next_iter)
 
-        modify_enabled, next_iter = _as_pair(
+        modify_enabled = self.process_enabled_api_call(
             debug_api.transformer_engine.modify_tensor_enabled(
                 layer_name=self.layer_name,
                 gemm=self.rowwise_gemm_name,
@@ -124,7 +122,6 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
             )
         )
-        self.update_next_iter(next_iter)
 
         plan = API_CALL_MODIFY if modify_enabled else HIGH_PRECISION
 
@@ -136,14 +133,13 @@ class DebugQuantizer(Quantizer):
         """
         import nvdlfw_inspect.api as debug_api
 
-        inspect_tensor_enabled, next_iter = _as_pair(
+        inspect_tensor_enabled = self.process_enabled_api_call(
             debug_api.transformer_engine.inspect_tensor_enabled(
                 layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
             )
         )
-        self.update_next_iter(next_iter)
 
-        inspect_tensor_postquantize_enabled_rowwise, next_iter = _as_pair(
+        inspect_tensor_postquantize_enabled_rowwise = self.process_enabled_api_call(
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
                 tensor_name=self.tensor_name,
@@ -151,9 +147,8 @@ class DebugQuantizer(Quantizer):
                 gemm=self.rowwise_gemm_name,
             )
         )
-        self.update_next_iter(next_iter)
 
-        inspect_tensor_postquantize_enabled_columnwise, next_iter = _as_pair(
+        inspect_tensor_postquantize_enabled_columnwise = self.process_enabled_api_call(
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
                 layer_name=self.layer_name,
                 tensor_name=self.tensor_name,
@@ -161,7 +156,6 @@ class DebugQuantizer(Quantizer):
                 gemm=self.columnwise_gemm_name,
             )
         )
-        self.update_next_iter(next_iter)
 
         return (
             inspect_tensor_enabled,
@@ -180,7 +174,7 @@ class DebugQuantizer(Quantizer):
         rowwise_plan = None
         columnwise_plan = None
 
-        modify_rowwise, next_iter = _as_pair(
+        modify_rowwise = self.process_enabled_api_call(
             debug_api.transformer_engine.modify_tensor_enabled(
                 layer_name=self.layer_name,
                 gemm=self.rowwise_gemm_name,
@@ -188,20 +182,18 @@ class DebugQuantizer(Quantizer):
                 iteration=self.iteration,
             )
         )
-        self.update_next_iter(next_iter)
 
         if modify_rowwise:
             rowwise_plan = API_CALL_MODIFY
         else:
             if self.parent_quantizer is not None:
-                fp8_quantize, next_iter = _as_pair(
+                fp8_quantize = self.process_enabled_api_call(
                     debug_api.transformer_engine.fp8_gemm_enabled(
                         layer_name=self.layer_name,
                         gemm=self.rowwise_gemm_name,
                         iteration=self.iteration,
                     )
                 )
-                self.update_next_iter(next_iter)
 
                 if fp8_quantize:
                     rowwise_plan = STANDARD_FP8_QUANTIZE
@@ -209,7 +201,7 @@ class DebugQuantizer(Quantizer):
             rowwise_plan = HIGH_PRECISION
 
         if self.columnwise_gemm_name is not None:
-            modify_columnwise, next_iter = _as_pair(
+            modify_columnwise = self.process_enabled_api_call(
                 debug_api.transformer_engine.modify_tensor_enabled(
                     layer_name=self.layer_name,
                     gemm=self.columnwise_gemm_name,
@@ -217,20 +209,19 @@ class DebugQuantizer(Quantizer):
                     iteration=self.iteration,
                 )
             )
-            self.update_next_iter(next_iter)
 
             if modify_columnwise:
                 columnwise_plan = API_CALL_MODIFY
             else:
                 if self.parent_quantizer is not None:
-                    fp8_quantize, next_iter = _as_pair(
+                    fp8_quantize = self.process_enabled_api_call(
                         debug_api.transformer_engine.fp8_gemm_enabled(
                             layer_name=self.layer_name,
                             gemm=self.columnwise_gemm_name,
                             iteration=self.iteration,
                         )
                     )
-                    self.update_next_iter(next_iter)
+                    self.process_enabled_api_call(next_iter)
 
                     if fp8_quantize:
                         columnwise_plan = STANDARD_FP8_QUANTIZE
@@ -505,7 +496,7 @@ class DebugQuantizer(Quantizer):
     def get_next_debug_iter(self) -> Optional[int]:
         """
         Returns the next iteration for which the debug is enabled for this tensor.
-        If the next iteration is inf, then the debug is not enabled for this tensor.
+        If the next iteration is None, then the debug is not enabled for this tensor.
         """
         return self.next_debug_iter
 
@@ -513,20 +504,26 @@ class DebugQuantizer(Quantizer):
         """Probably not needed for debug quantizer"""
         return None
 
-    def update_next_iter(self, next_iter: Optional[int]):
+    def process_enabled_api_call(self, enabled_call_output: bool | Tuple[bool, Optional[int]]) -> bool:
         """
-        If there is _enabled API that returned some next_iter,
-        this function updates the next_debug_iter field accordingly.
+        Process enabled API call output.
+        Updates self.next_debug_iter field accordingly.
+        Return the bool representing if the API call is enabled.
         """
-        if next_iter == -1:
-            # If api returned only bool, then we do not know when it will be enabled next time,
-            # so we need to run debug quantizer next time to check if it will be enabled.
+        if isinstance(enabled_call_output, tuple):
+            assert len(enabled_call_output) == 2, "Expected a tuple of length 2"
+            enabled_bool, next_iter = enabled_call_output
+        else:
+            enabled_bool = enabled_call_output
             next_iter = self.iteration + 1
+        
         if self.next_debug_iter is None:
             self.next_debug_iter = next_iter
         elif next_iter is not None:
             # If next iter is None, that means that call will never be enabled.
             self.next_debug_iter = min(self.next_debug_iter, next_iter)
+        
+        return enabled_bool
 
     def supports_only_rowwise_all_gather(self) -> bool:
         if self.parent_quantizer is not None:

@@ -1384,6 +1384,8 @@ def gather_along_first_dim(
                 )
             out_obj.columnwise_gemm_tensor = columnwise_total
         else:
+            # Sometimes the same object is used both for rowwise and columnwise gemms,
+            # and we want to avoid double all-gathers.
             out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
 
         return out_obj, None

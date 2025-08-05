@@ -600,7 +600,6 @@ class _Linear(torch.autograd.Function):
                             and quantizer.supports_only_rowwise_all_gather()
                         ):
                             # All-gather is not supported with FP8 column-wise data
-                            print("x")
                             quantizer.set_usage(rowwise=True, columnwise=False)
                         else:
                             quantizer.set_usage(rowwise=True, columnwise=True)
@@ -615,8 +614,6 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.input_quantizer
                     if quantizer.supports_only_rowwise_all_gather():
-                        print("y")
-                        print(quantizer)
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     else:

@@ -477,9 +477,10 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 run_current = any(
                     feature_output[0] for feature_output in multi_feature_outputs.values()
                 )
-                next_iter = min(
-                    feature_output[1] for feature_output in multi_feature_outputs.values()
-                )
+                next_iter = None
+                for feature_output in multi_feature_outputs.values():
+                    if feature_output[1] is not None:
+                        next_iter = min(next_iter, feature_output[1])
                 return run_current, next_iter
             run_current = any(feature_output for feature_output in multi_feature_outputs.values())
             return run_current, None

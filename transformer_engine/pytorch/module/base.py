@@ -565,7 +565,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
         self.name = None
-        self.next_iter_when_debug_should_be_run = None
+        self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
         self.fp8_calibration = False
@@ -1432,14 +1432,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # maybe in previous iterations debug features returned information
         # that no feature will be active for this layer for multiple next iterations.
         started_new_iteration = TEDebugState.get_iteration() != getattr(
-            self, "debug_last_iteration_name", None
+            self, "debug_last_iteration", None
         )
-        if self.next_iter_when_debug_should_be_run is not None and started_new_iteration:
-            if self.next_iter_when_debug_should_be_run is False:
-                debug = False
-            else:
-                debug = TEDebugState.get_iteration() == self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration_name = TEDebugState.get_iteration()
+        if started_new_iteration:
+            debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
+        self.debug_last_iteration = TEDebugState.get_iteration()
         return debug
 
     def no_debug_features_active(self, quantizers):
