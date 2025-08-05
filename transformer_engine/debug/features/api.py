@@ -146,7 +146,7 @@ class TEDefaultFeatures:
     ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
-        It has **higher priority** than fp8_gemm; if *modify_tensor_enabled* returns True or (True, next_enabled_iter), 
+        It has **higher priority** than fp8_gemm; if *modify_tensor_enabled* returns True or (True, next_enabled_iter),
         then modify_tensor call is invoked for the respective tensor no matter what.
 
         This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
@@ -317,7 +317,7 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> bool | Tuple[bool, Optional[int]]:
         """
-        It is a routing call, which is run at the initialization of the layer. 
+        It is a routing call, which is run at the initialization of the layer.
         Determines if *inspect_tensor* for a given GEMM and tensor will be invoked.
 
         This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
@@ -360,7 +360,7 @@ class TEDefaultFeatures:
         Returning the next enabled iteration can help optimize CPU usage,
         especially when the interval between inspect_tensor_postquantize is large.
         Returning only a bool is deprecated.
-        
+
         Parameters
         ----------
 
