@@ -134,7 +134,7 @@ class FakeQuant(TEConfigAPIMapper):
         self, config, layer_name: str, tensor_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run process_tensor() in the forward."""
-        return True
+        return True, iteration + 1
 
     @api_method
     def modify_tensor(

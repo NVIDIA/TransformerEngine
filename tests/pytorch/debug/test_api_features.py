@@ -24,7 +24,7 @@ def test_transformer_engine_no_config(feature_dirs):
         # FP8 enabled - true by the default
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
 
         # modify_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.modify_tensor_enabled(
@@ -51,24 +51,24 @@ def test_disable_fp8_gemm(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
 
         # caching
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
 
     finally:
         debug_api.end_debug()
@@ -80,22 +80,22 @@ def test_disable_fp8_layer(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="wgrad", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="wgrad", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.attn.qkv", gemm="dgrad", iteration=0
-        )
+        )[0]
 
     finally:
         debug_api.end_debug()
@@ -111,13 +111,13 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
         # check modify_tensor_enabled
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="weight", iteration=0
-        )
+        )[0]
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="gradient", iteration=0
-        )
+        )[0]
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="weight", iteration=0
         )[0]
@@ -191,11 +191,11 @@ def test_fake_quant(configs_dir, feature_dirs):
         # modify_tensor_enabled
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="fprop", tensor_name="activation", iteration=0
-        )
+        )[0]
 
         assert debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1", gemm="dgrad", tensor_name="gradient", iteration=0
-        )
+        )[0]
 
         # modify_tensor
         debug_api.transformer_engine.modify_tensor(
@@ -218,11 +218,11 @@ def test_fake_quant(configs_dir, feature_dirs):
 
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.fc2", gemm="wgrad", iteration=0
-        )
+        )[0]
         # caching
         assert debug_api.transformer_engine.fp8_gemm_enabled(
             "decoder.1.fc2", gemm="wgrad", iteration=0
-        )
+        )[0]
     finally:
         debug_api.end_debug()
 

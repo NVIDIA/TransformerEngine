@@ -1435,7 +1435,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self, "debug_last_iteration", None
         )
         if started_new_iteration:
-            debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
+            if self.next_iter_when_debug_should_be_run is None:
+                debug = False
+            else:
+                debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
         self.debug_last_iteration = TEDebugState.get_iteration()
         return debug
 
