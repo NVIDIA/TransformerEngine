@@ -155,7 +155,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14)
+    impl_static_args = (6, 7, 8, 9, 10, 11, 12)
     inner_primitive = None
     outer_primitive = None
 
@@ -169,15 +169,13 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
         grad,
         use_split_accumulator,
     ):
-        del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
+        del use_split_accumulator
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -313,15 +311,13 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
         grad,
         use_split_accumulator,
     ):
-        del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype
+        del out_dtype
 
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -363,8 +359,6 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -379,14 +373,14 @@ class GemmPrimitive(BasePrimitive):
             lhs_scale_inv,
             scaling_mode,
             lhs.shape,
-            is_colwise=lhs_quantized_colwise,
+            is_colwise=lhs_transposed,
             flatten_axis=max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
         )
         rhs_scale_inv = apply_padding_to_scale_inv(
             rhs_scale_inv,
             scaling_mode,
             rhs.shape,
-            is_colwise=rhs_quantized_colwise,
+            is_colwise=not rhs_transposed,
             flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
         )
 
@@ -399,8 +393,6 @@ class GemmPrimitive(BasePrimitive):
             gelu_input,
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
-            lhs_quantized_colwise=lhs_quantized_colwise,
-            rhs_quantized_colwise=rhs_quantized_colwise,
             scaling_mode=scaling_mode,
             fuse_bias=fuse_bias,
             fuse_gelu=fuse_gelu,
@@ -415,8 +407,6 @@ class GemmPrimitive(BasePrimitive):
         batch_dims,
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -445,8 +435,6 @@ class GemmPrimitive(BasePrimitive):
                 *batched_args,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
-                lhs_quantized_colwise=lhs_quantized_colwise,
-                rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
@@ -533,8 +521,6 @@ class GemmPrimitive(BasePrimitive):
     def infer_sharding_from_operands(
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -546,8 +532,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del (
             out_dtype,
-            lhs_quantized_colwise,
-            rhs_quantized_colwise,
             scaling_mode,
             grad,
         )
@@ -574,8 +558,6 @@ class GemmPrimitive(BasePrimitive):
     def partition(
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -638,8 +620,6 @@ class GemmPrimitive(BasePrimitive):
                 gelu_input,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
-                lhs_quantized_colwise=lhs_quantized_colwise,
-                rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
@@ -659,8 +639,6 @@ class GemmPrimitive(BasePrimitive):
     def shardy_sharding_rule(
         out_dtype,
         contracting_dims,
-        lhs_quantized_colwise,
-        rhs_quantized_colwise,
         scaling_mode,
         fuse_bias,
         fuse_gelu,
@@ -670,7 +648,7 @@ class GemmPrimitive(BasePrimitive):
         operand_types,
         result_types,
     ):
-        del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype, grad, use_split_accumulator
+        del out_dtype, grad, use_split_accumulator
         del mesh, result_types
 
         prefix = "GemmPrimitive_"
@@ -814,8 +792,6 @@ def _te_gemm(
         gelu_input,
         out_dtype=out_dtype,
         contracting_dims=(lhs_cdims, rhs_cdims),
-        lhs_quantized_colwise=lhs_q.is_colwise if isinstance(lhs_q, ScaledTensor) else False,
-        rhs_quantized_colwise=rhs_q.is_colwise if isinstance(rhs_q, ScaledTensor) else False,
         scaling_mode=scaling_mode,
         fuse_bias=fuse_bias,
         fuse_gelu=fuse_gelu,
