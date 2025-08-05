@@ -23,7 +23,6 @@ from .quantize import (
 )
 
 
-
 def dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
@@ -69,7 +68,14 @@ def dense(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5,))
+@partial(
+    jax.custom_vjp,
+    nondiff_argnums=(
+        3,
+        4,
+        5,
+    ),
+)
 def _dense(
     x,
     kernel,

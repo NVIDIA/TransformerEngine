@@ -427,8 +427,10 @@ class GemmPrimitive(BasePrimitive):
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Batched GEMM is not supported
-        assert lhs_bdims is None and rhs_bdims is None, f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
-        out_bdims = (None,) 
+        assert (
+            lhs_bdims is None and rhs_bdims is None
+        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
+        out_bdims = (None,)
 
         # Bias gradient is never batched
         bias_bdims = (None,)
@@ -686,6 +688,7 @@ class GemmPrimitive(BasePrimitive):
                     dim_name = f"{name}_l{dim_idx}"
                 specs.append(prefix + dim_name)
             return specs
+
         lhs, _, rhs, *_ = operand_types
         operand_ndims = (len(lhs.shape), len(rhs.shape))
         (lhs_cdims, rhs_cdims) = map(sanitize_dims, operand_ndims, contracting_dims)

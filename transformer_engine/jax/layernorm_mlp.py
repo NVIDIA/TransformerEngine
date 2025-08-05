@@ -30,6 +30,7 @@ from .quantize import (
     TensorUsage,
 )
 
+
 def layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
