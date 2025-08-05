@@ -861,9 +861,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         ub_obj_fc2_dgrad.get_communication_stream()
                     )
 
-                    ub_obj_fc2_wgrad = None
-                    if ctx.ub_overlap_ag:
-                        ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
+                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
 
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 

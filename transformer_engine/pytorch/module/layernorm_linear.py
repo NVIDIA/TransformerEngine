@@ -765,9 +765,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     # Get the communication stream from the dgrad GEMM to use for the AG
                     dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
 
-                    ub_obj_wgrad = None
-                    if ctx.ub_overlap_ag:
-                        ub_obj_wgrad = get_ub("wgrad")
+                    # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad")
 
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -776,7 +775,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # so we dont need to add any syncs yet.
                     with torch.cuda.stream(dgrad_send_stream):
                         grad_output, _ = fill_userbuffers_buffer_for_all_gather(
-                            ub_obj_wgrad,
+                            ub_obj_overlap_wgrad,
                             grad_outputs[0],
                             ctx.grad_output_quantizer,
                             ctx.tp_group,
@@ -784,7 +783,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                     tex.bulk_overlap_ag_with_external_gemm(
-                        grad_outputs[0], ub_obj_wgrad, dgrad_send_stream, dgrad_recv_stream
+                        grad_outputs[0], ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
                 # Prepare input tensor

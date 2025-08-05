@@ -749,10 +749,8 @@ class _Linear(torch.autograd.Function):
                     # Get the communication stream from the dgrad GEMM to use for the AG
                     dgrad_send_stream, dgrad_recv_stream = ub_obj_dgrad.get_communication_stream()
 
-                    # Note the different name to not conflict with the object for bulk overlap
-                    ub_obj_overlap_wgrad = None
-                    if ctx.ub_overlap_ag:
-                        ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad")
+                    # This object is separate from the ub_obj_wgrad object which is passed to the GEMM
+                    ub_obj_overlap_wgrad = get_ub(ctx.ub_name + "_wgrad")
 
                     ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
