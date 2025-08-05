@@ -88,7 +88,7 @@ struct SimpleTensor {
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
