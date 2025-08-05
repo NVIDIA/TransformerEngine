@@ -288,6 +288,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<4>(info.param).first) + "X" +
       std::to_string(std::get<4>(info.param).second) + "X" +
       std::to_string(std::get<5>(info.param)) + "X" +
-      std::to_string(std::get<6>(info.param));
+      std::to_string(std::get<6>(info.param)) + "X" +
+      std::to_string(std::get<7>(info.param));
     return name;
   });
