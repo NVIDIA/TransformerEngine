@@ -258,7 +258,7 @@ def _layernorm_mlp_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
-    del kernel_2_axes
+    del kernel_1_axes, kernel_2_axes
 
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
