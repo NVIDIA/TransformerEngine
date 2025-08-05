@@ -13,7 +13,6 @@ The implementation supports various normalization types, activation functions,
 quantization, and distributed training through sharding constraints.
 """
 
-import warnings
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
 

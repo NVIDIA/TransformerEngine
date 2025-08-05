@@ -9,7 +9,6 @@ architectures. It supports various normalization types, quantization, and
 distributed training through sharding constraints.
 """
 
-import warnings
 from functools import partial
 from typing import Tuple
 

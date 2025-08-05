@@ -8,7 +8,7 @@ architectures, including support for quantization and automatic differentiation.
 It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
 """
-import warnings
+
 from typing import Tuple, Sequence
 from functools import partial
 import jax
