@@ -1205,7 +1205,6 @@ class LayerNormMLP(TransformerEngineBase):
                     quantizer_set=ffn1_quantizer_set,
                 )
 
-
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (
                     kernel_1_each_shape[: len(axis)],
