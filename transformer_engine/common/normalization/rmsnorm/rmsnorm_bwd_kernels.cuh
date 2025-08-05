@@ -127,7 +127,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
         idx += Ktraits::VEC_COLS_PER_LDG;
       }
     }
-    
+
     reduce_t result = reducer.allreduce({0, mdyy_local}, sum);
     mdyy_local = Get<1>::of<reduce_t, compute_t>(result) * rn;
 

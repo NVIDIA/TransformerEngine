@@ -21,6 +21,7 @@ from transformer_engine.pytorch.ops.op import (
 from ...utils import clear_tensor_data
 from .._common import maybe_dequantize
 
+
 class BackwardAddRMSNorm(FusedOperation):
     """Fused backward RMNorm + add"""
 
@@ -77,6 +78,7 @@ class BackwardAddRMSNorm(FusedOperation):
         grad_weight = dw.view(weight_dims)
 
         return grad_input, [(grad_weight,), ()], [(), ()]
+
 
 def fuse_backward_add_rmsnorm(
     ops: list[tuple[FusibleOperation, list[int]]],

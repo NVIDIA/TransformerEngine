@@ -156,10 +156,9 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
 template <>
 void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                        void* mean_dptr, void* rsigma_dptr,
-                                                       void* dx_dptr, void* dz_dptr,
-                                                       void* add_dptr, void* dbeta_dptr,
-                                                       void* dgamma_dptr, void* workspace_dptr,
-                                                       cudaStream_t stream) {
+                                                       void* dx_dptr, void* dz_dptr, void* add_dptr,
+                                                       void* dbeta_dptr, void* dgamma_dptr,
+                                                       void* workspace_dptr, cudaStream_t stream) {
   NVTE_ERROR("Forward normalization should not call the backward execute function!");
 }
 
