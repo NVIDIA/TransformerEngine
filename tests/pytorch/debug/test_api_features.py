@@ -26,17 +26,17 @@ def test_transformer_engine_no_config(feature_dirs):
             "decoder.1.attn.qkv", gemm="fprop", iteration=0
         )
 
-        # modify_tensor_enabled - (False, float("inf")) by default
+        # modify_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
         )[0]
 
-        # inspect_tensor_enabled - (False, float("inf")) by default
+        # inspect_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.attn.qkv", tensor_name="activation", iteration=0
         )[0]
 
-        # inspect_tensor_postquantize - (False, float("inf")) by default
+        # inspect_tensor_postquantize - (False, None) by default
         assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
             "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
         )[0]

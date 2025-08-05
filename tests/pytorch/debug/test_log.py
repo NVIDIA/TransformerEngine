@@ -15,11 +15,12 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
-def test_log_every_3_layers(layer, configs_dir, feature_dirs):
+def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
     # If layer does not invoke any feature in current iteration,
     # then it changed into non-debug mode.
     # This test checks whether this works correctly -
-    # layer should be logged every 3 iterations.
+    # non-quantized statistics should be logged every 3 iterations,
+    # and quantized statistics should be logged every 5 iterations.
     with tempfile.TemporaryDirectory() as temp_dir:
         debug_api.initialize(
             config_file=configs_dir + "/log_config.yaml",
@@ -49,7 +50,7 @@ def test_log_every_3_layers(layer, configs_dir, feature_dirs):
         ) as f:
             file_content = f.read()
             for i in range(1, 11):
-                if i % 3 == 0:
+                if i % 3 == 0 or i % 5 == 0:
                     assert f"iteration={i:06d}" in file_content
                 else:
                     assert f"iteration={i:06d}" not in file_content

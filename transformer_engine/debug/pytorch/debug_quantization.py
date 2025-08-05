@@ -221,7 +221,6 @@ class DebugQuantizer(Quantizer):
                             iteration=self.iteration,
                         )
                     )
-                    self.process_enabled_api_call(next_iter)
 
                     if fp8_quantize:
                         columnwise_plan = STANDARD_FP8_QUANTIZE

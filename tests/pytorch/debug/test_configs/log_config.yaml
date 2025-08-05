@@ -15,5 +15,5 @@ test:
       tensors: weight
       stats: [underflows%]
       start_step: 1
-      freq: 3
+      freq: 5
   

@@ -127,7 +127,7 @@ class FakeQuant(TEConfigAPIMapper):
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for selecting between high-precision and FP8 GEMM execution."""
-        return False
+        return False, None
 
     @api_method
     def modify_tensor_enabled(

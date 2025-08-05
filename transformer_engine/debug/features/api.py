@@ -132,7 +132,7 @@ class TEDefaultFeatures:
         Returns
         -------
 
-        bool - default is True
+        Union[bool, Tuple[bool, Optional[int]]] - default is (True, None)
         """
         return True, None  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
@@ -146,11 +146,13 @@ class TEDefaultFeatures:
     ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name.
-        It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+        It has **higher priority** than fp8_gemm; if *modify_tensor_enabled* returns True or (True, next_enabled_iter), 
+        then modify_tensor call is invoked for the respective tensor no matter what.
 
         This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
         It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between modify_tensor is large.
+        Returning only a bool is deprecated.
 
         Parameters
         ----------
@@ -281,7 +283,7 @@ class TEDefaultFeatures:
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
         """
-        Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
+        Similar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
         ----------
@@ -315,11 +317,13 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> bool | Tuple[bool, Optional[int]]:
         """
-        It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
+        It is a routing call, which is run at the initialization of the layer. 
+        Determines if *inspect_tensor* for a given GEMM and tensor will be invoked.
 
         This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
         It can return (bool, None) if the feature will never be enabled for that layer and tensor.
         Returning the next enabled iteration can help optimize CPU usage, especially when the interval between inspect_tensor is large.
+        Returning only a bool is deprecated.
 
         Parameters
         ----------
@@ -349,14 +353,14 @@ class TEDefaultFeatures:
     ) -> bool | Tuple[bool, Optional[int]]:
         """
         It is a routing call, which is run at the initialization of the layer.
-        If it returns true, then *inspect_tensor_postquantize* for
-        a given GEMM and tensor will be invoked.
+        Determines if *inspect_tensor_postquantize* for a given GEMM and tensor will be invoked.
 
         This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
         It can return (bool, None) if the feature will never be enabled for that layer, gemm and tensor name.
         Returning the next enabled iteration can help optimize CPU usage,
         especially when the interval between inspect_tensor_postquantize is large.
-
+        Returning only a bool is deprecated.
+        
         Parameters
         ----------
 
