@@ -15,12 +15,12 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from ..dense import dense, _issue_batch_first_warning as _dense_warning
+from ..dense import dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
-from ..layernorm_dense import layernorm_dense, _issue_batch_first_warning as _ln_dense_warning
-from ..layernorm_mlp import layernorm_mlp, _issue_batch_first_warning as _ln_mlp_warning
+from ..layernorm_dense import layernorm_dense
+from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -414,8 +414,6 @@ class DenseGeneral(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
-    sequence_parallel_output: bool, default = False
-        Produce a sequence-parallel output with the first non-batch dimension sharded over
 
     Optimization parameters
     -----------------------
@@ -440,15 +438,8 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
-    sequence_parallel_output: bool = False
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _dense_warning(
-                "TE/JAX DenseGeneral() module does not officially support sequence-first inputs "
-                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
-                "sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype
@@ -513,7 +504,6 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
-            sequence_parallel_output=self.sequence_parallel_output,
         )
 
         if self.enable_low_rank_adaptation:
@@ -666,12 +656,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     depth_scaling: float = None
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _ln_dense_warning(
-                "TE/JAX LayerNormDenseGeneral() module does not officially support sequence-first "
-                "inputs and may produce incorrect results when `transpose_batch_sequence=True`. "
-                "Use sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0,
@@ -989,12 +973,6 @@ class LayerNormMLP(TransformerEngineBase):
     ffn2_ckpt_name: str = "ffn2"
 
     def __post_init__(self):
-        if self.transpose_batch_sequence:
-            _ln_mlp_warning(
-                "TE/JAX LayerNormMLP() module does not officially support sequence-first inputs "
-                "and may produce incorrect results when `transpose_batch_sequence=True`. Use "
-                "sequence-first inputs at your own discretion."
-            )
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "truncated_normal", dtype=self.dtype

@@ -155,7 +155,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+    impl_static_args = (6, 7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -169,7 +169,6 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -177,14 +176,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, use_split_accumulator
-        del (
-            sequence_parallel_output,
-            sequence_dim,
-        )
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -206,27 +199,6 @@ class GemmPrimitive(BasePrimitive):
             "cuBLAS GEMM expected consecutive contracting dimensions for RHS operand, but got "
             f"{rhs_contracting_dims}."
         )
-
-        (
-            lhs_batch_dims,
-            rhs_batch_dims,
-        ) = map(sanitize_dims, operand_ndims, batched_dims)
-        assert _dims_are_consecutive(lhs_batch_dims), (
-            "cuBLAS GEMM expected consecutive batch dimensions for LHS operand, but got "
-            f"{lhs_batch_dims}."
-        )
-        assert _dims_are_consecutive(rhs_batch_dims), (
-            "cuBLAS GEMM expected consecutive batch dimensions for RHS operand, but got "
-            f"{rhs_batch_dims}."
-        )
-        if len(lhs_batch_dims) == 0:
-            assert (
-                len(rhs_batch_dims) == 0
-            ), "cuBLAS GEMM RHS operand cannot be batched if LHS operand is not batched."
-        elif len(rhs_batch_dims) != 0:
-            assert all(bdim in lhs_contracting_dims for bdim in lhs_batch_dims) and all(
-                bdim in rhs_contracting_dims for bdim in rhs_batch_dims
-            ), "cuBLAS GEMM batched dimensions must be contracting when both operands are batched."
 
         lhs_contracting_size, rhs_contracting_size = map(
             lambda shape, dims: reduce(operator.mul, [shape[dim] for dim in dims]),
@@ -341,7 +313,6 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -349,11 +320,8 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
     ):
-        del batched_dims, lhs_quantized_colwise, rhs_quantized_colwise, out_dtype
-        del sequence_parallel_output, sequence_dim
+        del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype
 
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -395,7 +363,6 @@ class GemmPrimitive(BasePrimitive):
         gelu_input,
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -403,8 +370,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
     ):
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
@@ -434,7 +399,6 @@ class GemmPrimitive(BasePrimitive):
             gelu_input,
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
-            batched_dims=batched_dims,
             lhs_quantized_colwise=lhs_quantized_colwise,
             rhs_quantized_colwise=rhs_quantized_colwise,
             scaling_mode=scaling_mode,
@@ -442,18 +406,15 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
-            sequence_parallel_output=sequence_parallel_output,
-            sequence_dim=sequence_dim,
         )
         return outputs[:-3]  # discard workspace arrays
 
     @staticmethod
     def batcher(
         batched_args,
-        jax_batch_dims,
+        batch_dims,
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -461,28 +422,13 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
     ):
         assert GemmPrimitive.outer_primitive is not None
-        lhs, _, rhs, *_ = batched_args
-        lhs_bdims, _, rhs_bdims, *_ = jax_batch_dims
-        arg_lhs_bdims, arg_rhs_bdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), batched_dims)
-        arg_lhs_bdims = (None,) if len(arg_lhs_bdims) == 0 else arg_lhs_bdims
-        assert all(bdim == arg_bdim for bdim, arg_bdim in zip(lhs_bdims, arg_lhs_bdims)), (
-            "User-specified batch dimension(s) for cuBLAS GEMM LHS operand does not match batch "
-            f"dimensions inferred by JAX/XLA, expected {lhs_bdims} but got {arg_lhs_bdims}."
-        )
-        arg_rhs_bdims = (None,) if len(arg_rhs_bdims) == 0 else arg_rhs_bdims
-        assert all(bdim == arg_bdim for bdim, arg_bdim in zip(rhs_bdims, arg_rhs_bdims)), (
-            "User-specified batch dimension(s) for cuBLAS GEMM RHS operand does not match batch "
-            f"dimensions inferred by JAX/XLA, expected {lhs_bdims} but got {arg_lhs_bdims}."
-        )
+        lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
-        # Output is batched like the non-contracting batch dimensions of the LHS operand
-        lhs_cdims = sanitize_dims(lhs.ndim, contracting_dims)
-        lhs_non_contracting_bdims = tuple(dim for dim in lhs_bdims if dim not in lhs_cdims)
-        out_bdims = (None,) if len(lhs_non_contracting_bdims) == 0 else lhs_non_contracting_bdims
+        # Batched GEMM is not supported
+        assert lhs_bdims is None and rhs_bdims is None, f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
+        out_bdims = (None,) 
 
         # Bias gradient is never batched
         bias_bdims = (None,)
@@ -497,7 +443,6 @@ class GemmPrimitive(BasePrimitive):
                 *batched_args,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
-                batched_dims=batched_dims,
                 lhs_quantized_colwise=lhs_quantized_colwise,
                 rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
@@ -505,8 +450,6 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                sequence_parallel_output=sequence_parallel_output,
-                sequence_dim=sequence_dim,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -515,11 +458,7 @@ class GemmPrimitive(BasePrimitive):
     def _parse_operand_output_specs(
         arg_infos,
         contracting_dims,
-        batched_dims,
-        sequence_parallel_output,
-        sequence_dim,
     ):
-        del sequence_dim, sequence_parallel_output, batched_dims
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
@@ -586,14 +525,12 @@ class GemmPrimitive(BasePrimitive):
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
             (out_specs, bias_specs, gelu_specs),
             reduce_spec,
-            0,
         )
 
     @staticmethod
     def infer_sharding_from_operands(
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -601,8 +538,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
         mesh,
         arg_infos,
         result_infos,
@@ -616,14 +551,8 @@ class GemmPrimitive(BasePrimitive):
         )
         del use_split_accumulator, result_infos
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(
-                arg_infos,
-                contracting_dims,
-                batched_dims,
-                sequence_parallel_output,
-                sequence_dim,
-            )
+        (_, (out_specs, dbias_specs, pre_gelu_specs), _) = (
+            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims)
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -643,7 +572,6 @@ class GemmPrimitive(BasePrimitive):
     def partition(
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -651,8 +579,6 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
         mesh,
         arg_infos,
         result_infos,
@@ -663,14 +589,7 @@ class GemmPrimitive(BasePrimitive):
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
             reduce_spec,
-            _,
-        ) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos,
-            contracting_dims,
-            batched_dims,
-            sequence_parallel_output,
-            sequence_dim,
-        )
+        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims)
 
         # Assemble argument shardings
         # NOTE: Block scale inverses match their operands, but tensor scale inverses are unsharded.
@@ -717,7 +636,6 @@ class GemmPrimitive(BasePrimitive):
                 gelu_input,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
-                batched_dims=batched_dims,
                 lhs_quantized_colwise=lhs_quantized_colwise,
                 rhs_quantized_colwise=rhs_quantized_colwise,
                 scaling_mode=scaling_mode,
@@ -725,11 +643,9 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                sequence_parallel_output=sequence_parallel_output,
-                sequence_dim=sequence_dim,
             )
 
-            # All-Reduce/Reduce-Scatter GEMM output
+            # All-Reduce GEMM output
             if reduce_spec is not None:
                 outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 
@@ -741,7 +657,6 @@ class GemmPrimitive(BasePrimitive):
     def shardy_sharding_rule(
         out_dtype,
         contracting_dims,
-        batched_dims,
         lhs_quantized_colwise,
         rhs_quantized_colwise,
         scaling_mode,
@@ -749,46 +664,36 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        sequence_parallel_output,
-        sequence_dim,
         mesh,
         operand_types,
         result_types,
     ):
         del lhs_quantized_colwise, rhs_quantized_colwise, out_dtype, grad, use_split_accumulator
-        del sequence_parallel_output, sequence_dim, mesh, result_types
+        del mesh, result_types
 
         prefix = "GemmPrimitive_"
 
-        def _generate_operand_rules(name, ndim, cdims, bdims):
+        def _generate_operand_rules(name, ndim, cdims):
             specs = []
-            ldims = tuple(i for i in range(ndim) if i not in bdims + cdims)
+            ldims = tuple(i for i in range(ndim) if i not in cdims)
             for i in range(ndim):
                 dim_name = None
-                if i in bdims:
-                    dim_idx = bdims.index(i) if len(bdims) > 1 else ""
-                    dim_name = f"b{dim_idx}"
-                elif i in cdims:
-                    dim_idx = cdims.index(i) if len(cdims) > 1 else ""
+                if i in cdims:
+                    dim_idx = cdims.index(i)
                     dim_name = f"k{dim_idx}"
                 else:
-                    dim_idx = ldims.index(i) if len(ldims) > 1 else ""
+                    dim_idx = ldims.index(i)
                     dim_name = f"{name}_l{dim_idx}"
                 specs.append(prefix + dim_name)
             return specs
-
         lhs, _, rhs, *_ = operand_types
         operand_ndims = (len(lhs.shape), len(rhs.shape))
-        (lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims) = map(
-            lambda dims: map(sanitize_dims, operand_ndims, dims),
-            (contracting_dims, batched_dims),
-        )
+        (lhs_cdims, rhs_cdims) = map(sanitize_dims, operand_ndims, contracting_dims)
         lhs_specs, rhs_specs = map(
             _generate_operand_rules,
             ("lhs", "rhs"),
             operand_ndims,
             (lhs_cdims, rhs_cdims),
-            (lhs_bdims, rhs_bdims),
         )
         lhs_scale_specs = ("…1",)
         rhs_scale_specs = ("…2",)
@@ -840,13 +745,10 @@ def _te_gemm(
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
-    batched_dims: Tuple[Sequence[int], Sequence[int]] = ((), ()),
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
     use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
-    sequence_parallel_output: bool = False,
-    sequence_dim: int = None,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -857,7 +759,6 @@ def _te_gemm(
     scaling_mode = ScalingMode.NO_SCALING
     lhs_is_transposed, rhs_is_transposed = _get_gemm_layout((lhs.ndim, rhs.ndim), contracting_dims)
     lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
-    lhs_bdims, rhs_bdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), batched_dims)
 
     # Quantize operands (if necessary)
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
@@ -876,7 +777,6 @@ def _te_gemm(
         lhs_scale_inv = lhs_q.scale_inv
         if lhs_q.data_layout == "T":
             lhs_cdims = transpose_dims(lhs_q.ndim, lhs_cdims, flatten_axis=lhs_q.flatten_axis)
-            lhs_bdims = transpose_dims(lhs_q.ndim, lhs_bdims, flatten_axis=lhs_q.flatten_axis)
 
     if isinstance(rhs_q, ScaledTensor):
         assert isinstance(lhs_q, ScaledTensor) or lhs_quantizer is not None, (
@@ -894,7 +794,6 @@ def _te_gemm(
         rhs_scale_inv = rhs_q.scale_inv
         if rhs_q.data_layout == "T":
             rhs_cdims = transpose_dims(rhs_q.ndim, rhs_cdims, flatten_axis=rhs_q.flatten_axis)
-            rhs_bdims = transpose_dims(rhs_q.ndim, rhs_bdims, flatten_axis=rhs_q.flatten_axis)
 
     # Dummy empties for bias and gelu
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
@@ -912,7 +811,6 @@ def _te_gemm(
         gelu_input,
         out_dtype=out_dtype,
         contracting_dims=(lhs_cdims, rhs_cdims),
-        batched_dims=(lhs_bdims, rhs_bdims),
         lhs_quantized_colwise=lhs_q.is_colwise if isinstance(lhs_q, ScaledTensor) else False,
         rhs_quantized_colwise=rhs_q.is_colwise if isinstance(rhs_q, ScaledTensor) else False,
         scaling_mode=scaling_mode,
@@ -920,8 +818,6 @@ def _te_gemm(
         fuse_gelu=fuse_gelu,
         grad=grad,
         use_split_accumulator=use_split_accumulator,
-        sequence_parallel_output=sequence_parallel_output,
-        sequence_dim=sequence_dim,
     )
 
 
@@ -1239,7 +1135,6 @@ def gemm(
     lhs: Union[jnp.ndarray, ScaledTensor],
     rhs: Union[jnp.ndarray, ScaledTensor],
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((-1,), (0,)),
-    batched_dims: Tuple[Sequence[int], Sequence[int]] = ((), ()),
     lhs_quantizer: Quantizer = None,
     rhs_quantizer: Quantizer = None,
     **kwargs,
@@ -1258,11 +1153,6 @@ def gemm(
         Object for down-casting the RHS operand for quantized GEMM.
     contracting_dims: Tuple[Sequence[int], Sequence[int]], default = ((-1, ), (0, ))
         Tuple of sequences representing the contracting dimensions of the operands.
-    batched_dims: Tuple[Sequence[int], Sequence[int]], default = ((), ()),
-        Tuple of sequences representing the batched dimensions of the operands. This is *not* used
-        to perform a batched matrix multiplication, but it is required for TE's custom cuBLAS GEMM
-        call to avoid a potentially undesirable reduction in any batched contracting dimensions
-        when invoked with sharded operands (e.g. when computing weight gradients in a Flax module).
     bias: jax.Array, default = None
         Optional additive bias term, required for forward GEMM with bias fusion. Only supported
         with TE's custom call to cuBLAS GEMM.
@@ -1282,15 +1172,6 @@ def gemm(
         Enable promoting some intermediate sums to higher precision when accumulating the result in
         the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed. Only
         supported with TE's custom call to cuBLAS GEMM.
-    sequence_parallel_output: bool, default = False
-        Produces an output with the first non-batched non-contracting dimension sharded with the
-        same spec as operand contracting dimensions. This effectively converts the `jax.lax.psum`
-        for the GEMM output into a `jax.lax.psum_scatter`. Only supported with TE's custom call to
-        cuBLAS GEMM.
-    sequence_dim: int, default = None
-        Index of the sequence dimension for the LHS operand. This controls which dimension of the
-        GEMM output is scattered when `sequence_parallel_output=True`. When `None`, the first
-        non-batched non-contracting dimension is assumed to be the sequence dimension.
 
     Returns
     -------
@@ -1329,14 +1210,6 @@ def gemm(
             "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backends used when the custom cuBLAS "
             "GEMM primitive is disabled."
         )
-        assert (
-            not kwargs.get("sequence_parallel_output", False)
-            and kwargs.get("sequence_dim", None) is None
-        ), (
-            "TE GEMM was invoked with sequence-parallelism options that are not supported by the "
-            "`jax.lax.dot_general` and `jax.nn.scaled_matmul` backedns used when the custom cuBLAS "
-            "GEMM primitive is disabled."
-        )
         return _jax_gemm(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer)
 
     outputs = _te_gemm(
@@ -1345,7 +1218,6 @@ def gemm(
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
-        batched_dims=batched_dims,
         **kwargs,
     )
 
