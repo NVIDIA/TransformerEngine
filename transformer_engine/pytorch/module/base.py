@@ -582,6 +582,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
+        self.wgrad_accumulation_and_reduce_hooks = []
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -1383,6 +1384,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
+    def register_wgrad_accumulation_and_reduce_hooks(self, wgrad_accumulation_and_reduce_hook):
+        """
+        This method is used to manually control the weight gradient accumulation and reduce.
+        This method should be called before the backward() method.
+        Set the skip_wgrad_accumulation_and_reduce to True to skip the weight gradient accumulation
+        and reduce in backward();
+        And register the wgrad_accumulation_and_reduce_func to be called in backward_dw() method.
+        """
+        self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
@@ -1393,14 +1404,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
             if not self.fuse_wgrad_accumulation:
-                unfused_weights = [getattr(self, name) for name in self.weight_names]
-                weight_tensor = noop_cat(unfused_weights)
+                weight_tensor = noop_cat(self._get_weight_tensors())
                 if weight_tensor.grad is None:
                     weight_tensor.grad = wgrad.to(weight_tensor.dtype)
             if self.use_bias:
                 bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
                 if bias_tensor.grad is None:
                     bias_tensor.grad = bgrad.to(bias_tensor.dtype)
+            del wgrad
+            del bgrad
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
 
     def _validate_name(self):
         """

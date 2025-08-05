@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-from itertools import product
 import copy
 from contextlib import nullcontext
 
