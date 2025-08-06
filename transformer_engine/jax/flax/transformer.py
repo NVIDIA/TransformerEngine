@@ -1426,7 +1426,6 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             dtype=self.dtype,
             name="out",
-            sequence_parallel_output=self.enable_sequence_parallel,
         )(x)
         out = checkpoint_name(out, "out_proj")
 
