@@ -711,7 +711,6 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
     static constexpr int32_t rowChunkElems = 32;
     static constexpr int32_t colChunkElems = 32;
-    static constexpr int32_t transChunkElems = 4;
 
     using rowThreadLayout = Layout<32, 1>; // 32x1 
     using colThreadLayout = Layout<rowThreadLayout::N, rowThreadLayout::M>; // 1x32
@@ -723,8 +722,8 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     using colWarpDim = Layout<colThreadLayout::M * colChunkElems, colThreadLayout::N>;
     using warpDim = Layout<std::max(rowWarpDim::M, colWarpDim::M), std::max(rowWarpDim::N, colWarpDim::N)>;
 
-    static constexpr bool _tma_swizzle = true;
-    using warpLayout = Layout<1, 2>;
+    static constexpr bool _tma_swizzle = false;
+    using warpLayout = Layout<1, 1>;
     static_assert(_tma_swizzle ? (warpLayout::N == 2) : true);
     static constexpr CUtensorMapSwizzle input_swizzle_pattern = _tma_swizzle
         ? CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B
@@ -736,7 +735,7 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
     using blockIterDim = Layout<warpLayout::M * warpDim::M, warpLayout::N * warpDim::N>;
 
-    using iterLayout = Layout<1, 2>;
+    using iterLayout = Layout<1, 8>;
     using blockDIM = Layout<iterLayout::M * blockIterDim::M, iterLayout::N * blockIterDim::N>;
 
     static constexpr int32_t numStages = 2;
@@ -769,9 +768,11 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     static constexpr bool _use_warp_specialization = false;
     static constexpr bool _need_wait_group = iterLayout::num > numStages;
     static constexpr bool _reuse_input_out_smem = false;
+    static constexpr bool _cache_rowwise_scale_in_smem = false;
 
     static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
     static constexpr int32_t numThreads = numWarps * 32;
+    static_assert(numThreads <= 1024, "numThreads must be less than or equal to 1024");
 
     static constexpr size_t smemInputPerWarp = warpDim::num * sizeof(IType);
     static constexpr size_t smemInputPerBlock = smemInputPerWarp * warpLayout::num;
@@ -786,9 +787,14 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     static constexpr size_t smemRowwiseOutput = smemRowwiseOutputPerBlock * numStages;
     static constexpr size_t smemColwiseOutput = smemColwiseOutputPerBlock * numStages;
 
+    static constexpr size_t smem_rowwise_scale = _cache_rowwise_scale_in_smem 
+                                                 ? (blockDIM::M * (blockDIM::N / rowChunkElems) * sizeof(e8m0_t)) 
+                                                 : 0ul;
+
+    static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
     static constexpr size_t smem = _reuse_input_out_smem
-                                    ? std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + 1024ul
-                                    : smemInput + smemRowwiseOutput + smemColwiseOutput + 1024ul;
+                                    ? std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + smem_alignment + smem_rowwise_scale
+                                    : smemInput + smemRowwiseOutput + smemColwiseOutput + smem_alignment + smem_rowwise_scale;
 };
 
 #define ALIGN_TO(x, align) (((x) + (align) - 1) & ~((align) - 1))
@@ -821,7 +827,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, 1024));
+    char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, CastTraits::smem_alignment));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
 
@@ -1214,7 +1220,7 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDIM::N;
 
     extern __shared__ char smem[];
-    char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, 1024));
+    char *smemAligned = (char*)(ALIGN_TO((intptr_t)smem, CastTraits::smem_alignment));
     typename CastTraits::IType *sInput = reinterpret_cast<typename CastTraits::IType *>(smemAligned);
     typename CastTraits::inputUnitType *sInputUnit = reinterpret_cast<typename CastTraits::inputUnitType *>(sInput);
 
@@ -1226,12 +1232,23 @@ __global__ void cast_mxfp8_kernel(
 
     // colwise output will reuse input buffer
     typename CastTraits::OType *sColOutput;
+    e8m0_t *sRowwiseScale = nullptr;
     if constexpr (CastTraits::_reuse_input_out_smem) {
         sColOutput = reinterpret_cast<typename CastTraits::OType *>(sInput);
+        if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+            sRowwiseScale = reinterpret_cast<e8m0_t *>(
+                sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
+            );
+        }
     } else {
         sColOutput = reinterpret_cast<typename CastTraits::OType *>(
             sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
         );
+        if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+            sRowwiseScale = reinterpret_cast<e8m0_t *>(
+                sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
+            );
+        }
     }
 
     __shared__ uint64_t producer[CastTraits::numStages];
@@ -1267,6 +1284,13 @@ __global__ void cast_mxfp8_kernel(
         ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * scale_stride_colwise
         + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
 
+    constexpr int32_t rowwise_scale_stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
+    int32_t rowwise_scale_smem_base_offset = 
+        (warpId / CastTraits::warpLayout::N) * CastTraits::warpDim::M * rowwise_scale_stride_in_smem
+        + (warpId % CastTraits::warpLayout::N) * (CastTraits::warpDim::N / CastTraits::rowChunkElems)
+        + (threadIdx.x / CastTraits::rowThreadLayout::N) * rowwise_scale_stride_in_smem
+        + (threadIdx.x % CastTraits::rowThreadLayout::N);
+
 
     if (warpId == 0 && leader) {
         #pragma unroll 1
@@ -1276,7 +1300,7 @@ __global__ void cast_mxfp8_kernel(
             int2 coords;
             coords.y = block_coords.y + iter_m * CastTraits::blockIterDim::M;
             coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
-            if (coords.x >= cols || coords.y >= rows) { return; }
+            if (coords.x >= cols || coords.y >= rows) { break; }
 
             cuda_ptx::cp_async_bulk_tensor(
                 cuda_ptx::space_shared,
@@ -1338,7 +1362,7 @@ __global__ void cast_mxfp8_kernel(
         coords.x = block_coords.x + iter_n * CastTraits::blockIterDim::N;
 
         if (coords.x >= cols || coords.y >= rows) {
-            return;
+            break;
         }
 
         while (!cuda_ptx::mbarrier_try_wait_parity(
@@ -1347,6 +1371,92 @@ __global__ void cast_mxfp8_kernel(
         ));
 
         int32_t warp_offset = warp_base_offset + states.index() * CastTraits::blockIterDim::num;
+        // colwise
+        {
+            typename CastTraits::IType rInput[CastTraits::colChunkElems];
+            e8m0_t biased_exponent;
+            {
+                int32_t base = warp_offset + threadIdx.x;
+                typename CastTraits::IType thread_amax = static_cast<typename CastTraits::IType>(0.0f);
+                #pragma unroll
+                for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
+                    // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
+                    // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
+
+                    int32_t offset = base + i * CastTraits::blockIterDim::N;
+                    rInput[i] = sInput[CastTraits::inputElemSwz::swz(offset)];
+
+                    if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
+                    } else if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                        asm volatile (
+                            "max.xorsign.abs.f16 %0, %0, %1;"
+                            : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
+                            : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
+                        );
+                    } else {
+                        asm volatile (
+                            "max.xorsign.abs.bf16 %0, %0, %1;"
+                            : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
+                            : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
+                        );
+                    }
+                }
+                biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+            }
+            if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
+            } else {
+                int32_t colwise_scale_offset = 
+                    colwise_scale_base_offset
+                    + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                    + iter_n * CastTraits::blockIterDim::N;
+                scales_colwise[colwise_scale_offset] = biased_exponent;
+
+                float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+                ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+                typename CastTraits::OType rOutput[CastTraits::colChunkElems];
+
+                if constexpr (CastTraits::_use_cvt_4x) {
+                    using OType4 = FPx4<typename CastTraits::OType>;
+                    using IType4 = FPx4<typename CastTraits::IType>;
+                    IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
+                    OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                    #pragma unroll
+                    for (int32_t i = 0; i < CastTraits::colChunkElems / 4; i++) {
+                        IType4 in = rInput4[i];
+                        OType4 out;
+                        mul_cvt_4x(out, in, block_scale_inverse_2x);
+                        rOutput4[i] = out;
+                    }
+                } else {
+                    IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+                    OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                    #pragma unroll
+                    for (int32_t i = 0; i < CastTraits::colChunkElems / 2; i++) {
+                        IType2 in = rInput2[i];
+                        OType2 out;
+                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                        rOutput2[i] = out;
+                    }
+                }
+                {
+                    if constexpr (CastTraits::_reuse_input_out_smem) {
+                        __syncthreads();
+                    }
+
+                    int32_t base = warp_offset + threadIdx.x;
+                    #pragma unroll
+                    for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
+                        // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
+                        // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
+
+                        int32_t offset = base + i * CastTraits::blockIterDim::N;
+                        sColOutput[CastTraits::colOutputSwz::swz(offset)] = rOutput[i];
+                    }
+                }
+            }
+        }
         // rowwise 
         {
             typename CastTraits::inputUnitType rInput[CastTraits::rowNumUnitsPerChunk];
@@ -1370,11 +1480,19 @@ __global__ void cast_mxfp8_kernel(
                 typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
                 e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
                 
-                int32_t rowwise_scale_offset = 
-                    rowwise_scale_base_offset
-                    + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
-                    + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
-                scales_rowwise[rowwise_scale_offset] = biased_exponent;
+                if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                    int32_t rowwise_scale_offset = 
+                        rowwise_scale_smem_base_offset
+                        + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
+                        + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                    sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+                } else {
+                    int32_t rowwise_scale_offset = 
+                        rowwise_scale_base_offset
+                        + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                        + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                    scales_rowwise[rowwise_scale_offset] = biased_exponent;
+                }
 
                 float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
                 ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
@@ -1412,81 +1530,6 @@ __global__ void cast_mxfp8_kernel(
                 }
             }
         }
-        // colwise
-        {
-            typename CastTraits::IType rInput[CastTraits::colChunkElems];
-            {
-                int32_t base = warp_offset + threadIdx.x;
-                #pragma unroll
-                for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
-                    // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
-                    // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
-
-                    int32_t offset = base + i * CastTraits::blockIterDim::N;
-                    rInput[i] = sInput[CastTraits::inputElemSwz::swz(offset)];
-                }
-            }
-            if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-
-            } else {
-                IType2 thread_amax2{0.f, 0.f};
-                IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
-                #pragma unroll
-                for (int32_t i = 0; i < CastTraits::colChunkElems / 2; i++) {
-                    ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[i]);
-                }
-                typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
-                e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-
-                int32_t colwise_scale_offset = 
-                    colwise_scale_base_offset
-                    + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
-                    + iter_n * CastTraits::blockIterDim::N;
-                scales_colwise[colwise_scale_offset] = biased_exponent;
-
-                float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-                ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-                typename CastTraits::OType rOutput[CastTraits::colChunkElems];
-
-                if constexpr (CastTraits::_use_cvt_4x) {
-                    using OType4 = FPx4<typename CastTraits::OType>;
-                    using IType4 = FPx4<typename CastTraits::IType>;
-                    IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
-                    OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
-                    #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::colChunkElems / 4; i++) {
-                        IType4 in = rInput4[i];
-                        OType4 out;
-                        mul_cvt_4x(out, in, block_scale_inverse_2x);
-                        rOutput4[i] = out;
-                    }
-                } else {
-                    OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
-                    #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::colChunkElems / 2; i++) {
-                        IType2 in = rInput2[i];
-                        OType2 out;
-                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
-                        rOutput2[i] = out;
-                    }
-                }
-                {
-                    if constexpr (CastTraits::_reuse_input_out_smem) {
-                        __syncthreads();
-                    }
-
-                    int32_t base = warp_offset + threadIdx.x;
-                    #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
-                        // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
-                        // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
-
-                        int32_t offset = base + i * CastTraits::blockIterDim::N;
-                        sColOutput[CastTraits::colOutputSwz::swz(offset)] = rOutput[i];
-                    }
-                }
-            }
-        }
         ptx::fence_proxy_async_shared_cta();
         __syncthreads();
 
@@ -1509,6 +1552,44 @@ __global__ void cast_mxfp8_kernel(
             cuda_ptx::cp_async_bulk_commit_group();
         }
         states++;
+    }
+
+    if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+        constexpr int32_t stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
+        using DataType = std::conditional_t<stride_in_smem % 16 == 0, uint4,
+                         std::conditional_t<stride_in_smem % 8 == 0, uint2,
+                         std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                         std::conditional_t<stride_in_smem % 2 == 0, uint16_t, 
+                            uint8_t>>>>;
+        constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
+        constexpr int32_t stride_in_group = stride_in_smem / num_elems_per_group;
+        constexpr int32_t num_groups = CastTraits::blockDIM::M * stride_in_group;
+        constexpr int32_t needed_warps = num_groups / 32;
+        constexpr int32_t actual_warps = std::min(needed_warps, CastTraits::warpLayout::num);
+        constexpr int32_t warp_iters = std::min(needed_warps / CastTraits::warpLayout::num, 1);
+        constexpr int32_t num_rows_per_warp = 32 / stride_in_group;
+
+        int2 coords_base;
+        coords_base.y = (threadIdx.x / stride_in_group)
+                        + warpId * num_rows_per_warp;
+        coords_base.x = (threadIdx.x % stride_in_group);
+
+        int32_t gmem_offset_base = block_coords.y * (scale_stride_rowwise / num_elems_per_group)
+                                   + block_coords.x / CastTraits::rowChunkElems / num_elems_per_group;
+
+        int32_t current_warp_iters = (warpId < needed_warps) * warp_iters;
+        #pragma unroll
+        for (int32_t iter = 0; iter < warp_iters; iter++) {
+            if (iter >= current_warp_iters) { break; }
+
+            int32_t coords_y = coords_base.y + iter * (actual_warps * num_rows_per_warp);
+            int32_t smem_offset = coords_y * stride_in_group + coords_base.x;
+            int32_t gmem_offset = gmem_offset_base
+                + coords_y * (scale_stride_rowwise / num_elems_per_group) + coords_base.x;
+
+            reinterpret_cast<DataType *>(scales_rowwise)[gmem_offset] =
+                reinterpret_cast<DataType *>(sRowwiseScale)[smem_offset];
+        }
     }
 
     ptx::cp_async_bulk_wait_group_read<0>();
