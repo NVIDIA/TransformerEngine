@@ -299,6 +299,10 @@ class DebugQuantizer(Quantizer):
         #    the quantization using the self.parent_quantizer is performed.
 
         self._update_parent_quantizer_usage()
+        # Only columnwise quantization is not supported.
+        if self.parent_quantizer is not None:
+            if not self.parent_quantizer.rowwise_usage and self.parent_quantizer.columnwise_usage:
+                self.parent_quantizer.set_usage(rowwise=True)
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
         if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
