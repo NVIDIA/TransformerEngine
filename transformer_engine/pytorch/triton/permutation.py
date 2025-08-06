@@ -359,7 +359,7 @@ def _permute_kernel(
             if prob == 0.0:
                 # for routing_map padding
                 # dst_row != -1 and prob == 0.0 means that this slot is padded
-                tl.store(output_ptr + output_off, 0, mask=mask)
+                tl.store(output_ptr + output_off, 0.0, mask=mask)
             else:
                 tl.store(output_ptr + output_off, inp, mask=mask)
         else:
