@@ -1130,8 +1130,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
           // This kernel will only be called on sm100+, so no need to check sm_arch
           cudaLaunchAttribute attribute[1];
           attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-          attribute[0].val.programmaticStreamSerializationAllowed = 1;
-          cfg.attrs = attribute;
+          attribute[0].val.programmaticStreamSerializationAllowed = 1; cfg.attrs = attribute;
           cfg.numAttrs = 1;
 
           switch (scaling_type) {
