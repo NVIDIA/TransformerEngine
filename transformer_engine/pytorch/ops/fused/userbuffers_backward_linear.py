@@ -398,12 +398,12 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Initialize grad output
             if tensor_parallel_mode == "row" and isinstance(grad_output_quantizer, MXFP8Quantizer):
-                # UB does not support overlapping grad output
+                # UB does not support pipelined overlapping grad output
                 # all-gather with wgrad GEMM. Also, we can't
                 # convert row-scaled MXFP8 to column-scaled, so we
                 # can't reuse the grad output that was gathered
                 # for the dgrad GEMM. We work around by explicitly
-                # overlapping the NCCL operation with the dgrad GEMM.
+                # overlapping the AG operation with the dgrad GEMM.
 
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
