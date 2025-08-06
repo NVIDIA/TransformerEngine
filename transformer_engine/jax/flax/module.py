@@ -273,10 +273,6 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = False
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     epsilon: float = 1e-6
@@ -287,7 +283,6 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ("embed",)
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
@@ -419,10 +414,6 @@ class DenseGeneral(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     features: Union[Iterable[int], int]
@@ -436,7 +427,6 @@ class DenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
 
     def __post_init__(self):
@@ -621,10 +611,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     depth_scaling: float, default = None
         The factor to scale the output from `DenseGeneral`. It should be a float
         value or None. When None is set, then no scaling is applied.
@@ -650,7 +636,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_input_axes: Tuple[str, ...] = None
     depth_scaling: float = None
@@ -933,10 +918,6 @@ class LayerNormMLP(TransformerEngineBase):
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
         The data type used to allocate the initial parameters.
-    transpose_batch_sequence : bool, default = True
-        Indicate whether the input tensors were switched axis of batch
-        and sequence length dimension. If set to True, the input tensors
-        should be in (seqlen, batch, hidden), otherwise (batch, seqlen, hidden).
     """
 
     intermediate_dim: int = 2048
@@ -965,7 +946,6 @@ class LayerNormMLP(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
     dot_2_input_axes: Tuple[str, ...] = None
