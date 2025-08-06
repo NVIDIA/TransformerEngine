@@ -198,6 +198,8 @@ class CommOverlapBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &rs_output,
                         cudaStream_t stream_main) override;
+  // initialize ubnext buffer and return multicast pointer for allreduce
+  uintptr_t init_ubnext();
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {

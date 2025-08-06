@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import os
 
 import torch
 
@@ -52,6 +53,9 @@ from ..distributed import (
 )
 from ..cpp_extensions import (
     general_gemm,
+    ubsymm_request_allocator,
+    ubsymm_get_sym_tensor,
+    ubsymm_allreduce
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
@@ -290,6 +294,9 @@ class _Linear(torch.autograd.Function):
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
+        symm_out = None
+        if symmetric_ar_type == 'ub_custom':
+            symm_out = ubsymm_get_sym_tensor( (list(inp.shape)[0], out_features,), activation_dtype, tp_group)
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
@@ -306,6 +313,7 @@ class _Linear(torch.autograd.Function):
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=reduce_scatter_out,
+            out=symm_out,
         )
         nvtx_range_pop(f"{nvtx_label}.gemm")
         # ------------------------------------------------------
@@ -326,7 +334,11 @@ class _Linear(torch.autograd.Function):
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
                 if symmetric_ar_type is not None:
-                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                    if symm_out is not None:
+                        out = ubsymm_allreduce(symm_out)
+                    else:
+                        fallback_symmetric = "multimem_all_reduce" if symmetric_ar_type == "ub_custom" else symmetric_ar_type
+                        out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=fallback_symmetric)
                 else:
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
@@ -1151,6 +1163,8 @@ class Linear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
+            if self.symmetric_ar_type == 'ub_custom':
+                ubsymm_request_allocator(self.tp_group, (int(os.environ.get('NVTE_UB_MAXBATCH',64)), self.out_features,), params_dtype)
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()

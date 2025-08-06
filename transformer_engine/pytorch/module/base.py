@@ -261,7 +261,10 @@ def initialize_ub(
         "pipeline": ["proj_fprop", "fc2_fprop"],
         "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
     }
-
+    # Add "ubnext" to bulk methods if environment variable is set
+    if os.environ.get("NVTE_USE_UB_FOR_UBNEXT"):
+        methods["bulk"].append("ubnext")
+    
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
@@ -367,8 +370,8 @@ def initialize_ub(
             )
         else:
             ub_obj = tex.CommOverlap(
-                shape,  # Communication buffer shape
-                buffer_dtype,  # Communication buffer data type
+                shape if name != "ubnext" else (int(os.environ.get('NVTE_UB_SYMM_POOL_SIZE', 64)), 1024*1024), #Communication buffer shape
+                buffer_dtype if name != "ubnext" else torch.uint8,  # Communication buffer data type
                 helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_splits=num_splits,

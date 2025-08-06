@@ -462,7 +462,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   _ub_comm->cga_size = _cga_size;
   size_t m = transa ? A.size(0) : A.size(1);
   size_t k = transa ? A.size(1) : A.size(0);
-  size_t n = _ubuf.size(0);
+  size_t n = B.size(0);
   size_t m_chunk = m / _num_splits;
   const std::vector<size_t> input_a_chunk_shape =
       (transa ? std::vector<size_t>{m_chunk, k} : std::vector<size_t>{k, m_chunk});
@@ -590,6 +590,15 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }  // CommOverlapBase::split_overlap_rs
+
+uintptr_t CommOverlapBase::init_ubnext() {
+  NVTE_CHECK_CUDA(cudaMemset(_ub_comm->mem_ptr[_ub_reg], 0, _ub_comm->mem_size[_ub_reg]));
+  NVTE_CHECK_CUDA(cudaMemcpy(_ub_comm->mem_ptr[_ub_reg],
+                             (reinterpret_cast<char *>(_ub_comm->mem_ptr[0])) +
+                                 (_ub_reg * _ub_comm->nvsize * sizeof(void *)),
+                             _ub_comm->nvsize * sizeof(void *), cudaMemcpyDeviceToDevice));
+  return (uintptr_t)(_ub_comm->mc_ptr[_ub_reg]);
+}
 
 /***************************************************************************************************
  * Comm+GEMM Overlap P2P Base (Ring-Exchange)
