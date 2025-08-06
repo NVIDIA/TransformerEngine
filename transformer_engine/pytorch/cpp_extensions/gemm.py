@@ -18,16 +18,18 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
+    "validate_gemm_scale",
 ]
+
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     """Validate whether a GEMM scaling factor is consistent with its usage"""
     if required:
         return scale if scale is not None else 1.0
-    else:
-        if scale not in (0.0, None):
-            raise ValueError("scale must be zero")
-        return 0.0
+    if scale not in (0.0, None):
+        raise ValueError("scale must be zero")
+    return 0.0
+
 
 def general_gemm(
     A: torch.Tensor,
