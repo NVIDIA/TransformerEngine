@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 import logging
-import math
 import os
 import sys
 import pathlib
@@ -50,6 +49,7 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
     reset_rng_states,
+    compare_with_error,
     ModelConfig,
     dtype_tols,
     get_available_attention_backends,
@@ -1631,33 +1631,6 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
 
-def _rmse(a, b):
-    return math.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
-
-
-def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
-    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
-    try:
-        if a.dtype != b.dtype:
-            a = a.to(b.dtype)
-        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
-    except Exception as e:
-        logging.debug(e)
-
-    rmse = _rmse(a, b)
-    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
-    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    assert rmse < rmse_tol * rmse_range, (
-        name_a
-        + " vs "
-        + name_b
-        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-        )
-    )
-
-
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
@@ -1722,7 +1695,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
-        _error(
+        compare_with_error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1731,7 +1704,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             rtol,
             rmse_tol,
         )
-    _error(
+    compare_with_error(
         fused_attn_fwd_fp8,
         fused_attn_fwd_f16,
         "fused_attn_fwd_fp8",
@@ -1744,7 +1717,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     if is_training:
         for i in range(len(param_names[:1])):
             logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            _error(
+            compare_with_error(
                 fused_attn_bwd_fp8[i],
                 fused_attn_bwd_f16[i],
                 f"fused_attn_bwd_fp8[{i}]",
@@ -1951,7 +1924,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
-        _error(
+        compare_with_error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1966,7 +1939,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             fused_attn_fwd_fp8 == 1
         ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
     else:
-        _error(
+        compare_with_error(
             fused_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "fused_attn_fwd_fp8",
@@ -1978,7 +1951,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         if is_training:
             for i, _ in enumerate(fused_attn_bwd_f16):
                 logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-                _error(
+                compare_with_error(
                     fused_attn_bwd_fp8[i],
                     fused_attn_bwd_f16[i],
                     f"fused_attn_bwd_fp8[{i}]",
@@ -2178,7 +2151,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.13
-    _error(
+    compare_with_error(
         fused_attn_fwd_fp8,
         unfused_attn_fwd_f16,
         "fused_attn_fwd_fp8",
@@ -2187,7 +2160,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         rtol,
         rmse_tol,
     )
-    _error(
+    compare_with_error(
         fused_attn_bwd_fp8,
         unfused_attn_bwd_f16,
         "fused_attn_bwd_fp8",

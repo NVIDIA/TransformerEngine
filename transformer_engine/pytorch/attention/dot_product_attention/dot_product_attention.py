@@ -319,11 +319,13 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         self.softmax_type = softmax_type
         if self.softmax_type == "learnable":
-            self.register_parameter(
-                "softmax_offset",
-                Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
-                get_rng_state_tracker=get_rng_state_tracker,
-            )
+            #self.register_parameter(
+            #    "softmax_offset",
+            #    #Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
+            #    torch.randn(self.num_attention_heads // self.tp_size, device="cuda"),
+            #    get_rng_state_tracker=get_rng_state_tracker,
+            #)
+            self.softmax_offset = torch.randn(self.num_attention_heads // self.tp_size, device="cuda")
         if self.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")
         if self.softmax_type == "vanilla":

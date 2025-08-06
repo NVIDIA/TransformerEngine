@@ -17,89 +17,14 @@ from test_attention_with_cp import model_configs_flash_attn, model_configs_fused
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.common.recipe import DelayedScaling
+from utils import ModelConfig, compare_with_error
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
-
-def run_dpa_with_cp(
-    dtype="bf16",
-    model=None,
-    qkv_format="bshd",
-    kernel_backend="FlashAttention",
-    cp_comm_type="p2p",
-    fp8_mha=False,
+def generate_input_shapes(
+    qkv_format: str,
+    config: ModelConfig,
 ):
-    """Test DotProductAttention module with context parallelism"""
-
-    # args are passed as strings
-    fp8_mha = fp8_mha == "True"
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    if kernel_backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-        config = model_configs_flash_attn[model]
-    if kernel_backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = model_configs_fused_attn[model]
-
-    assert config.attn_mask_type in [
-        "causal",
-        "no_mask",
-    ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-    if qkv_format == "thd":
-        if "causal" in config.attn_mask_type:
-            config.attn_mask_type = "padding_causal"
-        else:
-            config.attn_mask_type = "padding"
-
-    rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-
-    if dist.is_initialized():
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-    else:
-        device_count = torch.cuda.device_count()
-        device = rank % device_count
-        torch.cuda.set_device(device)
-
-    print(f"[INFO] world_size:{world_size}, rank:{rank}")
-
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
-
-    # create flash attn comm group for CP
-    cp_comm_ranks = range(world_size)
-    assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
-    if cp_comm_type == "a2a+p2p":
-        assert (
-            world_size % 2 == 0
-        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
-        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
-        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = []
-        for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
-            if rank in sub_ranks:
-                cp_comm_sub_groups.append(sub_group)
-
-    if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
-
-    # instantiate core attn module
-    core_attn = DotProductAttention(
-        config.num_heads,
-        (config.head_dim_qk, config.head_dim_v),
-        num_gqa_groups=config.num_gqa_groups,
-        attention_dropout=config.dropout_p,
-        qkv_format=qkv_format,
-        attn_mask_type=config.attn_mask_type,
-        window_size=config.window_size,
-        softmax_type=config.softmax_type,
-    )
-    core_attn = core_attn.cuda()
-
-    # create flash attn inputs
     if qkv_format == "bshd":
         q_input_shape = (
             config.batch_size,
@@ -192,36 +117,146 @@ def run_dpa_with_cp(
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
     else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
+        assert False, f"qkv_format = {qkv_format} is not supported!"
 
+    return q_input_shape, k_input_shape, v_input_shape, attn_output_shape, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
+
+
+def get_tols(config, dtype):
+    if dtype == "bf16":
+        if config.num_heads == config.num_gqa_groups:
+            atol = 2.5e-2
+            rtol = 2.5e-2
+        else:
+            atol = 3.5e-2
+            rtol = 3.5e-2
+        rmse_tol = 0.01
+    elif dtype == "fp16":
+        atol = 5e-3
+        rtol = 5e-3
+        rmse_tol = 0.01
+    elif dtype == "fp8":
+        atol = 5e-1
+        rtol = 5e-1
+        rmse_tol = 0.1
+    else:
+        assert False, f"dtype = {dtype} is not supported!"
+
+    return atol, rtol, rmse_tol
+
+
+def run_dpa_with_cp(
+    dtype="bf16",
+    model=None,
+    qkv_format="bshd",
+    kernel_backend="FlashAttention",
+    cp_comm_type="p2p",
+    fp8_mha=False,
+):
+    """Test DotProductAttention module with context parallelism"""
+
+    # set up environment variables and config
+    fp8_mha = fp8_mha == "True"
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    if kernel_backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+        config = model_configs_flash_attn[model]
+    if kernel_backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        config = model_configs_fused_attn[model]
+    assert config.attn_mask_type in [
+        "causal",
+        "no_mask",
+    ], f"attn_mask_type = {config.attn_mask_type} is not supported!"
+    if qkv_format == "thd":
+        if "causal" in config.attn_mask_type:
+            config.attn_mask_type = "padding_causal"
+        else:
+            config.attn_mask_type = "padding"
+    if dtype == "fp8":
+        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
+
+
+    # set up distributed group
+    rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    if dist.is_initialized():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        device_count = torch.cuda.device_count()
+        device = rank % device_count
+        torch.cuda.set_device(device)
+    logging.debug(f"[run_dpa_with_cp] Setup (device {rank}): world_size {world_size}, rank {rank}")
+    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+
+    # set up communication group for CP
+    cp_comm_ranks = range(world_size)
+    assert rank in cp_comm_ranks
+    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    if cp_comm_type == "a2a+p2p":
+        assert (
+            world_size % 2 == 0
+        ), "Please make sure world_size % 2 = 0 as a2a+p2p assumes the cp_size for A2A is 2."
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+        cp_comm_sub_groups = []
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                cp_comm_sub_groups.append(sub_group)
+
+    # instantiate attention module
+    core_attn = DotProductAttention(
+        config.num_heads,
+        (config.head_dim_qk, config.head_dim_v),
+        num_gqa_groups=config.num_gqa_groups,
+        attention_dropout=config.dropout_p,
+        qkv_format=qkv_format,
+        attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
+        softmax_type=config.softmax_type,
+    ).cuda()
+    if config.softmax_type != "vanilla":
+        core_attn.softmax_offset.requires_grad = True
+
+    # generate attention inputs
+    (
+        q_input_shape,
+        k_input_shape,
+        v_input_shape,
+        attn_output_shape,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+    ) = generate_input_shapes(qkv_format, config)
     q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
     k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
-    dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
-    dout_quantizer = Float8Quantizer(
-        fp8_dtype=tex.DType.kFloat8E5M2,
-        scale=torch.tensor([1], dtype=torch.float32).cuda(),
-        amax=torch.tensor([0], dtype=torch.float32).cuda(),
-    )
+    for x in [q, k, v]:
+        x.requires_grad = True
 
-    # create flash attention bias
+    dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
+    if fp8_mha:
+        dout_quantizer = Float8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2,
+            scale=torch.tensor([1], dtype=torch.float32).cuda(),
+            amax=torch.tensor([0], dtype=torch.float32).cuda(),
+        )
+
     if config.attn_bias_type not in ["no_bias", "alibi"]:
         attn_bias_shape = (1, 1, config.max_seqlen_q, config.max_seqlen_kv)
         bias = torch.randn(*attn_bias_shape, dtype=dtypes[dtype]).cuda()
     else:
         bias = None
 
-    # run core_attn without CP
-    for x in [q, k, v]:
-        x.requires_grad = True
-    if config.softmax_type != "vanilla":
-        core_attn.softmax_offset.requires_grad = True
-
-    if dtype == "fp8":
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
-    else:
-        fp8_context = nullcontext()
-
+    ############ run without CP ############
+    logging.debug("[run_dpa_with_cp] Run without context parallelism (device {rank})")
     with fp8_context:
         out = core_attn(
             q,
@@ -239,44 +274,44 @@ def run_dpa_with_cp(
             out.backward(dout_fp8)
         else:
             out.backward(dout)
-    if rank == 0:
-        dq, dk, dv = q.grad, k.grad, v.grad
-        for i in range(world_size * 2):
-            s = i*1024
-            t = 4
-            e = s + t
-            print(f"{i} out {out.shape}, {out[0,s:e,0]}")
-            print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
-            print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
-            print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
-
+    dq, dk, dv = q.grad, k.grad, v.grad
+    #if rank == 0:
+    #    dq, dk, dv = q.grad, k.grad, v.grad
+    #    for i in range(world_size * 2):
+    #        s = i*1024
+    #        t = 4
+    #        e = s + t
+    #        print(f"{i} out {out.shape}, {out[0,s:e,0]}")
+    #        print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
+    #        print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
+    #        print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
     d_softmax_offset = None
     if config.softmax_type != "vanilla":
         d_softmax_offset = core_attn.softmax_offset.grad.clone()
         print(f"ORIGGGG, {core_attn.softmax_offset}")
         print(f"ORIGGGG, {d_softmax_offset}")
 
-    print("======================================")
-    # run core_attn wit CP
-    del core_attn
-    core_attn = DotProductAttention(
-        config.num_heads,
-        (config.head_dim_qk, config.head_dim_v),
-        num_gqa_groups=config.num_gqa_groups,
-        attention_dropout=config.dropout_p,
-        qkv_format=qkv_format,
-        attn_mask_type=config.attn_mask_type,
-        window_size=config.window_size,
-        softmax_type=config.softmax_type,
-    )
-    core_attn = core_attn.cuda()
-    for x in [q, k, v]:
-        x.requires_grad = True
-    if config.softmax_type != "vanilla":
-        core_attn.softmax_offset.requires_grad = True
+    ############ run with CP ############
+    logging.debug("[run_dpa_with_cp] Run with context parallelism (device {rank})")
+    torch.cuda.memory._record_memory_history(True, trace_alloc_max_entries=100000, trace_alloc_record_context=True)
 
+    # set up environment
+    core_attn.set_context_parallel_group(
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
+        cp_comm_ranks,
+        torch.cuda.Stream(),
+        cp_comm_type,
+    )
+
+    if config.softmax_type != "vanilla":
+        core_attn.softmax_offset.grad.zero_()
+        core_attn.zero_grad()
+    if dtype == "fp8":
+        core_attn.reset_fp8_meta_tensors()
+
+    # set up inputs
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
+        x.clone().detach().contiguous() for x in [q, k, v, dout] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -291,7 +326,6 @@ def run_dpa_with_cp(
             for x in [q_, k_, v_, dout_]
         ]
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
-        print(f"sssssssseq_idx {torch.cuda.current_device()}, {seq_idx}")
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
@@ -305,8 +339,6 @@ def run_dpa_with_cp(
         )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
-    else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
         bias_ = bias_.view(
@@ -314,22 +346,9 @@ def run_dpa_with_cp(
         )
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
-    core_attn.set_context_parallel_group(
-        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
-        cp_comm_ranks,
-        torch.cuda.Stream(),
-        cp_comm_type,
-    )
 
-    if dtype == "fp8":
-        core_attn.reset_fp8_meta_tensors()
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
-    else:
-        fp8_context = nullcontext()
-
+    # run attention
     with fp8_context:
-        #if config.softmax_type != "vanilla":
-        #    core_attn.softmax_offset.grad.zero_()
         out_ = core_attn(
             q_,
             k_,
@@ -345,37 +364,40 @@ def run_dpa_with_cp(
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
+            #os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+            #torch.cuda.empty_cache()
             out_.backward(dout_)
-
     if fp8_mha:
         assert isinstance(out, Float8Tensor)
         assert isinstance(out_, Float8Tensor)
         out = out.dequantize()
         out_ = out_.dequantize()
 
+    # get outputs
+    dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
     d_softmax_offset_ = None
     if config.softmax_type != "vanilla":
         d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
         print(f"CPPPPPP, {core_attn.softmax_offset}")
         print(f"CPPPPPP, {d_softmax_offset_}")
-    for x in [out_, q_.grad, k_.grad, v_.grad, d_softmax_offset_]:
+    for x in [out_, dq_, dk_, dv_, d_softmax_offset_]:
         if x is not None:
             assert torch.all(~torch.isnan(x))
             assert torch.all(~torch.isinf(x))
-    if rank == 0:
-        dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
-        tensors = [out_, dq_, dk_, dv_]
-        names = ["out_", "dq_", "dk_", "dv_"]
-        for i in range(world_size):
-            s = i*1024
-            t = 4
-            e = s + t
-            print(f"{i} out_ {out_.shape}, {out_[0,s:e,0]}")
-            print(f"{i} dq_  {dq_.shape}, {dq_[0,s:e,0,0]}")
-            print(f"{i} dk_  {dk_.shape}, {dk_[0,s:e,0,0]}")
-            print(f"{i} dv_  {dv_.shape}, {dv_[0,s:e,0,0]}")
+    #if rank == 0:
+    #    #dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
+    #    tensors = [out_, dq_, dk_, dv_]
+    #    names = ["out_", "dq_", "dk_", "dv_"]
+    #    for i in range(world_size):
+    #        s = i*1024
+    #        t = 4
+    #        e = s + t
+    #        print(f"{i} out_ {out_.shape}, {out_[0,s:e,0]}")
+    #        print(f"{i} dq_  {dq_.shape}, {dq_[0,s:e,0,0]}")
+    #        print(f"{i} dk_  {dk_.shape}, {dk_[0,s:e,0,0]}")
+    #        print(f"{i} dv_  {dv_.shape}, {dv_[0,s:e,0,0]}")
 
-    # compare results with and without CP
+    ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [
             x.view(
@@ -431,68 +453,35 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-    else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
 
-    if dtype == "bf16":
-        if config.num_heads == config.num_gqa_groups:
-            tols = dict(atol=2.5e-2, rtol=2.5e-2)
-        else:
-            tols = dict(atol=3.5e-2, rtol=3.5e-2)
-    elif dtype == "fp16":
-        tols = dict(atol=5e-3, rtol=5e-3)
-    elif dtype == "fp8":
-        tols = dict(atol=5e-1, rtol=5e-1)
-        rmse_tol = 0.1
-    else:
-        assert False, f"{dtype} is an unsupported dtype!"
+    #snapshot = torch.cuda.memory._snapshot()
 
-    def _rmse(a, b):
-        return torch.sqrt((a - b).square().mean()).item()
+    #with open(f"/code/pr_orange/transformerengine/snapshot.pickle", "wb") as f:
+    #    pickle.dump(snapshot, f)
+    torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
-    def _error(a, b):
-        if dtype != "fp8":
-            torch.testing.assert_close(a, b, **tols)
-        else:
-            try:
-                torch.testing.assert_close(a, b, **tols)
-            except Exception as e:
-                logging.debug(e)
+    atol, rtol, rmse_tol = get_tols(config, dtype)
+    tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_]
+    tensors_no_cp = [out, dq, dk, dv, d_softmax_offset]
+    names = ["out", "dq", "dk", "dv", "d_softmax_offset"]
+    names_cp = [x + "_cp" for x in names]
+    names_no_cp = [x + "_no_cp" for x in names]
+    for i, t in enumerate(tensors_no_cp):
+        if t is not None:
+            if "softmax_offset" not in names[i]:
+                if qkv_format == "bshd":
+                    compare_with_error(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_with_error(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                elif qkv_format == "sbhd":
+                    compare_with_error(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_with_error(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                elif qkv_format == "thd":
+                    compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+            else:
+                compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+            logging.info(f"[run_dpa_with_cp] CP vs no-CP {names[i]} matches on device {rank}")
 
-            rmse = _rmse(a, b)
-            rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-            assert (
-                rmse < rmse_tol * rmse_range
-            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-            )
-
-    if qkv_format == "bshd":
-        count = 0
-        #for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-        #for a, b in zip([out_, ], [out, ]):
-        if config.softmax_type != "vanilla":
-            _error(d_softmax_offset, d_softmax_offset_)
-        if rank == 0:
-            print(f"passed dso, {d_softmax_offset}")
-            print(f"passed dso, {d_softmax_offset_}")
-        for a, b in zip([dq_, ], [dq, ]):
-        #for a, b in zip([dk_, ], [dk, ]):
-        #for a, b in zip([dv_, ], [dv, ]):
-            print(f"dev {torch.cuda.current_device()}, {count}")
-            _error(a[:, 0], b[:, 0])
-            _error(a[:, 1], b[:, 1])
-            count += 1
-    elif qkv_format == "sbhd":
-        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-            _error(a[0], b[0])
-            _error(a[1], b[1])
-    elif qkv_format == "thd":
-        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-            _error(a, b)
-    else:
-        assert False, f"{qkv_format} is an unsupported qkv_format!"
-
+    # destroy distribution group
     dist.destroy_process_group()
 
 

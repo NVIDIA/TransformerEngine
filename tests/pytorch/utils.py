@@ -137,6 +137,29 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
+def compare_with_error(a, b, name_a, name_b, atol, rtol, rmse_tol):
+    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
+    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
+    try:
+        if a.dtype != b.dtype:
+            a = a.to(b.dtype)
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+    except Exception as e:
+        logging.debug(e)
+
+    rmse = torch.sqrt((a - b).square().mean()).item()
+    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
+    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+    assert rmse < rmse_tol * rmse_range, (
+        name_a
+        + " vs "
+        + name_b
+        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+        )
+    )
+
+
 class ModelConfig:
     def __init__(
         self,

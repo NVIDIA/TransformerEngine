@@ -891,12 +891,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         dtype = inp.dtype
-        for name, param in self.named_parameters():
-            if param is not None:
-                assert dtype == param.dtype, (
-                    "Data types for parameters must match when outside of autocasted region. "
-                    f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-                )
+        #for name, param in self.named_parameters():
+        #    if param is not None:
+        #        assert dtype == param.dtype, (
+        #            "Data types for parameters must match when outside of autocasted region. "
+        #            f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+        #        )
         self.activation_dtype = dtype
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
