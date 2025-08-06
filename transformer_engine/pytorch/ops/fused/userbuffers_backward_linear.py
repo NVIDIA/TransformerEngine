@@ -419,8 +419,8 @@ class UserbuffersBackwardLinear(FusedOperation):
                     dy, _ = fill_userbuffers_buffer_for_all_gather(
                         ub_obj_wgrad,
                         dy_local,
-                        ctx.grad_output_quantizer,
-                        ctx.tp_group,
+                        grad_output_quantizer,
+                        tensor_parallel_group,
                     )
 
                 # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
