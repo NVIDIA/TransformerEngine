@@ -261,7 +261,7 @@ def ubsymm_request_allocator(dist_group: torch.distributed.group, shape:Optional
     
     if dist_group not in _allocator_map:
         if os.environ.get("NVTE_USE_UB_FOR_UBNEXT"):
-            assert _allocator_map.is_empty(), "Current UBNEXT-UB bypass supports only one process group."
+            assert not _allocator_map, "Current UBNEXT-UB bypass supports only one process group."
         _allocator_map[dist_group] = (tensor_size, None)
     else:
         old_size, allocator = _allocator_map[dist_group]
