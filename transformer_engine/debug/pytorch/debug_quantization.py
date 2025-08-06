@@ -298,20 +298,10 @@ class DebugQuantizer(Quantizer):
         # 1. If there is fp8 quantization in at least one of the gemms,
         #    the quantization using the self.parent_quantizer is performed.
 
-        # rowwise gemm corresponds to the rowwise_usage in fp8, similarly with columnwise
-        rowwise_gemm_quantize = (
-            self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE
-        )
-        columnwise_gemm_quantize = (
-            self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
-        )
+        self._update_parent_quantizer_usage()
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
         if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
-            self.parent_quantizer.set_usage(
-                rowwise=rowwise_gemm_quantize,
-                columnwise=columnwise_gemm_quantize,
-            )
             quantized_tensor = self.parent_quantizer(tensor)
             # if both rowwise_tensor_plan and columnwise_tensor_plan need to be in fp8,
             # one tensor with columnwise=True and rowwise=True is computed
