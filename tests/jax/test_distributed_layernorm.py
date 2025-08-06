@@ -69,8 +69,7 @@ class TestDistributedLayernorm:
         assert ln_type in ["layernorm", "rmsnorm"]
         all_reduce_loss_bytes = 4  # 1 * FP32
         # for loss, dgamma and dbeta
-        # TODO(Jeremy): debug this check because layernorm should always have 2x weights regardless of dp
-        weight_count = 2 if (ln_type == "layernorm" and "dp" in mesh_axes) else 1
+        weight_count = 2 if (ln_type == "layernorm") else 1
         allreduce_total_bytes = (
             all_reduce_loss_bytes + weight_count * shape[-1] * jax_dtype.itemsize
         )
