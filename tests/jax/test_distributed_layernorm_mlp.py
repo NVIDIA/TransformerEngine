@@ -352,7 +352,6 @@ class TestDistributedLayernormMLP:
             ):
                 ln_mlp_sharded = LayerNormMLP(
                     layernorm_type=layernorm_type,
-                    transpose_batch_sequence=False,
                     intermediate_dim=INTERMEDIATE,
                     activations=activation_type,
                     scale_axes=LN_SCALE_AXES,
