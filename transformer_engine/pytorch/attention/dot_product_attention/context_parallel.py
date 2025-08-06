@@ -46,6 +46,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
+_softmax_offset_chunk_ids_cache = {}
 
 
 def flash_attn_p2p_communicate(
@@ -316,6 +317,58 @@ def flash_attn_a2a_communicate(
                     a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
+
+
+def flash_attn_a2a_communicate_softmax_offset(
+    tensor: torch.Tensor,
+    h_dim: int,
+    cp_size: int,
+    cp_group: dist_group_type,
+    cp_stream: torch.cuda.Stream,
+    before_attn: bool,
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """Split/AllGather communication for softmax offset."""
+    if tensor is None:
+        return None
+
+    global _softmax_offset_chunk_ids_cache
+    device = tensor.device
+    if (cp_size, device) not in _softmax_offset_chunk_ids_cache:
+        chunk_ids = torch.arange(cp_size, dtype=torch.int32, device=device)
+        _softmax_offset_chunk_ids_cache[(cp_size, device)] = chunk_ids
+    else:
+        chunk_ids = _softmax_offset_chunk_ids_cache[(cp_size, device)]
+
+    if before_attn:
+        # softmax_offset
+        # [1, h, 1, 1] -> [1, cp, h//cp, 1, 1]
+        shape = tensor.shape
+        tensor = tensor.view(*shape[:h_dim], cp_size, shape[h_dim] // cp_size, *shape[(h_dim+1):])
+        rank = get_distributed_rank(cp_group)
+        output = torch.index_select(tensor, dim=h_dim, index=chunk_ids[rank])
+        #output = output.contiguous()
+        output = output.view(*shape[:h_dim], -1, *shape[(h_dim+1):])
+        print(f"softmax_offset rank{rank}, {output.shape}, {output.view(-1)}")
+    else:
+        # d_softmax_offset
+        # [1, h//cp, 1, 1] -> [1, h, 1, 1]
+        print(f"d_softmax_offset rank{get_distributed_rank(cp_group)}, {tensor.shape}, {tensor.view(-1)}")
+        inp = tensor.view(-1)
+        output = torch.zeros(cp_size * inp.shape[0], dtype=tensor.dtype, device=device)
+        with torch.cuda.stream(cp_stream):
+            torch.distributed.all_gather_into_tensor(
+                output,
+                inp,
+                group=cp_group,
+                async_op=False,
+            )
+        torch.cuda.current_stream().wait_stream(cp_stream)
+        print(f'oooooo {output}')
+        output = output.view(
+            *tensor.shape[:h_dim], cp_size*tensor.shape[h_dim], *tensor.shape[h_dim+1:]
+            )
+        print(f'oooooo {output}')
+    return output
 
 
 def _get_cu_seqlens_info_with_cp(
@@ -3222,6 +3275,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_stream,
         quantizers,
         use_flash_attn_3,
+        softmax_type,
+        softmax_offset,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
@@ -3326,10 +3381,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fp8_meta_kwargs = {}
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
+        if softmax_offset is not None:
+            print(f'q before comm, {[x.shape for x in [q]]}, {softmax_offset.shape}, {softmax_offset[0,:,0,0]}')
+        else:
+            print(f'q before comm, {[x.shape for x in [q]]}, {softmax_offset}')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate(
             [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, True
         )
+        print(f'q after comm, {[x.shape for x in [q]]}')
+        if softmax_type != "vanilla":
+            softmax_offset = flash_attn_a2a_communicate_softmax_offset(
+                softmax_offset, 1, cp_size, cp_group, cp_stream, True
+            )
 
         if fp8 and not is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_f16, k_f16, v_f16 = q, k, v
@@ -3369,7 +3433,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 window_size=window_size,
                 **fp8_meta_kwargs,
+                softmax_type=softmax_type,
+                softmax_offset=softmax_offset,
             )
+            if torch.cuda.current_device() == 0:
+                tensors = [out, q_part, k_part, v_part]
+                names = ["o", "q", "k", "v"]
+                for i,x in enumerate(tensors):
+                    torch.save(x, 'cp_f_'+names[i]+'.pt')
             if fp8:
                 out = out._data
         else:
@@ -3398,10 +3469,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 rng_state = fa_outputs[3] if not use_flash_attn_3 else None
             aux_ctx_tensors = [softmax_lse, rng_state]
 
+        print(f'out before comm, {out.shape }')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out.device)
         out = flash_attn_a2a_communicate(
             out, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, False
         )
+        print(f'out after comm, {out.shape }')
 
         if use_fused_attention:
             if qkv_format == "bshd":
@@ -3471,6 +3544,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         ctx.use_flash_attn_3 = use_flash_attn_3
+        ctx.softmax_type = softmax_type
 
         ctx.qkv_dtype = qkv_dtype
         ctx.dQKV_quantizer = dQKV_quantizer
@@ -3634,7 +3708,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     dout_part, fake_dtype=dout_dtype, internal=True
                 )
 
-            dq, dk, dv, _ = fused_attn_bwd(
+            dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
                 cu_seqlens_q,
@@ -3658,7 +3732,31 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 window_size=ctx.window_size,
                 deterministic=ctx.deterministic,
                 **fp8_meta_kwargs,
+                softmax_type=ctx.softmax_type,
             )
+            if torch.cuda.current_device() == 0:
+                print(f"aux_ctx_tensors[2] {aux_ctx_tensors[2].view(-1)}")
+                for i in range(2):
+                    s = i*1024
+                    t = 4
+                    e = s + t
+                    print(f"{i} out_part   {out_part.shape}, {out_part[0,s:e,0,0]}")
+                    print(f"{i} dout_part {dout_part.shape}, {dout_part[0,s:e,0,0]}")
+                    print(f"{i} q_part   {q_part.shape}, {q_part[0,s:e,0,0]}")
+                    print(f"{i} k_part   {k_part.shape}, {k_part[0,s:e,0,0]}")
+                    print(f"{i} v_part   {v_part.shape}, {v_part[0,s:e,0,0]}")
+                    print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
+                    print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
+                    print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
+            if torch.cuda.current_device() == 0:
+                tensors = [out_part, dout_part, q_part, k_part, v_part, dq, dk, dv]
+                names = ["o", "do", "q", "k", "v", "dq", "dk", "dv"]
+                for i,x in enumerate(tensors):
+                    torch.save(x, 'cp_b_'+names[i]+'.pt')
+
+
+
+            print(f"len(rest) {ctx.softmax_type}, {len(aux_ctx_tensors)}, {[x.shape if x is not None else None for x in aux_ctx_tensors]}, {len(rest)}, {[x.shape if x is not None else None for x in rest]}")
             if ctx.fp8:
                 dq = dq._data
                 dk = dk._data
@@ -3692,15 +3790,34 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fa_backward_kwargs,
             )
 
+        print(f'before attn+comm, {[x.shape for x in [dq]]}')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, q.device)
         dq, dk, dv = flash_attn_a2a_communicate(
             [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, False
         )
+        print(f'after attn+comm, {[x.shape for x in [dq]]}')
 
         if ctx.qkv_format == "bshd":
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
         elif ctx.qkv_format == "sbhd":
             dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
+        print(f'after attn+comm+reshape, {[x.shape for x in [dq]]}')
+
+        d_bias = None
+        d_softmax_offset = None
+        if ctx.use_fused_attention:
+            count = 0
+            # if no_bias or alibi, return dqkv
+            if ctx.attn_bias_type not in ["no_bias", "alibi"]:
+                d_bias = rest[count]
+            count += 1
+            # if softmax type is "learnable"
+            if ctx.softmax_type != "vanilla":
+                d_softmax_offset = rest[count]
+                d_softmax_offset = flash_attn_a2a_communicate_softmax_offset(
+                    d_softmax_offset, 1, cp_size, ctx.cp_group, ctx.cp_stream, False
+                )
+                print(f"d_softmax_offset {d_softmax_offset}")
 
         if ctx.fp8:
             dq = ctx.dQKV_quantizer.create_tensor_from_data(
@@ -3732,6 +3849,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             None,
+            d_bias,
             None,
             None,
             None,
@@ -3742,6 +3860,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             None,
             None,
             None,
+            d_softmax_offset,
         )
 
 
@@ -3774,7 +3893,10 @@ def attn_forward_func_with_cp(
     quantizers=None,
     pad_between_seqs=False,
     use_flash_attn_3=False,
+    softmax_type="vanilla",
+    softmax_offset=None,
 ) -> torch.Tensor:
+
     """
     Attention implementation with context parallelism (CP). CP partitions tensors along the sequence
     dimension, and by reducing the memory and computational pressure on each GPU, it enables long-context
@@ -3882,6 +4004,20 @@ def attn_forward_func_with_cp(
         "a2a+p2p",
     ], "The context parallel running configs cannot support MLA!"
 
+    if fp8 and fp8_meta is not None:
+        if fp8_meta["recipe"].fp8_dpa:
+            assert (
+                softmax_type == "vanilla"
+            ), "Context parallelism does not support non-vanilla softmax types with FP8!"
+    assert (
+        softmax_type == "vanilla"
+        or use_fused_attention
+    ), "Context parallelism only supports non-vanilla softmax types with FusedAttention backend!"
+    assert (
+        softmax_type == "vanilla"
+        or cp_comm_type == "a2a"
+    ), "Context parallelism only supports non-vanilla softmax types with A2A or AllGather communication type!"
+
     args = [
         is_training,
         q,
@@ -3921,7 +4057,7 @@ def attn_forward_func_with_cp(
         args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers, use_flash_attn_3]
+        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers, use_flash_attn_3, softmax_type, softmax_offset]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")

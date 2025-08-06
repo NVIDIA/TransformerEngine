@@ -95,6 +95,7 @@ def run_dpa_with_cp(
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
         window_size=config.window_size,
+        softmax_type=config.softmax_type,
     )
     core_attn = core_attn.cuda()
 
@@ -213,6 +214,8 @@ def run_dpa_with_cp(
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
+    if config.softmax_type != "vanilla":
+        core_attn.softmax_offset.requires_grad = True
 
     if dtype == "fp8":
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
@@ -236,8 +239,42 @@ def run_dpa_with_cp(
             out.backward(dout_fp8)
         else:
             out.backward(dout)
+    if rank == 0:
+        dq, dk, dv = q.grad, k.grad, v.grad
+        for i in range(world_size * 2):
+            s = i*1024
+            t = 4
+            e = s + t
+            print(f"{i} out {out.shape}, {out[0,s:e,0]}")
+            print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
+            print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
+            print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
 
+    d_softmax_offset = None
+    if config.softmax_type != "vanilla":
+        d_softmax_offset = core_attn.softmax_offset.grad.clone()
+        print(f"ORIGGGG, {core_attn.softmax_offset}")
+        print(f"ORIGGGG, {d_softmax_offset}")
+
+    print("======================================")
     # run core_attn wit CP
+    del core_attn
+    core_attn = DotProductAttention(
+        config.num_heads,
+        (config.head_dim_qk, config.head_dim_v),
+        num_gqa_groups=config.num_gqa_groups,
+        attention_dropout=config.dropout_p,
+        qkv_format=qkv_format,
+        attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
+        softmax_type=config.softmax_type,
+    )
+    core_attn = core_attn.cuda()
+    for x in [q, k, v]:
+        x.requires_grad = True
+    if config.softmax_type != "vanilla":
+        core_attn.softmax_offset.requires_grad = True
+
     q_, k_, v_, dout_, *rest = [
         x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
     ]
@@ -254,6 +291,7 @@ def run_dpa_with_cp(
             for x in [q_, k_, v_, dout_]
         ]
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
+        print(f"sssssssseq_idx {torch.cuda.current_device()}, {seq_idx}")
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
@@ -290,6 +328,8 @@ def run_dpa_with_cp(
         fp8_context = nullcontext()
 
     with fp8_context:
+        #if config.softmax_type != "vanilla":
+        #    core_attn.softmax_offset.grad.zero_()
         out_ = core_attn(
             q_,
             k_,
@@ -313,9 +353,27 @@ def run_dpa_with_cp(
         out = out.dequantize()
         out_ = out_.dequantize()
 
-    for x in [out_, q_.grad, k_.grad, v_.grad]:
-        assert torch.all(~torch.isnan(x))
-        assert torch.all(~torch.isinf(x))
+    d_softmax_offset_ = None
+    if config.softmax_type != "vanilla":
+        d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
+        print(f"CPPPPPP, {core_attn.softmax_offset}")
+        print(f"CPPPPPP, {d_softmax_offset_}")
+    for x in [out_, q_.grad, k_.grad, v_.grad, d_softmax_offset_]:
+        if x is not None:
+            assert torch.all(~torch.isnan(x))
+            assert torch.all(~torch.isinf(x))
+    if rank == 0:
+        dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
+        tensors = [out_, dq_, dk_, dv_]
+        names = ["out_", "dq_", "dk_", "dv_"]
+        for i in range(world_size):
+            s = i*1024
+            t = 4
+            e = s + t
+            print(f"{i} out_ {out_.shape}, {out_[0,s:e,0]}")
+            print(f"{i} dq_  {dq_.shape}, {dq_[0,s:e,0,0]}")
+            print(f"{i} dk_  {dk_.shape}, {dk_[0,s:e,0,0]}")
+            print(f"{i} dv_  {dv_.shape}, {dv_[0,s:e,0,0]}")
 
     # compare results with and without CP
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -410,9 +468,21 @@ def run_dpa_with_cp(
             )
 
     if qkv_format == "bshd":
-        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+        count = 0
+        #for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+        #for a, b in zip([out_, ], [out, ]):
+        if config.softmax_type != "vanilla":
+            _error(d_softmax_offset, d_softmax_offset_)
+        if rank == 0:
+            print(f"passed dso, {d_softmax_offset}")
+            print(f"passed dso, {d_softmax_offset_}")
+        for a, b in zip([dq_, ], [dq, ]):
+        #for a, b in zip([dk_, ], [dk, ]):
+        #for a, b in zip([dv_, ], [dv, ]):
+            print(f"dev {torch.cuda.current_device()}, {count}")
             _error(a[:, 0], b[:, 0])
             _error(a[:, 1], b[:, 1])
+            count += 1
     elif qkv_format == "sbhd":
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
             _error(a[0], b[0])

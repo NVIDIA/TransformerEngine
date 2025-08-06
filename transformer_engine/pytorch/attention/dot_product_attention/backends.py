@@ -1084,6 +1084,11 @@ class FusedAttnFunc(torch.autograd.Function):
                 rng_gen,
                 softmax_offset,
             )
+            if torch.cuda.current_device() == 0:
+                tensors = [out_ret, q, k, v]
+                names = ["o", "q", "k", "v"]
+                for i,x in enumerate(tensors):
+                    torch.save(x, 'no_cp_f_'+names[i]+'.pt')
             out_save = out_ret
             fp8_tensors = (None, None, None, None)
 
@@ -1316,6 +1321,26 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
+                    if torch.cuda.current_device() == 0:
+                        tensors = [out, d_out, q, k, v, dq, dk, dv]
+                        names = ["o", "do", "q", "k", "v", "dq", "dk", "dv"]
+                        for i,x in enumerate(tensors):
+                            torch.save(x, 'no_cp_b_'+names[i]+'.pt')
+                    if torch.cuda.current_device() == 0:
+                        print(f"aux_ctx_tensors[2] {aux_ctx_tensors[2].view(-1)}")
+                        for i in range(2):
+                            s = i*1024
+                            t = 4
+                            e = s + t
+                            print(f"{i} out   {out.shape}, {out[0,s:e,0,0]}")
+                            print(f"{i} d_out {d_out.shape}, {d_out[0,s:e,0,0]}")
+                            print(f"{i} q   {q.shape}, {q[0,s:e,0,0]}")
+                            print(f"{i} k   {k.shape}, {k[0,s:e,0,0]}")
+                            print(f"{i} v   {v.shape}, {v[0,s:e,0,0]}")
+                            print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
+                            print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
+                            print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
+
 
         count = 0
         # if no_bias or alibi, return dqkv
@@ -1464,6 +1489,10 @@ class FusedAttention(torch.nn.Module):
         softmax_offset: torch.Tensor = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
+        if softmax_offset is not None:
+            print(f"FU softmax_offset, {self.softmax_type}, {softmax_offset[0,:,0,0]}")
+        else:
+            print(f"FU softmax_offset, {self.softmax_type}, {softmax_offset}")
         assert (
             fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
         ), "No fused attention backend supports this input combination!"
@@ -1612,6 +1641,8 @@ class FusedAttention(torch.nn.Module):
                     fp8_meta=fp8_meta,
                     quantizers=quantizers,
                     pad_between_seqs=pad_between_seqs,
+                    softmax_type=self.softmax_type,
+                    softmax_offset=softmax_offset,
                 )
         else:
             with self.attention_dropout_ctx():
