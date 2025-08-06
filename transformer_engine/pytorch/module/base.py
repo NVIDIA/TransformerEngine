@@ -891,12 +891,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         dtype = inp.dtype
-        #for name, param in self.named_parameters():
-        #    if param is not None:
-        #        assert dtype == param.dtype, (
-        #            "Data types for parameters must match when outside of autocasted region. "
-        #            f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-        #        )
+        if not self.allow_different_data_param_dtypes:
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
         self.activation_dtype = dtype
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -985,6 +986,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
+        allow_different_data_param_dtypes: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
@@ -992,6 +994,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.allow_different_data_param_dtypes = allow_different_data_param_dtypes
         self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():

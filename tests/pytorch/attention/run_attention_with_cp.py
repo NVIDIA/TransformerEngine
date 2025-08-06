@@ -117,7 +117,7 @@ def generate_input_shapes(
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
     else:
-        assert False, f"qkv_format = {qkv_format} is not supported!"
+        assert False, f"{qkv_format=} is not supported!"
 
     return q_input_shape, k_input_shape, v_input_shape, attn_output_shape, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded
 
@@ -140,7 +140,7 @@ def get_tols(config, dtype):
         rtol = 5e-1
         rmse_tol = 0.1
     else:
-        assert False, f"dtype = {dtype} is not supported!"
+        assert False, f"{dtype=} is not supported!"
 
     return atol, rtol, rmse_tol
 
@@ -168,7 +168,7 @@ def run_dpa_with_cp(
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
-    ], f"attn_mask_type = {config.attn_mask_type} is not supported!"
+    ], f"{config.attn_mask_type=} is not supported!"
     if qkv_format == "thd":
         if "causal" in config.attn_mask_type:
             config.attn_mask_type = "padding_causal"
@@ -191,7 +191,7 @@ def run_dpa_with_cp(
         device_count = torch.cuda.device_count()
         device = rank % device_count
         torch.cuda.set_device(device)
-    logging.debug(f"[run_dpa_with_cp] Setup (device {rank}): world_size {world_size}, rank {rank}")
+    logging.info(f"[run_dpa_with_cp] Setup (device {rank}): world_size {world_size}, rank {rank}")
     dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
     # set up communication group for CP
@@ -201,7 +201,7 @@ def run_dpa_with_cp(
     if cp_comm_type == "a2a+p2p":
         assert (
             world_size % 2 == 0
-        ), "Please make sure world_size % 2 = 0 as a2a+p2p assumes the cp_size for A2A is 2."
+        ), "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size = 2."
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
         cp_comm_sub_groups = []
@@ -256,7 +256,7 @@ def run_dpa_with_cp(
         bias = None
 
     ############ run without CP ############
-    logging.debug("[run_dpa_with_cp] Run without context parallelism (device {rank})")
+    logging.info("[run_dpa_with_cp] Run without context parallelism (device {rank})")
     with fp8_context:
         out = core_attn(
             q,
@@ -275,25 +275,12 @@ def run_dpa_with_cp(
         else:
             out.backward(dout)
     dq, dk, dv = q.grad, k.grad, v.grad
-    #if rank == 0:
-    #    dq, dk, dv = q.grad, k.grad, v.grad
-    #    for i in range(world_size * 2):
-    #        s = i*1024
-    #        t = 4
-    #        e = s + t
-    #        print(f"{i} out {out.shape}, {out[0,s:e,0]}")
-    #        print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
-    #        print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
-    #        print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
     d_softmax_offset = None
     if config.softmax_type != "vanilla":
-        d_softmax_offset = core_attn.softmax_offset.grad.clone()
-        print(f"ORIGGGG, {core_attn.softmax_offset}")
-        print(f"ORIGGGG, {d_softmax_offset}")
+        d_softmax_offset = core_attn.softmax_offset.grad
 
     ############ run with CP ############
-    logging.debug("[run_dpa_with_cp] Run with context parallelism (device {rank})")
-    torch.cuda.memory._record_memory_history(True, trace_alloc_max_entries=100000, trace_alloc_record_context=True)
+    logging.info("[run_dpa_with_cp] Run with context parallelism (device {rank})")
 
     # set up environment
     core_attn.set_context_parallel_group(
@@ -302,16 +289,14 @@ def run_dpa_with_cp(
         torch.cuda.Stream(),
         cp_comm_type,
     )
-
     if config.softmax_type != "vanilla":
         core_attn.softmax_offset.grad.zero_()
-        core_attn.zero_grad()
     if dtype == "fp8":
         core_attn.reset_fp8_meta_tensors()
 
     # set up inputs
     q_, k_, v_, dout_, *rest = [
-        x.clone().detach().contiguous() for x in [q, k, v, dout] + ([] if bias is None else [bias])
+        x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
     ]
     bias_ = rest[0] if len(rest) else None
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -364,8 +349,6 @@ def run_dpa_with_cp(
             dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
-            #os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-            #torch.cuda.empty_cache()
             out_.backward(dout_)
     if fp8_mha:
         assert isinstance(out, Float8Tensor)
@@ -378,24 +361,10 @@ def run_dpa_with_cp(
     d_softmax_offset_ = None
     if config.softmax_type != "vanilla":
         d_softmax_offset_ = core_attn.softmax_offset.grad.clone()
-        print(f"CPPPPPP, {core_attn.softmax_offset}")
-        print(f"CPPPPPP, {d_softmax_offset_}")
     for x in [out_, dq_, dk_, dv_, d_softmax_offset_]:
         if x is not None:
             assert torch.all(~torch.isnan(x))
             assert torch.all(~torch.isinf(x))
-    #if rank == 0:
-    #    #dq_, dk_, dv_ = q_.grad, k_.grad, v_.grad
-    #    tensors = [out_, dq_, dk_, dv_]
-    #    names = ["out_", "dq_", "dk_", "dv_"]
-    #    for i in range(world_size):
-    #        s = i*1024
-    #        t = 4
-    #        e = s + t
-    #        print(f"{i} out_ {out_.shape}, {out_[0,s:e,0]}")
-    #        print(f"{i} dq_  {dq_.shape}, {dq_[0,s:e,0,0]}")
-    #        print(f"{i} dk_  {dk_.shape}, {dk_[0,s:e,0,0]}")
-    #        print(f"{i} dv_  {dv_.shape}, {dv_[0,s:e,0,0]}")
 
     ############  compare results between CP and no-CP ############
     if qkv_format == "bshd" or qkv_format == "sbhd":
@@ -453,12 +422,6 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-
-    #snapshot = torch.cuda.memory._snapshot()
-
-    #with open(f"/code/pr_orange/transformerengine/snapshot.pickle", "wb") as f:
-    #    pickle.dump(snapshot, f)
-    torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
     atol, rtol, rmse_tol = get_tols(config, dtype)
     tensors_cp = [out_, dq_, dk_, dv_, d_softmax_offset_]

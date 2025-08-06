@@ -346,13 +346,10 @@ def flash_attn_a2a_communicate_softmax_offset(
         tensor = tensor.view(*shape[:h_dim], cp_size, shape[h_dim] // cp_size, *shape[(h_dim+1):])
         rank = get_distributed_rank(cp_group)
         output = torch.index_select(tensor, dim=h_dim, index=chunk_ids[rank])
-        #output = output.contiguous()
         output = output.view(*shape[:h_dim], -1, *shape[(h_dim+1):])
-        print(f"softmax_offset rank{rank}, {output.shape}, {output.view(-1)}")
     else:
         # d_softmax_offset
         # [1, h//cp, 1, 1] -> [1, h, 1, 1]
-        print(f"d_softmax_offset rank{get_distributed_rank(cp_group)}, {tensor.shape}, {tensor.view(-1)}")
         inp = tensor.view(-1)
         output = torch.empty(cp_size * inp.shape[0], dtype=tensor.dtype, device=device)
         with torch.cuda.stream(cp_stream):
@@ -363,11 +360,9 @@ def flash_attn_a2a_communicate_softmax_offset(
                 async_op=False,
             )
         torch.cuda.current_stream().wait_stream(cp_stream)
-        #print(f'oooooo {output}')
         output = output.view(
             *tensor.shape[:h_dim], cp_size*tensor.shape[h_dim], *tensor.shape[h_dim+1:]
             )
-        #print(f'oooooo {output}')
     return output
 
 
@@ -3381,15 +3376,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fp8_meta_kwargs = {}
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
-        #if softmax_offset is not None:
-        #    print(f'q before comm, {[x.shape for x in [q]]}, {softmax_offset.shape}, {softmax_offset[0,:,0,0]}')
-        #else:
-        #    print(f'q before comm, {[x.shape for x in [q]]}, {softmax_offset}')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate(
             [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, True
         )
-        #print(f'q after comm, {[x.shape for x in [q]]}')
         if softmax_type != "vanilla":
             softmax_offset = flash_attn_a2a_communicate_softmax_offset(
                 softmax_offset, 1, cp_size, cp_group, cp_stream, True
@@ -3436,11 +3426,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 softmax_type=softmax_type,
                 softmax_offset=softmax_offset,
             )
-            if torch.cuda.current_device() == 0:
-                tensors = [out, q_part, k_part, v_part]
-                names = ["o", "q", "k", "v"]
-                for i,x in enumerate(tensors):
-                    torch.save(x, 'cp_f_'+names[i]+'.pt')
             if fp8:
                 out = out._data
         else:
@@ -3469,12 +3454,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 rng_state = fa_outputs[3] if not use_flash_attn_3 else None
             aux_ctx_tensors = [softmax_lse, rng_state]
 
-        #print(f'out before comm, {out.shape }')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out.device)
         out = flash_attn_a2a_communicate(
             out, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, False
         )
-        #print(f'out after comm, {out.shape }')
 
         if use_fused_attention:
             if qkv_format == "bshd":
@@ -3734,29 +3717,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
                 softmax_type=ctx.softmax_type,
             )
-            if torch.cuda.current_device() == 0:
-                print(f"aux_ctx_tensors[2] {aux_ctx_tensors[2].view(-1)}")
-                for i in range(2):
-                    s = i*1024
-                    t = 4
-                    e = s + t
-                    print(f"{i} out_part   {out_part.shape}, {out_part[0,s:e,0,0]}")
-                    print(f"{i} dout_part {dout_part.shape}, {dout_part[0,s:e,0,0]}")
-                    print(f"{i} q_part   {q_part.shape}, {q_part[0,s:e,0,0]}")
-                    print(f"{i} k_part   {k_part.shape}, {k_part[0,s:e,0,0]}")
-                    print(f"{i} v_part   {v_part.shape}, {v_part[0,s:e,0,0]}")
-                    print(f"{i} dq  {dq.shape}, {dq[0,s:e,0,0]}")
-                    print(f"{i} dk  {dk.shape}, {dk[0,s:e,0,0]}")
-                    print(f"{i} dv  {dv.shape}, {dv[0,s:e,0,0]}")
-            if torch.cuda.current_device() == 0:
-                tensors = [out_part, dout_part, q_part, k_part, v_part, dq, dk, dv]
-                names = ["o", "do", "q", "k", "v", "dq", "dk", "dv"]
-                for i,x in enumerate(tensors):
-                    torch.save(x, 'cp_b_'+names[i]+'.pt')
-
-
-
-            print(f"len(rest) {ctx.softmax_type}, {len(aux_ctx_tensors)}, {[x.shape if x is not None else None for x in aux_ctx_tensors]}, {len(rest)}, {[x.shape if x is not None else None for x in rest]}")
             if ctx.fp8:
                 dq = dq._data
                 dk = dk._data
@@ -3790,34 +3750,26 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fa_backward_kwargs,
             )
 
-        #print(f'before attn+comm, {[x.shape for x in [dq]]}')
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, q.device)
         dq, dk, dv = flash_attn_a2a_communicate(
             [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, False
         )
-        #print(f'after attn+comm, {[x.shape for x in [dq]]}')
 
         if ctx.qkv_format == "bshd":
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
         elif ctx.qkv_format == "sbhd":
             dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
-        #print(f'after attn+comm+reshape, {[x.shape for x in [dq]]}')
 
         d_bias = None
         d_softmax_offset = None
         if ctx.use_fused_attention:
-            count = 0
-            # if no_bias or alibi, return dqkv
             if ctx.attn_bias_type not in ["no_bias", "alibi"]:
-                d_bias = rest[count]
-            count += 1
-            # if softmax type is "learnable"
+                d_bias = rest[0]
             if ctx.softmax_type != "vanilla":
-                d_softmax_offset = rest[count]
+                d_softmax_offset = rest[1]
                 d_softmax_offset = flash_attn_a2a_communicate_softmax_offset(
                     d_softmax_offset, 1, cp_size, ctx.cp_group, ctx.cp_stream, False
                 )
-                #print(f"d_softmax_offset {d_softmax_offset}")
 
         if ctx.fp8:
             dq = ctx.dQKV_quantizer.create_tensor_from_data(
@@ -3959,10 +3911,10 @@ def attn_forward_func_with_cp(
     """
 
     if cp_comm_type == "a2a+p2p":
-        assert isinstance(
-            cp_group, list
-        ), "Hierarchical CP implementation needs multi-level CP groups!"
-        assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
+        assert (
+            isinstance(cp_group, list)
+            and len(cp_group) == 2
+        ), "Hierarchical context parallelism (CP), i.e. a2a+p2p, requires a list of two CP groups!"
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
             cp_comm_type = "p2p"
@@ -3972,23 +3924,22 @@ def attn_forward_func_with_cp(
     else:
         assert isinstance(
             cp_group, dist_group_type
-        ), f"Unsupported process group for CP communication type {cp_comm_type}!"
+        ), f"cp_group must be {dist_group_type} type for {cp_comm_type=}!"
 
     assert qkv_format in [
         "bshd",
         "sbhd",
         "thd",
-    ], f"QKV format of {qkv_format} is not supported with context parallelism!"
+    ], f"Context parallelism does not support {qkv_format=}!"
     assert (
         qkv_format != "sbhd" or use_fused_attention
-    ), "FlashAttention does not support sbhd format!"
+    ), "Context parallelism does not support FlashAttention backend with qkv_format = 'sbhd'!"
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
-        """Attention bias is only supported with FusedAttention and "causal" """
-        """or "no_mask" mask types!"""
+        "Context parallelism only supports attention bias with FusedAttention backend and non-padding mask types!"
     )
     assert qkv_format != "thd" or (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
-    ), "cu_seqlens_padded cannot be None with context parallelism + THD format!"
+    ), "cu_seqlens_padded can not be None with context parallelism and qkv_format = 'thd'!"
 
     sliding_window_attn = (
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
@@ -3996,27 +3947,27 @@ def attn_forward_func_with_cp(
     assert not sliding_window_attn or cp_comm_type in [
         "a2a",
         "all_gather",
-    ], "The context parallel running configs cannot support sliding window attetnion!"
+    ], "Context parallelism does not support sliding window attention with {cp_comm_type=}!"
 
     enable_mla = k.shape[-1] != v.shape[-1]
     assert not enable_mla or cp_comm_type in [
         "p2p",
         "a2a+p2p",
-    ], "The context parallel running configs cannot support MLA!"
+    ], "Context parallelism does not support MLA with {cp_comm_type=}!"
 
     if fp8 and fp8_meta is not None:
         if fp8_meta["recipe"].fp8_dpa:
             assert (
                 softmax_type == "vanilla"
-            ), "Context parallelism does not support non-vanilla softmax types with FP8!"
+            ), "Context parallelism does not support {softmax_type=} with FP8!"
     assert (
         softmax_type == "vanilla"
         or use_fused_attention
-    ), "Context parallelism only supports non-vanilla softmax types with FusedAttention backend!"
+    ), "Context parallelism only supports {softmax_type=} with FusedAttention backend!"
     assert (
         softmax_type == "vanilla"
         or cp_comm_type == "a2a"
-    ), "Context parallelism only supports non-vanilla softmax types with A2A or AllGather communication type!"
+    ), "Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
 
     args = [
         is_training,

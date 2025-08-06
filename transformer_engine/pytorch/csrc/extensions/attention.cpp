@@ -535,7 +535,7 @@ std::vector<py::object> fused_attn_bwd(
   });
 
   // allocate memory for workspace
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype(), true);
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 

@@ -290,8 +290,6 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    if softmax_offset is not None:
-        softmax_offset = softmax_offset.to(dtype=torch.float32)
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
