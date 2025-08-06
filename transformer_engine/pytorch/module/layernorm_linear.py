@@ -76,7 +76,7 @@ from ..cpp_extensions import (
     general_gemm,
     ubsymm_request_allocator,
     ubsymm_get_sym_tensor,
-    ubsymm_allreduce
+    ubsymm_allreduce,
 )
 
 __all__ = ["LayerNormLinear"]
@@ -330,8 +330,15 @@ class _LayerNormLinear(torch.autograd.Function):
             out_shape[-1] = out_features
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
         symm_out = None
-        if symmetric_ar_type == 'ub_custom':
-            symm_out = ubsymm_get_sym_tensor( (list(inp.shape)[0], out_features,), activation_dtype, tp_group)
+        if symmetric_ar_type == "ub_custom":
+            symm_out = ubsymm_get_sym_tensor(
+                (
+                    list(inp.shape)[0],
+                    out_features,
+                ),
+                activation_dtype,
+                tp_group,
+            )
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
@@ -377,8 +384,14 @@ class _LayerNormLinear(torch.autograd.Function):
                     if symm_out is not None:
                         out = ubsymm_allreduce(symm_out)
                     else:
-                        fallback_symmetric = "multimem_all_reduce" if symmetric_ar_type == "ub_custom" else symmetric_ar_type
-                        out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=fallback_symmetric)
+                        fallback_symmetric = (
+                            "multimem_all_reduce"
+                            if symmetric_ar_type == "ub_custom"
+                            else symmetric_ar_type
+                        )
+                        out, _ = symmetric_all_reduce(
+                            out, tp_group, all_reduce_type=fallback_symmetric
+                        )
                 else:
                     out, _ = allreduce(out, tp_group)
             nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
@@ -1247,8 +1260,15 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-            if self.symmetric_ar_type == 'ub_custom':
-                ubsymm_request_allocator(self.tp_group, (int(os.environ.get('NVTE_UB_MAXBATCH',64)), self.out_features,), params_dtype)
+            if self.symmetric_ar_type == "ub_custom":
+                ubsymm_request_allocator(
+                    self.tp_group,
+                    (
+                        int(os.environ.get("NVTE_UB_MAXBATCH", 64)),
+                        self.out_features,
+                    ),
+                    params_dtype,
+                )
         self.eps = eps
         layer_norm_weight = torch.nn.Parameter(
             torch.empty(self.in_features, device=device, dtype=params_dtype)
