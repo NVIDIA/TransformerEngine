@@ -545,7 +545,7 @@ class DebugQuantizer(Quantizer):
                 rowwise=rowwise_gemm_quantize,
                 columnwise=columnwise_gemm_quantize,
             )
-    
+
     def set_usage(self, rowwise: bool = None, columnwise: bool = None):
         """
         Sets the usage of the quantizer.
