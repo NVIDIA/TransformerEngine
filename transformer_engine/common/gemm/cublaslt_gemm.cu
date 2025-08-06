@@ -238,8 +238,9 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 bool accumulate, bool use_split_accumulator, int math_sm_count, int m_split,
-                 int n_split, bool gemm_producer, const Tensor *inputCounter, cudaStream_t stream) {
+                 float alpha, float beta, bool use_split_accumulator, int math_sm_count,
+                 int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
+                 cudaStream_t stream) {
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();
@@ -295,12 +296,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                "fp8 Aux output for gemm + gelu fusion not supported!");
   }
   if (is_fp8_dtype(outputD->data.dtype)) {
-    NVTE_CHECK(!accumulate, "Accumulation mode not supported with FP8 GEMM output!");
+    NVTE_CHECK(beta == 0.0f, "Accumulation mode not supported with FP8 GEMM output!");
   }
-
-  float one = 1.0;
-  float zero = 0.0;
-  float beta = (accumulate) ? one : zero;
 
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
@@ -586,7 +583,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, operationDesc,
-                                   static_cast<const void *>(&one),         /* alpha */
+                                   static_cast<const void *>(&alpha),       /* alpha */
                                    param.A,                                 /* A */
                                    Adesc, param.B,                          /* B */
                                    Bdesc, static_cast<const void *>(&beta), /* beta */
@@ -629,7 +626,26 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
 
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              accumulate, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
+              1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, 0, 0, false,
+              nullptr, stream);
+}
+
+void nvte_cublas_gemm_scaled(const NVTETensor A, const NVTETensor B, NVTETensor D,
+                             const NVTETensor bias, NVTETensor pre_gelu_out, bool transa,
+                             bool transb, bool grad, NVTETensor workspace, float alpha, float beta,
+                             bool use_split_accumulator, int math_sm_count, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cublas_gemm_scaled);
+  using namespace transformer_engine;
+  const Tensor *inputA = convertNVTETensorCheck(A);
+  const Tensor *inputB = convertNVTETensorCheck(B);
+  Tensor *outputD = convertNVTETensor(D);
+  const Tensor *biasTensor = convertNVTETensor(bias);
+  Tensor *outputGelu = convertNVTETensor(pre_gelu_out);
+  Tensor *wspace = convertNVTETensor(workspace);
+
+  cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
+              (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
+              alpha, beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
 void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D,
@@ -671,8 +687,8 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
              "Atomic GEMM only supports delayed scaling.");
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
-              accumulate, use_split_accumulator, math_sm_count, m_split, n_split, gemm_producer,
-              inputCounter, stream);
+              1.0f, (accumulate) ? 1.0f : 0.0f, use_split_accumulator, math_sm_count, m_split,
+              n_split, gemm_producer, inputCounter, stream);
 }
 
 void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
