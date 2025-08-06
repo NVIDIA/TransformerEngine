@@ -305,14 +305,12 @@ class DebugQuantizer(Quantizer):
         columnwise_gemm_quantize = (
             self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
         )
-        if columnwise_gemm_quantize and not rowwise_gemm_quantize:
-            rowwise_gemm_quantize = True  # only columnwise quantization not implemented
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
         if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
             self.parent_quantizer.set_usage(
-                rowwise=True,
-                columnwise=columnwise_gemm_quantize,  # columnwise usage only is not supported
+                rowwise=rowwise_gemm_quantize,
+                columnwise=columnwise_gemm_quantize,
             )
             quantized_tensor = self.parent_quantizer(tensor)
             # if both rowwise_tensor_plan and columnwise_tensor_plan need to be in fp8,
@@ -530,6 +528,31 @@ class DebugQuantizer(Quantizer):
         if self.parent_quantizer is not None:
             return self.parent_quantizer.supports_only_rowwise_all_gather()
         return False
+
+    def _update_parent_quantizer_usage(self):
+        """
+        Updates the usage of the parent quantizer.
+        """
+        rowwise_gemm_quantize = (
+            self.rowwise_usage and self.rowwise_tensor_plan == STANDARD_FP8_QUANTIZE
+        )
+        columnwise_gemm_quantize = (
+            self.columnwise_usage and self.columnwise_tensor_plan == STANDARD_FP8_QUANTIZE
+        )
+
+        if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
+            self.parent_quantizer.set_usage(
+                rowwise=rowwise_gemm_quantize,
+                columnwise=columnwise_gemm_quantize,
+            )
+    
+    def set_usage(self, rowwise: bool = None, columnwise: bool = None):
+        """
+        Sets the usage of the quantizer.
+        """
+        super().set_usage(rowwise=rowwise, columnwise=columnwise)
+        if not self.output_tensor:
+            self._update_parent_quantizer_usage()
 
 
 class DebugQuantizedTensor(QuantizedTensorBase):

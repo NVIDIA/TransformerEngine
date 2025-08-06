@@ -36,7 +36,7 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
             raise ValueError(f"Invalid layer: {layer}")
 
         for i in range(11):
-            x = torch.randn(4, 4, 128).cuda()
+            x = torch.randn(4, 128, 128).cuda()
             with te.fp8_autocast(enabled=True):
                 y = model(x)
             y.sum().backward()
