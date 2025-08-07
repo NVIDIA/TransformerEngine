@@ -96,6 +96,7 @@ class Float8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8Tensor:
 
         # Canonicalize tensor attributes
@@ -103,7 +104,7 @@ class Float8Quantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
@@ -113,6 +114,7 @@ class Float8Quantizer(Quantizer):
                 transpose_shape,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -268,6 +270,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8Tensor:
 
         # Canonicalize tensor attributes
@@ -275,7 +278,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
@@ -286,6 +289,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 data.numel() // inner_dim,
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -468,26 +472,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 "data": data,
                 "data_transpose": data_transpose,
             },
-        )
-
-    def empty_like(self, *args, **kwargs):
-        new_data = torch.empty_like(self._data, *args, **kwargs) if self._data is not None else None
-        new_transpose = (
-            torch.empty_like(self._transpose, *args, **kwargs)
-            if self._transpose is not None
-            else None
-        )
-        new_scale_inv = torch.empty_like(self._scale_inv, *args, **kwargs)
-        device = new_data.device if new_data is not None else new_transpose.device
-        return Float8Tensor(
-            shape=self.shape,
-            dtype=self.dtype,
-            data=new_data,
-            fp8_scale_inv=new_scale_inv,
-            fp8_dtype=self._fp8_dtype,
-            data_transpose=new_transpose,
-            quantizer=self._quantizer,
-            device=device,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:

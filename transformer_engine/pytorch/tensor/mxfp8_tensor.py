@@ -84,6 +84,7 @@ class MXFP8Quantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> MXFP8Tensor:
 
         # Canonicalize tensor attributes
@@ -99,24 +100,26 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
+        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
         scale_inv = torch.zeros(
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
             round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
             device=device,
+            pin_memory=pin_memory,
         )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty_like(data)
+            columnwise_data = torch.empty_like(data, pin_memory=pin_memory)
             columnwise_scale_inv = torch.zeros(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -288,39 +291,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 "rowwise_data": rowwise_data,
                 "columnwise_data": columnwise_data,
             },
-        )
-
-    def empty_like(self, *args, **kwargs):
-        """Create a new empty tensor with the same shape and type as this tensor"""
-        new_rowwise_data = (
-            torch.empty_like(self._rowwise_data, *args, **kwargs)
-            if self._rowwise_data is not None
-            else None
-        )
-        new_columnwise_data = (
-            torch.empty_like(self._columnwise_data, *args, **kwargs)
-            if self._columnwise_data is not None
-            else None
-        )
-        new_rowwise_scale_inv = (
-            torch.empty_like(self._rowwise_scale_inv, *args, **kwargs)
-            if self._rowwise_scale_inv is not None
-            else None
-        )
-        new_columnwise_scale_inv = (
-            torch.empty_like(self._columnwise_scale_inv, *args, **kwargs)
-            if self._columnwise_scale_inv is not None
-            else None
-        )
-        return MXFP8Tensor(
-            shape=self.shape,
-            dtype=self.dtype,
-            rowwise_data=new_rowwise_data,
-            rowwise_scale_inv=new_rowwise_scale_inv,
-            fp8_dtype=self._fp8_dtype,
-            columnwise_data=new_columnwise_data,
-            columnwise_scale_inv=new_columnwise_scale_inv,
-            quantizer=self._quantizer,
         )
 
     def view(self, *shape: Tuple[int]) -> MXFP8Tensor:

@@ -209,6 +209,7 @@ class Float8BlockQuantizer(Quantizer):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         requires_grad: bool = False,
+        pin_memory: bool = False,
     ) -> Float8BlockwiseQTensor:
         """Construct quantized tensor with uninitialized data"""
         if device is None:
@@ -224,12 +225,13 @@ class Float8BlockQuantizer(Quantizer):
         data = None
         scale_inv = None
         if self.rowwise_usage:
-            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_shape = self.get_scale_shape(shape, columnwise=False)
             scale_inv = torch.empty(
                 scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Allocate FP8 data transpose if needed
@@ -237,13 +239,14 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device
+                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
                 columnwise_scale_shape,
                 dtype=torch.float32,
                 device=device,
+                pin_memory=pin_memory,
             )
 
         # Construct FP8 tensor
@@ -395,42 +398,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 "rowwise_data": rowwise_data,
                 "columnwise_data": columnwise_data,
             },
-        )
-
-    def empty_like(self, *args, **kwargs):
-        """Create a new empty tensor with the same shape and type as this tensor"""
-        new_rowwise_data = (
-            torch.empty_like(self._rowwise_data, *args, **kwargs)
-            if self._rowwise_data is not None
-            else None
-        )
-        new_columnwise_data = (
-            torch.empty_like(self._columnwise_data, *args, **kwargs)
-            if self._columnwise_data is not None
-            else None
-        )
-        new_rowwise_scale_inv = (
-            torch.empty_like(self._rowwise_scale_inv, *args, **kwargs)
-            if self._rowwise_scale_inv is not None
-            else None
-        )
-        new_columnwise_scale_inv = (
-            torch.empty_like(self._columnwise_scale_inv, *args, **kwargs)
-            if self._columnwise_scale_inv is not None
-            else None
-        )
-
-        return Float8BlockwiseQTensor(
-            shape=self.shape,
-            dtype=self.dtype,
-            fp8_dtype=self._fp8_dtype,
-            rowwise_data=new_rowwise_data,
-            rowwise_scale_inv=new_rowwise_scale_inv,
-            columnwise_data=new_columnwise_data,
-            columnwise_scale_inv=new_columnwise_scale_inv,
-            quantizer=self._quantizer,
-            is_2D_scaled=self._is_2D_scaled,
-            requires_grad=self.requires_grad,
         )
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:

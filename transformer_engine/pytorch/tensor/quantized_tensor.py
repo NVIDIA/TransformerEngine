@@ -451,7 +451,16 @@ class QuantizedTensor(torch.Tensor):
         # Empty like op
         if func == torch.ops.aten.empty_like.default:
             tensor = args[0]
-            return tensor.empty_like(*args[1:], **kwargs)
+            device = kwargs.get("device", tensor.device)
+            requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
+            pin_memory = kwargs.get("pin_memory", tensor.is_pinned())
+            return tensor.quantizer.make_empty(
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                device=device,
+                requires_grad=requires_grad,
+                pin_memory=pin_memory,
+            )
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
