@@ -283,7 +283,7 @@ class TEDefaultFeatures:
         tp_group: torch.distributed.ProcessGroup,
     ) -> None:
         """
-        Similar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 camilar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
+        Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
         ----------
