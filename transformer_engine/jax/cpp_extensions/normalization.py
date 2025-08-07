@@ -828,11 +828,11 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     """
     JAX native layernorm implementation
     """
-    x_ = x#jnp.asarray(x, jnp.float32)
-    # if not is_norm_zero_centered_gamma_in_weight_dtype(
-    #     quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-    # ):
-    #     gamma = gamma.astype(jnp.float32)
+    x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     mean = jnp.mean(x_, axis=-1, keepdims=True)
     var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
@@ -853,12 +853,11 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     """
     JAX native rmsnorm implementation
     """
-    x_ = x
-    # x_ = jnp.asarray(x, jnp.float32)
-    # if not is_norm_zero_centered_gamma_in_weight_dtype(
-    #     quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-    # ):
-    #     gamma = gamma.astype(jnp.float32)
+    x_ = jnp.asarray(x, jnp.float32)
+    if not is_norm_zero_centered_gamma_in_weight_dtype(
+        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+    ):
+        gamma = gamma.astype(jnp.float32)
     var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
     normed_input = x_ * rsigma
@@ -1065,7 +1064,7 @@ def layernorm_bwd(
         )
         mu_empty = jnp.zeros(mu.shape, mu.dtype)
         rsigma_empty = jnp.zeros(rsigma.shape, rsigma.dtype)
-        return vjp_func((dz.astype(x.dtype), mu_empty.astype(x.dtype), rsigma_empty.astype(x.dtype)))
+        return vjp_func((dz, mu_empty, rsigma_empty))
     return NormBwdPrimitive.outer_primitive.bind(
         dz,
         x,
@@ -1255,7 +1254,7 @@ def rmsnorm_bwd(
             gamma,
         )
         rsigma_empty = jnp.zeros(rsigma.shape, rsigma.dtype)
-        return vjp_func((dz.astype(x.dtype), rsigma_empty.astype(x.dtype)))
+        return vjp_func((dz, rsigma_empty))
     mu = jnp.empty(())
     dx, dgamma, _ = NormBwdPrimitive.outer_primitive.bind(
         dz,

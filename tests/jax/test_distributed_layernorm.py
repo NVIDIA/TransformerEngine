@@ -20,6 +20,7 @@ from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
 from transformer_engine.jax.cpp_extensions.base import primitive_context
+from transformer_engine.jax.cpp_extensions.normalization import is_norm_zero_centered_gamma_in_weight_dtype
 
 
 DTYPES = [jnp.bfloat16, jnp.float32]
@@ -66,7 +67,16 @@ class TestDistributedLayernorm:
             # No collectives for tensor parallelism only as we do not shard the hidden dim for LN with TP.
             return generate_collectives_count(allreduce=0, allgather=0, other=0)
 
-        wgrad_allreduce_dtype = jax.dtypes.canonicalize_dtype(dtype)
+        # Determine scaling mode for LN from recipe
+        scaling_mode = ScalingMode.NO_SCALING
+        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+            scaling_mode = QuantizerFactory.create_set().x.scaling_mode
+
+        # JAX norm does AllReduce in FP32 due to intermediate casts for precision
+        wgrad_allreduce_dtype = dtype
+        if not use_te_norm or (not is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode) and ln_type == "rmsnorm"):
+            wgrad_allreduce_dtype = jnp.float32
+        wgrad_allreduce_dtype = jax.dtypes.canonicalize_dtype(wgrad_allreduce_dtype)
         assert ln_type in ["layernorm", "rmsnorm"]
         all_reduce_loss_bytes = 4  # 1 * FP32
 
@@ -79,7 +89,7 @@ class TestDistributedLayernorm:
             all_reduce_loss_bytes + weight_count * shape[-1] * wgrad_allreduce_dtype.itemsize
         )
         if fp8_recipe == recipe.Float8CurrentScaling():
-            amax_dtype = jax.dtypes.canonicalize_dtype(dtype)
+            amax_dtype = jax.dtypes.canonicalize_dtype(dtype if use_te_norm else jnp.float32)
             allreduce_total_bytes += amax_dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes, allgather=0, other=0
