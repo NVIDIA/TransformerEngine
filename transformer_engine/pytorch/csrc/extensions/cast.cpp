@@ -398,11 +398,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -441,11 +438,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     }
 
     // Allocate full buffer
-    // TODO(zhongbo): use torch.empty if zero padding is added to the swizzle kernel
     auto buffer = std::make_shared<at::Tensor>(
-        at::zeros({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-    // auto buffer = std::make_shared<at::Tensor>(
-    //     at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
+        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
 
     // Construct tensor views
     for (size_t i = 0; i < num_tensors; ++i) {

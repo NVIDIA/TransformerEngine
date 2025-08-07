@@ -427,24 +427,3 @@ class ShardingType(Enum):
     TP_ROW = (MajorShardingType.TP, "tp_row")
     DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
-
-
-def get_non_contracting_logical_axes(
-    ndim, logical_axes: tuple[Optional[str]], contracting_dims
-) -> tuple[Optional[str]]:
-    """Get logical axes for non-contracting dimensions.
-
-    Args:
-        ndim: Number of dimensions in the tensor.
-        logical_axes: Tuple of logical axes for each dimension.
-        contracting_dims: Set of dimensions that are being contracted.
-
-    Returns:
-        Tuple of logical axes for non-contracting dimensions.
-    """
-    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
-    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
-
-    non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
-    non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
-    return non_contracting_logical_axes
