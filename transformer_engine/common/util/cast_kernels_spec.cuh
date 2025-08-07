@@ -1988,6 +1988,7 @@ __global__ void cast_mxfp8_kernel(
                     }
                 } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux) {
                     IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+                    float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
 
                     uint32_t sColwiseReduce_ptr = __cvta_generic_to_shared(sColwiseReduce);
                     uint32_t colwise_reduce_barrier_ptr = __cvta_generic_to_shared(colwise_reduce_barrier);
@@ -2033,7 +2034,6 @@ __global__ void cast_mxfp8_kernel(
                             : "f"(values.y)
                         );
                         if (leader) {
-                            float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
                             sColwiseReduce_2x[i] = amaxs;
                         }
                     }
