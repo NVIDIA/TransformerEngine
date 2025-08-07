@@ -337,8 +337,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version >= 90200 &&
           ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
            ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
-            (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               max_seqlen_q == max_seqlen_kv)) &&
             max_seqlen_q <= max_seqlen_kv && dropout == 0.0 &&
@@ -354,7 +353,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               (sm_arch_ < 100 || (sm_arch_ >= 100 && ((max_seqlen_q == max_seqlen_kv &&
                                                        cudnn_runtime_version <= 90700) ||
                                                       cudnn_runtime_version > 90700)))) ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
               (sm_arch_ < 100 || (sm_arch_ >= 100 && ((max_seqlen_q == max_seqlen_kv &&
