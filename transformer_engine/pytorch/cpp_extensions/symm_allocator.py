@@ -156,7 +156,7 @@ class SymmAllocator:
         self.freelist = merged
 
     def create_tensor(
-        self, shape: Tuple[int, ...], dtype: torch.dtype = torch.float32
+        self, shape: torch.Size, dtype: torch.dtype = torch.float32
     ) -> Optional[torch.Tensor]:
         """Create a PooledTensor using memory from the pool."""
         nbytes = torch.tensor(0, dtype=dtype).element_size() * torch.Size(shape).numel()

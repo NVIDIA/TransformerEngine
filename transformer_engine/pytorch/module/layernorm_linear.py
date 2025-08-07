@@ -331,11 +331,10 @@ class _LayerNormLinear(torch.autograd.Function):
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
         symm_out = None
         if symmetric_ar_type == "ub_custom":
+            out_shape_list = list(tuple(inp.shape))
+            out_shape_list[-1] = out_features
             symm_out = ubsymm_get_sym_tensor(
-                (
-                    list(inp.shape)[0],
-                    out_features,
-                ),
+                torch.Size(out_shape_list),
                 activation_dtype,
                 tp_group,
             )
