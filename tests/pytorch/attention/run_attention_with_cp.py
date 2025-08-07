@@ -207,9 +207,6 @@ def run_dpa_with_cp(
                 cp_comm_sub_groups.append(sub_group)
     if dtype == "fp8":
         fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
-    else:
-        fp8_context = nullcontext()
 
     # instantiate attention module
     core_attn = DotProductAttention(
@@ -258,6 +255,10 @@ def run_dpa_with_cp(
 
     ############ run without CP ############
     logging.info("[run_dpa_with_cp] Run without context parallelism (device {rank})")
+    if dtype == "fp8":
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
     with fp8_context:
         out = core_attn(
             q,
@@ -294,6 +295,9 @@ def run_dpa_with_cp(
         core_attn.softmax_offset.grad.zero_()
     if dtype == "fp8":
         core_attn.reset_fp8_meta_tensors()
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
 
     # set up inputs
     q_, k_, v_, dout_, *rest = [
