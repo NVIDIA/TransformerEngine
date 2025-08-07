@@ -327,7 +327,7 @@ def initialize_ub(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if method == "bulk" or method == "external":
+            if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
