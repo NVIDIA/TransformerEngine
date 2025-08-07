@@ -3968,6 +3968,10 @@ def attn_forward_func_with_cp(
         softmax_type == "vanilla"
         or cp_comm_type == "a2a"
     ), "Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
+    assert (
+        softmax_type == "vanilla"
+        or qkv_format == "thd"
+    ), "Context parallelism does not support {softmax_type=} with qkv_format = 'thd'!"
 
     args = [
         is_training,

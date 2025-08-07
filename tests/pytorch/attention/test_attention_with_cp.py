@@ -190,6 +190,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("CP implementation with FP8 does not support non-vanilla softmax types!")
     if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
         pytest.skip("CP implementation only supports A2A for non-vanilla softmax types!")
+    if config.softmax_type != "vanilla" and qkv_format == "thd":
+        pytest.skip("CP implementation does not support qkv_format=thd for non-vanilla softmax types!")
 
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
     available_backends, _, fused_attn_backends = get_available_attention_backends(

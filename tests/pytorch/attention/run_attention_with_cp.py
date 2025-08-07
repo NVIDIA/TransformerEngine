@@ -24,6 +24,7 @@ dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 def generate_input_shapes(
     qkv_format: str,
     config: ModelConfig,
+    world_size: int,
 ):
     if qkv_format == "bshd":
         q_input_shape = (
@@ -233,7 +234,7 @@ def run_dpa_with_cp(
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-    ) = generate_input_shapes(qkv_format, config)
+    ) = generate_input_shapes(qkv_format, config, world_size)
     q = torch.randn(q_input_shape, dtype=dtypes[dtype]).cuda()
     k = torch.randn(k_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(v_input_shape, dtype=dtypes[dtype]).cuda()
