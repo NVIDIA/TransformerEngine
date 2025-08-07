@@ -10,6 +10,7 @@ When log() is called, they gather stats from all nodes, compute combined final s
 
 
 from collections import defaultdict
+from typing import Dict
 import torch
 
 from nvdlfw_inspect.utils import gather_along_first_dim
@@ -20,6 +21,7 @@ from transformer_engine.debug.features.utils.stats_computation import (
     DEPENDENCIES,
     stats_to_num,
 )
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 class _Buffer:
@@ -149,10 +151,41 @@ class StatsBuffers:
         self.buffers = {}  # (layer_name, tensor_name) -> buffer
         self.reduction_group_to_buffer = defaultdict(list)
 
+        # Logging stats involves synchronization between nodes
+        # and non-trivial cpu overhead.
+        # It should be only done if absolutely necessary.
+        # This variables helps to determine if we can reduce.
+        self.at_least_one_layer_fed = False
+        self.layers_to_next_iter: Dict[str, int] = {}
+
+    def _if_run_reduction(self) -> bool:
+        """
+        Returns True if reduction should be run.
+
+        This is the case if at least one layer logged stats.
+        If not, it may be the case that some layer was not run on this node.
+        If we know that such layers on all other nodes do not log this time,
+        we can not reduce. If this in not the case, we should reduce.
+
+        To ensure corretness, we assume that every layer is invoked at first forward pass.
+        If this is not the case, hang might happen.
+        """
+        if self.at_least_one_layer_fed:
+            return True
+        iteration = TEDebugState.get_iteration()
+        for _, next_iter in self.layers_to_next_iter.items():
+            # Note that layer can be not run for many iterations,
+            # in this case we will synchronize until every step until we get any information from it.
+            if iteration >= next_iter:
+                return True
+        return False
+
     def reset(self):
         """Resets all buffers."""
         self.buffers = {}  # (layer_name, tensor_name) -> buffer
         self.reduction_group_to_buffer = defaultdict(list)
+        self.at_least_one_layer_fed = False
+        self.layers_to_next_iter: Dict[str, int] = {}
 
     def try_add_buffer(
         self, layer_name, tensor_name, stats, options, reduction_group, reduce_within_microbatch
@@ -173,12 +206,16 @@ class StatsBuffers:
         The aux_dict is used to share common computation between different stats.
         For example for LogFp8TensorStats in can contain quantized tensors in different precisions.
         """
+        self.at_least_one_layer_fed = True
         buffer = self.buffers[(layer_name, tensor_name, options)]
         buffer.feed(tensor, iteration, aux_dict)
         buffer.skip_reduction = skip_reduction
 
     def log_stats(self):
         """Logs the stats from all the buffers."""
+        if not self._if_run_reduction():
+            return {}
+
         output = {}
         for reduction_group, buffers in self.reduction_group_to_buffer.items():
             changed_buffers = [
@@ -191,6 +228,7 @@ class StatsBuffers:
             for _, buffer in changed_buffers:
                 stats = buffer.log()
                 output.update(stats)
+        self.at_least_one_layer_fed = False
         return output
 
 

@@ -47,6 +47,7 @@ from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTens
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
+from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -564,6 +565,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
         self.name = None
+        self.next_iter_when_debug_should_be_run = 0
         self.fp8_initialized = False
         self.fp8 = False
         self.fp8_calibration = False
@@ -1416,12 +1418,55 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
                 wgrad_accumulation_and_reduce_hook()
 
+    def is_debug_iter(self) -> bool:
+        """
+        This function checks if the debug should be enabled for this layer.
+        """
+        debug = TEDebugState.debug_enabled
+        if not debug:
+            return False
+        self._validate_name()
+
+        # If layer is run first time in new iteration,
+        # we need to check if the debug should be enabled for this layer -
+        # maybe in previous iterations debug features returned information
+        # that no feature will be active for this layer for multiple next iterations.
+        started_new_iteration = TEDebugState.get_iteration() != getattr(
+            self, "debug_last_iteration", None
+        )
+        if started_new_iteration:
+            if self.next_iter_when_debug_should_be_run is None:
+                debug = False
+            else:
+                debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
+        self.debug_last_iteration = TEDebugState.get_iteration()
+        return debug
+
+    def no_debug_features_active(self, quantizers):
+        """
+        Checks if any debug feature is active for this layer.
+        """
+        run_current = any_feature_enabled(quantizers)
+
+        # Sometimes features inform that they will not be enabled for particular layer
+        # for multiple next iterations.
+        self.next_iter_when_debug_should_be_run = next_iter_when_debug_should_be_run(quantizers)
+
+        if not run_current:
+            return True
+
+        if self.primary_weights_in_fp8:
+            raise RuntimeError("FP8 weights are not supported in debug mode.")
+        return False
+
     def _validate_name(self):
         """
         Validate name passed to the module.
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
         If no name is assigned, it creates a default name with layer count as the variable.
         """
+        if self.name is not None:
+            return
         assert TEDebugState.debug_enabled
         import nvdlfw_inspect.api as debug_api
 
@@ -1470,29 +1515,3 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         " Please check the recipes assigned during fp8_model_init() and"
                         " fp8_autocast() calls."
                     )
-
-    def _turn_off_unsupported_features_in_debug(self):
-        if (
-            getattr(self, "ub_bulk_wgrad", False)
-            or getattr(self, "ub_bulk_dgrad", False)
-            or getattr(self, "ub_overlap_ag", False)
-            or getattr(self, "ub_overlap_rs_dgrad", False)
-            or getattr(self, "ub_overlap_rs", False)
-        ):
-            import nvdlfw_inspect.api as debug_api
-
-            debug_api.log_message(
-                "UserBuffers are not supported in debug module. "
-                "Using UB optimization will not affect the debug module. ",
-                level=logging.WARNING,
-            )
-            if hasattr(self, "ub_bulk_wgrad"):
-                self.ub_bulk_wgrad = None
-            if hasattr(self, "ub_bulk_dgrad"):
-                self.ub_bulk_dgrad = None
-            if hasattr(self, "ub_overlap_ag"):
-                self.ub_overlap_ag = None
-            if hasattr(self, "ub_overlap_rs_dgrad"):
-                self.ub_overlap_rs_dgrad = None
-            if hasattr(self, "ub_overlap_rs"):
-                self.ub_overlap_rs = None
