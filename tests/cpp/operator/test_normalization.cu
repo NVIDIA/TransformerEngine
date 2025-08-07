@@ -72,7 +72,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (fused_bwd_add) {
     fillUniform(&bwd_add);
   } else {
-    fillCase(&bwd_add, zeros);
+    fillCase<WeightType>(&bwd_add, zeros);
   }
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N * H);
