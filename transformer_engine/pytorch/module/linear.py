@@ -295,7 +295,7 @@ class _Linear(torch.autograd.Function):
             reduce_scatter_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
         symm_out = None
-        if symmetric_ar_type == "ub_custom":
+        if symmetric_ar_type == "ub_custom" and parallel_mode == "row" and tp_size > 1:
             out_shape_list = list(tuple(inp.shape))
             out_shape_list[-1] = out_features
             symm_out = ubsymm_get_sym_tensor(
@@ -1176,7 +1176,7 @@ class Linear(TransformerEngineBaseModule):
                 7,
                 0,
             ), "Torch version must be at least 2.7 to use symmetric memory"
-            if self.symmetric_ar_type == "ub_custom":
+            if self.symmetric_ar_type == "ub_custom" and parallel_mode == "row" and tp_size > 1:
                 ubsymm_request_allocator(
                     self.tp_group,
                     (
