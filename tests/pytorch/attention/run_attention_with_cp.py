@@ -18,6 +18,7 @@ from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.common.recipe import DelayedScaling
 from utils import ModelConfig, compare_with_error
+logging.basicConfig(level=logging.INFO)
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
@@ -187,7 +188,7 @@ def run_dpa_with_cp(
         device_count = torch.cuda.device_count()
         device = rank % device_count
         torch.cuda.set_device(device)
-    logging.info(f"[run_dpa_with_cp] Setup (device {rank}): world_size {world_size}, rank {rank}")
+    logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
     dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
     # set up communication group for CP
@@ -254,7 +255,7 @@ def run_dpa_with_cp(
         bias = None
 
     ############ run without CP ############
-    logging.info("[run_dpa_with_cp] Run without context parallelism (device {rank})")
+    logging.info(f"[Rank {rank}] Run without context parallelism")
     if dtype == "fp8":
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
@@ -282,7 +283,7 @@ def run_dpa_with_cp(
         d_softmax_offset = core_attn.softmax_offset.grad
 
     ############ run with CP ############
-    logging.info("[run_dpa_with_cp] Run with context parallelism (device {rank})")
+    logging.info(f"[Rank {rank}] Run with context parallelism")
 
     # set up environment
     core_attn.set_context_parallel_group(
@@ -447,7 +448,7 @@ def run_dpa_with_cp(
                     compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
             else:
                 compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
-            logging.info(f"[run_dpa_with_cp] CP vs no-CP {names[i]} matches on device {rank}")
+            logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     # destroy distribution group
     dist.destroy_process_group()
