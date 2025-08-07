@@ -1457,30 +1457,31 @@ def gather_along_first_dim(
 # Global buffer pool for symmetric memory
 class SymmetricMemoryBufferPool:
     """This class manages a pool of reusable symmetric memory buffers for symmetric
-    all-reduce operations. It implements automatic buffer growth and reuse to 
+    all-reduce operations. It implements automatic buffer growth and reuse to
     minimize memory allocation overhead during distributed communication operations.
-    
+
     The pool maintains separate buffers for different combinations of data type,
     device, and process group, automatically growing buffers when larger sizes
     are requested.
-    
+
     Attributes
     ----------
     pools : Dict[Tuple, torch.Tensor]
         Dictionary mapping (dtype, device, group_name) tuples to allocated buffers.
         Each buffer is a contiguous symmetric memory tensor that can be sliced
         for individual operations.
-    
+
     pool_sizes : Dict[Tuple, int]
         Tracks the allocated size (in elements) for each buffer pool.
-    
+
     initial_pool_size : int
         Initial number of elements to allocate for new buffer pools.
         Default is 256M elements (1024 * 1024 * 256).
-    
+
     growth_factor : float
         Multiplicative factor for growing buffers when current size is insufficient.
         Default is 2.0 (doubles the buffer size on each growth)."""
+
     _instance: Optional["SymmetricMemoryBufferPool"] = None
     _lock = threading.Lock()
 
