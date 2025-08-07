@@ -701,6 +701,14 @@ __global__ void cast_mxfp8_kernel(
 }
 
 
+enum class ColwiseReduceMax: int32_t {
+    Atom = 0,
+    Red = 1,
+    RedAsync = 2,
+    Redux = 3,
+    Num = 4
+};
+
 // 32x32
 template <typename _IType, typename _OType>
 struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
@@ -770,6 +778,9 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     static constexpr bool _reuse_input_out_smem = false;
     static constexpr bool _cache_rowwise_scale_in_smem = false;
 
+    static constexpr bool _colwise_source_coming_from_rowwise = true;
+    static constexpr ColwiseReduceMax _colwise_reduce_max = ColwiseReduceMax::Atom;
+
     static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
     static constexpr int32_t numThreads = numWarps * 32;
     static_assert(numThreads <= 1024, "numThreads must be less than or equal to 1024");
@@ -791,10 +802,20 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                                  ? (blockDIM::M * (blockDIM::N / rowChunkElems) * sizeof(e8m0_t)) 
                                                  : 0ul;
 
+    using ColwiseReduceDataType = std::conditional_t<_colwise_reduce_max == ColwiseReduceMax::Atom, 
+                                        float, IType>;
+    static constexpr bool _need_smem_for_colwise_reduce = 
+        _colwise_source_coming_from_rowwise && _colwise_reduce_max != ColwiseReduceMax::Redux;
+    static constexpr size_t smem_colwise_reduce = _need_smem_for_colwise_reduce
+                ? 32 * warpLayout::num * sizeof(ColwiseReduceDataType)
+                : 0ul;
+
     static constexpr size_t smem_alignment = _tma_swizzle ? 1024ul : 128ul;
     static constexpr size_t smem = _reuse_input_out_smem
-                                    ? std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + smem_alignment + smem_rowwise_scale
-                                    : smemInput + smemRowwiseOutput + smemColwiseOutput + smem_alignment + smem_rowwise_scale;
+                                    ? (std::max(smemInput, smemColwiseOutput) + smemRowwiseOutput + smem_alignment 
+                                        + smem_rowwise_scale + smem_colwise_reduce)
+                                    : (smemInput + smemRowwiseOutput + smemColwiseOutput + smem_alignment 
+                                        + smem_rowwise_scale + smem_colwise_reduce);
 };
 
 #define ALIGN_TO(x, align) (((x) + (align) - 1) & ~((align) - 1))
@@ -1233,10 +1254,20 @@ __global__ void cast_mxfp8_kernel(
     // colwise output will reuse input buffer
     typename CastTraits::OType *sColOutput;
     e8m0_t *sRowwiseScale = nullptr;
+    typename CastTraits::ColwiseReduceDataType *sColwiseReduce = nullptr;
     if constexpr (CastTraits::_reuse_input_out_smem) {
         sColOutput = reinterpret_cast<typename CastTraits::OType *>(sInput);
         if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
             sRowwiseScale = reinterpret_cast<e8m0_t *>(
+                sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
+            );
+            if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
+                sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+                    sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t)
+                );
+            }
+        } else {
+            sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
                 sRowOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
         }
@@ -1248,7 +1279,22 @@ __global__ void cast_mxfp8_kernel(
             sRowwiseScale = reinterpret_cast<e8m0_t *>(
                 sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
             );
+            if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
+                sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+                    sRowwiseScale + CastTraits::smem_rowwise_scale / sizeof(e8m0_t)
+                );
+            }
+        } else {
+            sColwiseReduce = reinterpret_cast<typename CastTraits::ColwiseReduceDataType *>(
+                sColOutput + CastTraits::blockIterDim::num * CastTraits::numStages
+            );
         }
+    }
+    typename CastTraits::rowOutputUnitType *sColOutputUnit = 
+        reinterpret_cast<typename CastTraits::rowOutputUnitType *>(sColOutput);
+
+    if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
+        sColwiseReduce += warpId * 32;
     }
 
     __shared__ uint64_t producer[CastTraits::numStages];
@@ -1281,8 +1327,8 @@ __global__ void cast_mxfp8_kernel(
         (block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::rowThreadLayout::N)) * scale_stride_rowwise
         + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::rowThreadLayout::N) * CastTraits::rowChunkElems) / CastTraits::rowChunkElems;
     int32_t colwise_scale_base_offset =
-        ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * scale_stride_colwise
-        + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
+            ((block_coords.y + warp_coords.y + (threadIdx.x / CastTraits::colThreadLayout::N) * CastTraits::colChunkElems) / CastTraits::colChunkElems) * scale_stride_colwise
+            + (block_coords.x + warp_coords.x + (threadIdx.x % CastTraits::colThreadLayout::N));
 
     constexpr int32_t rowwise_scale_stride_in_smem = CastTraits::blockDIM::N / CastTraits::rowChunkElems;
     int32_t rowwise_scale_smem_base_offset = 
@@ -1354,6 +1400,10 @@ __global__ void cast_mxfp8_kernel(
             }
         }
 
+        if constexpr (CastTraits::_need_smem_for_colwise_reduce) {
+            sColwiseReduce[threadIdx.x] = 0.0f;
+        }
+
         int32_t iter_m = iter / CastTraits::iterLayout::N;
         int32_t iter_n = iter % CastTraits::iterLayout::N;
 
@@ -1371,161 +1421,350 @@ __global__ void cast_mxfp8_kernel(
         ));
 
         int32_t warp_offset = warp_base_offset + states.index() * CastTraits::blockIterDim::num;
-        // colwise
-        {
-            typename CastTraits::IType rInput[CastTraits::colChunkElems];
-            e8m0_t biased_exponent;
+        if constexpr (CastTraits::_colwise_source_coming_from_rowwise) {
+            typename CastTraits::IType rInput[CastTraits::rowChunkElems];
             {
-                int32_t base = warp_offset + threadIdx.x;
-                typename CastTraits::IType thread_amax = static_cast<typename CastTraits::IType>(0.0f);
+                typename CastTraits::inputUnitType *rInputUnit = 
+                    reinterpret_cast<typename CastTraits::inputUnitType *>(rInput);
+                int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
                 #pragma unroll
-                for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
-                    // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
-                    // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
-
-                    int32_t offset = base + i * CastTraits::blockIterDim::N;
-                    rInput[i] = sInput[CastTraits::inputElemSwz::swz(offset)];
-
-                    if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-
-                    } else if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
-                        asm volatile (
-                            "max.xorsign.abs.f16 %0, %0, %1;"
-                            : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
-                            : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
-                        );
-                    } else {
-                        asm volatile (
-                            "max.xorsign.abs.bf16 %0, %0, %1;"
-                            : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
-                            : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
-                        );
-                    }
+                for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
+                    rInputUnit[i] = sInputUnit[CastTraits::inputUnitSwz::swz(base + i)];
                 }
-                biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
             }
+            
             if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom) {
 
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
+
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux) {
+
+                }
             } else {
-                int32_t colwise_scale_offset = 
-                    colwise_scale_base_offset
-                    + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
-                    + iter_n * CastTraits::blockIterDim::N;
-                scales_colwise[colwise_scale_offset] = biased_exponent;
+                float row_scale_inverse;
 
-                float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-                ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-                typename CastTraits::OType rOutput[CastTraits::colChunkElems];
+                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom) {
+                    IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
 
-                if constexpr (CastTraits::_use_cvt_4x) {
-                    using OType4 = FPx4<typename CastTraits::OType>;
-                    using IType4 = FPx4<typename CastTraits::IType>;
-                    IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
-                    OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                    IType2 row_amax2{0.0f, 0.0f};
                     #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::colChunkElems / 4; i++) {
-                        IType4 in = rInput4[i];
-                        OType4 out;
-                        mul_cvt_4x(out, in, block_scale_inverse_2x);
-                        rOutput4[i] = out;
+                    for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
+                        ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
+
+                        float2 values;
+                        if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                              asm volatile (
+                                "{\n\t"
+                                ".reg.b32 abs;\n"
+                                "abs.f16x2 abs, %2;\n"
+                                ".reg.b16 val1;\n"
+                                ".reg.b16 val2;\n"
+                                "mov.b32 {val1, val2}, abs;\n"
+                                "cvt.f32.f16 %0, val1;\n"
+                                "cvt.f32.f16 %1, val2;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
+                        } else if constexpr (std::is_same_v<typename CastTraits::IType, bf16>) {
+                            asm volatile (
+                                "{\n\t"
+                                ".reg.b32 abs;\n"
+                                "abs.bf16x2 abs, %2;\n"
+                                "prmt.b32 %1, 0x0, abs, 0x7632;\n"
+                                "prmt.b32 %0, 0x0, abs, 0x5410;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
+                        }
+
+                        bool even = (threadIdx.x % 2 == 0);
+                        uint32_t _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + (even ^ 1));
+                        asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
+                            :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.x : values.y)));
+                        _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + even);
+                        asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
+                            :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.y : values.x)));
                     }
-                } else {
+                    {
+                        typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
+                        e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
+                        row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
+                        if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_smem_base_offset
+                                + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
+                        } else {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_base_offset
+                                + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
+                        }
+                    }
+                    {
+                        __syncwarp();
+                        float col_amax = sColwiseReduce[threadIdx.x];
+                        e8m0_t col_biased_exponent = to_e8m0<typename CastTraits::OType>(col_amax);
+                        int32_t colwise_scale_offset = 
+                            colwise_scale_base_offset 
+                            + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                            + iter_n * CastTraits::blockIterDim::N;
+                        scales_colwise[colwise_scale_offset] = col_biased_exponent;
+                        float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
+                        sColwiseReduce[threadIdx.x] = col_scale_inverse;
+                        __syncwarp();
+                    }
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
+
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux) {
+
+                }
+
+                // colwise
+                {
+                    typename CastTraits::OType rOutput[CastTraits::colChunkElems];
+
+                    ptx::floatx2 block_scale_inverse_2x[2];
+                    ptx::floatx2 *sColwiseScale2x = reinterpret_cast<ptx::floatx2 *>(sColwiseReduce);
+                    block_scale_inverse_2x[0] = sColwiseScale2x[0];
+
                     IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
                     OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
                     #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::colChunkElems / 2; i++) {
+                    for (int32_t i = 1; i < CastTraits::colChunkElems / 2; i++) {
+                        {
+                            block_scale_inverse_2x[i % 2] = 
+                                sColwiseScale2x[i];
+                        }
+
+                        IType2 in = rInput2[i - 1];
+                        OType2 out;
+                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x[(i - 1) % 2]);
+                        rOutput2[i - 1] = out;
+                    }
+                    {
+                        constexpr int32_t i = (CastTraits::colChunkElems / 2) - 1;
                         IType2 in = rInput2[i];
                         OType2 out;
-                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                        ptx::mul_cvt_2x(out, in,
+                            block_scale_inverse_2x[i % 2]);
                         rOutput2[i] = out;
                     }
-                }
-                {
-                    if constexpr (CastTraits::_reuse_input_out_smem) {
-                        __syncthreads();
-                    }
 
+                    {
+                        int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit)
+                            + warp_offset / CastTraits::rowOutNumElemsPerUnit;
+                        typename CastTraits::rowOutputUnitType *rOutputUnit = 
+                            reinterpret_cast<typename CastTraits::rowOutputUnitType *>(rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
+                            sColOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutputUnit[i];
+                        }
+                    }
+                }
+                // rowwise
+                {
+                    typename CastTraits::rowOutputUnitType rOutput[CastTraits::rowNumOutUnitsPerChunk];
+                    ptx::floatx2 block_scale_inverse_2{row_scale_inverse, row_scale_inverse};
+                    if constexpr (CastTraits::_use_cvt_4x) {
+                        using OType4 = FPx4<typename CastTraits::OType>;
+                        using IType4 = FPx4<typename CastTraits::IType>;
+                        IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
+                        OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowChunkElems / 4; i++) {
+                            IType4 in = rInput4[i];
+                            OType4 out;
+                            mul_cvt_4x(out, in, block_scale_inverse_2);
+                            rOutput4[i] = out;
+                        }
+                    } else {
+                        IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+                        OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
+                            IType2 in = rInput2[i];
+                            OType2 out;
+                            ptx::mul_cvt_2x(out, in, block_scale_inverse_2);
+                            rOutput2[i] = out;
+                        }
+                    }
+                    {
+                        int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit)
+                            + warp_offset / CastTraits::rowOutNumElemsPerUnit;
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
+                            sRowOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutput[i];
+                        }
+                    }
+                }
+            }
+        } else {
+            // colwise
+            {
+                typename CastTraits::IType rInput[CastTraits::colChunkElems];
+                e8m0_t biased_exponent;
+                {
                     int32_t base = warp_offset + threadIdx.x;
+                    typename CastTraits::IType thread_amax = static_cast<typename CastTraits::IType>(0.0f);
                     #pragma unroll
                     for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
                         // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
                         // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
 
                         int32_t offset = base + i * CastTraits::blockIterDim::N;
-                        sColOutput[CastTraits::colOutputSwz::swz(offset)] = rOutput[i];
+                        rInput[i] = sInput[CastTraits::inputElemSwz::swz(offset)];
+
+                        if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
+                        } else if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                            asm volatile (
+                                "max.xorsign.abs.f16 %0, %0, %1;"
+                                : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
+                                : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
+                            );
+                        } else {
+                            asm volatile (
+                                "max.xorsign.abs.bf16 %0, %0, %1;"
+                                : "+h"(reinterpret_cast<uint16_t &>(thread_amax))
+                                : "h"(reinterpret_cast<uint16_t &>(rInput[i]))
+                            );
+                        }
+                    }
+                    biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+                }
+                if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
+                } else {
+                    int32_t colwise_scale_offset = 
+                        colwise_scale_base_offset
+                        + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                        + iter_n * CastTraits::blockIterDim::N;
+                    scales_colwise[colwise_scale_offset] = biased_exponent;
+
+                    float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+                    ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+                    typename CastTraits::OType rOutput[CastTraits::colChunkElems];
+
+                    if constexpr (CastTraits::_use_cvt_4x) {
+                        using OType4 = FPx4<typename CastTraits::OType>;
+                        using IType4 = FPx4<typename CastTraits::IType>;
+                        IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
+                        OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::colChunkElems / 4; i++) {
+                            IType4 in = rInput4[i];
+                            OType4 out;
+                            mul_cvt_4x(out, in, block_scale_inverse_2x);
+                            rOutput4[i] = out;
+                        }
+                    } else {
+                        IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+                        OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::colChunkElems / 2; i++) {
+                            IType2 in = rInput2[i];
+                            OType2 out;
+                            ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                            rOutput2[i] = out;
+                        }
+                    }
+                    {
+                        if constexpr (CastTraits::_reuse_input_out_smem) {
+                            __syncthreads();
+                        }
+
+                        int32_t base = warp_offset + threadIdx.x;
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::colChunkElems; i++) {
+                            // int32_t row = CastTraits::colIndexSwz::swz(i * 32 + threadIdx.x) - i * 32;
+                            // int32_t offset = warp_offset + row * CastTraits::blockIterDim::N + threadIdx.x;
+
+                            int32_t offset = base + i * CastTraits::blockIterDim::N;
+                            sColOutput[CastTraits::colOutputSwz::swz(offset)] = rOutput[i];
+                        }
                     }
                 }
             }
-        }
-        // rowwise 
-        {
-            typename CastTraits::inputUnitType rInput[CastTraits::rowNumUnitsPerChunk];
+            // rowwise 
             {
-                int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
-                #pragma unroll
-                for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
-                    rInput[i] = sInputUnit[CastTraits::inputUnitSwz::swz(base + i)];
-                }
-            }
-
-            if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-
-            } else {
-                IType2 thread_amax2{0.f, 0.f};
-                IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
-                #pragma unroll
-                for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
-                    ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[i]);
-                }
-                typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
-                e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-                
-                if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
-                    int32_t rowwise_scale_offset = 
-                        rowwise_scale_smem_base_offset
-                        + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
-                        + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
-                    sRowwiseScale[rowwise_scale_offset] = biased_exponent;
-                } else {
-                    int32_t rowwise_scale_offset = 
-                        rowwise_scale_base_offset
-                        + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
-                        + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
-                    scales_rowwise[rowwise_scale_offset] = biased_exponent;
-                }
-
-                float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-                ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-                typename CastTraits::rowOutputUnitType rOutput[CastTraits::rowNumOutUnitsPerChunk];
-                if constexpr (CastTraits::_use_cvt_4x) {
-                    using OType4 = FPx4<typename CastTraits::OType>;
-                    using IType4 = FPx4<typename CastTraits::IType>;
-                    IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
-                    OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                typename CastTraits::inputUnitType rInput[CastTraits::rowNumUnitsPerChunk];
+                {
+                    int32_t base = thread_base_offset + warp_offset / CastTraits::rowNumElemsPerUnit;
                     #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::rowChunkElems / 4; i++) {
-                        IType4 in = rInput4[i];
-                        OType4 out;
-                        mul_cvt_4x(out, in, block_scale_inverse_2x);
-                        rOutput4[i] = out;
+                    for (int32_t i = 0; i < CastTraits::rowNumUnitsPerChunk; i++) {
+                        rInput[i] = sInputUnit[CastTraits::inputUnitSwz::swz(base + i)];
                     }
+                }
+
+                if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
+
                 } else {
-                    OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                    IType2 thread_amax2{0.f, 0.f};
+                    IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
                     #pragma unroll
                     for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
-                        IType2 in = rInput2[i];
-                        OType2 out;
-                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
-                        rOutput2[i] = out;
+                        ptx::abs_max_2x(thread_amax2, thread_amax2, rInput2[i]);
                     }
-                }
+                    typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
+                    e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
+                    
+                    if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                        int32_t rowwise_scale_offset = 
+                            rowwise_scale_smem_base_offset
+                            + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
+                            + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                        sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+                    } else {
+                        int32_t rowwise_scale_offset = 
+                            rowwise_scale_base_offset
+                            + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                            + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                        scales_rowwise[rowwise_scale_offset] = biased_exponent;
+                    }
 
-                {
-                    int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit) 
-                            + warp_offset / CastTraits::rowOutNumElemsPerUnit;
-                    #pragma unroll
-                    for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
-                        sRowOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutput[i];
+                    float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+                    ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+                    typename CastTraits::rowOutputUnitType rOutput[CastTraits::rowNumOutUnitsPerChunk];
+                    if constexpr (CastTraits::_use_cvt_4x) {
+                        using OType4 = FPx4<typename CastTraits::OType>;
+                        using IType4 = FPx4<typename CastTraits::IType>;
+                        IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
+                        OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowChunkElems / 4; i++) {
+                            IType4 in = rInput4[i];
+                            OType4 out;
+                            mul_cvt_4x(out, in, block_scale_inverse_2x);
+                            rOutput4[i] = out;
+                        }
+                    } else {
+                        OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
+                            IType2 in = rInput2[i];
+                            OType2 out;
+                            ptx::mul_cvt_2x(out, in, block_scale_inverse_2x);
+                            rOutput2[i] = out;
+                        }
+                    }
+
+                    {
+                        int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit) 
+                                + warp_offset / CastTraits::rowOutNumElemsPerUnit;
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
+                            sRowOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutput[i];
+                        }
                     }
                 }
             }
