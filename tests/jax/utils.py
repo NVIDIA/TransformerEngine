@@ -25,6 +25,7 @@ from transformer_engine.jax.attention import (
     make_swa_mask,
 )
 from transformer_engine.jax.quantize.helper import DType as TEDType
+from transformer_engine.jax.cpp_extensions.base import primitive_context
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -1604,18 +1605,5 @@ def print_debug_tensor_stats(prefix, tensor, hist=False):
 
 @contextmanager
 def use_jax_gemm(enabled=False):
-    orig_custom_calls_filter = os.environ.get("NVTE_JAX_CUSTOM_CALLS", None)
-
-    try:
-        if enabled:
-            os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=false"
-        else:
-            os.environ["NVTE_JAX_CUSTOM_CALLS"] = "GemmPrimitive=true"
+    with primitive_context(f"GemmPrimitive={enabled}"):
         yield
-
-    finally:
-        if enabled:
-            if orig_custom_calls_filter is None:
-                os.environ.pop("NVTE_JAX_CUSTOM_CALLS")
-            else:
-                os.environ["NVTE_JAX_CUSTOM_CALLS"] = orig_custom_calls_filter

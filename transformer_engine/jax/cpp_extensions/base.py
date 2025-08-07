@@ -8,6 +8,7 @@ import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
 from packaging import version
+from contextlib import contextmanager
 
 from jax.extend import core
 from jax.interpreters import xla, mlir
@@ -34,7 +35,7 @@ class BasePrimitive(metaclass=ABCMeta):
     _is_enabled = True
 
     # Default list of primitives to disable for all recipes
-    _default_disable_names = ["GemmPrimitive"]
+    _default_disable_names = ["GemmPrimitive", "NormFwdPrimitive", "NormBwdPrimitive"]
 
     @classmethod
     def enabled(cls):
@@ -258,3 +259,56 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             cls.set_enabled(False)
         else:
             raise ValueError(f"Primitive not found in registry: {name}")
+
+
+def _parse_custom_call_string_to_dict(custom_calls_str: str):
+    """
+    Parses a custom call string into a dictionary of primitive names and their enabled states.
+    The input string can be a single value 'true' or 'false' to enable/disable all primitives,
+    or a comma-separated list of key=value pairs.
+
+    Args:
+        custom_calls_str: A string representing the custom call settings.
+
+    Returns:
+        A dictionary where keys are primitive names and values are booleans indicating enabled state.
+    """
+    custom_calls_str = custom_calls_str.strip()
+    if custom_calls_str.lower() == "true":
+        return {primitive_name: True for primitive_name in _primitive_registry.keys()}
+    if custom_calls_str.lower() == "false":
+        return {primitive_name: False for primitive_name in _primitive_registry.keys()}
+
+    settings = {}
+    for pair in custom_calls_str.split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+            key = key.strip()
+            value = value.strip().lower()
+            settings[key] = value == "true"
+    return settings
+
+@contextmanager
+def primitive_context(primitive_enabling_changes: str):
+    orig_env_var = os.getenv("NVTE_JAX_CUSTOM_CALLS")
+
+    primitives = {}
+    if orig_env_var is not None:
+        primitives = _parse_custom_call_string_to_dict(orig_env_var)
+
+    changes = _parse_custom_call_string_to_dict(primitive_enabling_changes)
+    primitives.update(changes)
+
+    updated_env_var = ",".join(
+        f"{name}={'true' if enabled else 'false'}" for name, enabled in primitives.items()
+    )
+
+    os.environ["NVTE_JAX_CUSTOM_CALLS"] = str(updated_env_var)
+    try:
+        yield
+    finally:
+        if orig_env_var is not None:
+            os.environ["NVTE_JAX_CUSTOM_CALLS"] = orig_env_var
+        else:
+            del os.environ["NVTE_JAX_CUSTOM_CALLS"]
