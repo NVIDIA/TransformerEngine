@@ -175,7 +175,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // TODO (cyang): add is_training to nvte_get_fused_attn_backend
         // sm90: fwd d<=256, bwd d=128 only
         // sm100: fwd d<=128, bwd d<=128
-        ((sm_arch_ < 100 && head_dim_qk <= 256 && head_dim_v <= 256) ||
+        ((sm_arch_ < 100 && (!is_training) && head_dim_qk <= 256 && head_dim_v <= 256) ||
          (sm_arch_ >= 100 && head_dim_qk <= 128 && head_dim_v <= 128)) &&
         head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
         (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
