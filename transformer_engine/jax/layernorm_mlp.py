@@ -19,6 +19,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+import warnings
 
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
@@ -91,6 +92,21 @@ def layernorm_mlp(
         - Checkpointing is applied to both feed-forward networks for memory efficiency
     """
     assert len(kernels) == 2
+
+    # For MaxText TP (= Megatron TP + sharding in hidden dimension of remaining unsharded
+    # activations), JAX dot_general may perform better then TE GEMM custom call
+    # This inspection only works if either norm_input_axes or dot_1_input_axes is set
+    is_mxfp8 = (
+        False if quantizer_sets[0] == noop_quantizer_set
+        else quantizer_sets[0].x.scaling_mode.is_1d_block_scaling()
+    )
+    inspect_axes = norm_input_axes or dot_1_input_axes
+    if (inspect_axes is not None
+        and len(inspect_axes) == x.ndim
+        and inspect_axes[-1] != None
+        and not is_mxfp8
+            ):
+        warnings.warn("Detected sharding in the hidden dimension of the MLP activation input. For improved performance, consider using JAX’s built-in `dot_general` implementation.  To try this, set the environment variable: `NVTE_JAX_CUSTOM_CALLS='GemmPrimitive=false'`", UserWarning)
 
     kernel_1 = kernels[0]
     kernel_2 = kernels[1]
