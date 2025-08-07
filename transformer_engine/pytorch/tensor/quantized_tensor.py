@@ -58,7 +58,7 @@ class QuantizedTensorBase:
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
-    
+
     def get_usage(self) -> Tuple[bool, bool]:
         """Get the usage of the tensor"""
         raise NotImplementedError(
@@ -460,7 +460,10 @@ class QuantizedTensor(torch.Tensor):
             device = kwargs.get("device", tensor.device)
             requires_grad = kwargs.get("requires_grad", tensor.requires_grad)
             pin_memory = kwargs.get("pin_memory", False)
-            print(f"Shape: {tensor.shape}, dtype: {tensor.dtype}, device: {device}, requires_grad: {requires_grad}, pin_memory: {pin_memory}")
+            print(
+                f"Shape: {tensor.shape}, dtype: {tensor.dtype}, device: {device}, requires_grad:"
+                f" {requires_grad}, pin_memory: {pin_memory}"
+            )
             rowwise_usage, columnwise_usage = tensor.get_usage()
             print(f"rowwise_usage: {rowwise_usage}, columnwise_usage: {columnwise_usage}")
             tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
@@ -471,7 +474,9 @@ class QuantizedTensor(torch.Tensor):
                 requires_grad=requires_grad,
                 pin_memory=pin_memory,
             )
-            print(f" out rowwise_usage: {out.get_usage()[0]}, columnwise_usage: {out.get_usage()[1]}")
+            print(
+                f" out rowwise_usage: {out.get_usage()[0]}, columnwise_usage: {out.get_usage()[1]}"
+            )
             tensor._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
             return out
 

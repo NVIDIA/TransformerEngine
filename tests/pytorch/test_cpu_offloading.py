@@ -8,7 +8,11 @@ import pytest
 import os
 import torch
 from typing import Optional
-from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, OffloadSynchronizer, start_offload_if_offload_enabled
+from transformer_engine.pytorch.cpu_offload import (
+    get_cpu_offload_context,
+    OffloadSynchronizer,
+    start_offload_if_offload_enabled,
+)
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
@@ -35,6 +39,7 @@ EPSILON = model_config["small"].eps
 # Disable garbage collection to tests if there are reference cycles.
 # We do not want them, because they can result in CUDA out of memory errors.
 import gc
+
 gc.disable()
 
 
@@ -98,12 +103,19 @@ class Utils:
         elif layer_type == "layernorm_mlp":
             return te.LayerNormMLP(Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "multihead_attention":
-            return te.MultiheadAttention(Utils._D, Utils._H, attention_dropout=0.0, params_dtype=torch.bfloat16)
+            return te.MultiheadAttention(
+                Utils._D, Utils._H, attention_dropout=0.0, params_dtype=torch.bfloat16
+            )
         elif layer_type == "grouped_linear":
             return te.GroupedLinear(Utils._H, Utils._D, Utils._D, params_dtype=torch.bfloat16)
         elif layer_type == "transformer_layer":
             return te.TransformerLayer(
-                Utils._D, Utils._D, Utils._H, attention_dropout=0.0, hidden_dropout=0.0, params_dtype=torch.bfloat16
+                Utils._D,
+                Utils._D,
+                Utils._H,
+                attention_dropout=0.0,
+                hidden_dropout=0.0,
+                params_dtype=torch.bfloat16,
             )
         else:
             raise ValueError(f"Unknown layer type: {layer_type}")
@@ -630,7 +642,9 @@ class TestTELayers:
         # This assertion verifies that the memory used by tensors on the CPU matches the memory saved from a layer.
         # It helps catch cases where an offloaded tensor still has a live pointer, which would
         # cause an unnecessary copy to the CPU and prevent GPU memory from being released.
-        assert Utils.get_cuda_memory_mb() + offloaded_memory_cpu == pytest.approx(cuda_memory_no_offload, 0.1)
+        assert Utils.get_cuda_memory_mb() + offloaded_memory_cpu == pytest.approx(
+            cuda_memory_no_offload, 0.1
+        )
         out.sum().backward()
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
@@ -701,7 +715,9 @@ class TestTELayers:
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
     @pytest.mark.parametrize("backend", ["FlashAttention", "FusedAttention", "UnfusedAttention"])
-    def test_numerics(self, recipe_name, layer_type, use_cuda_graphs, retain_pinned_cpu_buffers, backend):
+    def test_numerics(
+        self, recipe_name, layer_type, use_cuda_graphs, retain_pinned_cpu_buffers, backend
+    ):
         recipe_ctx = Utils.create_recipe_ctx(recipe_name)
         Utils.skip_if_recipe_not_supported(recipe_name)
 
@@ -728,11 +744,12 @@ class TestTELayers:
             retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
         )
 
-
         class Callable(torch.nn.Module):
             def __init__(self, offload_ctx=None, sync_function=None):
                 super().__init__()
-                self.layers = torch.nn.ModuleList([Utils.create_layer(layer_type) for _ in range(2)])
+                self.layers = torch.nn.ModuleList(
+                    [Utils.create_layer(layer_type) for _ in range(2)]
+                )
                 self.offload_ctx = offload_ctx
                 self.sync_function = sync_function
 
@@ -753,7 +770,9 @@ class TestTELayers:
         callable_no_offload = Callable(offload_ctx=contextlib.nullcontext(), sync_function=None)
 
         # copy parameters
-        for param_offload, param_no_offload in zip(callable_offload.parameters(), callable_no_offload.parameters()):
+        for param_offload, param_no_offload in zip(
+            callable_offload.parameters(), callable_no_offload.parameters()
+        ):
             param_offload.data.copy_(param_no_offload.data)
 
         x = Utils.create_tensor("high precision")
@@ -761,9 +780,14 @@ class TestTELayers:
         if use_cuda_graphs:
             torch.cuda.reset_peak_memory_stats()
             callable_offload = te.make_graphed_callables(
-                callable_offload, (x,),
+                callable_offload,
+                (x,),
                 fp8_enabled=recipe_name != "high precision",
-                fp8_recipe=Utils.create_recipe_ctx(recipe_name) if recipe_name != "high precision" else None
+                fp8_recipe=(
+                    Utils.create_recipe_ctx(recipe_name)
+                    if recipe_name != "high precision"
+                    else None
+                ),
             )
 
         # warm up (for example to compute sf for delayed scaling)
