@@ -86,30 +86,6 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def get_sequence_parallel_dim(logical_axes, contracting_dims, batch_dims):
-    """
-    Get the index for the sequence-parallel dimension based on the given logical axes.
-
-    The sequence-parallel dimension is assumed to be the only sharded non-batched non-contracting
-    dimension.
-    """
-    if not logical_axes:
-        return None
-
-    pspec = generate_pspec(logical_axes, with_flax_rules=True, padded=True)
-    ldims = [i for i in range(len(logical_axes)) if i not in set(contracting_dims + batch_dims)]
-    lspecs = [pspec[i] for i in ldims if pspec[i] is not None]
-    if len(lspecs) == 0:
-        return None
-
-    assert len(lspecs) == 1, (
-        "Expected only 1 non-batched non-contracting dimension to be sharded for "
-        f"sequence-parallelism, but found {len(lspecs)}: {pspec} @ idx {ldims}"
-    )
-
-    return pspec.index(lspecs[0])
-
-
 def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
     """
     Convert logical axes to PartitionSpec
