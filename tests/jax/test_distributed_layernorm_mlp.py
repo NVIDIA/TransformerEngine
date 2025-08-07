@@ -333,7 +333,6 @@ class TestDistributedLayernormMLP:
             with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
                 ln_mlp_single = LayerNormMLP(
                     layernorm_type=layernorm_type,
-                    transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
                     intermediate_dim=INTERMEDIATE,
                     activations=activation_type,
                     use_bias=use_bias,
