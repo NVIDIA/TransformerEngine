@@ -5,6 +5,7 @@
 """API definition for nvidia-dlframework-inspect."""
 
 import copy
+import warnings
 from typing import Dict, Union, Tuple, Optional
 from nvdlfw_inspect.base import BaseNamespaceAPI, BaseConfigAPIMapper
 from nvdlfw_inspect.registry import Registry
@@ -292,6 +293,9 @@ class TEDefaultFeatures:
         rowwise: bool,
     ) -> None:
         """
+
+        This is deprecated call, we advise to use *inspect_tensor* instead.
+
         Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
         Parameters
@@ -359,7 +363,7 @@ class TEDefaultFeatures:
         iteration: int,
     ) -> bool | Tuple[bool, Optional[int]]:
         """
-        This is legacy call, we advise to use *inspect_tensor_all* and *inspect_tensor_all_enabled* instead.
+        This is deprecated call, we advise to use *inspect_tensor* and *inspect_tensor_enabled* instead.
 
         It is a routing call, which is run at the initialization of the layer.
         Determines if *inspect_tensor_postquantize* for a given GEMM and tensor will be invoked.
@@ -480,6 +484,13 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                     kwargs_copy.pop(k)
         else:
             kwargs_copy = kwargs
+
+        if feat_name == "inspect_tensor_postquantize":
+            warnings.warn(
+                "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
+                DeprecationWarning,
+            )
+
         return call(feat_config, layer_name, **kwargs_copy)
 
     def handle_multi_feature_output(
