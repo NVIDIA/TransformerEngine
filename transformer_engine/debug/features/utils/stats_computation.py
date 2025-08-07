@@ -203,7 +203,6 @@ STATS = {
 def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     """Register *both* underflow stats (num and %) for the given recipe."""
     columnwise_suffix = "_columnwise" if columnwise else ""
-    data_tensor_idx = 1 if columnwise else 0
 
     # Stat names
     stat_num = f"{recipe_name}{'_' if recipe_name != '' else ''}underflows_num{columnwise_suffix}"
@@ -213,12 +212,12 @@ def add_underflows_stats(recipe_name: str, columnwise: bool = False):
     stats_to_num[stat_pct] = len(stats_to_num)
 
     STATS[stat_num] = (
-        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum()
+        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors(rowwise_data=not columnwise, columnwise_data=columnwise) == 0).sum()
         - (x == 0).sum(),
         lambda buffers, _sn=stat_num: sum(_get(buffers, _sn)),
     )
     STATS[stat_pct] = (
-        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors()[data_tensor_idx] == 0).sum()
+        lambda x, aux_dict: (aux_dict[recipe_name].get_data_tensors(rowwise_data=not columnwise, columnwise_data=columnwise) == 0).sum()
         / aux_dict[recipe_name].numel()
         * 100,
         lambda buffers, _sn_num=stat_num: 100

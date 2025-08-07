@@ -119,7 +119,7 @@ class LogTensorStats(BaseLogTensorStats):
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
-    ):
+    ):  # pylint: disable=unused-argument
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
         assert (
