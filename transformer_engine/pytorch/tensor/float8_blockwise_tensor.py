@@ -239,7 +239,10 @@ class Float8BlockQuantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty(
-                self.get_columnwise_shape(shape), dtype=torch.uint8, device=device, pin_memory=pin_memory
+                self.get_columnwise_shape(shape),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
