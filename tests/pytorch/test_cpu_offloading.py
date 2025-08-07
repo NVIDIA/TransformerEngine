@@ -707,7 +707,7 @@ class TestTELayers:
 
         # 3 bwd
         pp3_2_out.sum().backward()
-    
+
     @pytest.mark.parametrize("recipe_name", Utils.get_recipe_names())
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
@@ -740,7 +740,7 @@ class TestTELayers:
             retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
         )
 
-        
+
         class Callable(torch.nn.Module):
             def __init__(self, offload_ctx=None, sync_function=None):
                 super().__init__()
@@ -760,7 +760,7 @@ class TestTELayers:
                     if self.sync_function is not None:
                         x = self.sync_function(x)
                 return x
-        
+
         callable_offload = Callable(offload_ctx=offload_ctx, sync_function=sync_function)
         callable_no_offload = Callable(offload_ctx=contextlib.nullcontext(), sync_function=None)
 
@@ -774,7 +774,7 @@ class TestTELayers:
             torch.cuda.reset_peak_memory_stats()
             callable_offload = te.make_graphed_callables(
                 callable_offload, (x,),
-                fp8_enabled=recipe_name != "high precision", 
+                fp8_enabled=recipe_name != "high precision",
                 fp8_recipe=Utils.create_recipe_ctx(recipe_name) if recipe_name != "high precision" else None
             )
 
@@ -788,12 +788,12 @@ class TestTELayers:
         callable_offload.zero_grad(set_to_none=True)
         out_offload = callable_offload(x)
         out_offload.sum().backward()
-        
+
         # save out and gradients
         offload_outs = [out_offload]
         for param in callable_offload.parameters():
             offload_outs.append(param.detach().clone())
-        
+
         torch.cuda.reset_peak_memory_stats()
         out_no_offload = callable_no_offload(x)
         out_no_offload.sum().backward()
@@ -806,5 +806,5 @@ class TestTELayers:
         # check if tensors are the same
         for i in range(len(offload_outs)):
             assert torch.allclose(offload_outs[i], no_offload_outs[i]), f"Error in tensor {i}."
-        
+
         torch.cuda.synchronize()

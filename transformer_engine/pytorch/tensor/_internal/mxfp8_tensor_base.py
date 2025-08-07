@@ -139,7 +139,12 @@ class MXFP8TensorBase(QuantizedTensorBase):
     def get_data_tensors(self, scales: bool = False):
         """Get this Tensor's data."""
         if scales:
-            return self._rowwise_data, self._columnwise_data, self._rowwise_scale_inv, self._columnwise_scale_inv
+            return (
+                self._rowwise_data,
+                self._columnwise_data,
+                self._rowwise_scale_inv,
+                self._columnwise_scale_inv,
+            )
         else:
             return self._rowwise_data, self._columnwise_data
 
