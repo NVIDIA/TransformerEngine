@@ -597,8 +597,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }  // CommOverlapBase::split_overlap_rs
 
-void CommOverlapBase::bulk_overlap_external_ag(const TensorWrapper &input, cudaStream_t send_stream,
-                                               cudaStream_t recv_stream, cudaStream_t stream_main) {
+void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
+                                               cudaStream_t stream_main) {
   int comm_bytes = _ubuf.bytes();
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 

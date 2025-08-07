@@ -427,8 +427,8 @@ void nvshmem_finalize();
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
-void bulk_overlap_ag_with_external_gemm(py::handle input, CommOverlap &allgather_communicator,
-                                        at::Stream send_stream, at::Stream recv_stream);
+void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
+                                        at::Stream recv_stream);
 
 }  // namespace transformer_engine::pytorch
 

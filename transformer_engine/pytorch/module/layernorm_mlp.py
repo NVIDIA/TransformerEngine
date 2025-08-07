@@ -878,7 +878,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                     # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                     tex.bulk_overlap_ag_with_external_gemm(
-                        grad_outputs[0], ub_obj_fc2_wgrad, dgrad_send_stream, dgrad_recv_stream
+                        ub_obj_fc2_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
                 # Prepare input tensor

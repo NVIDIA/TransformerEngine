@@ -767,7 +767,7 @@ class _Linear(torch.autograd.Function):
 
                     # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
                     tex.bulk_overlap_ag_with_external_gemm(
-                        grad_output_arg, ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
+                        ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                     )
 
                 if ctx.fp8 or ctx.debug:

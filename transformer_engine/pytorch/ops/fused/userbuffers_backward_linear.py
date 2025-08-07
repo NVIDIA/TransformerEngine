@@ -10,9 +10,9 @@ import warnings
 
 import torch
 
-from transformer_engine_torch import CommOverlapType
+from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
 from ...cpp_extensions import general_gemm
-from ...distributed import gather_along_first_dim, get_distributed_world_size
+from ...distributed import get_distributed_world_size
 from ...module.base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -408,7 +408,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
-                ub_obj_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad")
 
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -417,15 +417,15 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # so we dont need to add any syncs yet.
                 with torch.cuda.stream(dgrad_send_stream):
                     dy, _ = fill_userbuffers_buffer_for_all_gather(
-                        ub_obj_wgrad,
+                        ub_obj_overlap_wgrad,
                         dy_local,
                         grad_output_quantizer,
                         tensor_parallel_group,
                     )
 
                 # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
-                tex.bulk_overlap_ag_with_external_gemm(
-                    dy_local, ub_obj_wgrad, dgrad_send_stream, dgrad_recv_stream
+                bulk_overlap_ag_with_external_gemm(
+                    ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                 )
 
             if tensor_parallel_mode == "column":
