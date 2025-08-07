@@ -174,12 +174,6 @@ def run_dpa_with_cp(
             config.attn_mask_type = "padding_causal"
         else:
             config.attn_mask_type = "padding"
-    if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
-        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
-    else:
-        fp8_context = nullcontext()
-
 
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
@@ -209,6 +203,11 @@ def run_dpa_with_cp(
             sub_group = dist.new_group(sub_ranks, backend="nccl")
             if rank in sub_ranks:
                 cp_comm_sub_groups.append(sub_group)
+    if dtype == "fp8":
+        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
 
     # instantiate attention module
     core_attn = DotProductAttention(

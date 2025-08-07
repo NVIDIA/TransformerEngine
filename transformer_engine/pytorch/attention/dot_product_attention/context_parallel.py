@@ -1883,7 +1883,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
-                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_, *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
                             cu_seqlens_q_per_step[cp_size - i - 1],
@@ -2032,7 +2032,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
-                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_, *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv // 2,
                             cu_seqlens_q_per_step[cp_size - i - 1],
@@ -2176,7 +2176,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
-                        dq_, dk_, dv_, dbias_ = fused_attn_bwd(
+                        dq_, dk_, dv_, dbias_, *_ = fused_attn_bwd(
                             ctx.max_seqlen_q // 2,
                             ctx.max_seqlen_kv,
                             cu_seqlens_q_per_step[cp_size - i - 1],
@@ -2283,7 +2283,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         )
                         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
-                    dq_, dk_, dv_, dbias_ = fused_attn_bwd(
+                    dq_, dk_, dv_, dbias_, *_ = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
                         cu_seqlens_q_per_step[cp_size - i - 1],
@@ -3109,7 +3109,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     dout_ = dout.select(seq_dim, i).contiguous().view(out_.shape)
                     if ctx.use_fused_attention:
                         aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
-                        dq_per_step[i], dk_per_step[i], dv_per_step[i], _ = fused_attn_bwd(
+                        dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
                             max_seqlen_kv,
                             cu_seqlens_q,

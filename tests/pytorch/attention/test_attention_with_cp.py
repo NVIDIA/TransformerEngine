@@ -186,6 +186,11 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
+    if dtype == "fp8" and config.softmax_type != "vanilla":
+        pytest.skip("CP implementation with FP8 does not support non-vanilla softmax types!")
+    if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
+        pytest.skip("CP implementation only supports A2A for non-vanilla softmax types!")
+
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
