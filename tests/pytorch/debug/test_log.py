@@ -193,6 +193,7 @@ def test_numerics(fp8_recipe, feature_dirs):
             )
             assert overflows == pytest.approx(expected.cpu(), abs=1e-4)
 
+
 @pytest.mark.parametrize("layer", ["linear", "transformer"])
 def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
     # If layer does not invoke any feature in current iteration,

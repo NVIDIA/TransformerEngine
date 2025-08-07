@@ -26,6 +26,7 @@ def get_reduction_params(tensor_name: str, tp_group: torch.distributed.ProcessGr
             skip_reduction = True
     return skip_reduction, reduction_group, reduce_within_microbatch
 
+
 def next_enabled_iter(start_step, end_step, start_end_list, freq, iteration):
     """
     Determines whether the feature should be enabled at the current iteration,

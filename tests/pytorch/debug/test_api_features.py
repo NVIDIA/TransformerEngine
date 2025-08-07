@@ -276,9 +276,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
             ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
         )
 
-
-        debug_api.transformer_engine.inspect_tensor(
-        )[0]
+        debug_api.transformer_engine.inspect_tensor()[0]
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
