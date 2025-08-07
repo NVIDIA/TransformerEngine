@@ -363,7 +363,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // check 64-bit ragged offset support
         (supported_ragged_offset_size) &&
         // 9.10.0/9.10.1: known bugs with SDPA F16
-        (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001)) {
+        (cudnn_runtime_version != 91000) && (cudnn_runtime_version != 91001) &&
+        (cudnn_runtime_version >= 91300 ||
+	 (cudnn_runtime_version < 91300 && softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX))) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {
