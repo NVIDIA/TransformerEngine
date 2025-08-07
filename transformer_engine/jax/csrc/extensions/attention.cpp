@@ -18,9 +18,10 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(bool is_training, DType q_dtype, DTy
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
                                             size_t qk_head_dim, size_t v_head_dim,
                                             int64_t window_size_left, int64_t window_size_right) {
+  NVTE_Softmax_Type softmax_type = NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX;
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
+      bias_type, mask_type, softmax_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
       kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   return backend;
 }
@@ -146,6 +147,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
 
   auto dummy_rng_state_tensor = TensorWrapper(nullptr, std::vector<size_t>{2}, DType::kInt64);
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
+  auto dummy_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
+  NVTE_Softmax_Type softmax_type = NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX;
 
   NVTETensorPack aux_output_tensors;
   nvte_tensor_pack_create(&aux_output_tensors);
@@ -172,27 +175,27 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
       NVTE_CHECK(q_max_seqlen == kv_max_seqlen, "q_max_seqlen must equal to kv_max_seqlen");
       nvte_fused_attn_fwd_qkvpacked(
-          qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+          qkv_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(),
           &aux_output_tensors, q_cu_seqlens_tensor.data(), ragged_offset_tensor.data(),
           dummy_rng_state_tensor.data(), q_max_seqlen, is_training, scaling_factor,
-          dropout_probability, qkv_layout, bias_type, mask_type, window_size_left,
+          dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
           window_size_right, query_workspace_tensor.data(), nullptr);
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
       nvte_fused_attn_fwd_kvpacked(
-          q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+          q_tensor.data(), kv_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(),
           &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
           ragged_offset_tensor.data(), ragged_offset_tensor.data(), dummy_page_table_tensor.data(),
           dummy_page_table_tensor.data(), dummy_rng_state_tensor.data(), q_max_seqlen,
           kv_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout, bias_type,
-          mask_type, window_size_left, window_size_right, query_workspace_tensor.data(), nullptr);
+          mask_type, softmax_type, window_size_left, window_size_right, query_workspace_tensor.data(), nullptr);
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) {
       nvte_fused_attn_fwd(
-          q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(), s_tensor.data(),
+          q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(),
           o_tensor.data(), &aux_output_tensors, q_cu_seqlens_tensor.data(),
           kv_cu_seqlens_tensor.data(), ragged_offset_tensor.data(), ragged_offset_tensor.data(),
           dummy_page_table_tensor.data(), dummy_page_table_tensor.data(),
           dummy_rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen, is_training, scaling_factor,
-          dropout_probability, qkv_layout, bias_type, mask_type, window_size_left,
+          dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
           window_size_right, query_workspace_tensor.data(), nullptr);
     } else {
       NVTE_ERROR("Unsupported QKVLayout.");
@@ -262,9 +265,13 @@ static void FusedAttnForwardImpl(
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+
+  auto dummy_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
+  NVTE_Softmax_Type softmax_type = NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX;
+
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
-      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
       kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
@@ -280,11 +287,11 @@ static void FusedAttnForwardImpl(
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     auto qkv_shape = std::vector<size_t>{input_batch * q_max_seqlen, 3, attn_heads, qk_head_dim};
     auto qkv_tensor = TensorWrapper(q, qkv_shape, dtype);
-    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
+    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(),
                                   o_tensor.data(), &aux_output_tensors, q_cu_seqlens_tensor.data(),
                                   q_seq_offsets_tensor.data(), rng_state_tensor.data(),
                                   q_max_seqlen, is_training, scaling_factor, dropout_probability,
-                                  qkv_layout, bias_type, mask_type, window_size_left,
+                                  qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
                                   window_size_right, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
@@ -293,11 +300,11 @@ static void FusedAttnForwardImpl(
     auto q_tensor = TensorWrapper(q, q_shape, dtype);
     auto kv_tensor = TensorWrapper(k, kv_shape, dtype);
     nvte_fused_attn_fwd_kvpacked(
-        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
+        q_tensor.data(), kv_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(), o_tensor.data(),
         &aux_output_tensors, q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
         q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(), dummy_page_table_tensor.data(),
         dummy_page_table_tensor.data(), rng_state_tensor.data(), q_max_seqlen, kv_max_seqlen,
-        is_training, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+        is_training, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
         window_size_left, window_size_right, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
@@ -307,12 +314,12 @@ static void FusedAttnForwardImpl(
     auto k_tensor = TensorWrapper(k, k_shape, dtype);
     auto v_tensor = TensorWrapper(v, v_shape, dtype);
     nvte_fused_attn_fwd(
-        q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(), s_tensor.data(),
+        q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(), dummy_softmax_offset_tensor.data(), s_tensor.data(),
         o_tensor.data(), &aux_output_tensors, q_cu_seqlens_tensor.data(),
         kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(),
         dummy_page_table_tensor.data(), dummy_page_table_tensor.data(), rng_state_tensor.data(),
         q_max_seqlen, kv_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout,
-        bias_type, mask_type, window_size_left, window_size_right, workspace_tensor.data(), stream);
+        bias_type, mask_type, softmax_type, window_size_left, window_size_right, workspace_tensor.data(), stream);
   } else {
     NVTE_ERROR("Unsupported qkv_layout.");
   }
@@ -444,6 +451,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
     min_num_segments = input_batch * max_segments_per_seq;
   }
+  auto dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
+  NVTE_Softmax_Type softmax_type = NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX;
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
@@ -456,20 +465,20 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
       nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                     s_tensor.data(),  // not used for F16
                                     s_tensor.data(),  // not used for F16
-                                    &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(),
+                                    &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(),
                                     q_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
                                     q_max_seqlen, scaling_factor, dropout_probability, qkv_layout,
-                                    bias_type, mask_type, window_size_left, window_size_right,
+                                    bias_type, mask_type, softmax_type, window_size_left, window_size_right,
                                     deterministic, query_workspace_tensor.data(), nullptr);
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
       nvte_fused_attn_bwd_kvpacked(
           q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
           s_tensor.data(),  // not used for F16
           s_tensor.data(),  // not used for F16
-          &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
+          &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(),
           q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(),
           dummy_ragged_offset_tensor.data(), dummy_ragged_offset_tensor.data(), q_max_seqlen,
-          kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+          kv_max_seqlen, scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
           window_size_left, window_size_right, deterministic, query_workspace_tensor.data(),
           nullptr);
     } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) {
@@ -478,10 +487,10 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
                           s_tensor.data(),  // not used for F16
                           s_tensor.data(),  // not used for F16
                           &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                          dbias_tensor.data(), q_cu_seqlens_tensor.data(),
+                          dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(), q_cu_seqlens_tensor.data(),
                           kv_cu_seqlens_tensor.data(), dummy_ragged_offset_tensor.data(),
                           dummy_ragged_offset_tensor.data(), q_max_seqlen, kv_max_seqlen,
-                          scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type,
+                          scaling_factor, dropout_probability, qkv_layout, bias_type, mask_type, softmax_type,
                           window_size_left, window_size_right, deterministic,
                           query_workspace_tensor.data(), nullptr);
     } else {
@@ -515,13 +524,15 @@ static void FusedAttnBackwardImpl(
   /* Output tensors */
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
   auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
+  auto dummy_d_softmax_offset_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kFloat32);
+  NVTE_Softmax_Type softmax_type = NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX;
 
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout,
-      bias_type, mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      bias_type, mask_type, softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
       kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
@@ -539,10 +550,10 @@ static void FusedAttnBackwardImpl(
     nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                   s_tensor.data(),  // not used for F16
                                   s_tensor.data(),  // not used for F16
-                                  &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(),
+                                  &aux_input_tensors, dqkv_tensor.data(), dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(),
                                   q_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
                                   q_max_seqlen, scaling_factor, dropout_probability, qkv_layout,
-                                  bias_type, mask_type, window_size_left, window_size_right,
+                                  bias_type, mask_type, softmax_type, window_size_left, window_size_right,
                                   deterministic, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
@@ -561,10 +572,10 @@ static void FusedAttnBackwardImpl(
         q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
         s_tensor.data(),  // not used for F16
         s_tensor.data(),  // not used for F16
-        &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(),
+        &aux_input_tensors, dq_tensor.data(), dkv_tensor.data(), dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(),
         q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
         k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
-        dropout_probability, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
+        dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left, window_size_right,
         deterministic, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD) {
     auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
@@ -586,10 +597,10 @@ static void FusedAttnBackwardImpl(
                         s_tensor.data(),  // not used for F16
                         s_tensor.data(),  // not used for F16
                         &aux_input_tensors, dq_tensor.data(), dk_tensor.data(), dv_tensor.data(),
-                        dbias_tensor.data(), q_cu_seqlens_tensor.data(),
+                        dbias_tensor.data(), dummy_d_softmax_offset_tensor.data(), q_cu_seqlens_tensor.data(),
                         kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
                         k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
-                        dropout_probability, qkv_layout, bias_type, mask_type, window_size_left,
+                        dropout_probability, qkv_layout, bias_type, mask_type, softmax_type, window_size_left,
                         window_size_right, deterministic, workspace_tensor.data(), stream);
   } else {
     NVTE_ERROR("Unsupported qkv_layout.");
