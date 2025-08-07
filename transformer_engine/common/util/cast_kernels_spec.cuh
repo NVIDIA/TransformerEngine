@@ -135,6 +135,49 @@ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const ptx::floatx2 &scale) {
 }
 
 __device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const floatx4 &scale) {
+    ptx::bf16x2 const * in2 = reinterpret_cast<ptx::bf16x2 const*>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "prmt.b32 val2, 0x0, %1, 0x7632;\n\t"
+        "prmt.b32 val1, 0x0, %1, 0x5410;\n\t"
+        "prmt.b32 val4, 0x0, %2, 0x7632;\n\t"
+        "prmt.b32 val3, 0x0, %2, 0x5410;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %4, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
 void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const ptx::floatx2 &scale) {
     ptx::bf16x2 const * in2 = reinterpret_cast<ptx::bf16x2 const*>(&in);
     asm volatile (
@@ -171,6 +214,49 @@ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const ptx::floatx2 &scale) {
         : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
           "r"(reinterpret_cast<const uint32_t&>(in2[1])),
           "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const floatx4 &scale) {
+    ptx::bf16x2 const * in2 = reinterpret_cast<ptx::bf16x2 const*>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "prmt.b32 val2, 0x0, %1, 0x7632;\n\t"
+        "prmt.b32 val1, 0x0, %1, 0x5410;\n\t"
+        "prmt.b32 val4, 0x0, %2, 0x7632;\n\t"
+        "prmt.b32 val3, 0x0, %2, 0x5410;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %4, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
           "r"(0x80008000)
     );
 }
@@ -223,6 +309,55 @@ void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, const ptx::floatx2 &scale) {
 }
 
 __device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, const floatx4 &scale) {
+    ptx::fp16x2 const * in2 = reinterpret_cast<ptx::fp16x2 const*>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b16 val1_f16;\n\t"
+        ".reg.b16 val2_f16;\n\t"
+        ".reg.b16 val3_f16;\n\t"
+        ".reg.b16 val4_f16;\n\t"
+        "mov.b32 {val1_f16, val2_f16}, %1;\n\t"
+        "mov.b32 {val3_f16, val4_f16}, %2;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "cvt.f32.f16 val1, val1_f16;\n\t"
+        "cvt.f32.f16 val2, val2_f16;\n\t"
+        "cvt.f32.f16 val3, val3_f16;\n\t"
+        "cvt.f32.f16 val4, val4_f16;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %4, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
 void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const ptx::floatx2 &scale) {
     ptx::fp16x2 const * in2 = reinterpret_cast<ptx::fp16x2 const*>(&in);
     asm volatile (
@@ -270,6 +405,55 @@ void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const ptx::floatx2 &scale) {
 }
 
 __device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const floatx4 &scale) {
+    ptx::fp16x2 const * in2 = reinterpret_cast<ptx::fp16x2 const*>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b16 val1_f16;\n\t"
+        ".reg.b16 val2_f16;\n\t"
+        ".reg.b16 val3_f16;\n\t"
+        ".reg.b16 val4_f16;\n\t"
+        "mov.b32 {val1_f16, val2_f16}, %1;\n\t"
+        "mov.b32 {val3_f16, val4_f16}, %2;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "cvt.f32.f16 val1, val1_f16;\n\t"
+        "cvt.f32.f16 val2, val2_f16;\n\t"
+        "cvt.f32.f16 val3, val3_f16;\n\t"
+        "cvt.f32.f16 val4, val4_f16;\n\t"
+        ".reg.b64 val_1_2;\n\t"
+        ".reg.b64 val_3_4;\n\t"
+        "mov.b64 val_1_2, {val1, val2};\n\t"
+        "mov.b64 val_3_4, {val3, val4};\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 val_1_2, val_1_2, %3, zeros;\n\t"
+        "fma.rn.f32x2 val_3_4, val_3_4, %4, zeros;\n\t"
+        "mov.b64 {val1, val2}, val_1_2;\n\t"
+        "mov.b64 {val3, val4}, val_3_4;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "r"(reinterpret_cast<const uint32_t&>(in2[0])),
+          "r"(reinterpret_cast<const uint32_t&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
 void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
     ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
     asm volatile (
@@ -303,6 +487,41 @@ void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
 }
 
 __device__ __forceinline__
+void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const floatx4 &scale) {
+    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 %2, %2, %4, zeros;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "mov.b64 {val1, val2}, %1;\n\t"
+        "mov.b64 {val3, val4}, %2;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e5m2x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out)),
+          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
+          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
+        : "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
 void mul_cvt_4x(fp8e4m3x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
     ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
     asm volatile (
@@ -331,6 +550,41 @@ void mul_cvt_4x(fp8e4m3x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
           "+l"(reinterpret_cast<uint64_t&>(in2[0])),
           "+l"(reinterpret_cast<uint64_t&>(in2[1]))
         : "l"(reinterpret_cast<const uint64_t&>(scale)),
+          "r"(0x80008000)
+    );
+}
+
+__device__ __forceinline__
+void mul_cvt_4x(fp8e4m3x4 &out, floatx4 &in, const floatx4 &scale) {
+    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+    ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
+    asm volatile (
+        "{\n\t"
+        ".reg.b64 zeros;\n\t"
+        "mov.b64 zeros, {0x0, 0x0};\n\t"
+        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 %2, %2, %4, zeros;\n\t"
+        ".reg.b32 val1;\n\t"
+        ".reg.b32 val2;\n\t"
+        ".reg.b32 val3;\n\t"
+        ".reg.b32 val4;\n\t"
+        "mov.b64 {val1, val2}, %1;\n\t"
+        "mov.b64 {val3, val4}, %2;\n\t"
+    #if (defined _LOOSE_PRECISION)
+        "cvt.rs.satfinite.e4m3x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
+    #else
+        ".reg.b16 r1;\n\t"
+        ".reg.b16 r2;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r1, val2, val1;\n\t"
+        "cvt.rn.satfinite.e4m3x2.f32 r2, val4, val3;\n\t"
+        "mov.b32 %0, {r1, r2};\n\t"
+    #endif
+        "}\n\t"
+        : "=r"(reinterpret_cast<uint32_t&>(out)),
+          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
+          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
+        : "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
           "r"(0x80008000)
     );
 }
@@ -703,7 +957,7 @@ __global__ void cast_mxfp8_kernel(
 
 enum class ColwiseReduceMax: int32_t {
     Atom = 0,
-    Red = 1,
+    Red = 1, // it's actually the same to Atom
     RedAsync = 2,
     Redux = 3,
     Num = 4
@@ -730,8 +984,8 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     using colWarpDim = Layout<colThreadLayout::M * colChunkElems, colThreadLayout::N>;
     using warpDim = Layout<std::max(rowWarpDim::M, colWarpDim::M), std::max(rowWarpDim::N, colWarpDim::N)>;
 
-    static constexpr bool _tma_swizzle = false;
-    using warpLayout = Layout<1, 1>;
+    static constexpr bool _tma_swizzle = true;
+    using warpLayout = Layout<1, 2>;
     static_assert(_tma_swizzle ? (warpLayout::N == 2) : true);
     static constexpr CUtensorMapSwizzle input_swizzle_pattern = _tma_swizzle
         ? CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B
@@ -743,7 +997,7 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
 
     using blockIterDim = Layout<warpLayout::M * warpDim::M, warpLayout::N * warpDim::N>;
 
-    using iterLayout = Layout<1, 8>;
+    using iterLayout = Layout<1, 4>;
     using blockDIM = Layout<iterLayout::M * blockIterDim::M, iterLayout::N * blockIterDim::N>;
 
     static constexpr int32_t numStages = 2;
@@ -779,7 +1033,9 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
     static constexpr bool _cache_rowwise_scale_in_smem = false;
 
     static constexpr bool _colwise_source_coming_from_rowwise = true;
-    static constexpr ColwiseReduceMax _colwise_reduce_max = ColwiseReduceMax::Atom;
+    static constexpr ColwiseReduceMax _colwise_reduce_max = ColwiseReduceMax::Redux;
+    static_assert(_colwise_reduce_max != ColwiseReduceMax::RedAsync, 
+        "It requires aligned smem pointer");
 
     static constexpr int32_t numWarps = warpLayout::num + 2 * (int32_t)_use_warp_specialization;
     static constexpr int32_t numThreads = numWarps * 32;
@@ -802,10 +1058,9 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                                  ? (blockDIM::M * (blockDIM::N / rowChunkElems) * sizeof(e8m0_t)) 
                                                  : 0ul;
 
-    using ColwiseReduceDataType = std::conditional_t<_colwise_reduce_max == ColwiseReduceMax::Atom, 
-                                        float, IType>;
+    using ColwiseReduceDataType = float;
     static constexpr bool _need_smem_for_colwise_reduce = 
-        _colwise_source_coming_from_rowwise && _colwise_reduce_max != ColwiseReduceMax::Redux;
+        _colwise_source_coming_from_rowwise;// && _colwise_reduce_max != ColwiseReduceMax::Redux;
     static constexpr size_t smem_colwise_reduce = _need_smem_for_colwise_reduce
                 ? 32 * warpLayout::num * sizeof(ColwiseReduceDataType)
                 : 0ul;
@@ -1298,12 +1553,25 @@ __global__ void cast_mxfp8_kernel(
     }
 
     __shared__ uint64_t producer[CastTraits::numStages];
+    uint64_t *colwise_reduce_barrier = nullptr;
+    if constexpr (CastTraits::_colwise_source_coming_from_rowwise && 
+                  CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+        __shared__ uint64_t colwise_reduce_bar[CastTraits::warpLayout::num];
+        colwise_reduce_barrier = &colwise_reduce_bar[warpId];
+    }
 
-    if (warpId == 0 && leader) {
-        #pragma unroll
-        for (int32_t i = 0; i < CastTraits::numStages; i++) {
-            cuda_ptx::mbarrier_init(&producer[i], 1);
+    if (leader) {
+        if (warpId == 0) {
+            #pragma unroll
+            for (int32_t i = 0; i < CastTraits::numStages; i++) {
+                cuda_ptx::mbarrier_init(&producer[i], 1);
+            }
         }
+        if constexpr (CastTraits::_colwise_source_coming_from_rowwise && 
+            CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+            cuda_ptx::mbarrier_init(colwise_reduce_barrier, 32);
+        }
+
         cuda_ptx::fence_mbarrier_init(
             cuda_ptx::sem_release,
             cuda_ptx::scope_cluster
@@ -1434,9 +1702,8 @@ __global__ void cast_mxfp8_kernel(
             }
             
             if constexpr (std::is_same_v<typename CastTraits::IType, float>) {
-                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom) {
-
-                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
+                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom ||
+                              CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
 
                 } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
 
@@ -1446,8 +1713,83 @@ __global__ void cast_mxfp8_kernel(
             } else {
                 float row_scale_inverse;
 
-                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom) {
+                if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Atom || 
+                              CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
                     IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+
+                    uint32_t sColwiseReduce_ptr = __cvta_generic_to_shared(sColwiseReduce);
+
+                    IType2 row_amax2{0.0f, 0.0f};
+                    #pragma unroll
+                    for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
+                        ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
+
+                        float2 values;
+                        if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                              asm volatile (
+                                "{\n\t"
+                                ".reg.b32 abs;\n"
+                                "abs.f16x2 abs, %2;\n"
+                                ".reg.b16 val1;\n"
+                                ".reg.b16 val2;\n"
+                                "mov.b32 {val1, val2}, abs;\n"
+                                "cvt.f32.f16 %0, val1;\n"
+                                "cvt.f32.f16 %1, val2;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
+                        } else if constexpr (std::is_same_v<typename CastTraits::IType, bf16>) {
+                            asm volatile (
+                                "{\n\t"
+                                ".reg.b32 abs;\n"
+                                "abs.bf16x2 abs, %2;\n"
+                                "prmt.b32 %1, 0x0, abs, 0x7632;\n"
+                                "prmt.b32 %0, 0x0, abs, 0x5410;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
+                        }
+
+                        // bool even = (threadIdx.x % 2 == 0);
+                        // uint32_t _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + (even ^ 1));
+                        // asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
+                        //     :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.x : values.y)));
+                        // _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + even);
+                        // asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
+                        //     :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.y : values.x)));
+                        bool even = (threadIdx.x % 2 == 0);
+                        asm volatile ("red.relaxed.cta.shared::cta.max.u32 [%0], %1;"
+                            :: "r"(sColwiseReduce_ptr + i * 2 + (even ^ 1)), 
+                               "r"(reinterpret_cast<uint32_t&>(even ? values.x : values.y)));
+                        asm volatile ("red.relaxed.cta.shared::cta.max.u32 [%0], %1;"
+                            :: "r"(sColwiseReduce_ptr + i * 2 + even), 
+                               "r"(reinterpret_cast<uint32_t&>(even ? values.y : values.x)));
+                    }
+                    {
+                        typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
+                        e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
+                        row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
+                        if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_smem_base_offset
+                                + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
+                        } else {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_base_offset
+                                + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
+                        }
+                    }
+                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+                    IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+
+                    uint32_t sColwiseReduce_ptr = __cvta_generic_to_shared(sColwiseReduce);
+                    uint32_t colwise_reduce_barrier_ptr = __cvta_generic_to_shared(colwise_reduce_barrier);
 
                     IType2 row_amax2{0.0f, 0.0f};
                     #pragma unroll
@@ -1483,13 +1825,27 @@ __global__ void cast_mxfp8_kernel(
                         }
 
                         bool even = (threadIdx.x % 2 == 0);
-                        uint32_t _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + (even ^ 1));
-                        asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
-                            :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.x : values.y)));
-                        _smem_ptr = __cvta_generic_to_shared(sColwiseReduce + i * 2 + even);
-                        asm volatile ("atom.relaxed.cta.shared::cta.max.u32 _, [%0], %1;"
-                            :: "r"(_smem_ptr), "r"(reinterpret_cast<uint32_t&>(even ? values.y : values.x)));
+                        asm volatile (
+                            "red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.max.u32 [%0], %1, [%2];"
+                            :: "r"(sColwiseReduce_ptr + i * 2 + (even ^ 1)), 
+                               "r"(reinterpret_cast<uint32_t&>(even ? values.x : values.y)),
+                               "r"(colwise_reduce_barrier_ptr)
+                        );
+                        asm volatile (
+                            "red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.max.u32 [%0], %1, [%2];"
+                            :: "r"(sColwiseReduce_ptr + i * 2 + even), 
+                               "r"(reinterpret_cast<uint32_t&>(even ? values.y : values.x)),
+                               "r"(colwise_reduce_barrier_ptr)
+                        );
                     }
+                    cuda_ptx::mbarrier_arrive_expect_tx(
+                        cuda_ptx::sem_release,
+                        cuda_ptx::scope_cta,
+                        cuda_ptx::space_shared,
+                        colwise_reduce_barrier,
+                        CastTraits::warpDim::num * sizeof(typename CastTraits::ColwiseReduceDataType)
+                    );
+
                     {
                         typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
                         e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
@@ -1508,66 +1864,74 @@ __global__ void cast_mxfp8_kernel(
                             scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
                         }
                     }
-                    {
-                        __syncwarp();
-                        float col_amax = sColwiseReduce[threadIdx.x];
-                        e8m0_t col_biased_exponent = to_e8m0<typename CastTraits::OType>(col_amax);
-                        int32_t colwise_scale_offset = 
-                            colwise_scale_base_offset 
-                            + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
-                            + iter_n * CastTraits::blockIterDim::N;
-                        scales_colwise[colwise_scale_offset] = col_biased_exponent;
-                        float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
-                        sColwiseReduce[threadIdx.x] = col_scale_inverse;
-                        __syncwarp();
-                    }
-                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Red) {
-
-                } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
-
                 } else if constexpr (CastTraits::_colwise_reduce_max == ColwiseReduceMax::Redux) {
-
-                }
-
-                // colwise
-                {
-                    typename CastTraits::OType rOutput[CastTraits::colChunkElems];
-
-                    ptx::floatx2 block_scale_inverse_2x[2];
-                    ptx::floatx2 *sColwiseScale2x = reinterpret_cast<ptx::floatx2 *>(sColwiseReduce);
-                    block_scale_inverse_2x[0] = sColwiseScale2x[0];
-
                     IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
-                    OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+
+                    uint32_t sColwiseReduce_ptr = __cvta_generic_to_shared(sColwiseReduce);
+                    uint32_t colwise_reduce_barrier_ptr = __cvta_generic_to_shared(colwise_reduce_barrier);
+
+                    IType2 row_amax2{0.0f, 0.0f};
                     #pragma unroll
-                    for (int32_t i = 1; i < CastTraits::colChunkElems / 2; i++) {
-                        {
-                            block_scale_inverse_2x[i % 2] = 
-                                sColwiseScale2x[i];
+                    for (int32_t i = 0; i < CastTraits::rowChunkElems / 2; i++) {
+                        ptx::abs_max_2x(row_amax2, row_amax2, rInput2[i]);
+
+                        float2 values;
+                        if constexpr (std::is_same_v<typename CastTraits::IType, fp16>) {
+                              asm volatile (
+                                "{\n\t"
+                                ".reg.b16 val1;\n"
+                                ".reg.b16 val2;\n"
+                                "mov.b32 {val1, val2}, %2;\n"
+                                "cvt.f32.f16 %0, val1;\n"
+                                "cvt.f32.f16 %1, val2;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
+                        } else if constexpr (std::is_same_v<typename CastTraits::IType, bf16>) {
+                            asm volatile (
+                                "{\n\t"
+                                "prmt.b32 %1, 0x0, %2, 0x7632;\n"
+                                "prmt.b32 %0, 0x0, %2, 0x5410;\n"
+                                "}\n\t"
+                                : "=f"(values.x), "=f"(values.y)
+                                : "r"(reinterpret_cast<int32_t&>(rInput2[i]))
+                            );
                         }
 
-                        IType2 in = rInput2[i - 1];
-                        OType2 out;
-                        ptx::mul_cvt_2x(out, in, block_scale_inverse_2x[(i - 1) % 2]);
-                        rOutput2[i - 1] = out;
-                    }
-                    {
-                        constexpr int32_t i = (CastTraits::colChunkElems / 2) - 1;
-                        IType2 in = rInput2[i];
-                        OType2 out;
-                        ptx::mul_cvt_2x(out, in,
-                            block_scale_inverse_2x[i % 2]);
-                        rOutput2[i] = out;
+                        float2 amaxs;
+                        asm volatile (
+                            "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
+                            : "=f"(amaxs.x)
+                            : "f"(values.x)
+                        );
+                        asm volatile (
+                            "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
+                            : "=f"(amaxs.y)
+                            : "f"(values.y)
+                        );
+                        if (leader) {
+                            float2 *sColwiseReduce_2x = reinterpret_cast<float2 *>(sColwiseReduce);
+                            sColwiseReduce_2x[i] = amaxs;
+                        }
                     }
 
                     {
-                        int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit)
-                            + warp_offset / CastTraits::rowOutNumElemsPerUnit;
-                        typename CastTraits::rowOutputUnitType *rOutputUnit = 
-                            reinterpret_cast<typename CastTraits::rowOutputUnitType *>(rOutput);
-                        #pragma unroll
-                        for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
-                            sColOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutputUnit[i];
+                        typename CastTraits::IType row_amax = ptx::get_amax(row_amax2.x, row_amax2.y);
+                        e8m0_t row_biased_exponent = to_e8m0<typename CastTraits::OType>(row_amax);
+                        row_scale_inverse = ptx::exp2f_rcp(row_biased_exponent);
+                        if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_smem_base_offset
+                                + iter_m * CastTraits::blockIterDim::M * rowwise_scale_stride_in_smem
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            sRowwiseScale[rowwise_scale_offset] = row_biased_exponent;
+                        } else {
+                            int32_t rowwise_scale_offset = 
+                                rowwise_scale_base_offset
+                                + iter_m * (CastTraits::blockIterDim::M) * scale_stride_rowwise
+                                + iter_n * (CastTraits::blockIterDim::N / CastTraits::rowChunkElems);
+                            scales_rowwise[rowwise_scale_offset] = row_biased_exponent;
                         }
                     }
                 }
@@ -1607,6 +1971,103 @@ __global__ void cast_mxfp8_kernel(
                         }
                     }
                 }
+
+                // colwise
+                {
+                    {
+                        if constexpr (CastTraits::_colwise_source_coming_from_rowwise &&
+                                      CastTraits::_colwise_reduce_max == ColwiseReduceMax::RedAsync) {
+                            while (!cuda_ptx::mbarrier_try_wait_parity(
+                                colwise_reduce_barrier,
+                                iter & 1
+                            ));
+                        } else {
+                            __syncwarp();
+                        }
+                        
+                        float col_amax = sColwiseReduce[threadIdx.x];
+                        e8m0_t col_biased_exponent = to_e8m0<typename CastTraits::OType>(col_amax);
+                        float col_scale_inverse = ptx::exp2f_rcp(col_biased_exponent);
+                        sColwiseReduce[threadIdx.x] = col_scale_inverse;
+                        int32_t colwise_scale_offset = 
+                            colwise_scale_base_offset 
+                            + iter_m * (CastTraits::blockIterDim::M / CastTraits::colChunkElems) * scale_stride_colwise
+                            + iter_n * CastTraits::blockIterDim::N;
+                        scales_colwise[colwise_scale_offset] = col_biased_exponent;
+                        __syncwarp();
+                    }
+
+                    typename CastTraits::OType rOutput[CastTraits::colChunkElems];
+
+                    if constexpr (CastTraits::_use_cvt_4x) {
+                        floatx4 block_scale_inverse_4x[2];
+                        floatx4 *sColwiseScale4x = reinterpret_cast<floatx4 *>(sColwiseReduce);
+                        block_scale_inverse_4x[0] = sColwiseScale4x[0];
+
+                        using IType4 = FPx4<typename CastTraits::IType>;
+                        using OType4 = FPx4<typename CastTraits::OType>;
+
+                        IType4 *rInput4 = reinterpret_cast<IType4 *>(&rInput);
+                        OType4 *rOutput4 = reinterpret_cast<OType4 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 1; i < CastTraits::colChunkElems / 4; i++) {
+                            {
+                                block_scale_inverse_4x[i % 2] = 
+                                    sColwiseScale4x[i];
+                            }
+                            IType4 in = rInput4[i - 1];
+                            OType4 out;
+                            mul_cvt_4x(out, in, block_scale_inverse_4x[(i - 1) % 2]);
+                            rOutput4[i - 1] = out;
+                        }
+                        {
+                            constexpr int32_t i = (CastTraits::colChunkElems / 4) - 1;
+                            IType4 in = rInput4[i];
+                            OType4 out;
+                            mul_cvt_4x(out, in, block_scale_inverse_4x[i % 2]);
+                            rOutput4[i] = out;
+                        }
+                    } else {
+                        ptx::floatx2 block_scale_inverse_2x[2];
+                        ptx::floatx2 *sColwiseScale2x = reinterpret_cast<ptx::floatx2 *>(sColwiseReduce);
+                        block_scale_inverse_2x[0] = sColwiseScale2x[0];
+
+                        IType2 *rInput2 = reinterpret_cast<IType2 *>(&rInput);
+                        OType2 *rOutput2 = reinterpret_cast<OType2 *>(&rOutput);
+                        #pragma unroll
+                        for (int32_t i = 1; i < CastTraits::colChunkElems / 2; i++) {
+                            {
+                                block_scale_inverse_2x[i % 2] = 
+                                    sColwiseScale2x[i];
+                            }
+
+                            IType2 in = rInput2[i - 1];
+                            OType2 out;
+                            ptx::mul_cvt_2x(out, in, block_scale_inverse_2x[(i - 1) % 2]);
+                            rOutput2[i - 1] = out;
+                        }
+                        {
+                            constexpr int32_t i = (CastTraits::colChunkElems / 2) - 1;
+                            IType2 in = rInput2[i];
+                            OType2 out;
+                            ptx::mul_cvt_2x(out, in,
+                                block_scale_inverse_2x[i % 2]);
+                            rOutput2[i] = out;
+                        }
+                    }
+
+                    {
+                        int32_t base = thread_base_offset / (CastTraits::rowOutNumElemsPerUnit / CastTraits::rowNumElemsPerUnit)
+                            + warp_offset / CastTraits::rowOutNumElemsPerUnit;
+                        typename CastTraits::rowOutputUnitType *rOutputUnit = 
+                            reinterpret_cast<typename CastTraits::rowOutputUnitType *>(rOutput);
+                        #pragma unroll
+                        for (int32_t i = 0; i < CastTraits::rowNumOutUnitsPerChunk; i++) {
+                            sColOutputUnit[CastTraits::rowOutputChunkSwz::swz(base + i)] = rOutputUnit[i];
+                        }
+                    }
+                }
+
             }
         } else {
             // colwise
