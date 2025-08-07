@@ -323,7 +323,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         pad_token_id: int = 0,
         max_new_tokens: int = 0,
         *args,
-        **kwargs
+        **kwargs,
     ):
         self.eval()
 
@@ -337,9 +337,10 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             batch_size, max_input_sequence_len = input_ids.shape[0], self._get_max_input_seq_len(
                 input_ids
             )
-            print(f"batch_size: {batch_size}, \
-                    max_input_sequence_len: {max_input_sequence_len}, \
-                    lengths: {lengths}")
+            print(
+                f"batch_size: {batch_size},                     max_input_sequence_len:"
+                f" {max_input_sequence_len},                     lengths: {lengths}"
+            )
 
             # For benchmark generation run, this is being set explicitly.
             max_input_sequence_len = self.config.max_seq_length
@@ -367,7 +368,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
                 dtype=torch.bfloat16,
                 is_paged=self.config.is_paged,
                 page_size=64,
-                total_num_pages=batch_size * max_input_sequence_len // 64,  # 64 * 64 (max_sequence_length) / 64 (page_size)
+                total_num_pages=batch_size
+                * max_input_sequence_len
+                // 64,  # 64 * 64 (max_sequence_length) / 64 (page_size)
             )
 
             self._model_context_phase.set_inference_params(inference_params)
@@ -380,7 +383,6 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
             inference_params.pre_step(
                 OrderedDict(zip(list(range(len(lengths_tensor))), lengths_tensor.tolist()))
             )
-
 
             output_tokens = [next_tokens]
 
@@ -452,8 +454,10 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             head_dim_k=self.config.head_dim,
             dtype=torch.bfloat16,
             is_paged=self.config.is_paged,
-            page_size=64, # @sudhakars: Try 16 or 1 even
-            total_num_pages=self.config.cuda_graphs_static_batch_size * self.config.cuda_graphs_static_max_context_len // 64,
+            page_size=64,  # @sudhakars: Try 16 or 1 even
+            total_num_pages=self.config.cuda_graphs_static_batch_size
+            * self.config.cuda_graphs_static_max_context_len
+            // 64,
         )
 
         self._model_generation_phase.set_inference_params(self.inference_params)

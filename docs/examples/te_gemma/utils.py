@@ -29,6 +29,7 @@ from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 
 random.seed(42)
 
+
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
@@ -270,12 +271,15 @@ def print_sample_of_generated_texts(model, hyperparams):
         "The fundamental theorem of calculus for the layman:",
         "A fact about AI:",
     ]
-    prompts *= hyperparams.batch_size // len(prompts) # repeat prompts to match batch size
+    prompts *= hyperparams.batch_size // len(prompts)  # repeat prompts to match batch size
 
     inputs = tokenizer(prompts, return_tensors="pt", padding=True)
 
-    max_total_tokens = (hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs
-                       else hyperparams.cuda_graphs_static_max_seq_len)
+    max_total_tokens = (
+        hyperparams.max_seq_length
+        if not hyperparams.generation_cuda_graphs
+        else hyperparams.cuda_graphs_static_max_seq_len
+    )
 
     max_length = inputs["input_ids"].size(1)
     new_length = ((max_length + 63) // 64) * max_total_tokens
@@ -317,11 +321,15 @@ def _generate_random_words(num_words, max_word_length):
     return words
 
 
-def benchmark_generation(model, hyperparams, context_length = 20):
+def benchmark_generation(model, hyperparams, context_length=20):
     batch_size = hyperparams.batch_size
     # hyperparams.max_seq_length = 512
 
-    max_total_tokens = hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs else hyperparams.cuda_graphs_static_max_seq_len
+    max_total_tokens = (
+        hyperparams.max_seq_length
+        if not hyperparams.generation_cuda_graphs
+        else hyperparams.cuda_graphs_static_max_seq_len
+    )
     max_new_tokens = max_total_tokens - context_length
 
     print(
@@ -338,7 +346,9 @@ def benchmark_generation(model, hyperparams, context_length = 20):
 
     # Add padding to the left
     inputs["input_ids"] = torch.nn.functional.pad(
-        inputs["input_ids"], (max_total_tokens - max_context_tokens, 0), value=tokenizer.pad_token_id
+        inputs["input_ids"],
+        (max_total_tokens - max_context_tokens, 0),
+        value=tokenizer.pad_token_id,
     )
 
     # Add padding to the left (only intended for baseline generation with HF
