@@ -8,13 +8,13 @@ import pytest
 import os
 import torch
 from typing import Optional
-from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, OffloadSynchronizer
+from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, OffloadSynchronizer, start_offload_if_offload_enabled
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
-from utils import ModelConfig, get_available_attention_backends
+from utils import ModelConfig
+import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
@@ -366,8 +366,10 @@ class TestsOffloadSynchronizer:
         x_2 = x[1::2]
 
         offload_synchronizer.fwd_step()
-        x1_id = offload_synchronizer.push_tensor(x_1, offload_base_tensor=True)
-        x2_id = offload_synchronizer.push_tensor(x_2, offload_base_tensor=True)
+        start_offload_if_offload_enabled(x_1, offload_base_tensor=True)
+        start_offload_if_offload_enabled(x_2, offload_base_tensor=True)
+        x1_id = offload_synchronizer.push_tensor(x_1)
+        x2_id = offload_synchronizer.push_tensor(x_2)
         del x_1, x_2
         offload_synchronizer.fwd_step()
 
@@ -655,25 +657,11 @@ class TestTELayers:
 
         recipe_ctx = Utils.create_recipe_ctx(recipe_name)
 
-<<<<<<< HEAD
         m_splits = (
             {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
             if layer_type == "grouped_linear"
             else {}
         )
-=======
-    if model_key in ["multihead_attention", "transformer_layer"]:
-        available_backends, *_ = get_available_attention_backends(
-            model_config["small"],
-            qkv_dtype=torch.bfloat16,
-            qkv_layout="sbhd_sbhd_sbhd",
-        )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
-            pytest.skip("Fused attention backend not available.")
-        os.environ["NVTE_FLASH_ATTN"] = "0"
-        _attention_backends["backend_selection_requires_update"] = True
->>>>>>> upstream/main
 
         # 1 fwd
         with offload_ctx, recipe_ctx():

@@ -263,3 +263,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
+
+    def get_usage(self) -> Tuple[bool, bool]:
+        """Get the usage of the tensor"""
+        return self._rowwise_data is not None, self._columnwise_data is not None

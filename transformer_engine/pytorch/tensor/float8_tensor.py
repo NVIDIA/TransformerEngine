@@ -104,12 +104,14 @@ class Float8Quantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1])
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
@@ -278,15 +280,16 @@ class Float8CurrentScalingQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+        data = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            transpose_shape = [shape[-1]] + list(shape[:-1])
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
                 pin_memory=pin_memory,

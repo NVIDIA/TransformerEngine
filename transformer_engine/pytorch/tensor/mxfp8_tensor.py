@@ -100,14 +100,17 @@ class MXFP8Quantizer(Quantizer):
         )
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
-        scale_inv = torch.zeros(
-            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
-            dtype=torch.uint8,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        data = None
+        scale_inv = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
+            scale_inv = torch.zeros(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
