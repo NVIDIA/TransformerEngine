@@ -38,11 +38,12 @@ at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
                                                           at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_tokens,
-                                                          int num_experts, int topk, float coeff);
+                                                          int total_num_tokens, int num_experts,
+                                                          int num_rows, int num_cols, int topk,
+                                                          float coeff);
 
-at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert,
-                                  int num_tokens, int num_experts, at::Tensor grad_aux_loss);
+at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
+                                  int num_cols, at::Tensor grad_aux_loss);
 
 /***************************************************************************************************
  * Permutation
@@ -141,6 +142,8 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
+
+at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
  * Activations

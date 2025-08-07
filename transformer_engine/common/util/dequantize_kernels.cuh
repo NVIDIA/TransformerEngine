@@ -84,8 +84,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  __shared__ alignas(128) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-  __shared__ alignas(128) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
   constexpr int transaction_size = shmem_buff_size;
@@ -166,7 +166,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
-    const float block_scale = exp2f(static_cast<float>(biased_exponent) - FP32_EXPONENT_BIAS);
+    const float block_scale = ptx::exp2f(biased_exponent);
 
     if constexpr (USE_ROWWISE_SCALING) {
       Vec<IType, ELEMS_PER_THREAD> in;

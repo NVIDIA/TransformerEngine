@@ -251,6 +251,12 @@ class Quantizer(abc.ABC):
         """Create shallow copy"""
         return copy.copy(self)
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Symbolic function for ONNX export"""
+
+    def onnx_dequantize(self, tensor) -> torch.Tensor:
+        """Symbolic function for ONNX export"""
+
     @abc.abstractmethod
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Returns recipe class that is compatible with this quantizer"""

@@ -12,9 +12,25 @@ from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context, Offl
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
+from utils import ModelConfig, get_available_attention_backends
 
-EPSILON = 0.1
+# Check if FP8 is supported
+fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
+
+fp8_recipes = [None]
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
+
+model_config = {
+    "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
+}
+SIZE = model_config["small"].hidden_size
+NUM_HEADS = model_config["small"].num_heads
+NUM_LAYERS = model_config["small"].num_layers
+EPSILON = model_config["small"].eps
 
 # Disable garbage collection to tests if there are reference cycles.
 # We do not want them, because they can result in CUDA out of memory errors.
@@ -639,11 +655,25 @@ class TestTELayers:
 
         recipe_ctx = Utils.create_recipe_ctx(recipe_name)
 
+<<<<<<< HEAD
         m_splits = (
             {"m_splits": [Utils._B * Utils._S // Utils._H] * Utils._H}
             if layer_type == "grouped_linear"
             else {}
         )
+=======
+    if model_key in ["multihead_attention", "transformer_layer"]:
+        available_backends, *_ = get_available_attention_backends(
+            model_config["small"],
+            qkv_dtype=torch.bfloat16,
+            qkv_layout="sbhd_sbhd_sbhd",
+        )
+        _, fused_attn_supported, _ = available_backends
+        if not fused_attn_supported:
+            pytest.skip("Fused attention backend not available.")
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+>>>>>>> upstream/main
 
         # 1 fwd
         with offload_ctx, recipe_ctx():

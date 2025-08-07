@@ -88,7 +88,7 @@ struct SimpleTensor {
             nvte_make_shape(this->shape.data(), this->shape.size())};
   }
 
-  int numel() const {
+  size_t numel() const {
     size_t acc = 1;
     for (const auto &dim : shape) {
       acc *= dim;
@@ -668,7 +668,8 @@ constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
   return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;

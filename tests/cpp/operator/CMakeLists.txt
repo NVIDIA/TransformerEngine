@@ -28,6 +28,7 @@ add_executable(test_operator
                test_multi_unpadding.cu
                test_causal_softmax.cu
                test_swizzle.cu
+               test_swap_first_dims.cu
                ../test_common.cu)
 
 find_package(OpenMP REQUIRED)

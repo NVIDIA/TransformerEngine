@@ -26,14 +26,28 @@ __device__ inline T sum(T a, T b) {
   return a + b;
 }
 
+enum ReduceFuncType {
+  SUM,
+  MAX,
+};
+
 template <typename T>
-__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, T (*reduce_func)(T, T),
+__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncType type,
                                          int lane_id) {
+  T (*reduce_func)(T, T);
+  double default_val = 0;
+  if (type == ReduceFuncType::SUM) {
+    reduce_func = sum;
+    default_val = 0;
+  } else if (type == ReduceFuncType::MAX) {
+    reduce_func = max;
+    default_val = -std::numeric_limits<double>::infinity();
+  }
+
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile double val =
-      lane_id < data_size ? static_cast<double>(data_ptr[lane_id]) : static_cast<double>(0);
+  volatile double val = lane_id < data_size ? static_cast<double>(data_ptr[lane_id]) : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     val = reduce_func(val, data_ptr[i]);
   }
@@ -57,13 +71,22 @@ __device__ inline void apply_sigmoid_on_float(DataType *scores, int data_size, i
 
 template <typename T>
 __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int data_size,
-                                                T (*reduce_func)(T, T), int lane_id) {
+                                                ReduceFuncType type, int lane_id) {
+  T (*reduce_func)(T, T);
+  double default_val = 0;
+  if (type == ReduceFuncType::SUM) {
+    reduce_func = sum;
+    default_val = 0;
+  } else if (type == ReduceFuncType::MAX) {
+    reduce_func = max;
+    default_val = -std::numeric_limits<double>::infinity();
+  }
+
   // Some value is hanlded in local thread
   // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
   // Reduce the value in local thread
-  volatile double val = lane_id < data_size && mask[lane_id]
-                            ? static_cast<double>(data_ptr[lane_id])
-                            : static_cast<double>(0);
+  volatile double val =
+      lane_id < data_size && mask[lane_id] ? static_cast<double>(data_ptr[lane_id]) : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
       val = reduce_func(val, data_ptr[i]);
@@ -108,7 +131,7 @@ __device__ inline void apply_softmax_bwd_on_float(DataType *grad, DataType *fwd_
   float sum_Output_x_Grad = warp_reduce_on_shmem(
       /*data ptr = */ comp_buf,
       /*data size = */ data_size,
-      /*reduce func = */ sum, lane_id);
+      /*reduce func = */ ReduceFuncType::SUM, lane_id);
   // In-place update
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     if (mask) {
@@ -127,14 +150,16 @@ __device__ inline void apply_softmax_bwd_on_float(DataType *grad, DataType *fwd_
 template <typename DataType>
 __device__ inline void apply_softmax_on_float(DataType *scores, int data_size, int lane_id) {
   // 1. compute the max of value
-  float max_val = static_cast<float>(warp_reduce_on_shmem(scores, data_size, max, lane_id));
+  float max_val =
+      static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::MAX, lane_id));
   // 2. value -> exp_value
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     scores[i] = static_cast<float>(exp(static_cast<float>(scores[i]) - max_val));
   }
   __syncwarp();
   // 3. compute the sum of exp_value
-  float sum_val = static_cast<float>(warp_reduce_on_shmem(scores, data_size, sum, lane_id));
+  float sum_val =
+      static_cast<float>(warp_reduce_on_shmem(scores, data_size, ReduceFuncType::SUM, lane_id));
   // 4. update the softmax value
   for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
     scores[i] = static_cast<float>(scores[i]) / sum_val;
@@ -145,19 +170,29 @@ __device__ inline void apply_softmax_on_float(DataType *scores, int data_size, i
 template <typename T>
 __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, int *topk_indices,
                                            T *topk_scores, int lane_id) {
+  // Check if the index is masked by the later iteration
+  auto is_masked = [&topk_indices](int k, int index) {
+    if (k == 0) return false;
+    for (int i = 0; i < k; i++) {
+      if (topk_indices[i] == index) return true;
+    }
+    return false;
+  };
   // Topk Times: Find the max value and its index
   // Then mask it, and record the index in the topk_indices
   // After looping topk times, the topk_indices will be the topk indices
   for (int k = 0; k < topk; k++) {
     // Find the max value and its index
-    volatile double val =
-        (lane_id < data_size) ? static_cast<double>(scores[lane_id]) : static_cast<double>(0);
+    volatile double val = (lane_id < data_size && !is_masked(k, lane_id))
+                              ? static_cast<double>(scores[lane_id])
+                              : -std::numeric_limits<double>::infinity();
     volatile int index = (lane_id < data_size) ? lane_id : 0;
     // Some value is hanlded in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-      volatile double cur_val = scores[i];
+      volatile double cur_val = (is_masked(k, i)) ? -std::numeric_limits<double>::infinity()
+                                                  : static_cast<double>(scores[i]);
       if (cur_val > val) {
         val = cur_val;
         index = i;
@@ -175,16 +210,8 @@ __device__ inline void naive_topk_and_mask(T *scores, int data_size, int topk, i
     if (lane_id == 0) {
       topk_indices[k] = index;
       topk_scores[k] = val;
-      scores[index] =
-          static_cast<double>(-1.0) - val;  // make the selected experts using val = - 1 - val
     }
     __syncwarp();
-  }
-
-  // Reset the scores to the original value
-  for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
-    scores[topk_indices[i]] =
-        static_cast<double>(-1.0) - static_cast<double>(scores[topk_indices[i]]);
   }
 }
 

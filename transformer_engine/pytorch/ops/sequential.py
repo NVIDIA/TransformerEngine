@@ -10,7 +10,6 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.fuser import OperationFuser
 
@@ -161,24 +160,7 @@ class Sequential(torch.nn.Module):
                 groups.append(module)
         for idx, group in enumerate(groups):
             if isinstance(group, list):
-                groups[idx] = OperationFuser(group, fuse_ops=True)
-
-        # Check if operations expect extra input or output tensors
-        # Note: If any op has extra inputs or outputs, then the entire
-        # Sequential must be made up of TE ops.
-        if len(groups) > 1:
-            ops = []
-            for group in groups:
-                if isinstance(group, OperationFuser):
-                    ops.extend(group._basic_ops)
-            num_extra_inputs = sum(op.num_extra_inputs for op in ops)
-            num_extra_outputs = sum(op.num_extra_outputs for op in ops)
-            if num_extra_inputs > 0 or num_extra_outputs > 0:
-                raise RuntimeError(
-                    f"`Sequential` expects {num_extra_inputs} extra inputs "
-                    f"and {num_extra_outputs} extra outputs, "
-                    "but it contains non-fusible operations"
-                )
+                groups[idx] = OperationFuser(group)
 
         return groups
 
@@ -189,22 +171,28 @@ class Sequential(torch.nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Forward pass"""
 
-        # Get current global state
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8_enabled else None
-        global_state = (fp8_enabled, type(fp8_recipe))
-
-        # Reset module groups is global state changed
-        if self._last_global_state != global_state:
-            self._module_groups = None
-            self._last_global_state = global_state
-
         # Create module groups if needed
         if self._module_groups is None:
             self._module_groups = self._make_module_groups(self._modules.values())
 
         # Forward pass for each module group
         x = input
+        extra_outputs: list[torch.Tensor] = []
         for module_group in self._module_groups:
-            x = module_group(x, *extra_inputs)
+            if isinstance(module_group, OperationFuser):
+                xs, extra_inputs = (
+                    (x,) + extra_inputs[: module_group.num_extra_inputs],
+                    extra_inputs[module_group.num_extra_inputs :],
+                )
+                xs = module_group(*xs)
+                if isinstance(xs, tuple):
+                    x, ys = xs[0], xs[1:]
+                    extra_outputs.extend(ys)
+                else:
+                    x = xs
+            else:
+                x = module_group(x)
+
+        if extra_outputs:
+            return (x,) + tuple(extra_outputs)
         return x

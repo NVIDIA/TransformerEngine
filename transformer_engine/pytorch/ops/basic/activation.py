@@ -11,7 +11,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...fp8 import FP8GlobalStateManager
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
@@ -71,9 +70,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
 
         # Compute dtype
@@ -88,21 +86,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Check input tensor
         x = maybe_dequantize(input_.contiguous(), dtype)
 
-        # Check if quantized compute is enabled
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        quantizer = None
-        if with_quantized_compute:
-            quantizer = next_op_input_quantizer
-
         # Launch kernel
-        y = self._activation_forward_impl(
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check output tensor
-        if len(y.size()) != x.dim():
-            y = y.view(list(x.shape[:-1]) + [-1])
+        y = self._activation_forward_impl(x, next_op_input_quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -111,11 +96,10 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             x = input_quantizer(x)
 
         # Save state for backward pass
-        ctx.save_for_backward(x)
-        ctx.with_quantized_compute = with_quantized_compute
-        ctx.dtype = dtype
-        ctx.is_first_op = is_first_op
-        ctx.prev_op_grad_input_quantizer = prev_op_grad_input_quantizer
+        if ctx.requires_grad:
+            ctx.save_for_backward(x)
+            ctx.dtype = dtype
+            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
         return y
 
@@ -134,25 +118,11 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         # Check grad output tensor
         dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
 
-        # Check if quantized compute is enabled
-        quantizer = None
-        if ctx.with_quantized_compute:
-            quantizer = ctx.prev_op_grad_input_quantizer
-
         # Launch kernel
-        dx = self._activation_backward_impl(
-            dy.view((-1, dy.size(-1))),
-            x.view((-1, x.size(-1))),
-            quantizer,
-        )
-
-        # Check grad input tensor
-        if dx.size() != x.size():
-            dx = dx.view(x.size())
+        dx = self._activation_backward_impl(dy, x, ctx.prev_op_grad_output_quantizer)
 
         # Clear input tensor if possible
-        if not ctx.is_first_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
 
         return dx, ()
 

@@ -57,6 +57,8 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
 )
+from transformer_engine.pytorch import export
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 # Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
@@ -149,7 +151,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(attention_mask_func)
+        def mask_func(x, y):
+            return (
+                export.onnx_attention_mask_func(x, y)
+                if is_in_onnx_export_mode()
+                else attention_mask_func(x, y)
+            )
+
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but

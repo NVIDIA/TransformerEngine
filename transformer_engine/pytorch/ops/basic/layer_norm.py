@@ -13,7 +13,6 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...fp8 import FP8GlobalStateManager
 from ...constants import TE_DType
 from ...utils import (
     canonicalize_device,
@@ -23,6 +22,7 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
+from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
 
 
@@ -167,8 +167,8 @@ class LayerNorm(BasicOperation):
         self.weight = weight
         self.bias = bias
 
-    def pre_first_forward(self, *args, **kwargs) -> None:
-        super().pre_first_forward(*args, **kwargs)
+    def pre_first_fuser_forward(self) -> None:
+        super().pre_first_fuser_forward()
         if self.weight.device.type == "meta" or self.bias.device.type == "meta":
             self.reset_parameters()
 
@@ -176,10 +176,11 @@ class LayerNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
-        is_first_op: bool,
     ) -> torch.Tensor:
+        if is_in_onnx_export_mode():
+            return self.op_onnx_forward(input_)
 
         # Check tensor dims
         weight = self.weight
@@ -198,34 +199,24 @@ class LayerNorm(BasicOperation):
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
         b = maybe_dequantize(self.bias, dtype).view((inner_dim,))
 
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
-
-        # Check if output is quantized
-        output_quantizer = None
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        if with_quantized_compute:
-            output_quantizer = next_op_input_quantizer
-
         # Compute layer norm
-        sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
+        sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         y, means, rstdevs = layernorm_fwd(
             x,
             w,
             b,
             self.eps,
             None,
-            output_quantizer,
+            next_op_input_quantizer,
             TE_DType[dtype],
             sm_margin,
             self.zero_centered_gamma,
         )
 
         # Save state for backward pass
-        if requires_grad:
+        if ctx.requires_grad:
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
-            ctx.has_prev_op = not is_first_op
 
         # Reshape output tensor
         out = y.view(input_dims)
@@ -261,8 +252,7 @@ class LayerNorm(BasicOperation):
         )
 
         # Clear saved tensors if possible
-        if ctx.has_prev_op:
-            clear_tensor_data(x)
+        clear_tensor_data(x)
         clear_tensor_data(means)
         clear_tensor_data(rstdevs)
 
@@ -271,3 +261,13 @@ class LayerNorm(BasicOperation):
         grad_weight = dw.view(weight_dims)
         grad_bias = db.view(weight_dims)
         return grad_input, (grad_weight, grad_bias)
+
+    def op_onnx_forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        """Every operand in this function has a defined ONNX translation."""
+        weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+        return torch.nn.functional.layer_norm(
+            input_, input_.shape[-1:], weight, self.bias, self.eps
+        )
