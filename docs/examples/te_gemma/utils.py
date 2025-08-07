@@ -9,7 +9,6 @@ import random
 import string
 
 from te_gemma_loading_weights import load_te_model
-from te_llama_loading_weights import load_te_model as load_te_model_llama
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -27,8 +26,8 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 
 
 from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
-from te_llama import TELlamaForCausalLM, TELlamaForCausalLMCudaGraphs
 
+random.seed(42)
 
 class HyperParameters:
     def __init__(self):
@@ -60,6 +59,9 @@ class HyperParameters:
         # QKV format.
         self.fuse_qkv_params = False
         self.qkv_format = "bshd"
+
+        # Attention
+        self.is_paged = False
 
 
 hyperparams = HyperParameters()
@@ -116,20 +118,6 @@ def init_baseline_model(hyperparams):
         config=config,
         torch_dtype=torch.bfloat16,
     )
-    return model.cuda()
-
-
-def init_te_llama_model(hyperparams):
-    cls = TELlamaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TELlamaForCausalLM
-    config = AutoConfig.from_pretrained(hyperparams.model_name)
-    config._attn_implementation = "flash_attention_2"
-
-    # Adding all params from the hyperparams to the config to make the code simpler.
-    for key, value in hyperparams.__dict__.items():
-        setattr(config, key, value)
-    model = load_te_model_llama(cls, config)
-    if hyperparams.generation_cuda_graphs:
-        model.record()
     return model.cuda()
 
 
@@ -272,16 +260,25 @@ def run_forward_pass(model, hyperparams, num_iters):
 """
 
 
-def print_sample_of_generated_texts(model):
+def print_sample_of_generated_texts(model, hyperparams):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     if getattr(tokenizer, "pad_token", None) is None:
         tokenizer.pad_token = tokenizer.eos_token
-    prompts = ["Here are the two facts about GPUs:", "Some facts about NVIDIA:"]
-    prompts *= 32
+    prompts = [
+        "Here are the two facts about GPUs:",
+        "Some facts about NVIDIA:",
+        "The fundamental theorem of calculus for the layman:",
+        "A fact about AI:",
+    ]
+    prompts *= hyperparams.batch_size // len(prompts) # repeat prompts to match batch size
+
     inputs = tokenizer(prompts, return_tensors="pt", padding=True)
 
+    max_total_tokens = (hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs
+                       else hyperparams.cuda_graphs_static_max_seq_len)
+
     max_length = inputs["input_ids"].size(1)
-    new_length = ((max_length + 63) // 64) * 128
+    new_length = ((max_length + 63) // 64) * max_total_tokens
 
     # Add padding to the left
     inputs["input_ids"] = torch.nn.functional.pad(
@@ -307,7 +304,7 @@ def print_sample_of_generated_texts(model):
         print("Generated text:")
         print(generated_texts[idx][len(prompts[idx]) :])
 
-    for i in range(5):
+    for i in range(2):
         print_output(prompts, generated_texts, i)
 
 
@@ -320,14 +317,16 @@ def _generate_random_words(num_words, max_word_length):
     return words
 
 
-def benchmark_generation(model):
-    batch_size = 64
-    context_length = 128
-    max_new_tokens = 156 - 128
-    print("=" * 30 + " Benchmarking " + "=" * 30)
+def benchmark_generation(model, hyperparams, context_length = 20):
+    batch_size = hyperparams.batch_size
+    # hyperparams.max_seq_length = 512
+
+    max_total_tokens = hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs else hyperparams.cuda_graphs_static_max_seq_len
+    max_new_tokens = max_total_tokens - context_length
+
     print(
-        f"Benchmarking for batch_size = {batch_size} and max total tokens ="
-        f" {context_length + max_new_tokens}"
+        f"Benchmarking for batch_size = {batch_size} and prefill tokens ="
+        f" {context_length} and max new tokens = {max_new_tokens}"
     )
 
     input_str = _generate_random_words(batch_size, context_length)
@@ -335,17 +334,17 @@ def benchmark_generation(model):
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     inputs = tokenizer(input_str, return_tensors="pt", padding=True)
 
-    max_length = inputs["input_ids"].size(1)
+    max_context_tokens = inputs["input_ids"].size(1)
 
     # Add padding to the left
     inputs["input_ids"] = torch.nn.functional.pad(
-        inputs["input_ids"], (context_length - max_length, 0), value=tokenizer.pad_token_id
+        inputs["input_ids"], (max_total_tokens - max_context_tokens, 0), value=tokenizer.pad_token_id
     )
 
     # Add padding to the left (only intended for baseline generation with HF
     # which expects padding to the left)
     inputs["attention_mask"] = torch.nn.functional.pad(
-        inputs["attention_mask"], (context_length - max_length, 0), value=0
+        inputs["attention_mask"], (max_total_tokens - max_context_tokens, 0), value=0
     )
 
     inputs["input_ids"] = inputs["input_ids"].cuda()
