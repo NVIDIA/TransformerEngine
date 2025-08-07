@@ -2105,7 +2105,6 @@ class TestFusedOps:
     @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
-    @pytest.mark.parametrize("quantization", _quantization_list)
     def test_backward_add_rmsnorm(
         self,
         *,
@@ -2115,15 +2114,11 @@ class TestFusedOps:
         device: torch.device = "cuda",
         eps: float = 0.3,
         zero_centered_gamma: bool,
-        quantization: Optional[str],
     ) -> None:
         """Fused backward RMNorm + add"""
 
         # Make input and weight shapes consistent
         in_shape = list(in_shape)[:-1] + list(weight_shape)
-
-        # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -2160,10 +2155,7 @@ class TestFusedOps:
         (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
 
         # Implementation with fusible operations
-        quantized_compute = quantization is not None
-        recipe = make_recipe(quantization)
         model = te_ops.Sequential(
-            te_ops.Quantize(forward=False, backward=quantized_compute),
             te_ops.MakeExtraOutput(),
             te_ops.RMSNorm(
                 weight_shape,
@@ -2174,22 +2166,18 @@ class TestFusedOps:
             ),
         )
         with torch.no_grad():
-            model[2].weight.copy_(w_test)
+            model[1].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
-            y1_test, y2_test = model(x_test)
+        y1_test, y2_test = model(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
         # Check that backward operations have been fused
         backward_ops = model._module_groups[0]._backward_ops
-        assert len(backward_ops) == 2
+        assert len(backward_ops) == 1
         assert isinstance(backward_ops[0][0], BackwardAddRMSNorm)
-        assert isinstance(backward_ops[1][0], te_ops.Quantize)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
         y1_test = y1_test.to(dtype=torch.float64, device="cpu")

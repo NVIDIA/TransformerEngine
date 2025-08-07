@@ -24,7 +24,7 @@ extern "C" {
  * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}} \gamma + \beta
  * @f]
  *
- * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     x                   Input tensor of shape [N, H].
@@ -55,7 +55,7 @@ void nvte_layernorm_fwd(const NVTETensor x, const NVTETensor gamma, const NVTETe
  * else
  * with respect to \f$x\f$, \f$\gamma\f$ and \f$\beta\f$.
  *
- * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
@@ -90,7 +90,7 @@ void nvte_layernorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETenso
  * RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^{n-1} x_i^2 + \varepsilon}
  * @f]
  *
- * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     x                   Input tensor of shape [N, H].
@@ -120,7 +120,7 @@ void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float ep
  * @f]
  * with respect to \f$x\f$ and \f$gamma\f$.
  *
- * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
@@ -142,7 +142,7 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
 
 /*! \brief Compute backward of RMSNorm and add additional tensor to output gradient
  *
- * Calling this function with workspace set to the empty tensor will not perform the operation,
+ * Calling this function with workspace set to an empty tensor will not perform the operation,
  * but instead set the shape and type of the workspace tensor to the required values.
  *
  *  \param[in]     dz                  Incoming gradient tensor of shape [N, H].
