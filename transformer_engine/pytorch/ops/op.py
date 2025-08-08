@@ -322,8 +322,12 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                             assert (
                                 buffer_key in FP8GlobalStateManager.global_amax_history_buffer
                             ), "TE internal error during amax history change."
-                            FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = recipe_state.amax_history[0]
-                            FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = recipe_state.amax_history
+                            FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = (
+                                recipe_state.amax_history[0]
+                            )
+                            FP8GlobalStateManager.global_amax_history_buffer[buffer_key][
+                                pos
+                            ] = recipe_state.amax_history
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):
