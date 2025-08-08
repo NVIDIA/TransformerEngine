@@ -754,9 +754,14 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
     static constexpr int32_t numPrefetch = numStages - 1;
 
     static constexpr bool _use_cvt_4x = true;
+    static constexpr bool _cache_rowwise_scale_in_smem = true;
 
     static constexpr int32_t numThreads = warpLayout::num * 32;
-    static constexpr size_t smem = 0ul;
+
+    static constexpr size_t smem_rowwise_scale = _cache_rowwise_scale_in_smem
+                                                ? (blockDimM * (blockDimN / chunkElems) * sizeof(e8m0_t))
+                                                : 0ul;
+    static constexpr size_t smem = smem_rowwise_scale;
 };
 
 // 1x32
@@ -776,6 +781,12 @@ __global__ void cast_mxfp8_kernel(
     constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
     using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
 
+    e8m0_t *sRowwiseScale = nullptr;
+    if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+        extern __shared__ char smem[];
+        sRowwiseScale = reinterpret_cast<e8m0_t *>(smem);
+    }
+
     int2 block_coords;
     block_coords.y = blockIdx.y * CastTraits::blockDimM
                 + threadIdx.z * CastTraits::warpDimM
@@ -783,6 +794,16 @@ __global__ void cast_mxfp8_kernel(
     block_coords.x = blockIdx.x * CastTraits::blockDimN
                 + threadIdx.y * CastTraits::warpDimN
                 + (threadIdx.x % CastTraits::threadLayout::N) * CastTraits::chunkElems;
+
+    int32_t rowwise_scale_smem_base_offset;
+    constexpr int32_t rowwise_scale_stride_in_smem = CastTraits::blockDimN / CastTraits::chunkElems;
+    if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+        rowwise_scale_smem_base_offset = 
+            threadIdx.z * CastTraits::warpDimM * rowwise_scale_stride_in_smem
+            + threadIdx.y * (CastTraits::warpDimN / CastTraits::chunkElems)
+            + (threadIdx.x / CastTraits::threadLayout::N) * rowwise_scale_stride_in_smem
+            + (threadIdx.x % CastTraits::threadLayout::N);
+    }
 
     typename CastTraits::inputUnitType rInput[CastTraits::numStages][CastTraits::numUnitsPerChunk];
     // prologue
@@ -845,7 +866,15 @@ __global__ void cast_mxfp8_kernel(
                 abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
             }
             e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                int32_t rowwise_scale_offset = 
+                    rowwise_scale_smem_base_offset 
+                    + iter_m * CastTraits::blockIterDimM * rowwise_scale_stride_in_smem
+                    + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
+                sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+            } else {
+                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            }
 
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
@@ -888,9 +917,15 @@ __global__ void cast_mxfp8_kernel(
             }
             typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
             e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-            
-            // write biased_exponent
-            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                int32_t rowwise_scale_offset = 
+                    rowwise_scale_smem_base_offset 
+                    + iter_m * CastTraits::blockIterDimM * rowwise_scale_stride_in_smem
+                    + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
+                sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+            } else {
+                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            }
 
             // scaling input
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -947,7 +982,15 @@ __global__ void cast_mxfp8_kernel(
                 abs_max_2x(thread_amax, thread_amax, rInput2[j].x, rInput2[j].y);
             }
             e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                int32_t rowwise_scale_offset = 
+                    rowwise_scale_smem_base_offset 
+                    + iter_m * CastTraits::blockIterDimM * rowwise_scale_stride_in_smem
+                    + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
+                sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+            } else {
+                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            }
 
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
             ptx::floatx2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
@@ -990,9 +1033,15 @@ __global__ void cast_mxfp8_kernel(
             }
             typename CastTraits::IType thread_amax = ptx::get_amax(thread_amax2.x, thread_amax2.y);
             e8m0_t biased_exponent = to_e8m0<typename CastTraits::OType>(thread_amax);
-            
-            // write biased_exponent
-            scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+                int32_t rowwise_scale_offset = 
+                    rowwise_scale_smem_base_offset 
+                    + iter_m * CastTraits::blockIterDimM * rowwise_scale_stride_in_smem
+                    + iter_n * (CastTraits::blockIterDimN / CastTraits::chunkElems);
+                sRowwiseScale[rowwise_scale_offset] = biased_exponent;
+            } else {
+                scales_rowwise[coords.y * scale_stride_rowwise + coords.x / CastTraits::chunkElems] = biased_exponent;
+            }
 
             // scaling input
             float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
@@ -1029,6 +1078,77 @@ __global__ void cast_mxfp8_kernel(
             }
         }
     }
+
+    if constexpr (CastTraits::_cache_rowwise_scale_in_smem) {
+        __syncthreads();
+
+        int32_t warpId = threadIdx.z * CastTraits::warpLayout::N + threadIdx.y;
+
+        block_coords.y = blockIdx.y * CastTraits::blockDimM;
+        block_coords.x = blockIdx.x * CastTraits::blockDimN;
+
+        constexpr int32_t stride_in_smem = CastTraits::blockDimN / CastTraits::chunkElems;
+        using PreferredDataType = std::conditional_t<stride_in_smem % 16 == 0, uint4,
+                                    std::conditional_t<stride_in_smem % 8 == 0, uint2,
+                                    std::conditional_t<stride_in_smem % 4 == 0, uint32_t,
+                                    std::conditional_t<stride_in_smem % 2 == 0, uint16_t, 
+                                        uint8_t>>>>;
+
+        int2 end_coords;
+        end_coords.y = std::min(block_coords.y + CastTraits::blockDimM, rows);
+        end_coords.x = std::min((block_coords.x + CastTraits::blockDimN) / CastTraits::chunkElems, 
+                                    scale_stride_rowwise);
+        int2 valid_coords;
+        valid_coords.y = end_coords.y - block_coords.y;
+        valid_coords.x = end_coords.x - (block_coords.x / CastTraits::chunkElems);
+                                    
+        if (scale_stride_rowwise % sizeof(PreferredDataType) != 0) {
+            using DataType = int32_t;
+            constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
+            constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
+
+            int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
+            int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
+
+            DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
+            DataType *gScales = reinterpret_cast<DataType *>(
+                scales_rowwise
+                + block_coords.y * scale_stride_rowwise
+                + block_coords.x / CastTraits::chunkElems
+            );
+
+            for (int32_t i = threadIdx.x + warpId * 32; 
+                 i < (valid_coords.y * num_threads_per_row); 
+                 i += CastTraits::warpLayout::num * 32) {
+                int32_t row = i / num_threads_per_row;
+                int32_t col = i % num_threads_per_row;
+                gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+            }
+        } else {
+            using DataType = PreferredDataType;
+            constexpr int32_t num_elems_per_group = sizeof(DataType) / sizeof(e8m0_t);
+            constexpr int32_t num_groups_per_row_in_smem = stride_in_smem / num_elems_per_group;
+
+            int32_t num_threads_per_row = (valid_coords.x / num_elems_per_group);
+            int32_t gmem_stride_in_group = scale_stride_rowwise / num_elems_per_group;
+
+            DataType *sScales = reinterpret_cast<DataType *>(sRowwiseScale);
+            DataType *gScales = reinterpret_cast<DataType *>(
+                scales_rowwise
+                + block_coords.y * scale_stride_rowwise
+                + block_coords.x / CastTraits::chunkElems
+            );
+
+            for (int32_t i = threadIdx.x + warpId * 32; 
+                 i < (valid_coords.y * num_threads_per_row); 
+                 i += CastTraits::warpLayout::num * 32) {
+                int32_t row = i / num_threads_per_row;
+                int32_t col = i % num_threads_per_row;
+                gScales[row * gmem_stride_in_group + col] = sScales[row * num_groups_per_row_in_smem + col];
+            }
+        }
+    }
+
 #endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
