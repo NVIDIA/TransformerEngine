@@ -17,7 +17,7 @@ from test_attention_with_cp import model_configs_flash_attn, model_configs_fused
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.common.recipe import DelayedScaling
-from utils import ModelConfig, compare_with_error
+from utils import ModelConfig, compare_and_assert
 logging.basicConfig(level=logging.INFO)
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
@@ -439,15 +439,15 @@ def run_dpa_with_cp(
         if t is not None:
             if "softmax_offset" not in names[i]:
                 if qkv_format == "bshd":
-                    compare_with_error(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
-                    compare_with_error(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_and_assert(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_and_assert(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
                 elif qkv_format == "sbhd":
-                    compare_with_error(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
-                    compare_with_error(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_and_assert(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_and_assert(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
                 elif qkv_format == "thd":
-                    compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                    compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
             else:
-                compare_with_error(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
+                compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol)
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     # destroy distribution group

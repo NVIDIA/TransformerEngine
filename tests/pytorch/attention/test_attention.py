@@ -49,7 +49,7 @@ _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import (
     reset_rng_states,
-    compare_with_error,
+    compare_and_assert,
     ModelConfig,
     dtype_tols,
     get_available_attention_backends,
@@ -1699,7 +1699,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
-        compare_with_error(
+        compare_and_assert(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1708,7 +1708,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             rtol,
             rmse_tol,
         )
-    compare_with_error(
+    compare_and_assert(
         fused_attn_fwd_fp8,
         fused_attn_fwd_f16,
         "fused_attn_fwd_fp8",
@@ -1721,7 +1721,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     if is_training:
         for i in range(len(param_names[:1])):
             logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            compare_with_error(
+            compare_and_assert(
                 fused_attn_bwd_fp8[i],
                 fused_attn_bwd_f16[i],
                 f"fused_attn_bwd_fp8[{i}]",
@@ -1930,7 +1930,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if flash_attn_supported:
-        compare_with_error(
+        compare_and_assert(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1945,7 +1945,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             fused_attn_fwd_fp8 == 1
         ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
     else:
-        compare_with_error(
+        compare_and_assert(
             fused_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "fused_attn_fwd_fp8",
@@ -1957,7 +1957,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         if is_training:
             for i, _ in enumerate(fused_attn_bwd_f16):
                 logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-                compare_with_error(
+                compare_and_assert(
                     fused_attn_bwd_fp8[i],
                     fused_attn_bwd_f16[i],
                     f"fused_attn_bwd_fp8[{i}]",
@@ -2157,7 +2157,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.13
-    compare_with_error(
+    compare_and_assert(
         fused_attn_fwd_fp8,
         unfused_attn_fwd_f16,
         "fused_attn_fwd_fp8",
@@ -2166,7 +2166,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         rtol,
         rmse_tol,
     )
-    compare_with_error(
+    compare_and_assert(
         fused_attn_bwd_fp8,
         unfused_attn_bwd_f16,
         "fused_attn_bwd_fp8",

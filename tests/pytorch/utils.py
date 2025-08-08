@@ -137,7 +137,7 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
-def compare_with_error(a, b, name_a, name_b, atol, rtol, rmse_tol):
+def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:
