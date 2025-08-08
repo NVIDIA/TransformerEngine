@@ -1310,7 +1310,10 @@ class TestGroupedDense:
 
         # jitting grouped_gemm
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims,
+            lhs,
+            rhs,
+            group_sizes,
+            contracting_dims,
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
@@ -1341,9 +1344,9 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
-                lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
-                )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        )
 
         allclose_dtype = jnp.float8_e4m3fn
         if jnp.float8_e5m2 in fwd_bwd_dtype:
@@ -1377,8 +1380,9 @@ class TestGroupedDense:
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         # jitting the grouped_dense
-        value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-                                     static_argnums=(4,))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x, kernel, bias, group_sizes, contracting_dims
@@ -1417,8 +1421,9 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
 
         # jitting the grouped_dense
-        value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-                                     static_argnums=(4,))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x,
