@@ -2024,7 +2024,7 @@ class TestFusedOps:
         quantization: Optional[str],
         quantized_weight: bool = False,
     ) -> None:
-        """Forward GEMM * scale + add"""
+        """Forward GEMM + scale + add"""
 
         # Make input and weight shapes consistent
         out_features, in_features = weight_shape
