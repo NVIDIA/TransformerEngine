@@ -19,7 +19,8 @@
 			*transformer_engine::CommOverlapP2PBase*;
 			*transformer_engine::CommOverlapCore*;
 			*nvshmem_wait_on_stream*;
-			*nvshmemi_init_thread*
+			*nvshmemi_init_thread*;
+			allreduce_*;
 		};
 	local: *;
 };
