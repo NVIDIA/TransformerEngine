@@ -252,8 +252,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
         nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), D_tensor.data(),
-                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb,
-                                grad, te_workspace.data(), alpha, *beta, use_split_accumulator,
+                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
+                                te_workspace.data(), alpha, *beta, use_split_accumulator,
                                 num_math_sms, main_stream);
       });
     }

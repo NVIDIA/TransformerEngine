@@ -98,7 +98,11 @@ class BackwardLinearScale(FusedOperation):
         # Clear input tensor if possible
         clear_tensor_data(x_local)
 
-        return grad_input, [(), (grad_weight,)], [(), ()],
+        return (
+            grad_input,
+            [(), (grad_weight,)],
+            [(), ()],
+        )
 
 
 def fuse_backward_linear_scale(
@@ -153,5 +157,3 @@ def fuse_backward_linear_scale(
     out.extend(window)
     out.extend(ops)
     return out
-
-

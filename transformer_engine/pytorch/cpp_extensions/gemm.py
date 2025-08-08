@@ -21,6 +21,7 @@ __all__ = [
     "validate_gemm_scale",
 ]
 
+
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     """Validate whether a GEMM scaling factor is consistent with its usage"""
     if required:
@@ -29,6 +30,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
         if scale not in (0.0, None):
             raise ValueError("scale must be zero")
         return 0.0
+
 
 def general_gemm(
     A: torch.Tensor,
