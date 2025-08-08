@@ -106,12 +106,14 @@ def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor
     return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
 
 
+# TODO We should change the name of use_fp8 and add an enum but I don't want to break the API yet
+#   We should revisit this if we add support for FP4
 def initialize_ub(
     shape: list,
     tp_size: int,
-    use_fp8: bool = False,
+    use_fp8: Union[bool, List[bool]] = False,
     dtype: torch.dtype = torch.bfloat16,
-    ub_cfgs: Optional[dict] = None,
+    ub_cfgs: Optional[Union[dict, List[dict]]] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
     r"""
@@ -127,7 +129,8 @@ def initialize_ub(
     tp_size : int
               number of GPUs in the tensor-parallel process group
     use_fp8 : bool = False
-              allocate the communication buffer for FP8 GEMM inputs/outputs
+              allocate the communication buffer for FP8 GEMM inputs/outputs.
+              if a list is provided, a UB is created for each quantization setting in the list.
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when `use_fp8 = False`
     ub_cfgs: dict = None
@@ -151,6 +154,7 @@ def initialize_ub(
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
              "fc2_fprop", "fc2_dgrad"]`.
+             a list may be provided to specify different overlap configurations for different the quantization settings in `use_fp8`
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -166,6 +170,16 @@ def initialize_ub(
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
             + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
         )
+
+    if isinstance(use_fp8, bool):
+        use_fp8 = [use_fp8]
+
+    if isinstance(ub_cfgs, dict) or ub_cfgs is None:
+        ub_cfgs = [ub_cfgs] * len(use_fp8)
+    else:
+        assert len(ub_cfgs) == len(
+            use_fp8
+        ), "Number of ub_cfgs settings must match number of quantization configurations"
 
     global _ub_communicators
     assert _ub_communicators is None, "UB communicators are already initialized."
@@ -299,6 +313,7 @@ def initialize_ub(
 
     def add_ub(
         name: str,
+        use_fp8: bool,
         method: str,
         is_reduce_scatter: bool,
         num_sm: int = 16,
@@ -381,36 +396,42 @@ def initialize_ub(
                 comm_priority=comm_priority,
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
-        _ub_communicators[name] = ub_obj
+        _ub_communicators[(name, use_fp8)] = ub_obj
 
-    if ub_cfgs is not None:
-        for name in dgrad_reduce_scatter_overlap:
-            if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
-                wgrad_name = name.replace("dgrad", "wgrad")
-                assert wgrad_name not in ub_cfgs
-                layers_reduce_scatter_overlap.remove(wgrad_name)
-                layers_all_gather_overlap.remove(name)
-                layers_reduce_scatter_overlap.append(name)
-                methods["bulk"].remove(name)
-                new_method = ub_cfgs[name]["method"]
-                methods[new_method].append(name)
+    for use_fp8, user_ub_cfg in zip(use_fp8, ub_cfgs):
+        if user_ub_cfg is not None:
+            for name in dgrad_reduce_scatter_overlap:
+                if (
+                    name in user_ub_cfg
+                    and "method" in user_ub_cfg[name]
+                    and user_ub_cfg[name]["method"] != "bulk"
+                ):
+                    wgrad_name = name.replace("dgrad", "wgrad")
+                    assert wgrad_name not in user_ub_cfg
+                    layers_reduce_scatter_overlap.remove(wgrad_name)
+                    layers_all_gather_overlap.remove(name)
+                    layers_reduce_scatter_overlap.append(name)
+                    methods["bulk"].remove(name)
+                    new_method = user_ub_cfg[name]["method"]
+                    methods[new_method].append(name)
 
-    for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
-        ub_cfg = get_default_config(name)
-        if ub_cfgs is not None and name in ub_cfgs:
-            fp8_buf = (name in layers_all_gather_overlap) or (
-                ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
-            )
-            ub_cfg.update(ub_cfgs[name])
-            ub_cfg["fp8_buf"] = fp8_buf
-        add_ub(name, **ub_cfg)
+        for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+            ub_cfg = get_default_config(name)
+            if user_ub_cfg is not None and name in user_ub_cfg:
+                fp8_buf = (name in layers_all_gather_overlap) or (
+                    user_ub_cfg[name].get("fp8_buf", False) and name in methods["pipeline"]
+                )
+                ub_cfg.update(ub_cfgs[name])
+                ub_cfg["fp8_buf"] = fp8_buf
+            add_ub(name, use_fp8, **ub_cfg)
 
 
-def get_ub(name: str):
+def get_ub(name: str, use_fp8: bool):
     """Get userbuffer communicator corresponding to give key."""
+    key = (name, use_fp8)
     assert _ub_communicators is not None, "UB manager is not initialized."
-    assert name in _ub_communicators, f"UB for {name} is not registered."
-    return _ub_communicators[name]
+    assert key in _ub_communicators, f"UB for {name} with use_fp8={use_fp8} is not registered."
+    return _ub_communicators[key]
 
 
 def destroy_ub():
