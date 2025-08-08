@@ -7,8 +7,8 @@ import re
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
-from packaging import version
 from contextlib import contextmanager
+from packaging import version
 
 from jax.extend import core
 from jax.interpreters import xla, mlir
@@ -275,9 +275,9 @@ def _parse_custom_call_string_to_dict(custom_calls_str: str):
     """
     custom_calls_str = custom_calls_str.strip()
     if custom_calls_str.lower() == "true":
-        return {primitive_name: True for primitive_name in _primitive_registry.keys()}
+        return {primitive_name: True for primitive_name in _primitive_registry}
     if custom_calls_str.lower() == "false":
-        return {primitive_name: False for primitive_name in _primitive_registry.keys()}
+        return {primitive_name: False for primitive_name in _primitive_registry}
 
     settings = {}
     for pair in custom_calls_str.split(","):
@@ -289,8 +289,18 @@ def _parse_custom_call_string_to_dict(custom_calls_str: str):
             settings[key] = value == "true"
     return settings
 
+
 @contextmanager
 def primitive_context(primitive_enabling_changes: str):
+    """Context manager to temporarily change the enabled state of primitives.
+
+    This context manager allows for temporary changes to the enabled state of
+    primitives within its scope. Any changes made will be reverted once the
+    context is exited.
+
+    Args:
+        primitive_enabling_changes: A string representing the changes to be made to the enabled state of primitives. This input string uses the same pattern as the `NVTE_JAX_CUSTOM_CALLS` environment variable, `Prim1=true,Prim2=false` or `false`/`true` to disable or enable all primitives, respectively.
+    """
     orig_env_var = os.getenv("NVTE_JAX_CUSTOM_CALLS")
 
     primitives = {}
