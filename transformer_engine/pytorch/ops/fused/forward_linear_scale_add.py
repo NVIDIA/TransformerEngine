@@ -23,7 +23,6 @@ from transformer_engine.pytorch.tensor import Quantizer
 class ForwardLinearScaleAdd(FusedOperation):
     """Fused forward GEMM + scale + add
 
-    Fuses BasicLinear, ConstantScale, and AddExtraInput(in_place=False).
     Row tensor parallelism is not supported since that requires
     communication immediately after the GEMM.
 
