@@ -278,6 +278,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(test_cases),
     ::testing::Values(false, true),
     ::testing::Values(false, true)),
+    ::testing::Values(false, true)),
   [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
     std::string name =
