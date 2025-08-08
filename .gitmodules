@@ -4,3 +4,6 @@
 [submodule "3rdparty/cudnn-frontend"]
 	path = 3rdparty/cudnn-frontend
 	url = https://github.com/NVIDIA/cudnn-frontend.git
+[submodule "transformer_engine/common/gemm/cutlass"]
+	path = transformer_engine/common/gemm/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
