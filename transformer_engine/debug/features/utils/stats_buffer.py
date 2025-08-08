@@ -124,13 +124,13 @@ class _Buffer:
         # [num_active_nodes, num_stats]
         gathered_helper_stats = self._gather_helper_stats()
 
+
         if not self.modified[0]:
             return {}
         output = {}
         for stat_name in self.stats_to_log:
             combiner = STATS[stat_name][1]
             stat_value = combiner(gathered_helper_stats)
-
             MetricLogger.log_scalar(
                 f"{self.layer_name}_{self.tensor_name}_{stat_name}", stat_value, self.iteration
             )
@@ -213,6 +213,7 @@ class StatsBuffers:
 
     def log_stats(self):
         """Logs the stats from all the buffers."""
+
         if not self._if_run_reduction():
             return {}
 

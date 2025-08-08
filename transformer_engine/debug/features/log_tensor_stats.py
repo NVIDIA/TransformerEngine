@@ -122,6 +122,7 @@ class LogTensorStats(BaseLogTensorStats):
     ):  # pylint: disable=unused-argument
         """API call used to collect the data about the tensor before process_tensor()/quantization."""
 
+
         assert (
             type(tensor) not in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase]
             and tensor.dtype != torch.uint8

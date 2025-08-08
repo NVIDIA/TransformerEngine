@@ -135,7 +135,7 @@ class Float8TensorBase(QuantizedTensorBase):
         if rowwise_data:
             return self._data
         if columnwise_data:
-            return self._transpose, None
+            return self._transpose
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:

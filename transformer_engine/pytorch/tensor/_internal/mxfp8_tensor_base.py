@@ -143,7 +143,7 @@ class MXFP8TensorBase(QuantizedTensorBase):
         if rowwise_data:
             return self._rowwise_data
         if columnwise_data:
-            return self._columnwise_data, None
+            return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:

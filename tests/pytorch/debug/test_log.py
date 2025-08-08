@@ -10,9 +10,10 @@ import tempfile
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.fp8 import RecipeState
 import pytest
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import contextlib
 import os
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -63,6 +64,10 @@ for r in recipes:
             ):
                 # hopper in needed for current-scaling, block-scaling and mxfp8
                 continue
+            if r in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise_postfix == "_columnwise":
+                # columnwise stats are not supported for fp8_delayed_scaling and fp8_current_scaling
+                continue
+
             all_stats.append(f"{r}_{stat}{columnwise_postfix}")
 
 all_stats.append("fp8_delayed_scaling_overflows%")  # only delayed-scaling supports overflows%
@@ -215,7 +220,7 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
         else:
             raise ValueError(f"Invalid layer: {layer}")
 
-        for i in range(11):
+        for i in range(20):
             x = torch.randn(4, 128, 128).cuda()
             with te.fp8_autocast(enabled=True):
                 y = model(x)
@@ -229,7 +234,7 @@ def test_log_every_3_or_5_layers(layer, configs_dir, feature_dirs):
             "r",
         ) as f:
             file_content = f.read()
-            for i in range(1, 11):
+            for i in range(1, 20):
                 if i % 3 == 0 or i % 5 == 0:
                     assert f"iteration={i:06d}" in file_content
                 else:

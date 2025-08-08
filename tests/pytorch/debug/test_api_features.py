@@ -36,11 +36,6 @@ def test_transformer_engine_no_config(feature_dirs):
             "decoder.1.attn.qkv", tensor_name="activation", iteration=0
         )[0]
 
-        # inspect_tensor_postquantize - (False, None) by default
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
-        )[0]
-
     finally:
         debug_api.end_debug()
 
@@ -270,22 +265,21 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )[0]
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.2.mlp.fc1", tensor_name="activation", iteration=200
-        )
+        )[0]
 
         expected_underflows = (
             ((tensor_fp8._data == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
         )
 
-        debug_api.transformer_engine.inspect_tensor()[0]
-        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
 
         # TE FP8 tensor stats --
-        assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
-        debug_api.transformer_engine.inspect_tensor_postquantize(
+        debug_api.transformer_engine.inspect_tensor(
             "decoder.1.mlp.fc1",
             tensor_name="gradient",
             iteration=200,
@@ -300,11 +294,11 @@ def test_statistics_collection(configs_dir, feature_dirs):
             stats[("decoder.1.mlp.fc1", "gradient", "underflows%", 200)], expected_underflows
         )
 
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="activation", gemm="fprop", iteration=201
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
         )[0]
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.2.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.2.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
 
         # Second config in same yaml

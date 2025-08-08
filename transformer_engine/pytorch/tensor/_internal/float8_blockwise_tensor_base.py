@@ -131,7 +131,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         if rowwise_data:
             return self._rowwise_data
         if columnwise_data:
-            return self._columnwise_data, None
+            return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:

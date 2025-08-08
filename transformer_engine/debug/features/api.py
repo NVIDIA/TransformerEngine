@@ -115,7 +115,7 @@ class TEDefaultFeatures:
         If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
 
-        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be enabled.
+        This method may return a tuple (bool, Optional[int]), where the int indicates the next iteration when the feature will be disabled.
         It can return (bool, None) if the feature will never be enabled for that layer and gemm.
         Returning the next enabled iteration can help optimize CPU usage.
 
@@ -412,8 +412,8 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             "modify_tensor": ["tensor_name", "gemm"],
             "inspect_tensor": ["tensor_name"],
             "inspect_tensor_postquantize": ["tensor_name"],
-            "inspect_tensor_enabled": ["tensor_name"],
-            "inspect_tensor_postquantize_enabled": ["tensor_name"],
+            "inspect_tensor_enabled": ["tensor_name", "iteration"],
+            "inspect_tensor_postquantize_enabled": ["tensor_name", "iteration"],
             "modify_tensor_enabled": ["tensor_name"],
         }
 
@@ -473,11 +473,11 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 if kwargs["dtype"] is not None:
                     assert ret.dtype == kwargs["dtype"]
 
-    def call_feature(self, call, feat_name, feat_config, layer_name, **kwargs):
+    def call_feature(self, call, feat_config, layer_name, **kwargs):
         """
         For backward compatibility, remove kwargs that are not needed for the call
         """
-        if feat_name == "inspect_tensor":
+        if call.__name__ == "inspect_tensor":
             kwargs_copy = kwargs.copy()
             for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
                 if k not in call.__code__.co_varnames:
@@ -485,12 +485,12 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         else:
             kwargs_copy = kwargs
 
-        if feat_name == "inspect_tensor_postquantize":
+        if call.__name__ == "inspect_tensor_postquantize":
             warnings.warn(
                 "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
                 DeprecationWarning,
             )
-
+        
         return call(feat_config, layer_name, **kwargs_copy)
 
     def handle_multi_feature_output(
@@ -508,18 +508,20 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             # If the second value is None, that means that the feature will never be enabled.
             all_ret_tuple = all(
                 isinstance(feature_output, tuple)
-                for feature_output in multi_feature_outputs.values()
+                for feature_output in multi_feature_outputs
             )
             if all_ret_tuple:
                 run_current = any(
-                    feature_output[0] for feature_output in multi_feature_outputs.values()
+                    feature_output[0] for feature_output in multi_feature_outputs
                 )
                 next_iter = None
-                for feature_output in multi_feature_outputs.values():
-                    if feature_output[1] is not None:
+                for feature_output in multi_feature_outputs:
+                    if next_iter is None:
+                        next_iter = feature_output[1]
+                    elif feature_output[1] is not None:
                         next_iter = min(next_iter, feature_output[1])
                 return run_current, next_iter
-            run_current = any(feature_output for feature_output in multi_feature_outputs.values())
+            run_current = any(feature_output for feature_output in multi_feature_outputs)
             return run_current, None
         return super().handle_multi_feature_output(
             api_name, multi_feature_outputs, features_to_invoke, **kwargs
