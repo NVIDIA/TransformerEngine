@@ -18,7 +18,7 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.debug.features.utils import next_enabled_iter
+from transformer_engine.debug.features.utils import next_enabled_iter, get_reduction_params
 
 
 @Registry.register_feature(namespace="transformer_engine")
