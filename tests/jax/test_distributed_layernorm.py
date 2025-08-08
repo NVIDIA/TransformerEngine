@@ -67,16 +67,7 @@ class TestDistributedLayernorm:
             # No collectives for tensor parallelism only as we do not shard the hidden dim for LN with TP.
             return generate_collectives_count(allreduce=0, allgather=0, other=0)
 
-        # Determine scaling mode for LN from recipe
-        scaling_mode = ScalingMode.NO_SCALING
-        with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-            scaling_mode = QuantizerFactory.create_set().x.scaling_mode
-
-        # JAX norm does AllReduce in FP32 due to intermediate casts for precision
-        wgrad_allreduce_dtype = dtype
-        if not use_te_norm or (not is_norm_zero_centered_gamma_in_weight_dtype(scaling_mode) and ln_type == "rmsnorm"):
-            wgrad_allreduce_dtype = jnp.float32
-        wgrad_allreduce_dtype = jax.dtypes.canonicalize_dtype(wgrad_allreduce_dtype)
+        dtype = jax.dtypes.canonicalize_dtype(dtype)
         assert ln_type in ["layernorm", "rmsnorm"]
         all_reduce_loss_bytes = 4  # 1 * FP32
 
@@ -86,11 +77,10 @@ class TestDistributedLayernorm:
         # allreduce for dgamma and if required also dbeta
         weight_count = 2 if dbeta_needs_allreduce else 1
         allreduce_total_bytes = (
-            all_reduce_loss_bytes + weight_count * shape[-1] * wgrad_allreduce_dtype.itemsize
+            all_reduce_loss_bytes + weight_count * shape[-1] * dtype.itemsize
         )
         if fp8_recipe == recipe.Float8CurrentScaling():
-            amax_dtype = jax.dtypes.canonicalize_dtype(dtype if use_te_norm else jnp.float32)
-            allreduce_total_bytes += amax_dtype.itemsize  # 1 * dtype for the amax reduction
+            allreduce_total_bytes += dtype.itemsize  # 1 * dtype for the amax reduction
         return generate_collectives_count(
             allreduce=allreduce_total_bytes, allgather=0, other=0
         )
@@ -209,7 +199,8 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
+        prim_ctx = primitive_context(f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}")
+        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource), prim_ctx:
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
 

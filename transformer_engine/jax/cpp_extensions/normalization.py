@@ -828,18 +828,19 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
     """
     JAX native layernorm implementation
     """
-    x_ = jnp.asarray(x, jnp.float32)
-    if not is_norm_zero_centered_gamma_in_weight_dtype(
-        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-    ):
-        gamma = gamma.astype(jnp.float32)
-    mean = jnp.mean(x_, axis=-1, keepdims=True)
-    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    mean = jnp.mean(x, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
-    normed_input = (x_ - mean) * rsigma
+    normed_input = (x - mean) * rsigma
+
+    gamma_ = gamma
     if zero_centered_gamma:
-        gamma += 1.0
-    output = normed_input * gamma + beta
+        zero_centered_gamma_dtype = gamma.dtype if is_norm_zero_centered_gamma_in_weight_dtype(
+            quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+        ) else jnp.float32
+        gamma_ = (gamma + jnp.asarray(1.0, dtype=zero_centered_gamma_dtype)).astype(gamma.dtype)
+
+    output = normed_input * gamma_ + beta
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
@@ -853,17 +854,18 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
     """
     JAX native rmsnorm implementation
     """
-    x_ = jnp.asarray(x, jnp.float32)
-    if not is_norm_zero_centered_gamma_in_weight_dtype(
-        quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-    ):
-        gamma = gamma.astype(jnp.float32)
-    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
     rsigma = jax.lax.rsqrt(var + epsilon)
-    normed_input = x_ * rsigma
+    normed_input = x * rsigma
+
+    gamma_ = gamma
     if zero_centered_gamma:
-        gamma += 1.0
-    output = normed_input * gamma
+        zero_centered_gamma_dtype = gamma.dtype if is_norm_zero_centered_gamma_in_weight_dtype(
+            quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+        ) else jnp.float32
+        gamma_ = gamma + jnp.asarray(1.0, dtype=zero_centered_gamma_dtype)
+
+    output = normed_input * gamma_
 
     if quantizer:
         ln_out = quantizer.quantize(output, dq_dtype=x.dtype)
