@@ -212,7 +212,6 @@ class StatsBuffers:
 
     def log_stats(self):
         """Logs the stats from all the buffers."""
-
         if not self._if_run_reduction():
             return {}
 

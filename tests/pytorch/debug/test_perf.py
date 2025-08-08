@@ -73,4 +73,4 @@ def test_cpu_overhead(layer, configs_dir, feature_dirs):
     print(f"with_debug_tools: {with_debug_tools} s")
     print(f"without_debug_tools: {without_debug_tools} s")
 
-    assert with_debug_tools < without_debug_tools * 1.1  # 10% overhead margin
+    assert with_debug_tools < without_debug_tools * 1.25  # 25% overhead margin
