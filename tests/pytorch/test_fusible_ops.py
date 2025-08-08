@@ -2183,7 +2183,7 @@ class TestFusedOps:
         y1_test = y1_test.to(dtype=torch.float64, device="cpu")
         y2_test = y2_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        dw_test = model[2].weight.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y1_test, y1_ref, **tols)
         torch.testing.assert_close(y2_test, y2_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
