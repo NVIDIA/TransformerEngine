@@ -41,7 +41,7 @@ class DisableFP8Layer:
         # If this feature is invoked, then FP8 GEMM is disabled.
         # If not, then default behavior in TransformerEngineAPI
         # is that fp8_gemm() API call returns True.
-        return False
+        return False, None
 
     def parse_config_and_api(self, config, **_kwargs):
         """Determines whether to run the API
