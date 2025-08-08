@@ -490,7 +490,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
                 DeprecationWarning,
             )
-        
+
         return call(feat_config, layer_name, **kwargs_copy)
 
     def handle_multi_feature_output(
@@ -507,13 +507,10 @@ class TransformerEngineAPI(BaseNamespaceAPI):
             # representing the number of steps after the feature will be enabled next time.
             # If the second value is None, that means that the feature will never be enabled.
             all_ret_tuple = all(
-                isinstance(feature_output, tuple)
-                for feature_output in multi_feature_outputs
+                isinstance(feature_output, tuple) for feature_output in multi_feature_outputs
             )
             if all_ret_tuple:
-                run_current = any(
-                    feature_output[0] for feature_output in multi_feature_outputs
-                )
+                run_current = any(feature_output[0] for feature_output in multi_feature_outputs)
                 next_iter = None
                 for feature_output in multi_feature_outputs:
                     if next_iter is None:

@@ -64,7 +64,10 @@ for r in recipes:
             ):
                 # hopper in needed for current-scaling, block-scaling and mxfp8
                 continue
-            if r in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise_postfix == "_columnwise":
+            if (
+                r in ["fp8_delayed_scaling", "fp8_current_scaling"]
+                and columnwise_postfix == "_columnwise"
+            ):
                 # columnwise stats are not supported for fp8_delayed_scaling and fp8_current_scaling
                 continue
 

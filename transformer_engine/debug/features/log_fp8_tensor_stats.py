@@ -94,7 +94,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         stats: List[str]
             Each stat is a string of the form `<recipe>_<stat>`, with an optional `_columnwise` suffix (i.e., `<recipe>_<stat>_columnwise`).
             If only `<recipe>` is omitted, the current training recipe is used.
-            For mxfp8 and fp8_block_scaling `_columnwise` suffix can be provided. Then stat is computed on columnwise(transpose) 
+            For mxfp8 and fp8_block_scaling `_columnwise` suffix can be provided. Then stat is computed on columnwise(transpose)
             version of the tensor, which can be numerically different from rowwise (non-transpose) tensors.
             "_columnwise" suffix is not supported for fp8_delayed_scaling and fp8_current_scaling.
 
@@ -163,13 +163,16 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
-        
+
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
-            raise ValueError(f"Stat {stat} is not supported. Columnwise tensor statistics are not supported for fp8_delayed_scaling and fp8_current_scaling.")
+            raise ValueError(
+                f"Stat {stat} is not supported. Columnwise tensor statistics are not supported for"
+                " fp8_delayed_scaling and fp8_current_scaling."
+            )
 
         if recipe_from_stat == "fp8_delayed_scaling" and stat_without_recipe == "overflows%":
             return True
-        
+
         if recipe_from_stat in ["fp8_block_scaling"] and torch.cuda.get_device_capability()[0] < 9:
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
 

@@ -124,7 +124,6 @@ class _Buffer:
         # [num_active_nodes, num_stats]
         gathered_helper_stats = self._gather_helper_stats()
 
-
         if not self.modified[0]:
             return {}
         output = {}
