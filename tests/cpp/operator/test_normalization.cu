@@ -277,7 +277,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
     ::testing::Values(false, true),
-    ::testing::Values(false, true)),
+    ::testing::Values(false, true),
     ::testing::Values(false, true)),
   [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
