@@ -15,11 +15,11 @@ quantization, and distributed training through sharding constraints.
 
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
+import warnings
 
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import warnings
 
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
@@ -105,7 +105,7 @@ def layernorm_mlp(
     if (
         inspect_axes is not None
         and len(inspect_axes) == x.ndim
-        and inspect_axes[-1] != None
+        and inspect_axes[-1] is not None
         and not is_mxfp8
     ):
         warnings.warn(
