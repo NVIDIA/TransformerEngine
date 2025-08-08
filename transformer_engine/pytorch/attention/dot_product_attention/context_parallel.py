@@ -340,7 +340,7 @@ def flash_attn_a2a_communicate_softmax_offset(
         chunk_ids = _softmax_offset_chunk_ids_cache[(cp_size, device)]
 
     if before_attn:
-        # softmax_offset
+        # softmax_offset: split round-robin to CP ranks
         # [1, h, 1, 1] -> [1, cp, h//cp, 1, 1]
         shape = tensor.shape
         tensor = tensor.view(*shape[:h_dim], cp_size, shape[h_dim] // cp_size, *shape[(h_dim+1):])
@@ -348,7 +348,7 @@ def flash_attn_a2a_communicate_softmax_offset(
         output = torch.index_select(tensor, dim=h_dim, index=chunk_ids[rank])
         output = output.view(*shape[:h_dim], -1, *shape[(h_dim+1):])
     else:
-        # d_softmax_offset
+        # d_softmax_offset: all-gather from all ranks to all ranks
         # [1, h//cp, 1, 1] -> [1, h, 1, 1]
         inp = tensor.view(-1)
         output = torch.empty(cp_size * inp.shape[0], dtype=tensor.dtype, device=device)
@@ -3939,7 +3939,7 @@ def attn_forward_func_with_cp(
     )
     assert qkv_format != "thd" or (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
-    ), "cu_seqlens_padded can not be None with context parallelism and qkv_format = 'thd'!"
+    ), "cu_seqlens_padded can not be None for context parallelism and qkv_format = 'thd'!"
 
     sliding_window_attn = (
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
@@ -3959,7 +3959,7 @@ def attn_forward_func_with_cp(
         if fp8_meta["recipe"].fp8_dpa:
             assert (
                 softmax_type == "vanilla"
-            ), "Context parallelism does not support {softmax_type=} with FP8!"
+            ), "Context parallelism does not support {softmax_type=} with FP8 attention!"
     assert (
         softmax_type == "vanilla"
         or use_fused_attention

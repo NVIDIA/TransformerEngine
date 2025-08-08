@@ -137,9 +137,11 @@ def reset_rng_states() -> None:
         torch.cuda.set_rng_state(cuda_rng_state)
 
 
-def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
-    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
+def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
+    if not is_fp8:
+        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+        return
+
     try:
         if a.dtype != b.dtype:
             a = a.to(b.dtype)

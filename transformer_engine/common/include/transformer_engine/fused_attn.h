@@ -237,7 +237,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *
  *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
  *  \param[in]     Bias                     The Bias tensor.
- *  \param[in]     SoftmaxOffset             The SoftmaxOffset tensor.
+ *  \param[in]     SoftmaxOffset            The SoftmaxOffset tensor.
  *  \param[in,out] S                        The S tensor.
  *  \param[out]    O                        The output O tensor.
  *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
@@ -299,7 +299,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  *                                          e.g. M, ZInv, rng_state.
  *  \param[out]    dQKV                     The gradient of the QKV tensor.
  *  \param[out]    dBias                    The gradient of the Bias tensor.
- *  \param[out]    dSoftmaxOffset            The gradient of the SoftmaxOffset tensor.
+ *  \param[out]    dSoftmaxOffset           The gradient of the SoftmaxOffset tensor.
  *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
  *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
  *  \param[in]     max_seqlen               Max sequence length used for computing,

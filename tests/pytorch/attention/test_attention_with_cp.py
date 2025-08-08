@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import pathlib
+import logging
 
 import pytest
 import torch
@@ -18,6 +19,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import Fla
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
 from utils import ModelConfig, get_available_attention_backends
+pytest_logging_level = logging.getLevelName(logging.root.level)
 
 # Initialize RNG state
 seed = 1234
@@ -25,7 +27,7 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 model_configs_flash_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
@@ -90,13 +92,14 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             qkv_format=qkv_format,
             kernel_backend="FlashAttention",
             cp_comm_type=cp_comm_type,
+            log_level=pytest_logging_level,
         ),
         check=True,
     )
 
 
 model_configs_fused_attn = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
     "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
     "cp_1_2": ModelConfig(
@@ -187,9 +190,9 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
     if dtype == "fp8" and config.softmax_type != "vanilla":
-        pytest.skip("CP implementation with FP8 does not support non-vanilla softmax types!")
+        pytest.skip("CP implementation does not support non-vanilla softmax types in FP8!")
     if config.softmax_type != "vanilla" and cp_comm_type != "a2a":
-        pytest.skip("CP implementation only supports A2A for non-vanilla softmax types!")
+        pytest.skip("CP implementation only supports cp_comm_type=a2a for non-vanilla softmax types!")
     if config.softmax_type != "vanilla" and qkv_format == "thd":
         pytest.skip("CP implementation does not support qkv_format=thd for non-vanilla softmax types!")
 
@@ -214,6 +217,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
             kernel_backend="FusedAttention",
             cp_comm_type=cp_comm_type,
             fp8_mha=fp8_mha,
+            log_level=pytest_logging_level,
         ),
         check=True,
     )

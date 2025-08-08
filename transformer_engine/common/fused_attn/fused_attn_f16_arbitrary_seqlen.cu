@@ -348,7 +348,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           key_tensors_tuple = std::make_tuple(Q, K, V, attn_scale, O);
       auto Stats_tuple = std::make_tuple(Stats);
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
-      auto softmax_offset_tuple = devPtrSoftmaxOffset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
+      auto softmax_offset_tuple = is_softmax_offset ? std::make_tuple(softmax_offset) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto page_table_tuple = is_paged_kv ? std::make_tuple(page_table_k, page_table_v)
@@ -828,8 +828,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                  std::shared_ptr<fe::graph::Tensor_attributes>>  // dV
           key_tensors_tuple = std::make_tuple(q, k, v, o, dO, stats, attn_scale, dQ, dK, dV);
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
-      auto softmax_offset_tuple = devPtrSoftmaxOffset ? std::make_tuple(softmax_offset, d_softmax_offset)
-                                      : std::make_tuple(nullptr, nullptr);
+      auto softmax_offset_tuple = is_softmax_offset ? std::make_tuple(softmax_offset, d_softmax_offset)
+                 : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto offset_qo_tuple =

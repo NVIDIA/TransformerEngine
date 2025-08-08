@@ -538,6 +538,35 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention 3 for dropout")
         use_flash_attention_3 = False
 
+    # Filter: Softmax type
+    # context_parallel | softmax_type | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # no               | vanilla      | All
+    # no               | off-by-one   | FusedAttention, UnfusedDotProductAttention
+    # no               | learnable    | FusedAttention, UnfusedDotProductAttention
+    # yes              | vanilla      | FusedAttention, FlashAttention
+    # yes              | off-by-one   | FusedAttention
+    # yes              | learnable    | FusedAttention
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
+        use_flash_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_fused_attention = False
+            logger.debug("Disabling UnfusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_unfused_attention = False
+        if qkv_format == "thd":
+            logger.debug("Disabling FusedAttention for softmax_type = %s and qkv_format = thd", softmax_type)
+            use_fused_attention = False
+            logger.debug("Disabling UnfusedAttention for softmax_type = %s and qkv_format = thd", softmax_type)
+            use_unfused_attention = False
+        if context_parallel:
+            logger.debug("Disabling UnfusedAttention for context parallelism with softmax_type = %s", softmax_type)
+            use_unfused_attention = False
+            if cp_comm_type != "a2a":
+                logger.debug("Disabling FusedAttention for context parallelism with cp_comm_type = %s", cp_comm_type)
+                use_fused_attention = False
+
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
     # ----------------------------------------------------------------------------------------------------
@@ -819,11 +848,6 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
-
-    # Filter: Softmax type
-    if softmax_type != "vanilla":
-        logger.debug("Disabling FlashAttention for non-vanilla softmax types")
-        use_flash_attention = False
 
     # Filter: Determinism
     # backend                      | deterministic

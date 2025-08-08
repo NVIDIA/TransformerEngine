@@ -1055,14 +1055,14 @@ def _run_dot_product_attention(
     )
     if is_training:
         out.backward(d_out)
-    additional_grad = None
+    d_softmax_offset = None
     if is_training and config.softmax_type != "vanilla":
-        additional_grad = block.softmax_offset.grad
+        d_softmax_offset = block.softmax_offset.grad
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
-            return out, (q.grad, k.grad, v.grad, additional_grad)
+            return out, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
-            return out, (None, None, None, additional_grad)
+            return out, (None, None, None, d_softmax_offset)
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1091,14 +1091,14 @@ def _run_dot_product_attention(
                         [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
-                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig, additional_grad)
+                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset)
             else:
-                return out_orig, (None, None, None, additional_grad)
+                return out_orig, (None, None, None, d_softmax_offset)
         else:
             if is_training:
-                return out, (q.grad, k.grad, v.grad, additional_grad)
+                return out, (q.grad, k.grad, v.grad, d_softmax_offset)
             else:
-                return out, (None, None, None, additional_grad)
+                return out, (None, None, None, d_softmax_offset)
 
 
 model_configs_te_layer = {
@@ -1707,6 +1707,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             atol,
             rtol,
             rmse_tol,
+            True,
         )
     compare_and_assert(
         fused_attn_fwd_fp8,
@@ -1716,6 +1717,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
         atol,
         rtol,
         rmse_tol,
+        True,
     )
 
     if is_training:
@@ -1729,6 +1731,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
                 atol,
                 rtol,
                 rmse_tol,
+                True,
             )
 
 
@@ -1938,6 +1941,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             atol,
             rtol,
             rmse_tol,
+            True,
         )
     if config.dropout_p != 0.0:
         # test cuDNN FP8 dropout
@@ -1953,6 +1957,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             atol,
             rtol,
             rmse_tol,
+            True,
         )
         if is_training:
             for i, _ in enumerate(fused_attn_bwd_f16):
@@ -1965,6 +1970,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
                     atol,
                     rtol,
                     rmse_tol,
+                    True,
                 )
 
 
@@ -2165,6 +2171,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         atol,
         rtol,
         rmse_tol,
+        True,
     )
     compare_and_assert(
         fused_attn_bwd_fp8,
@@ -2174,6 +2181,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         atol,
         rtol,
         rmse_tol,
+        True,
     )
 
 

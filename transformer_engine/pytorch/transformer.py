@@ -191,13 +191,14 @@ class TransformerLayer(torch.nn.Module):
     name: str, default = `None`
         name of the module, currently used for debugging purposes.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 the type of softmax operation as described in this paper:
+                 softmax type as described in this paper:
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T of shape [b, h, s_q, s_kv],
+                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
                  'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
                  'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(alpha[j] + sum(exp(S[:,j,:,:]), dim=-1)).
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+                 where alpha is a learnable parameter in shape [h].
 
     Parallelism parameters
     ----------------------

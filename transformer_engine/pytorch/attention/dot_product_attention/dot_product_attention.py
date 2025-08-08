@@ -170,13 +170,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 softmax scale for the attention scores. If `None`, defaults to
                 `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
-                 the type of softmax operation as described in this paper:
+                 softmax type as described in this paper:
                  `Efficient Streaming Language Models with Attention Sinks
                  <https://arxiv.org/pdf/2309.17453v3>`_.
-                 For a given attention score S = Q*K^T of shape [b, h, s_q, s_kv],
+                 For a given attention score S = Q*K^T, of shape [b, h, s_q, s_kv],
                  'vanilla': S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
                  'off-by-one': S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
-                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)).
+                 'learnable': S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+                 where alpha is a learnable parameter in shape [h].
 
     Parallelism parameters
     ----------------------
@@ -318,16 +319,16 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.attention_dropout = attention_dropout
 
         self.softmax_type = softmax_type
+        if self.softmax_type == "vanilla":
+            self.softmax_offset = None
+        if self.softmax_type == "off-by-one":
+            self.softmax_offset = torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
                 Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
-        if self.softmax_type == "off-by-one":
-            self.softmax_offset = torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")
-        if self.softmax_type == "vanilla":
-            self.softmax_offset = None
 
         attn_kwargs = {
             "attention_dropout": attention_dropout,
@@ -1049,6 +1050,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             # run attention
+            softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1) if self.softmax_offset is not None else None
+
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
@@ -1082,8 +1085,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     flash_attention_backend=flash_attention_backend,
                 )
 
-            softmax_offset = self.softmax_offset.reshape(1, -1, 1, 1) if self.softmax_offset is not None else None
-
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
@@ -1100,7 +1101,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bias_dtype=query_layer.dtype,
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
-                # checkpoint_core_attention=False
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.fused_attention,
