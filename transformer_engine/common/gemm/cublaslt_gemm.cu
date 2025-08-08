@@ -14,13 +14,12 @@
 #include <cstdint>
 #include <mutex>
 
-#include "cutlass_groupgemm.cuh"
-
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
+#include "cutlass_groupgemm.cuh"
 
 namespace {
 
@@ -652,7 +651,8 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_ERROR("Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS verson is ",
              CUBLAS_VERSION);
 #endif
-  NVTE_CHECK(transformer_engine::cuda::cudart_version() >= 12020 && transformer_engine::cuda::cudart_version() < 13000,
+  NVTE_CHECK(transformer_engine::cuda::cudart_version() >= 12020 &&
+                 transformer_engine::cuda::cudart_version() < 13000,
              "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA verson is ",
              transformer_engine::cuda::cudart_version());
   NVTE_CHECK(

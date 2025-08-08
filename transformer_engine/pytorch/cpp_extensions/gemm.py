@@ -134,7 +134,7 @@ def general_grouped_gemm(
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     single_output=False,
-    gemm_type='te'
+    gemm_type="te",
 ) -> Tuple[List[torch.Tensor], ...]:
     """
     TN layout Grouped GEMM with fp8 inputs.
@@ -170,9 +170,9 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    # TODO(Alan): Add condition checks to exclude cases where certain parameters are not supported 
+    # TODO(Alan): Add condition checks to exclude cases where certain parameters are not supported
     #             by the current CUTLASS Group GEMM implementation.
-    if gemm_type == 'cutlass':
+    if gemm_type == "cutlass":
         bias = tex.cutlass_general_grouped_gemm(
             A,
             transa,

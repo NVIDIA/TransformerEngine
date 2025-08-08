@@ -19,49 +19,64 @@ from transformer_engine.pytorch.module.base import get_multi_stream_cublas_works
 import argparse
 import json
 
+
 class TEGPUGroupGemmTester:
-    def __init__(self, group_config, dtype=torch.float16, accumulate=False, transa = False, transb = False):
+    def __init__(
+        self, group_config, dtype=torch.float16, accumulate=False, transa=False, transb=False
+    ):
         self.dtype = dtype
         self.accumulate = accumulate
-        
+
         self.num_groups = len(group_config)
-        
+
         self.group_config = group_config
-        
+
         self.m_splits = []
         for i in range(self.num_groups):
             self.m_splits.append(group_config[i][0])
-        
+
         self.transa = transa
         self.transb = transb
         self.device = torch.cuda.get_device_name(0)
-    
+
     def generate_inputs_outputs(self) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         A_list, B_list, C_list, ref_C_list = [], [], [], []
         for n, m, k in self.group_config:
-            A = torch.randn(k if not self.transa else m, m if not self.transa else k, dtype=self.dtype, device='cuda')
-            B = torch.randn(n if not self.transb else k, k if not self.transb else n, dtype=self.dtype, device='cuda')
-            ref_C = torch.randn(n, m, dtype=self.dtype, device='cuda')
+            A = torch.randn(
+                k if not self.transa else m,
+                m if not self.transa else k,
+                dtype=self.dtype,
+                device="cuda",
+            )
+            B = torch.randn(
+                n if not self.transb else k,
+                k if not self.transb else n,
+                dtype=self.dtype,
+                device="cuda",
+            )
+            ref_C = torch.randn(n, m, dtype=self.dtype, device="cuda")
             C = ref_C.clone()
             A_list.append(A)
             B_list.append(B)
             C_list.append(C)
             ref_C_list.append(ref_C)
         return A_list, B_list, C_list, ref_C_list
-    
-    def test_grouped_gemm(self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False, gemm_type='te'):
-        
+
+    def test_grouped_gemm(
+        self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False, gemm_type="te"
+    ):
+
         WARM_ITERS = 10
         ITERS = 1000
-    
+
         A, B, C, ref_C = self.generate_inputs_outputs()
 
         if not self.transa and not self.transb:
-            layout="NN"
+            layout = "NN"
         elif not self.transa:
-            layout="NT"
+            layout = "NT"
         elif not self.transb:
-            layout="TN"
+            layout = "TN"
         else:
             print("Not Support TT")
             return
@@ -76,17 +91,21 @@ class TEGPUGroupGemmTester:
             layout=layout,
             m_splits=self.m_splits,
             accumulate=self.accumulate,
-            gemm_type=gemm_type
+            gemm_type=gemm_type,
         )
         torch.cuda.synchronize()
 
         print(f"\n=== Accuracy Testing with Layout:{layout} GemmType:{gemm_type} ===")
         if check_accuracy:
-            
+
             alpha = 1.0
             beta = 1.0 if self.accumulate else 0.0
-                
-            ref_out = [alpha * torch.matmul(b if not self.transb else b.T, a if not self.transa else a.T) + beta * c for b, a, c in zip(B, A, ref_C)]
+
+            ref_out = [
+                alpha * torch.matmul(b if not self.transb else b.T, a if not self.transa else a.T)
+                + beta * c
+                for b, a, c in zip(B, A, ref_C)
+            ]
 
             max_abs_err = []
             max_rel_err = []
@@ -103,7 +122,10 @@ class TEGPUGroupGemmTester:
                     print(f"  Max Abs Error = {max_abs_err[-1]:.6f}")
                     print(f"  Max Rel Error = {max_rel_err[-1]:.6f}")
                 else:
-                    print(f"[Group {i}] ✅ Passed: max abs error = {max_abs_err[-1]:.6f}, max rel error = {max_rel_err[-1]:.6f}")
+                    print(
+                        f"[Group {i}] ✅ Passed: max abs error = {max_abs_err[-1]:.6f}, max rel"
+                        f" error = {max_rel_err[-1]:.6f}"
+                    )
 
         if check_performance:
             print("\n=== Performance Testing ===")
@@ -119,7 +141,7 @@ class TEGPUGroupGemmTester:
                     layout=layout,
                     m_splits=self.m_splits,
                     accumulate=self.accumulate,
-                    gemm_type=gemm_type
+                    gemm_type=gemm_type,
                 )
 
             torch.cuda.synchronize()
@@ -134,20 +156,21 @@ class TEGPUGroupGemmTester:
                     layout=layout,
                     m_splits=self.m_splits,
                     accumulate=self.accumulate,
-                    gemm_type=gemm_type
+                    gemm_type=gemm_type,
                 )
             torch.cuda.synchronize()
             end_time = time.perf_counter()
             exec_time = end_time - start_time
-            
+
             avg_time_ms = exec_time * 1000 / ITERS
-            
+
             # FLOPs 计算
             total_flops = sum([2 * m * n * k for (m, n, k) in self.group_config])
             tflops = total_flops / (avg_time_ms * 1e9)
 
             print(f"🔥 avgerage used time: {avg_time_ms:.3f} ms/iter")
             print(f"⚡ average throughput: {tflops:.2f} TFLOPs")
+
 
 def run_grouped_gemm(group_config, gemm_type, check_performance, transa, transb, accumulate):
     print(f"🔧 Running grouped GEMM with:")
@@ -159,13 +182,15 @@ def run_grouped_gemm(group_config, gemm_type, check_performance, transa, transb,
     tester = TEGPUGroupGemmTester(group_config, transa=transa, transb=transb, accumulate=accumulate)
     tester.test_grouped_gemm(gemm_type=gemm_type, check_performance=check_performance)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Grouped GEMM test from JSON config")
-    parser.add_argument("--config_file", type=str, required=True,
-                        help="Path to JSON config file with test cases")
+    parser.add_argument(
+        "--config_file", type=str, required=True, help="Path to JSON config file with test cases"
+    )
     args = parser.parse_args()
 
-    with open(args.config_file, 'r') as f:
+    with open(args.config_file, "r") as f:
         config_data = json.load(f)
 
     for i, case in enumerate(config_data["configs"]):
