@@ -20,7 +20,9 @@ from transformer_engine.common import recipe
 from transformer_engine.jax.layernorm import layernorm
 from transformer_engine.jax.quantize import QuantizerFactory, ScalingMode, is_fp8_available
 from transformer_engine.jax.cpp_extensions.base import primitive_context
-from transformer_engine.jax.cpp_extensions.normalization import is_norm_zero_centered_gamma_in_weight_dtype
+from transformer_engine.jax.cpp_extensions.normalization import (
+    is_norm_zero_centered_gamma_in_weight_dtype,
+)
 
 
 DTYPES = [jnp.bfloat16, jnp.float32]
@@ -39,6 +41,7 @@ if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+
 
 class TestDistributedLayernorm:
 
@@ -73,17 +76,13 @@ class TestDistributedLayernorm:
 
         # JAX is able to optimize away the computation for dbeta because our
         # loss function is jnp.mean, it can determine that dbeta is always 1.0/beta.shape[-1]
-        dbeta_needs_allreduce = (ln_type == "layernorm" and use_te_norm)
+        dbeta_needs_allreduce = ln_type == "layernorm" and use_te_norm
         # allreduce for dgamma and if required also dbeta
         weight_count = 2 if dbeta_needs_allreduce else 1
-        allreduce_total_bytes = (
-            all_reduce_loss_bytes + weight_count * shape[-1] * dtype.itemsize
-        )
+        allreduce_total_bytes = all_reduce_loss_bytes + weight_count * shape[-1] * dtype.itemsize
         if fp8_recipe == recipe.Float8CurrentScaling():
             allreduce_total_bytes += dtype.itemsize  # 1 * dtype for the amax reduction
-        return generate_collectives_count(
-            allreduce=allreduce_total_bytes, allgather=0, other=0
-        )
+        return generate_collectives_count(allreduce=allreduce_total_bytes, allgather=0, other=0)
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
     @pytest_parametrize_wrapper("data_shape", NORM_INPUT_SHAPES)
@@ -133,12 +132,22 @@ class TestDistributedLayernorm:
             data_shape, mesh_resource, dtype
         )
         collective_count_ref = self.generate_collectives_count_ref(
-            mesh_resource, ln_type, data_shape, dtype, mesh_axes, fp8_recipe, use_te_norm=use_te_norm
+            mesh_resource,
+            ln_type,
+            data_shape,
+            dtype,
+            mesh_axes,
+            fp8_recipe,
+            use_te_norm=use_te_norm,
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        prim_ctx = primitive_context(f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}")
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource), prim_ctx:
+        prim_ctx = primitive_context(
+            f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}"
+        )
+        with mesh, fp8_autocast(
+            enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+        ), prim_ctx:
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
             beta_ = jax.device_put(beta, NamedSharding(mesh, b_pspec))
@@ -180,9 +189,13 @@ class TestDistributedLayernorm:
         q_dtype = jnp.float8_e4m3fn
 
         def target_func(x, gamma):
-            with primitive_context(f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}"):
+            with primitive_context(
+                f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}"
+            ):
                 quantizer = QuantizerFactory.create_set().x
-                return jnp.mean(layernorm(x, gamma, None, ln_type, False, epsilon, quantizer=quantizer))
+                return jnp.mean(
+                    layernorm(x, gamma, None, ln_type, False, epsilon, quantizer=quantizer)
+                )
 
         def ref_func(x, gamma):
             x = jnp.asarray(x, jnp.float32)
@@ -195,12 +208,22 @@ class TestDistributedLayernorm:
             data_shape, mesh_resource, dtype
         )
         collective_count_ref = self.generate_collectives_count_ref(
-            mesh_resource, ln_type, data_shape, dtype, mesh_axes, fp8_recipe, use_te_norm=use_te_norm
+            mesh_resource,
+            ln_type,
+            data_shape,
+            dtype,
+            mesh_axes,
+            fp8_recipe,
+            use_te_norm=use_te_norm,
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        prim_ctx = primitive_context(f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}")
-        with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource), prim_ctx:
+        prim_ctx = primitive_context(
+            f"NormFwdPrimitive={use_te_norm},NormBwdPrimitive={use_te_norm}"
+        )
+        with mesh, fp8_autocast(
+            enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource
+        ), prim_ctx:
             x_ = jax.device_put(x, NamedSharding(mesh, x_pspec))
             gamma_ = jax.device_put(gamma, NamedSharding(mesh, g_pspec))
 

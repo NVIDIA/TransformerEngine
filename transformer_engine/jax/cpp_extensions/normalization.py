@@ -835,9 +835,13 @@ def _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None)
 
     gamma_ = gamma
     if zero_centered_gamma:
-        zero_centered_gamma_dtype = gamma.dtype if is_norm_zero_centered_gamma_in_weight_dtype(
-            quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-        ) else jnp.float32
+        zero_centered_gamma_dtype = (
+            gamma.dtype
+            if is_norm_zero_centered_gamma_in_weight_dtype(
+                quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+            )
+            else jnp.float32
+        )
         gamma_ = (gamma + jnp.asarray(1.0, dtype=zero_centered_gamma_dtype)).astype(gamma.dtype)
 
     output = normed_input * gamma_ + beta
@@ -860,9 +864,13 @@ def _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer=None):
 
     gamma_ = gamma
     if zero_centered_gamma:
-        zero_centered_gamma_dtype = gamma.dtype if is_norm_zero_centered_gamma_in_weight_dtype(
-            quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
-        ) else jnp.float32
+        zero_centered_gamma_dtype = (
+            gamma.dtype
+            if is_norm_zero_centered_gamma_in_weight_dtype(
+                quantizer.scaling_mode if quantizer else ScalingMode.NO_SCALING
+            )
+            else jnp.float32
+        )
         gamma_ = gamma + jnp.asarray(1.0, dtype=zero_centered_gamma_dtype)
 
     output = normed_input * gamma_
