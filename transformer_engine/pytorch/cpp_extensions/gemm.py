@@ -134,6 +134,7 @@ def general_grouped_gemm(
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     single_output=False,
+    gemm_type='te'
 ) -> Tuple[List[torch.Tensor], ...]:
     """
     TN layout Grouped GEMM with fp8 inputs.
@@ -169,24 +170,47 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
-    bias = tex.te_general_grouped_gemm(
-        A,
-        transa,
-        B,
-        transb,
-        out,
-        out_dtype,
-        m_splits,
-        grad_bias if grad else bias,
-        bias_dtype,
-        single_output,
-        gelu_input,  # this is pre_gelu_out
-        grad,  # grad
-        workspaces,
-        workspaces[0].shape[0],
-        accumulate,
-        use_split_accumulator,
-        sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
-    )
+    # TODO(Alan): Add condition checks to exclude cases where certain parameters are not supported 
+    #             by the current CUTLASS Group GEMM implementation.
+    if gemm_type == 'cutlass':
+        bias = tex.cutlass_general_grouped_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            out,
+            out_dtype,
+            m_splits,
+            grad_bias if grad else bias,
+            bias_dtype,
+            single_output,
+            gelu_input,  # this is pre_gelu_out
+            grad,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+            sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        )
+    else:
+        bias = tex.te_general_grouped_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            out,
+            out_dtype,
+            m_splits,
+            grad_bias if grad else bias,
+            bias_dtype,
+            single_output,
+            gelu_input,  # this is pre_gelu_out
+            grad,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+            sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
+        )
 
     return out, bias, gelu_input

@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <mutex>
 
+#include "cutlass_groupgemm.cuh"
+
 #include "../common.h"
 #include "../util/handle_manager.h"
 #include "../util/logging.h"
@@ -650,9 +652,9 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   NVTE_ERROR("Atomic GEMM requires cuBLAS >=12.2.5 and <13.0.0, but compile-time cuBLAS verson is ",
              CUBLAS_VERSION);
 #endif
-  NVTE_CHECK(cuda::cudart_version() >= 12020 && cuda::cudart_version() < 13000,
+  NVTE_CHECK(transformer_engine::cuda::cudart_version() >= 12020 && transformer_engine::cuda::cudart_version() < 13000,
              "Atomic GEMM requires CUDA version >=12.2.0 and <13.0.0, but run-time CUDA verson is ",
-             cuda::cudart_version());
+             transformer_engine::cuda::cudart_version());
   NVTE_CHECK(
       cublas_version() >= 120205 && cublas_version() < 130000,
       "Atomic GEMM requires cuBLAS version >=12.2.5 and <13.0.0, but run-time cuBLAS verson is ",
@@ -718,3 +720,46 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
 }  //  namespace transformer_engine
+
+void nvte_cutlass_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                               const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                               const int num_gemms, bool transa, bool transb, bool grad,
+                               NVTETensor *workspace, bool accumulate, bool use_split_accumulator,
+                               int math_sm_count, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cutlass_grouped_gemm);
+  using namespace transformer_engine;
+
+  // wait for current stream to finish
+  static cudaEvent_t finish_event;
+  static std::once_flag event_init_flag;
+  std::call_once(event_init_flag, []() { NVTE_CHECK_CUDA(cudaEventCreate(&finish_event)); });
+
+  const Tensor *inputA = convertNVTETensorCheck(A[0]);
+  const Tensor *inputB = convertNVTETensorCheck(B[0]);
+  Tensor *outputD = convertNVTETensor(D[0]);
+  cudaDataType_t A_type = get_cuda_dtype(inputA->data.dtype);
+  cudaDataType_t B_type = get_cuda_dtype(inputB->data.dtype);
+  cudaDataType_t D_type = get_cuda_dtype(outputD->data.dtype);
+
+  float one = 1.0;
+  float zero = 0.0;
+  float alpha = one;
+  float beta = (accumulate) ? one : zero;
+
+  int device = transformer_engine::cuda::current_device();
+
+  if (A_type == CUDA_R_16BF) {
+    grouped_gemm::CutlassGroupedGemm<cutlass::bfloat16_t>(
+        transb, transa, B, A, D, workspace, alpha, beta, num_gemms, stream, device, math_sm_count);
+  } else if (A_type == CUDA_R_16F) {
+    grouped_gemm::CutlassGroupedGemm<cutlass::half_t>(
+        transb, transa, B, A, D, workspace, alpha, beta, num_gemms, stream, device, math_sm_count);
+  } else {
+    NVTE_ERROR("Invalid data type: only CUDA_R_16BF (BF16) and CUDA_R_16F (FP16) are supported.");
+  }
+
+  NVTE_CHECK_CUDA(cudaEventRecord(finish_event, stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, finish_event));
+
+  return;
+}

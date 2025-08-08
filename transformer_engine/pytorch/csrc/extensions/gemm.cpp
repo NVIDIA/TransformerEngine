@@ -443,4 +443,131 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   return bias;
 }
 
+std::optional<std::vector<at::Tensor>> cutlass_general_grouped_gemm(
+    std::vector<py::handle> A, bool transa, std::vector<py::handle> B, bool transb,
+    std::optional<std::vector<at::Tensor>> D, DType D_type, std::vector<int64_t> m_splits,
+    std::vector<at::Tensor> bias, DType bias_type, bool single_output,
+    std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
+    size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count) {
+  std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
+      te_pre_gelu_out_vector, te_workspace_vector;
+  std::vector<TensorWrapper> wrappers;
+  std::vector<at::Tensor> D_vectors;
+  // Keep the swizzled scaling factor tensors alive during the GEMMs.
+  std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
+
+  auto none = py::none();
+
+  std::vector<size_t> single_output_begins;
+  std::vector<size_t> single_output_ends;
+  if (single_output && D == std::nullopt) {
+    NVTE_ERROR("not implemented, D should be allocated for single output case.");
+  }
+
+  void* output_data_ptr = nullptr;
+  if (single_output) {
+    output_data_ptr = (*D)[0].data_ptr();
+  }
+
+  for (size_t i = 0; i < A.size(); i++) {
+    auto te_A = makeTransformerEngineTensor(A[i], none);
+    auto te_B = makeTransformerEngineTensor(B[i], none);
+
+    // if there is single output
+    at::Tensor out_tensor;
+    auto size_t_shape =
+        pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
+    bool D_numel_is_zero = false;
+    std::vector<int64_t> D_shape;
+
+    for (size_t t : size_t_shape) {
+      D_shape.push_back(t);
+      // printf("%d, \t", t);
+      if (t == 0) {
+        D_numel_is_zero = true;
+      }
+    }
+    // printf(")\n");
+    auto dtype = GetATenDType(D_type);
+    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+    if (single_output) {
+      if (output_data_ptr == nullptr) {
+        out_tensor = at::empty(D_shape, opts);
+      } else {
+        // We need to check !D_numel_is_zero because if the final input portion has zero elements,
+        // output_data_ptr would point beyond the allocated memory of D. This would cause
+        // at::from_blob to fail as it would reference memory not allocated by CUDA.
+        if (!D_numel_is_zero) {
+          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        }
+      }
+      char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
+      char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
+      output_data_ptr = reinterpret_cast<void*>(char_ptr);
+      D_vectors.emplace_back(out_tensor);
+    } else {
+      if (D == std::nullopt) {
+        auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+        out_tensor = at::empty(D_shape, opts);
+        D_vectors.emplace_back(out_tensor);
+      } else {
+        out_tensor = (*D)[i];
+      }
+    }
+
+    if (te_A.numel() == 0 || te_B.numel() == 0) {
+      if (out_tensor.numel() != 0 && !accumulate) out_tensor.zero_();
+      if (bias[i].numel() != 0 && grad) {
+        bias[i].zero_();
+      }
+      if (pre_gelu_out[i].numel() != 0) pre_gelu_out[i].zero_();
+      continue;
+    }
+
+    // Optionally swizzle the scaling factors
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_A, transa)));
+    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(te_B, !transb)));
+
+    auto te_D = makeTransformerEngineTensor(out_tensor);
+    auto te_bias = makeTransformerEngineTensor(bias[i]);
+    auto te_pre_gelu_out = makeTransformerEngineTensor(pre_gelu_out[i]);
+
+    const auto gelu_shape = pre_gelu_out[i].data_ptr() == nullptr
+                                ? std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0))}
+                                : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
+                                                      static_cast<size_t>(te_pre_gelu_out.size(1))};
+
+    DType gelu_type = bias_type;
+    te_pre_gelu_out =
+        makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
+
+    te_A_vector.emplace_back(te_A.data());
+    te_B_vector.emplace_back(te_B.data());
+    te_D_vector.emplace_back(te_D.data());
+    te_bias_vector.emplace_back(te_bias.data());
+    te_pre_gelu_out_vector.emplace_back(te_pre_gelu_out.data());
+
+    wrappers.emplace_back(std::move(te_A));
+    wrappers.emplace_back(std::move(te_B));
+    wrappers.emplace_back(std::move(te_D));
+    wrappers.emplace_back(std::move(te_bias));
+    wrappers.emplace_back(std::move(te_pre_gelu_out));
+  }
+  for (size_t i = 0; i < workspace.size(); i++) {
+    auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(),
+                                           std::vector<size_t>{workspaceSize}, DType::kByte);
+    te_workspace_vector.emplace_back(wsp.data());
+    wrappers.emplace_back(std::move(wsp));
+  }
+  // For now, we only have multi-stream cublas backend.
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_cutlass_grouped_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                              te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                              te_A_vector.size(), transa, transb, grad, te_workspace_vector.data(),
+                              accumulate, use_split_accumulator, math_sm_count,
+                              at::cuda::getCurrentCUDAStream());
+  });
+  return bias;
+}
+
 }  // namespace transformer_engine::pytorch
