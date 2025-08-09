@@ -26,6 +26,15 @@ pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 mkdir -p "$XML_LOG_DIR"
 
 NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
+# Run left over distributed fused attn tests
+# TestReorderCausalLoadBalancing: Run only one (non symmetric) BSHD/SBHD data shape combination
+NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py -k "TestReorderCausalLoadBalancing and ( 4-32-12-32 or 1-16-1-1 )"
+# TestDistributedSelfAttn: Run only one (smaller) BSHD type data shape combination
+NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py -k "TestDistributedSelfAttn and 32-512-12-64"
+# TestDistributedCrossAttn: Run only one (smaller) BSHD type data shape combination
+NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py -k "TestDistributedCrossAttn and data_shape0"
+# TestDistributedContextParallelSelfAttn: Run only cp1 combinations
+NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/jax/test_distributed_fused_attn.py -k "TestDistributedContextParallelSelfAttn and cp1"
 
 pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"
 NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_mnist.xml $TE_PATH/examples/jax/mnist || test_fail "mnist"
