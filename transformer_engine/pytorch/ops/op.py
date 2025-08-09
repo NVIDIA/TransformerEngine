@@ -294,6 +294,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         forward=(mode == "forward"),
                     )
                     recipe_state = self._fp8_metas[mode][fp8_meta_key]
+
+                    # Reallocate amax history if needed
                     current_length = recipe_state.amax_history.size(0)
                     target_length = recipe.amax_history_len
                     if target_length < current_length:
@@ -307,6 +309,25 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                                 recipe_state.amax_history,
                                 pad=(0, 0, 0, target_length - current_length),
                             )
+
+                    # Update quantizers with new amax pointers
+                    self._quantizers[mode] = recipe_state.make_quantizers()
+
+                    # Update the global buffers with new amax pointers
+                    if FP8GlobalStateManager.get_buffer_info() in self._fp8_metas[mode]:
+                        pos, buffer_key = self._fp8_metas[mode][
+                            FP8GlobalStateManager.get_buffer_info()
+                        ]
+                        if buffer_key in FP8GlobalStateManager.global_amax_buffer:
+                            assert (
+                                buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                            ), "TE internal error during amax history change."
+                            FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = (
+                                recipe_state.amax_history[0]
+                            )
+                            FP8GlobalStateManager.global_amax_history_buffer[buffer_key][
+                                pos
+                            ] = recipe_state.amax_history
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):
@@ -686,7 +707,6 @@ class FusedOperation(FusibleOperation):
         return self.basic_ops[-1].get_grad_output_quantizer()
 
     def pre_first_fuser_forward(self) -> None:
-        """Preprocessing before first fuser forward pass"""
         for op in self.basic_ops:
             op.pre_first_fuser_forward()
 
