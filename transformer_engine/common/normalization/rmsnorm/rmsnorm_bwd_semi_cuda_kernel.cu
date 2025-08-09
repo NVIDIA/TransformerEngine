@@ -17,7 +17,8 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
                    const bool configure_params) {  // NOLINT(*)
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
-  auto kernel = &rmsnorm_bwd_tuned_kernel<Kernel_traits>;
+  auto kernel = launch_params.params.add ? &rmsnorm_bwd_tuned_kernel<Kernel_traits, true>
+                                         : &rmsnorm_bwd_tuned_kernel<Kernel_traits, false>;
 
   if (configure_params) {
     int ctas_per_sm;
@@ -77,7 +78,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   // Instantiate kernel
   using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
                                       1, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
-  auto kernel = &rmsnorm_bwd_general_kernel<Kernel_traits>;
+  auto kernel = launch_params.params.add ? &rmsnorm_bwd_general_kernel<Kernel_traits, true>
+                                         : &rmsnorm_bwd_general_kernel<Kernel_traits, false>;
 
   // Configure kernel params
   const int rows = launch_params.params.rows;
