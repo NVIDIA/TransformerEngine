@@ -151,7 +151,7 @@ def initialize_ub(
              ```
              for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
              "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
-             "fc2_fprop", "fc2_dgrad"]`.
+             "fc2_fprop", "fc2_wgrad"]`.
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
@@ -250,22 +250,31 @@ def initialize_ub(
         "qkv_fprop",
         "qkv_dgrad",
         "proj_dgrad",
+        "proj_wgrad",
         "fc1_fprop",
         "fc1_dgrad",
         "fc2_dgrad",
+        "fc2_wgrad",
     ]
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
     methods = {
-        "ring_exchange": ["qkv_fprop", "fc1_fprop", "proj_dgrad", "fc2_dgrad"],
+        "ring_exchange": [
+            "qkv_fprop",
+            "fc1_fprop",
+            "proj_dgrad",
+            "fc2_dgrad",
+        ],
         "pipeline": ["proj_fprop", "fc2_fprop"],
         "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+        "external": ["proj_wgrad", "fc2_wgrad"],
     }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
+    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -319,7 +328,7 @@ def initialize_ub(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if method == "bulk":
+            if method in ("bulk", "external"):
                 warnings.warn(
                     f"At {name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
@@ -347,6 +356,16 @@ def initialize_ub(
             else:
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+
+        if name in external_gemm_to_overlap:
+            assert method == "external", (
+                f"At {name}, `external` overlap method is specified, but the selected method is"
+                f" {method}"
+            )
+            assert external_gemm_to_overlap[name] in methods["ring_exchange"], (
+                f"At {name}, `external` overlap method is specified, but the external gemm"
+                f" {external_gemm_to_overlap[name]} is not using `ring_exchange` overlap method"
+            )
 
         buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
         if method == "ring_exchange":
@@ -396,7 +415,9 @@ def initialize_ub(
                 new_method = ub_cfgs[name]["method"]
                 methods[new_method].append(name)
 
-    for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
+    for name in (
+        methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
+    ):
         ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
             fp8_buf = (name in layers_all_gather_overlap) or (
