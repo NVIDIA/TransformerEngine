@@ -853,7 +853,6 @@ template void fillCase<fp16>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<bf16>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e4m3>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
-template void fillCase<fp8e8m0>(Tensor *t, const InputsFillCase fill_case);
 #if FP4_TYPE_SUPPORTED
 template void fillCase<fp4e2m1>(Tensor *t, const InputsFillCase fill_case);
 #endif
