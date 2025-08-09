@@ -260,6 +260,10 @@ class Quantizer(abc.ABC):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Returns recipe class that is compatible with this quantizer"""
 
+    def supports_only_rowwise_all_gather(self) -> bool:
+        """Returns True if the quantizer supports only rowwise all-gather"""
+        return False
+
 
 class _QuantizeFunc(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
