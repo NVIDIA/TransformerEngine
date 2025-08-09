@@ -213,9 +213,6 @@ class Float8CurrentScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-        assert (
-            not self.fp8_dpa and not self.fp8_mha
-        ), "FP8 attention is not supported for Float8CurrentScaling."
 
     def __repr__(self) -> str:
         return (
