@@ -732,7 +732,6 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/false> {
     using OType = _OType;
 
     static constexpr int32_t chunkElems = 32;
-    // using threadLayout = Layout<8, 4>;
     using threadLayout = Layout<1, 32>;
     static constexpr int32_t numThreadsPerChunk = 1;
     static constexpr int32_t warpDimM = threadLayout::M;
@@ -1225,9 +1224,10 @@ struct CastTraits<_IType, _OType, /*rowwise=*/true, /*colwise=*/true> {
                                             swz::Linear>;
 
     static constexpr bool _use_cvt_4x = true;
-    static constexpr bool _use_warp_specialization = true;
+    static constexpr bool _use_warp_specialization = false;
     static constexpr bool _need_wait_group = iterLayout::num > numStages;
     static constexpr bool _reuse_input_out_smem = false;
+    static_assert(_reuse_input_out_smem == false, "Just don't use it");
     static constexpr bool _cache_rowwise_scale_in_smem = true;
 
     static constexpr bool _colwise_source_coming_from_rowwise = true;
