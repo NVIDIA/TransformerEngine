@@ -1492,9 +1492,9 @@ def test_dpa_fp8_extra_state(model, dtype):
     if not fused_attn_supported and not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-    outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
-    outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
-    outputs_checkpoint_v1_6 = _run_attention_extra_state(
+    outputs = _run_dpa_fp8_extra_state(dtype, config, checkpoint=False)
+    outputs_checkpoint = _run_dpa_fp8_extra_state(dtype, config, checkpoint=True)
+    outputs_checkpoint_v1_6 = _run_dpa_fp8_extra_state(
         dtype, config, mimic_v1_6=True, checkpoint=True
     )
 

@@ -984,6 +984,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
+                cp_comm_type=self.cp_comm_type,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,

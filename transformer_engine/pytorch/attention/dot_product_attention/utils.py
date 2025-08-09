@@ -240,6 +240,7 @@ class AttentionParams:
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
+    cp_comm_type: str = "p2p"
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
@@ -312,6 +313,7 @@ def get_attention_backend(
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
+    cp_comm_type = attention_params.cp_comm_type
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8

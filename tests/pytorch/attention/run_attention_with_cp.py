@@ -437,19 +437,20 @@ def run_dpa_with_cp(
     names = ["out", "dq", "dk", "dv", "d_softmax_offset"]
     names_cp = [x + "_cp" for x in names]
     names_no_cp = [x + "_no_cp" for x in names]
+    is_fp8 = dtype == "fp8"
     for i, t in enumerate(tensors_no_cp):
         if t is not None:
             if "softmax_offset" not in names[i]:
                 if qkv_format == "bshd":
-                    compare_and_assert(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
-                    compare_and_assert(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
+                    compare_and_assert(t[:, 0], tensors_cp[i][:, 0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                    compare_and_assert(t[:, 1], tensors_cp[i][:, 1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
                 elif qkv_format == "sbhd":
-                    compare_and_assert(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
-                    compare_and_assert(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
+                    compare_and_assert(t[0], tensors_cp[i][0], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
+                    compare_and_assert(t[1], tensors_cp[i][1], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
                 elif qkv_format == "thd":
-                    compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
+                    compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
             else:
-                compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, False)
+                compare_and_assert(t, tensors_cp[i], names_no_cp[i], names_cp[i], atol, rtol, rmse_tol, is_fp8)
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     # destroy distribution group
