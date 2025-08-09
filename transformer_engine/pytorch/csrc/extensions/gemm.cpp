@@ -92,7 +92,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
                              bool use_split_accumulator, CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
-                             bool bulk_overlap) {
+                             bool bulk_overlap, float alpha, std::optional<float> beta) {
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
   NVTE_CHECK(!B.is_none(), "Tensor B has not been provided");
@@ -109,6 +109,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
+
+  // Check scaling factors
+  if (accumulate) {
+    if (!beta) {
+      beta = 1.0f;
+    }
+  } else {
+    if (!beta) {
+      beta = 0.0f;
+    }
+    NVTE_CHECK(beta == 0.0, "Trying to use non-zero beta while not accumulating ",
+               "into D tensor. Beta has nothing to be applied to.");
+  }
 
   // Output tensor
   TensorWrapper D_tensor;
@@ -238,9 +251,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), D_tensor.data(), bias_tensor.data(),
-                         te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
-                         accumulate, use_split_accumulator, num_math_sms, main_stream);
+        nvte_cublas_gemm_scaled(A_tensor.data(), B_tensor.data(), D_tensor.data(),
+                                bias_tensor.data(), te_pre_gelu_out.data(), transa, transb, grad,
+                                te_workspace.data(), alpha, *beta, use_split_accumulator,
+                                num_math_sms, main_stream);
       });
     }
   } else {
