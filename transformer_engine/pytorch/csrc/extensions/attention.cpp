@@ -153,7 +153,6 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    printf("FWD----FP8\n");
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
     if (set_zero && ((h * d) % block_size == 0) &&
@@ -327,7 +326,7 @@ std::vector<py::object> fused_attn_bwd(
   std::tie(te_dP, py_dP) =
       quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
   if (detail::IsFloat8CurrentScalingQuantizers(dp_quantizer.ptr())) {
-    // update scale_inv when dP is current scaling
+    // workaround for dP: update scale_inv manually
     const at::Tensor &scale = dp_quantizer.attr("scale").cast<at::Tensor>();
     auto scale_inv = py_dP.attr("_scale_inv").cast<at::Tensor>();
     scale_inv = at::reciprocal(scale);

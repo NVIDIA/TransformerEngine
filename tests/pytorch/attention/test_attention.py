@@ -1622,14 +1622,14 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
     # if '2' in name_a or '1' in name_a:
-    #    assert rmse < rmse_tol * rmse_range, (
-    #        name_a
-    #        + " vs "
-    #        + name_b
-    #        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-    #            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-    #        )
+    #assert rmse < rmse_tol * rmse_range, (
+    #    name_a
+    #    + " vs "
+    #    + name_b
+    #    + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+    #        rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
     #    )
+    #)
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
@@ -1696,7 +1696,7 @@ def test_mha_fp8_vs_f16(
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, scaling_mode
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1704,12 +1704,12 @@ def test_mha_fp8_vs_f16(
     _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
     fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, scaling_mode
+        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
     )
 
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
     fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, scaling_mode
+        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
     )
 
     atol = 5e-1
@@ -1751,7 +1751,7 @@ def test_mha_fp8_vs_f16(
 
 
 def _run_mha_fp8_vs_f16(
-    dtype, config, fp8_mha, qkv_format, input_layernorm, RoPE, is_training, scaling_mode
+    dtype, config, fp8_mha, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
 ):
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -1760,22 +1760,6 @@ def _run_mha_fp8_vs_f16(
     def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    if scaling_mode == "delayed":
-        fp8_recipe = recipe.DelayedScaling(
-            margin=0,
-            fp8_format=recipe.Format.HYBRID,
-            amax_history_len=1,
-            amax_compute_algo="most_recent",
-            fp8_dpa=fp8_mha,
-            fp8_mha=fp8_mha,
-        )
-    elif scaling_mode == "current":
-        fp8_recipe = recipe.Float8CurrentScaling(
-            fp8_format=recipe.Format.HYBRID,
-            fp8_dpa=fp8_mha,
-            fp8_mha=fp8_mha,
-        )
 
     with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
         rotary_pos_emb = None
@@ -1948,7 +1932,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FlashAttention)")
         flash_attn_fwd_fp8, flash_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
-            dtype, config, True, qkv_layout, is_training, scaling_mode
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1956,14 +1940,14 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
-        dtype, config, True, qkv_layout, is_training, scaling_mode
+        dtype, config, True, qkv_layout, is_training, fp8_recipe
     )
 
     if config.dropout_p == 0.0:
         # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
         logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
         fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
-            dtype, config, False, qkv_layout, is_training, scaling_mode
+            dtype, config, False, qkv_layout, is_training, fp8_recipe
         )
 
     atol = 5e-1
@@ -2010,7 +1994,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                 )
 
 
-def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, scaling_mode):
+def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):
 
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -2019,20 +2003,6 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, scaling
     def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    if scaling_mode == "delayed":
-        fp8_recipe = recipe.DelayedScaling(
-            margin=0,
-            fp8_format=recipe.Format.HYBRID,
-            amax_history_len=1,
-            amax_compute_algo="most_recent",
-            fp8_dpa=fp8_dpa,
-        )
-    elif scaling_mode == "current":
-        fp8_recipe = recipe.Float8CurrentScaling(
-            fp8_format=recipe.Format.HYBRID,
-            fp8_dpa=fp8_dpa,
-        )
 
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
     with fp8_model_init(enabled=fp8_dpa):

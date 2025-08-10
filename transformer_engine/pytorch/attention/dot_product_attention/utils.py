@@ -43,6 +43,8 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
+    SplitAlongDim,
+    combine_tensors,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
@@ -1788,35 +1790,11 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         num_of_nones = 8 if cp_specific_quantizers else 6
         return [None] * num_of_nones
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
+    QKV_quantizer.internal = False #True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
     O_quantizer = quantizers["scaling_fwd"][META_O]
     O_quantizer.set_usage(rowwise=True, columnwise=False)
-    S_quantizer = None
-    dP_quantizer = None
-    if fp8_meta["recipe"].delayed():
-        S_quantizer = quantizers["scaling_fwd"][META_S]
-        S_quantizer.internal = True
-        S_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer = quantizers["scaling_bwd"][META_DP]
-        dP_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer.interal = True
-    if True:  # fp8_meta["recipe"].float8_current_scaling():
-        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
-        dP_quantizer = quantizers["scaling_bwd"][META_DP]
-
-        # two options:
-        # 1) convert to Float8Quantizer to keep track of dP.scale_inv based on dP.scale;
-        #    need to think about amax reduction (DS reduction in CS scheme)
-        # dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
-
-        # 2) use Float8CurrentScalingQuantizer but set scale to pre-selected value
-        #    and update scale_inv in extension/attention.cpp
-        dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
-
-        dP_quantizer.set_usage(rowwise=True, columnwise=False)
-        dP_quantizer.interal = True
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1828,6 +1806,42 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
     dQKV_CP_quantizer.internal = True
     O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
     O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    S_quantizer = None
+    dP_quantizer = None
+    if fp8_meta["recipe"].delayed():
+        S_quantizer = quantizers["scaling_fwd"][META_S]
+        S_quantizer.internal = True
+        S_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer = quantizers["scaling_bwd"][META_DP]
+        dP_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer.interal = True
+        # These values can be set to validate DS vs CS
+        S_quantizer.scale.fill_(448.0)
+        O_quantizer.scale.fill_(1.0)
+        dP_quantizer.scale.fill_(1.0)
+        dQKV_quantizer.scale.fill_(1.0)
+    if fp8_meta["recipe"].float8_current_scaling():
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+        dP_quantizer = quantizers["scaling_bwd"][META_DP]
+
+        # two options:
+        # 1) convert dP from Float8CurrentScalingQuantizer to Float8Quantizer;
+        #    dP.scale_inv gets updated as 1.0/dP.scale in Float8Quantizer.create_tensor();
+        #    mixed amax reduction/scale update is required: dP in DS stype and other tensors in CS;
+        dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
+        dP_quantizer.scale.fill_(448/0.1361) #1.0)
+        dP_quantizer.amax.fill_(0.1361) #0.0)
+
+        # 2) stay with Float8CurrentScalingQuantizer;
+        #    set dP.scale to an estimate, and use the workaround in pytorch/extension/attention.cpp
+        #    to update dP.scale_inv;
+        #    different from 1), amax reduction/scale update is in CS style for all tensors;
+        #    quality of the gradients depend on the estimate of dP.scale, which can be collected from previous runs
+        # dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
+
+        dP_quantizer.set_usage(rowwise=True, columnwise=False)
+        dP_quantizer.interal = True
 
     if cp_specific_quantizers:
         return (
@@ -1842,3 +1856,73 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_group = len(qkv_layout.replace("paged_kv_", "").split("_"))
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv = combine_tensors([q, k, v], dim)
+            qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_fp8, k_fp8, v_fp8 = SplitAlongDim.apply(qkv_fp8, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv = combine_tensors([k, v], dim)
+            kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
+            q_c = q.unsqueeze(dim)
+            qkv_c = torch.cat([q_c, kv_c], dim=dim)
+            qkv_fp8 = qkv_quantizer(qkv_c)
+            q_fp8 = torch.select_index(qkv_fp8, dim, [0]).squeeze(dim).contiguous()
+            kv_fp8 = torch.select_index(qkv_fp8, dim, [1, 2]).contiguous()
+            k_fp8, v_fp8 = SplitAlongDim.apply(kv_fp8, dim, [1, 1], True)
+        case 3:
+            print("combine_and_quantize before ", qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
+            dim = 0
+            q_c, k_c, v_c = [x.unsqueeze(dim) for x in [q, k, v]]
+            qkv_c = torch.cat([q_c, k_c, v_c], dim=dim)
+            qkv_fp8 = qkv_quantizer(qkv_c)
+            q_fp8, k_fp8, v_fp8 = [qkv_fp8[i].contiguous() for i in range(3)]
+            print("combine_and_quantize after ", qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
+        case _:
+            raise "Invalid qkv_layout " + qkv_layout
+    return q_fp8, k_fp8, v_fp8
+
+
+def combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8):
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_group = len(qkv_layout.replace("paged_kv_", "").split("_"))
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv_fp8 = combine_tensors([q_fp8, k_fp8, v_fp8], dim)
+            qkv_fp8_c = qkv_fp8.view(-1, qkv_fp8.shape[-3] * qkv_fp8.shape[-2] * qkv_fp8.shape[-1])
+            qkv = qkv_fp8_c.dequantize().view(qkv_fp8.shape)
+            q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.replace("paged_kv_", "").split("_")[1].find("2")
+            kv_fp8 = combine_tensors([k_fp8, v_fp8], dim)
+            kv_fp8_c = kv_fp8.view(-1, kv_fp8.shape[-3] * kv_fp8.shape[-2] * kv_fp8.shape[-1])
+            q_fp8_c = q_fp8.unsqueeze(dim)
+            qkv_fp8_c = torch.cat([q_fp8_c, kv_fp8_c], dim=dim)
+            qkv = qkv_fp8_c.dequantize()
+            q = torch.select_index(qkv, dim, [0]).squeeze(dim).contiguous()
+            kv = torch.select_index(qkv, dim, [1, 2]).contiguous()
+            k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
+        case 3:
+            print("combine_and_dequantize before ", q_fp8._quantizer.scale, q_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print("combine_and_dequantize before ", k_fp8._quantizer.scale, k_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print("combine_and_dequantize before ", v_fp8._quantizer.scale, v_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            dim = 0
+            q_fp8_c, k_fp8_c, v_fp8_c = [x.unsqueeze(dim) for x in [q_fp8, k_fp8, v_fp8]]
+            qkv_fp8_c = torch.cat([q_fp8_c, k_fp8_c, v_fp8_c], dim=dim)
+            qkv = qkv_fp8_c.dequantize()
+            q, k, v = [qkv[i].contiguous() for i in range(3)]
+            print("combine_and_dequantize after ", q_fp8._quantizer.scale, q_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print("combine_and_dequantize after ", k_fp8._quantizer.scale, k_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print("combine_and_dequantize after ", v_fp8._quantizer.scale, v_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+        case _:
+            raise "Invalid qkv_layout " + qkv_layout
+    return q, k, v

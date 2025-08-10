@@ -961,6 +961,7 @@ class MultiheadAttention(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
             pad_between_seqs=pad_between_seqs,
+            fp8_output=fp8_mha,
         )
 
         # ===================
