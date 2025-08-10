@@ -649,9 +649,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # checks for FP8
             if not self.fp8:
-                assert not fp8_output, (
-                    "fp8_output must be False when FP8 is not enabled for DotProductAttention."
-                )
+                assert (
+                    not fp8_output
+                ), "fp8_output must be False when FP8 is not enabled for DotProductAttention."
             if self.fp8:
                 if self.fp8_meta["recipe"].fp8_mha:
                     if not fp8_output:

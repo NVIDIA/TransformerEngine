@@ -1790,7 +1790,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         num_of_nones = 8 if cp_specific_quantizers else 6
         return [None] * num_of_nones
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = False #True
+    QKV_quantizer.internal = False  # True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
     O_quantizer = quantizers["scaling_fwd"][META_O]
     O_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1823,6 +1823,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         dQKV_quantizer.scale.fill_(1.0)
     if fp8_meta["recipe"].float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
 
         # two options:
@@ -1830,8 +1831,8 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         #    dP.scale_inv gets updated as 1.0/dP.scale in Float8Quantizer.create_tensor();
         #    mixed amax reduction/scale update is required: dP in DS stype and other tensors in CS;
         dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
-        dP_quantizer.scale.fill_(448/0.1361) #1.0)
-        dP_quantizer.amax.fill_(0.1361) #0.0)
+        dP_quantizer.scale.fill_(448 / 0.1361)  # 1.0)
+        dP_quantizer.amax.fill_(0.1361)  # 0.0)
 
         # 2) stay with Float8CurrentScalingQuantizer;
         #    set dP.scale to an estimate, and use the workaround in pytorch/extension/attention.cpp
@@ -1879,13 +1880,23 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             kv_fp8 = torch.select_index(qkv_fp8, dim, [1, 2]).contiguous()
             k_fp8, v_fp8 = SplitAlongDim.apply(kv_fp8, dim, [1, 1], True)
         case 3:
-            print("combine_and_quantize before ", qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
+            print(
+                "combine_and_quantize before ",
+                qkv_quantizer.scale,
+                qkv_quantizer.amax,
+                [x.max().item() for x in [q, k, v]],
+            )
             dim = 0
             q_c, k_c, v_c = [x.unsqueeze(dim) for x in [q, k, v]]
             qkv_c = torch.cat([q_c, k_c, v_c], dim=dim)
             qkv_fp8 = qkv_quantizer(qkv_c)
             q_fp8, k_fp8, v_fp8 = [qkv_fp8[i].contiguous() for i in range(3)]
-            print("combine_and_quantize after ", qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
+            print(
+                "combine_and_quantize after ",
+                qkv_quantizer.scale,
+                qkv_quantizer.amax,
+                [x.max().item() for x in [q, k, v]],
+            )
         case _:
             raise "Invalid qkv_layout " + qkv_layout
     return q_fp8, k_fp8, v_fp8
@@ -1912,17 +1923,47 @@ def combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8):
             kv = torch.select_index(qkv, dim, [1, 2]).contiguous()
             k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
         case 3:
-            print("combine_and_dequantize before ", q_fp8._quantizer.scale, q_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-            print("combine_and_dequantize before ", k_fp8._quantizer.scale, k_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-            print("combine_and_dequantize before ", v_fp8._quantizer.scale, v_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print(
+                "combine_and_dequantize before ",
+                q_fp8._quantizer.scale,
+                q_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
+            print(
+                "combine_and_dequantize before ",
+                k_fp8._quantizer.scale,
+                k_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
+            print(
+                "combine_and_dequantize before ",
+                v_fp8._quantizer.scale,
+                v_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
             dim = 0
             q_fp8_c, k_fp8_c, v_fp8_c = [x.unsqueeze(dim) for x in [q_fp8, k_fp8, v_fp8]]
             qkv_fp8_c = torch.cat([q_fp8_c, k_fp8_c, v_fp8_c], dim=dim)
             qkv = qkv_fp8_c.dequantize()
             q, k, v = [qkv[i].contiguous() for i in range(3)]
-            print("combine_and_dequantize after ", q_fp8._quantizer.scale, q_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-            print("combine_and_dequantize after ", k_fp8._quantizer.scale, k_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-            print("combine_and_dequantize after ", v_fp8._quantizer.scale, v_fp8._quantizer.amax, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
+            print(
+                "combine_and_dequantize after ",
+                q_fp8._quantizer.scale,
+                q_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
+            print(
+                "combine_and_dequantize after ",
+                k_fp8._quantizer.scale,
+                k_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
+            print(
+                "combine_and_dequantize after ",
+                v_fp8._quantizer.scale,
+                v_fp8._quantizer.amax,
+                [x.max().item() for x in [q_fp8, k_fp8, v_fp8]],
+            )
         case _:
             raise "Invalid qkv_layout " + qkv_layout
     return q, k, v

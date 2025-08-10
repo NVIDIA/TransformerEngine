@@ -1133,9 +1133,10 @@ class FusedAttnFunc(torch.autograd.Function):
     def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
         if ctx.is_output_fp8:
-            assert isinstance(
-                d_out, Float8Tensor
-            ), "Gradient of the DPA output is expected to be in Float8Tensor type but found {d_out.__class__}."
+            assert isinstance(d_out, Float8Tensor), (
+                "Gradient of the DPA output is expected to be in Float8Tensor type but found"
+                " {d_out.__class__}."
+            )
 
         d_out = d_out.contiguous()
         (
@@ -1218,9 +1219,18 @@ class FusedAttnFunc(torch.autograd.Function):
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     names = ["q", "k", "v", "out", "d_out", "S", "dP", "dQKV"]
-                    for i,x in enumerate([
-                        q_fp8._quantizer, k_fp8._quantizer, v_fp8._quantizer, out_fp8._quantizer, d_out_fp8._quantizer,
-                        ctx.S_quantizer, ctx.dP_quantizer, ctx.dQKV_quantizer]):
+                    for i, x in enumerate(
+                        [
+                            q_fp8._quantizer,
+                            k_fp8._quantizer,
+                            v_fp8._quantizer,
+                            out_fp8._quantizer,
+                            d_out_fp8._quantizer,
+                            ctx.S_quantizer,
+                            ctx.dP_quantizer,
+                            ctx.dQKV_quantizer,
+                        ]
+                    ):
                         if x is not None:
                             print("before quantizer ", names[i], x.scale, x.amax)
 
@@ -1252,9 +1262,18 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    for i,x in enumerate([
-                        q_fp8._quantizer, k_fp8._quantizer, v_fp8._quantizer, out_fp8._quantizer, d_out_fp8._quantizer,
-                        ctx.S_quantizer, ctx.dP_quantizer, ctx.dQKV_quantizer]):
+                    for i, x in enumerate(
+                        [
+                            q_fp8._quantizer,
+                            k_fp8._quantizer,
+                            v_fp8._quantizer,
+                            out_fp8._quantizer,
+                            d_out_fp8._quantizer,
+                            ctx.S_quantizer,
+                            ctx.dP_quantizer,
+                            ctx.dQKV_quantizer,
+                        ]
+                    ):
                         if x is not None:
                             print("after quantizer ", names[i], x.scale, x.amax)
                     print("min/max ", [(x.min().item(), x.max().item()) for x in [dq_, dk_, dv_]])
@@ -1263,12 +1282,14 @@ class FusedAttnFunc(torch.autograd.Function):
                     #                                       fp8_dtype = tex.DType.kFloat8E4M3
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
-                    dq, dk, dv= dq_, dk_, dv_
+                    dq, dk, dv = dq_, dk_, dv_
                     if ctx.fp8_meta["recipe"].delayed() and not ctx.is_input_fp8:
                         dq, dk, dv = combine_and_dequantize(ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8)
                     if ctx.fp8_meta["recipe"].float8_current_scaling() and ctx.is_input_fp8:
                         # return dq_fp8, dk_fp8, dv_fp8
-                        dq, dk, dv = combine_and_quantize(ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
+                        dq, dk, dv = combine_and_quantize(
+                            ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
+                        )
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
