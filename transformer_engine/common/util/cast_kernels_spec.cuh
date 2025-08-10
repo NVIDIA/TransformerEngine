@@ -454,20 +454,22 @@ void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const floatx4 &scale) {
 }
 
 __device__ __forceinline__
-void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
-    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+void mul_cvt_4x(fp8e5m2x4 &out, floatx4 const &in, const ptx::floatx2 &scale) {
+    ptx::floatx2 const * in2 = reinterpret_cast<ptx::floatx2 const *>(&in);
     asm volatile (
         "{\n\t"
         ".reg.b64 zeros;\n\t"
         "mov.b64 zeros, {0x0, 0x0};\n\t"
-        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
-        "fma.rn.f32x2 %2, %2, %3, zeros;\n\t"
+        ".reg.b64 re1;\n\t"
+        ".reg.b64 re2;\n\t"
+        "fma.rn.f32x2 re1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 re2, %2, %3, zeros;\n\t"
         ".reg.b32 val1;\n\t"
         ".reg.b32 val2;\n\t"
         ".reg.b32 val3;\n\t"
         ".reg.b32 val4;\n\t"
-        "mov.b64 {val1, val2}, %1;\n\t"
-        "mov.b64 {val3, val4}, %2;\n\t"
+        "mov.b64 {val1, val2}, re1;\n\t"
+        "mov.b64 {val3, val4}, re2;\n\t"
     #if (defined _LOOSE_PRECISION)
         "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
     #else
@@ -478,30 +480,32 @@ void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const ptx::floatx2 &scale) {
         "mov.b32 %0, {r1, r2};\n\t"
     #endif
         "}\n\t"
-        : "=r"(reinterpret_cast<uint32_t&>(out)),
-          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
-          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
-        : "l"(reinterpret_cast<const uint64_t&>(scale)),
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "l"(reinterpret_cast<uint64_t const&>(in2[0])),
+          "l"(reinterpret_cast<uint64_t const&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale)),
           "r"(0x80008000)
     );
 }
 
 __device__ __forceinline__
-void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const floatx4 &scale) {
-    ptx::floatx2 * in2 = reinterpret_cast<ptx::floatx2 *>(&in);
+void mul_cvt_4x(fp8e5m2x4 &out, floatx4 const &in, const floatx4 &scale) {
+    ptx::floatx2 const * in2 = reinterpret_cast<ptx::floatx2 const *>(&in);
     ptx::floatx2 const * scale2 = reinterpret_cast<ptx::floatx2 const*>(&scale);
     asm volatile (
         "{\n\t"
         ".reg.b64 zeros;\n\t"
         "mov.b64 zeros, {0x0, 0x0};\n\t"
-        "fma.rn.f32x2 %1, %1, %3, zeros;\n\t"
-        "fma.rn.f32x2 %2, %2, %4, zeros;\n\t"
+        ".reg.b64 re1;\n\t"
+        ".reg.b64 re2;\n\t"
+        "fma.rn.f32x2 re1, %1, %3, zeros;\n\t"
+        "fma.rn.f32x2 re2, %2, %4, zeros;\n\t"
         ".reg.b32 val1;\n\t"
         ".reg.b32 val2;\n\t"
         ".reg.b32 val3;\n\t"
         ".reg.b32 val4;\n\t"
-        "mov.b64 {val1, val2}, %1;\n\t"
-        "mov.b64 {val3, val4}, %2;\n\t"
+        "mov.b64 {val1, val2}, re1;\n\t"
+        "mov.b64 {val3, val4}, re2;\n\t"
     #if (defined _LOOSE_PRECISION)
         "cvt.rs.satfinite.e5m2x4.f32 %0, {val4, val3, val2, val1}, %4;\n\t"
     #else
@@ -512,10 +516,10 @@ void mul_cvt_4x(fp8e5m2x4 &out, floatx4 &in, const floatx4 &scale) {
         "mov.b32 %0, {r1, r2};\n\t"
     #endif
         "}\n\t"
-        : "=r"(reinterpret_cast<uint32_t&>(out)),
-          "+l"(reinterpret_cast<uint64_t&>(in2[0])),
-          "+l"(reinterpret_cast<uint64_t&>(in2[1]))
-        : "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
+        : "=r"(reinterpret_cast<uint32_t&>(out))
+        : "l"(reinterpret_cast<uint64_t const&>(in2[0])),
+          "l"(reinterpret_cast<uint64_t const&>(in2[1])),
+          "l"(reinterpret_cast<const uint64_t&>(scale2[0])),
           "l"(reinterpret_cast<const uint64_t&>(scale2[1])),
           "r"(0x80008000)
     );
