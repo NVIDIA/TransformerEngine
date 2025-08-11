@@ -1225,11 +1225,9 @@ def _all_gather_mxfp8(
         if inp._rowwise_data is not None:
             in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
-            dtype = inp._rowwise_data.dtype
         elif inp._columnwise_data is not None:
             in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
-            dtype = inp._columnwise_data.dtype
         else:
             raise ValueError("Got MXFP8 input tensor without any data")
         dtype = torch.bfloat16
