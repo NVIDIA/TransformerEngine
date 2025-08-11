@@ -2310,9 +2310,7 @@ static __global__ void tiny_delay_kern() {
   // an empty kernel seems to work well enough.
 }
 
-void userbuffers_tiny_delay(cudaStream_t stream) {
-  tiny_delay_kern<<<1,1,0,stream>>>();
-}
+void userbuffers_tiny_delay(cudaStream_t stream) { tiny_delay_kern<<<1, 1, 0, stream>>>(); }
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
