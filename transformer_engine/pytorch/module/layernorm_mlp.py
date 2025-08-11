@@ -68,7 +68,6 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ..tensor.quantized_tensor import (
-    QuantizedTensor,
     QuantizedTensorBase,
     Quantizer,
     prepare_for_saving,
@@ -78,7 +77,6 @@ from ..cpp_extensions import (
     general_gemm,
 )
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ...debug.pytorch.utils import any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["LayerNormMLP"]
@@ -223,6 +221,12 @@ class _LayerNormMLP(torch.autograd.Function):
         device = inp.device
 
         # Configure Userbuffers communication (comm+GEMM overlap)
+        if debug:  # turn off userbuffers in debug mode
+            ub_overlap_ag = False
+            ub_overlap_rs = False
+            ub_overlap_rs_dgrad = False
+            ub_bulk_wgrad = False
+            ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
 
@@ -238,9 +242,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if fc1_input_quantizer is None:
                 raise ValueError("Missing quantizer for FC1 input tensor")
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
-            if sequence_parallel and isinstance(
-                fc1_input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-            ):
+            if sequence_parallel and fc1_input_quantizer.supports_only_rowwise_all_gather():
                 # All-gather is not supported with FP8 column-wise data
                 fc1_input_quantizer.set_usage(columnwise=False)
 
@@ -849,26 +851,37 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Note: Synchronize tensor-parallel communication and
                 # make sure required data is available
                 if ctx.ub_overlap_ag and isinstance(ctx.fc2_grad_output_quantizer, MXFP8Quantizer):
-                    # UB does not support overlapping grad output
+                    # UB does not support pipelined overlapping grad output
                     # all-gather with wgrad GEMM. Also, we can't
                     # convert row-scaled MXFP8 to column-scaled, so we
                     # can't reuse the grad output that was gathered
                     # for the dgrad GEMM. We work around by explicitly
-                    # overlapping the NCCL operation with the dgrad GEMM.
+                    # overlapping the AG operation with the dgrad GEMM.
+
+                    # Get the communication stream from the dgrad GEMM to use for the AG
+                    dgrad_send_stream, dgrad_recv_stream = (
+                        ub_obj_fc2_dgrad.get_communication_stream()
+                    )
+
+                    ub_obj_fc2_wgrad = get_ub("fc2_wgrad")
+
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                    # Get the communication stream from the dgrad GEMM and set it as the current torch stream
-                    dgrad_comm_stream = ub_obj_fc2_dgrad.get_communication_stream()
-                    with torch.cuda.stream(dgrad_comm_stream):
-                        # Syncs with the current stream (dgrad_comm_stream) before starting the all-gather
-                        # This ensures that we don't start until all communication for the dgrad GEMM is complete
-                        grad_output, mxfp8_fc2_grad_output_work = gather_along_first_dim(
+
+                    # We use the send stream to copy into the userbuffers.
+                    # This is the same stream that we will use to access the data in the AG,
+                    # so we dont need to add any syncs yet.
+                    with torch.cuda.stream(dgrad_send_stream):
+                        grad_output, _ = fill_userbuffers_buffer_for_all_gather(
+                            ub_obj_fc2_wgrad,
                             grad_outputs[0],
+                            ctx.fc2_grad_output_quantizer,
                             ctx.tp_group,
-                            async_op=True,
-                            quantizer=ctx.fc2_grad_output_quantizer,
                         )
-                    # Synchronize with the main stream
-                    mxfp8_fc2_grad_output_work.wait()
+
+                    # Allgather grad_outputs[0] using the dgrad streams so we can overlap with the fc2_dgrad gemm
+                    tex.bulk_overlap_ag_with_external_gemm(
+                        ub_obj_fc2_wgrad, dgrad_send_stream, dgrad_recv_stream
+                    )
 
                 # Prepare input tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -1523,9 +1536,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
         self.name = name
 
-        if TEDebugState.debug_enabled:
-            self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
-
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
         if tp_group is None:
@@ -1728,9 +1738,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """
         if is_in_onnx_export_mode():
             return self.onnx_forward(inp)
-        debug = TEDebugState.debug_enabled
-        if debug:
-            self._validate_name()
+
+        debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1754,12 +1763,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 else self._get_debug_quantizers(fp8_output)
             )
             if debug:
-                if not any_feature_enabled(quantizers):
-                    quantizers = self._get_quantizers(fp8_output)
+                if self.no_debug_features_active(quantizers):
                     debug = False
-
-                if isinstance(self.fc1_weight, QuantizedTensor):
-                    raise RuntimeError("FP8 weights are not supported in debug mode.")
+                    quantizers = self._get_quantizers(fp8_output)
 
             # Get quantizers
             (
