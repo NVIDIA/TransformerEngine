@@ -106,7 +106,7 @@ def layernorm_mlp(
     if (
         inspect_axes is not None
         and len(inspect_axes) == x.ndim
-        and generate_pspec(inspect_axes)[-1] is not None    # need to convert logical axes to pspec
+        and generate_pspec(inspect_axes)[-1] is not None  # need to convert logical axes to pspec
         and not is_mxfp8
         and not tex.gemm_uses_jax_dot()
     ):
