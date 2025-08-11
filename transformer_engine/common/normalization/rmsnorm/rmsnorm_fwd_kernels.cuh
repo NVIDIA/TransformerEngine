@@ -288,7 +288,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
       atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
     }
   }
-  
+
   if (params.fp8_out) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
