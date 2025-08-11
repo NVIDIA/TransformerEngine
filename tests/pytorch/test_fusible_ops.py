@@ -36,9 +36,7 @@ from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
 # Import utility functions
-_current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent))
-from utils import dtype_tols, make_recipe
+from utils import dtype_tols, make_recipe, reset_rng_states
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -270,22 +268,22 @@ class TestSequentialContainer:
         bias = te_ops.Bias(size=size, device="cpu")
         with torch.no_grad():
             bias.bias.copy_(torch.rand((size,)))
-        model = te_ops.Sequential(  #    | Inputs  | Outputs
-            torch.nn.Identity(),  #      | x1      | x1
-            te_ops.MakeExtraOutput(),  # | x1      | x1 [x1]
-            bias,  #                     | x1      | h1 (= x1 + b)
-            te_ops.MakeExtraOutput(),  # | h1      | h1 [h1]
-            te_ops.AddInPlace(),  #      | h1 [x2] | x2 (= x2 + h1)
-            te_ops.MakeExtraOutput(),  # | x2      | x2 [x2]
-            torch.nn.Identity(),  #      | x2      | x2
-            bias,  #                     | x2      | h2 (= x2 + b)
-            te_ops.AddInPlace(),  #      | h2 [x3] | x3 (= x3 + h2)
-            te_ops.MakeExtraOutput(),  # | x3      | x3 [x3]
-            te_ops.AddInPlace(),  #      | x3 [x4] | x4 (= x4 + x3)
-            torch.nn.Identity(),  #      | x4      | x4
-            te_ops.Identity(),  #        | x4      | x4
-            te_ops.MakeExtraOutput(),  # | x4      | x4 [x4]
-            te_ops.Identity(),  #        | x4      | x4
+        model = te_ops.Sequential(  #                 | Inputs  | Outputs
+            torch.nn.Identity(),  #                   | x1      | x1
+            te_ops.MakeExtraOutput(in_place=True),  # | x1      | x1 [x1]
+            bias,  #                                  | x1      | h1 (= x1 + b)
+            te_ops.MakeExtraOutput(in_place=True),  # | h1      | h1 [h1]
+            te_ops.AddExtraInput(in_place=True),  #   | h1 [x2] | x2 (= x2 + h1)
+            te_ops.MakeExtraOutput(in_place=True),  # | x2      | x2 [x2]
+            torch.nn.Identity(),  #                   | x2      | x2
+            bias,  #                                  | x2      | h2 (= x2 + b)
+            te_ops.AddExtraInput(in_place=True),  #   | h2 [x3] | x3 (= x3 + h2)
+            te_ops.MakeExtraOutput(in_place=True),  # | x3      | x3 [x3]
+            te_ops.AddExtraInput(in_place=True),  #   | x3 [x4] | x4 (= x4 + x3)
+            torch.nn.Identity(),  #                   | x4      | x4
+            te_ops.Identity(),  #                     | x4      | x4
+            te_ops.MakeExtraOutput(in_place=True),  # | x4      | x4 [x4]
+            te_ops.Identity(),  #                     | x4      | x4
         )
 
         # Create input tensors
@@ -327,10 +325,7 @@ class TestFuser:
 
     @staticmethod
     def setup_class(cls) -> None:
-        # Configure RNG
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        reset_rng_states()
 
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_scale_update(
@@ -544,10 +539,7 @@ class TestBasicOps:
 
     @staticmethod
     def setup_class(cls) -> None:
-        # Configure RNG
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        reset_rng_states()
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
@@ -845,10 +837,9 @@ class TestBasicOps:
                 pytest.skip("FP8 output is only supported with FP8 GEMMs")
             if quantized_grad_input and not quantized_compute:
                 pytest.skip("FP8 grad input is only supported with FP8 GEMMs")
-        if quantization == "mxfp8" and quantized_output:
-            pytest.skip("MXFP8 output is not supported with MXFP8 GEMMs")
-        if quantization == "mxfp8" and quantized_grad_input:
-            pytest.skip("MXFP8 grad input is not supported with MXFP8 GEMMs")
+        if quantization not in (None, "fp8"):
+            if quantized_output or quantized_grad_input:
+                pytest.skip("Recipe does not support quantized GEMM output")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1400,18 +1391,17 @@ class TestBasicOps:
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
 
         torch.testing.assert_close(y_test, y_ref, **tols)
-        # L2Norm backward pass requires slightly looser atol for bfloat16
-        if dtype == torch.bfloat16:
-            tols["atol"] = 2e-3
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
-    def test_add_in_place(
+    def test_add_extra_input(
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1457,7 +1447,7 @@ class TestBasicOps:
         dx2_ref = dy_ref
 
         # Implementation with fusible operation
-        op = te_ops.AddInPlace()
+        op = te_ops.AddExtraInput(in_place=in_place)
         y_test = op(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -1472,6 +1462,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx1_test, dx1_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx2_test, dx2_ref, rtol=0, atol=0)
 
+    @pytest.mark.parametrize("in_place", (True, False))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
     @pytest.mark.parametrize("quantization", _quantization_list)
@@ -1479,6 +1470,7 @@ class TestBasicOps:
         self,
         *,
         in_shape: Iterable[int] = (32, 32),
+        in_place: bool,
         dtype: torch.dtype,
         device: torch.device,
         quantization: Optional[str],
@@ -1524,7 +1516,7 @@ class TestBasicOps:
         (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
 
         # Implementation with fusible operation
-        op = te_ops.MakeExtraOutput()
+        op = te_ops.MakeExtraOutput(in_place=in_place)
         y1_test, y2_test = op(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -1692,16 +1684,107 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
+    @pytest.mark.parametrize("shape", ((), (1, 13), (4, 4, 2)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("device", _devices)
+    def test_constant_scale(
+        self,
+        *,
+        scale: float,
+        shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref = scale * x_ref
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        op = te_ops.ConstantScale(scale)
+        y_test = op(x_test)
+        y_test.backward(dy_test)
+
+        # Check results
+        tols = dtype_tols(dtype)
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
+    @pytest.mark.parametrize("prob", (0.1, 0.5, 0.75))
+    @pytest.mark.parametrize("is_training", (True, False))
+    @pytest.mark.parametrize("shape", ((101,), (2, 4, 16)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    def test_dropout(
+        self,
+        *,
+        prob: float,
+        is_training: bool,
+        shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+    ):
+
+        # Random data
+        x_ref = torch.rand(shape, dtype=dtype, device=device) + 0.5
+        x_test = x_ref.clone().requires_grad_()
+        dy_ref = torch.rand(shape, dtype=dtype, device=device) + 0.5
+        dy_test = dy_ref.clone()
+
+        # Apply dropout
+        op = te_ops.Dropout(prob)
+        if is_training:
+            op.train()
+        else:
+            op.eval()
+        y = op(x_test)
+        y.backward(dy_test)
+
+        # Check values
+        if is_training:
+            mask = ((y != 0) / (1 - prob)).to(dtype=dtype)
+            torch.testing.assert_close(y, x_ref * mask)
+            torch.testing.assert_close(x_test.grad, dy_ref * mask)
+        else:
+            torch.testing.assert_close(y, x_ref, rtol=0, atol=0)
+            torch.testing.assert_close(x_test.grad, dy_ref, rtol=0, atol=0)
+
+        # Hypothesis testing for number of zeros
+        # Note: A Bernoulli random variable with probability p has
+        # mean p and standard deviation sqrt(p*(1-p)). By the central
+        # limit theorem, the mean of n iid Bernoulli variables
+        # converges to a normal random variable with mean p and
+        # standard deviation sqrt(p*(1-p)/n). If the observed mean is
+        # below the 0.5th or above the 99.5th percentiles, then the
+        # p-value is less than 1% and we assume that the dropout
+        # distribution is incorrect.
+        if is_training:
+            prob_observed = 1 - torch.count_nonzero(y).item() / y.numel()
+            z_score = (prob_observed - prob) / math.sqrt(prob * (1 - prob) / y.numel())
+            assert abs(z_score) < 2.5758, "Number of zeros is outside 99% confidence interval"
+
 
 class TestFusedOps:
     """Tests for fused operations"""
 
     @staticmethod
     def setup_class(cls) -> None:
-        # Configure RNG
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        reset_rng_states()
 
     @pytest.mark.parametrize("weight_shape", ((32, 64), (3, 5)))
     @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (8, 2, 10, -1)))
@@ -1888,7 +1971,7 @@ class TestFusedOps:
                     device=device,
                     dtype=dtype,
                 ),
-                te_ops.AddInPlace(),
+                te_ops.AddExtraInput(in_place=True),
             )
         with torch.no_grad():
             model[0].weight.copy_(w_test)
@@ -2080,7 +2163,7 @@ class TestFusedOps:
         recipe = make_recipe(quantization)
         with te.fp8_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
-                te_ops.MakeExtraOutput(),
+                te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
                     in_features,
                     out_features,
@@ -2124,10 +2207,7 @@ class TestCheckpointing:
 
     @staticmethod
     def setup_class(cls) -> None:
-        # Configure RNG
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        reset_rng_states()
 
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
@@ -2239,10 +2319,7 @@ class TestSequentialModules:
 
     @staticmethod
     def setup_class(cls) -> None:
-        # Configure RNG
-        seed = 1234
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        reset_rng_states()
 
     @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))

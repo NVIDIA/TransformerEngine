@@ -86,7 +86,7 @@ class Float8TensorBase(QuantizedTensorBase):
         else:
             instance = super().__new__(cls, *args, **kwargs)
         instance._data = data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose

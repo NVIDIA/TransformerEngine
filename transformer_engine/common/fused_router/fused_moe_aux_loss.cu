@@ -90,7 +90,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
              * Section: Reduce to get the sum of aggregated_probs_per_expert
              */
       CompType intermediate_result =
-          warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, sum, lane_id);
+          warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, ReduceFuncType::SUM, lane_id);
       __syncwarp();
 
       if (lane_id == 0) {
@@ -146,7 +146,7 @@ __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
          * Section: Reduce to get the sum of aggregated_probs_per_expert
          */
     CompType intermediate_result =
-        warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, sum, lane_id);
+        warp_reduce_on_shmem(aggregated_probs_per_expert, num_cols, ReduceFuncType::SUM, lane_id);
     __syncwarp();
 
     if (lane_id == 0) {

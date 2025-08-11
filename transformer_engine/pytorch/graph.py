@@ -179,24 +179,17 @@ def _make_graphed_callables(
         assert isinstance(
             sample_args, list
         ), "sample_args must be a list for _reuse_graph_input_output_buffers."
-        len_args = len(sample_args[0])
-        for i, arg in enumerate(sample_args):
-            assert len_args == len(
-                arg
-            ), "Arguments must have same length and shape for `_reuse_graph_input_output_buffers`."
-        len_kwargs = len(sample_kwargs[0])
-        assert isinstance(
-            sample_kwargs, list
-        ), "sample_kwargs must be a list for _reuse_graph_input_output_buffers."
-        for i, kwarg in enumerate(sample_kwargs):
-            assert len_kwargs == len(kwarg), (
-                "Keyword arguments must have same length and shape for"
-                " `_reuse_graph_input_output_buffers`."
-            )
 
         # Reorganize args and kwargs for input tensor reuse.
+        # fwd_sample_qs is keyed by model chunk index. The value is a queue of tuples.
+        # Each tuple contains the sample key signature and its fwd_idx. When we finish a backward
+        # chunk, we pop the corresponding fwd_idx and push to the consumed_sample_q.
+        # consumed_sample_q is keyed by the sample key signature. The value is a queue of the
+        # fwd_idx whose backward has been called so that we can reuse the same static buffers.
+        # In this way, we can reuse the same static input buffers for the non-overlapping samples
+        # with the same input signature.
         fwd_sample_qs = {}
-        consumed_sample_q = []
+        consumed_sample_q = {}
         fwd_idx = [0] * num_model_chunks
         for c_id in _order:
             m_chunk = abs(c_id) - 1
@@ -208,10 +201,21 @@ def _make_graphed_callables(
                 fwd_sample_idx = [
                     sample_start_idx + i for i in range(_num_layers_per_chunk[m_chunk])
                 ]
-                fwd_sample_qs[m_chunk] = fwd_sample_qs.get(m_chunk, []) + fwd_sample_idx
+                if m_chunk not in fwd_sample_qs:
+                    fwd_sample_qs[m_chunk] = []
                 for per_callable_fwd_idx in fwd_sample_idx:
-                    if consumed_sample_q:
-                        reuse_fwd_idx = consumed_sample_q.pop(0)
+                    sample_args_keys = tuple(
+                        (t.shape, t.dtype, t.layout) for t in sample_args[per_callable_fwd_idx]
+                    )
+                    sample_kwargs_keys = tuple(
+                        (k, v.shape, v.dtype, v.layout)
+                        for k, v in sorted(sample_kwargs[per_callable_fwd_idx].items())
+                    )
+                    sample_keys = sample_args_keys + sample_kwargs_keys
+
+                    fwd_sample_qs[m_chunk].append((sample_keys, per_callable_fwd_idx))
+                    if consumed_sample_q.get(sample_keys, []):
+                        reuse_fwd_idx = consumed_sample_q[sample_keys].pop(0)
                         sample_args[per_callable_fwd_idx] = sample_args[reuse_fwd_idx]
                         sample_kwargs[per_callable_fwd_idx] = sample_kwargs[reuse_fwd_idx]
                 fwd_idx[m_chunk] += 1
@@ -219,7 +223,12 @@ def _make_graphed_callables(
                 num_consumed_samples = min(
                     len(fwd_sample_qs[m_chunk]), _num_layers_per_chunk[m_chunk]
                 )
-                consumed_sample_q += fwd_sample_qs[m_chunk][:num_consumed_samples]
+                for sample_keys, per_callable_fwd_idx in fwd_sample_qs[m_chunk][
+                    :num_consumed_samples
+                ]:
+                    if sample_keys not in consumed_sample_q:
+                        consumed_sample_q[sample_keys] = []
+                    consumed_sample_q[sample_keys].append(per_callable_fwd_idx)
                 fwd_sample_qs[m_chunk] = fwd_sample_qs[m_chunk][num_consumed_samples:]
 
     if fp8_weight_caching:
@@ -422,8 +431,8 @@ def _make_graphed_callables(
         per_callable_static_grad_inputs = [None] * len(flatten_sample_args)
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
-        static_grad_outputs = None
-        previous_per_callable_bwd_idx = None
+        static_grad_outputs_dict = {}
+        previous_chunk_last_callable_bwd_idx = None
         for c_id in _order:
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
@@ -446,6 +455,7 @@ def _make_graphed_callables(
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
+                previous_per_callable_bwd_idx = None
                 for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
                     per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
@@ -454,9 +464,21 @@ def _make_graphed_callables(
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
                     bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
-                    if not _reuse_graph_input_output_buffers or static_grad_outputs is None:
+                    if _reuse_graph_input_output_buffers:
                         # Note for _reuse_graph_input_output_buffers: grad output is only used
                         # within backward, so we can reuse the same static buffers every time.
+                        static_grad_outputs_keys = tuple(
+                            (o.shape, o.dtype, o.layout) for o in static_outputs if o.requires_grad
+                        )
+                        if static_grad_outputs_keys in static_grad_outputs_dict:
+                            static_grad_outputs = static_grad_outputs_dict[static_grad_outputs_keys]
+                        else:
+                            static_grad_outputs = tuple(
+                                torch.empty_like(o) if o.requires_grad else None
+                                for o in static_outputs
+                            )
+                            static_grad_outputs_dict[static_grad_outputs_keys] = static_grad_outputs
+                    else:
                         static_grad_outputs = tuple(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
@@ -496,18 +518,28 @@ def _make_graphed_callables(
                         per_callable_static_outputs[per_callable_bwd_idx] = make_weak_ref(
                             static_outputs
                         )
-                        # Weak ref the static grad inputs of the previous backward pass.
-                        # Note: After a backward pass, we assume Mcore will send the
-                        # grad input to another pipeline parallel rank and that the
-                        # communication is finished before the end of the next backward
-                        # pass.
+
+                        # Weak ref the static grad inputs of the previous backward pass within the
+                        # same chunk.
                         if previous_per_callable_bwd_idx is not None:
-                            per_callable_static_grad_inputs[previous_per_callable_bwd_idx] = (
-                                make_weak_ref(
-                                    per_callable_static_grad_inputs[previous_per_callable_bwd_idx]
-                                )
+                            idx = previous_per_callable_bwd_idx
+                            per_callable_static_grad_inputs[idx] = make_weak_ref(
+                                per_callable_static_grad_inputs[idx]
                             )
                         previous_per_callable_bwd_idx = per_callable_bwd_idx
+
+                        # Weak ref the static grad inputs of the previous chunk's last backward
+                        # pass.
+                        # Note: After a chunk's backward pass, we assume Mcore will send the grad
+                        # input to another pipeline parallel rank and that the communication is
+                        # finished before the end of the next chunk's backward pass.
+                        if l_no == 0:
+                            if previous_chunk_last_callable_bwd_idx is not None:
+                                idx = previous_chunk_last_callable_bwd_idx
+                                per_callable_static_grad_inputs[idx] = make_weak_ref(
+                                    per_callable_static_grad_inputs[idx]
+                                )
+                            previous_chunk_last_callable_bwd_idx = per_callable_bwd_idx
 
                 bwd_idx[m_chunk] += 1
     else:
@@ -712,6 +744,12 @@ def _make_graphed_callables(
                                 elif isinstance(m, BasicOperation):
                                     for mode in ("forward", "backward"):
                                         if m.num_quantizers(mode):
+                                            m._fp8_metas[mode][
+                                                "fp8_group"
+                                            ] = FP8GlobalStateManager.get_fp8_group()
+                                            m._fp8_metas[mode][
+                                                "recipe"
+                                            ] = FP8GlobalStateManager.get_fp8_recipe()
                                             FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                                                 m._fp8_metas[mode],
                                             )
@@ -756,7 +794,7 @@ def save_fp8_tensors(
                     m.adjust_amax_history_length(fp8_recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
             elif isinstance(m, BasicOperation):
-                m.reset_recipe_type(recipe=fp8_recipe)
+                m.reset_recipe_state(recipe=fp8_recipe)
                 module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors

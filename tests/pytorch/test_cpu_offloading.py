@@ -14,15 +14,12 @@ from transformer_engine.pytorch.attention.dot_product_attention import _attentio
 from utils import ModelConfig, get_available_attention_backends
 
 # Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, _ = FP8GlobalStateManager.is_fp8_available()
 
-fp8_recipes = [
-    None,  # non-fp8
-    # recipe.MXFP8BlockScaling(), - scale inverse tensors offloading doest not work yet
-    recipe.Float8CurrentScaling(),
-    recipe.DelayedScaling(),
-]
+fp8_recipes = [None]
+if fp8_available:
+    fp8_recipes.append(recipe.Float8CurrentScaling())
+    fp8_recipes.append(recipe.DelayedScaling())
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
@@ -128,12 +125,6 @@ def test_cpu_offload(fp8_recipe, model_key) -> None:
 
     model_cls = model_types[model_key]
     models_list = [model_cls() for _ in range(NUM_LAYERS)]
-
-    if fp8_recipe and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    if fp8_recipe is not None:
-        if fp8_recipe.mxfp8() and not mxfp8_available:
-            pytest.skip(reason_for_no_mxfp8)
 
     if model_key in ["multihead_attention", "transformer_layer"]:
         available_backends, *_ = get_available_attention_backends(

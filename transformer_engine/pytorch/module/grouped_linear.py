@@ -662,6 +662,12 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         self.reset_parameters(defer_init=device == "meta")
 
+        if self.wgrad_store.delay_wgrad_compute():
+            for name, param in self.named_parameters():
+                for i in range(self.num_gemms):
+                    if name in (f"weight{i}", f"bias{i}"):
+                        param.skip_backward_post_hook = True
+
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         super().set_meta_tensor(fwd, recipe)
@@ -742,7 +748,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
-        with self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
+        with torch.cuda.device(
+            getattr(self, list(self.named_parameters())[0][0]).device
+        ), self.prepare_forward(inp, num_gemms=self.num_gemms) as inp:
             weight_tensors = self._get_weight_tensors()
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
 
@@ -817,19 +825,21 @@ class GroupedLinear(TransformerEngineBaseModule):
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
+            weight_params = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+            bias_params = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fuse_wgrad_accumulation:
                 for i in range(self.num_gemms):
-                    weight_param = getattr(self, f"weight{i}")
-                    if weight_param.grad is None:
-                        weight_param.grad = wgrad_list[i].to(weight_param.dtype)
+                    if weight_params[i].grad is None:
+                        weight_params[i].grad = wgrad_list[i].to(weight_params[i].dtype)
             if self.use_bias:
                 for i in range(self.num_gemms):
-                    bias_param = getattr(self, f"bias{i}")
-                    if bias_param.grad is None:
-                        bias_param.grad = grad_biases_[i].to(bias_param.dtype)
+                    if bias_params[i].grad is None:
+                        bias_params[i].grad = grad_biases_[i].to(bias_params[i].dtype)
             del grad_biases_
             del wgrad_list
             del tensor_list
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""

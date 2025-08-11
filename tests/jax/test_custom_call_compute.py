@@ -673,10 +673,6 @@ class TestGroupedQuantize:
             n_groups=n_groups,
         )
 
-        # grouped_quantize does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         scaled_tensor = tex.grouped_quantize(
             x, group_sizes=group_sizes, flatten_axis=flatten_axis, quantizer=grouped_quantizer
         )
@@ -861,15 +857,6 @@ valid_fp8_gemm_operand_types = [
     (jnp.float8_e5m2, jnp.float8_e4m3fn),
     (jnp.float8_e4m3fn, jnp.float8_e5m2),
 ]
-
-
-def _use_jax_fp8_gemm(enabled=False):
-    import os
-
-    if enabled:
-        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
-    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
-        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 class TestDense:
@@ -1321,16 +1308,14 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # grouped_gemm does not work with cudaGraph yet, so the jitting will breaks
-        # To test it locally, export XLA_FLAGS="--xla_gpu_enable_command_buffer= $XLA_FLAGS" to
-        # disable cudaGraph, then use the following jitted function
-
         # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-        #     lhs, rhs, group_sizes, contracting_dims,
-        # )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs,
+            rhs,
+            group_sizes,
+            contracting_dims,
+        )
 
-        prim_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
@@ -1359,12 +1344,7 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
-        # jitting grouped_gemm
-        # prim_out = jax.jit(tex.grouped_gemm, static_argnames=('contracting_dims',))(
-        #         lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
-        #         )
-
-        prim_out = tex.grouped_gemm(
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
@@ -1400,9 +1380,9 @@ class TestGroupedDense:
 
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x, kernel, bias, group_sizes, contracting_dims
@@ -1441,9 +1421,9 @@ class TestGroupedDense:
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_dense, (0, 1, 2))
 
         # jitting the grouped_dense
-        # value_n_grad_prim_func = jit(value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)),
-        #                              static_argnums=(4,))
-        value_n_grad_prim_func = value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2))
+        value_n_grad_prim_func = jit(
+            value_and_grad(self._primitive_sum_grouped_dense, (0, 1, 2)), static_argnums=(4,)
+        )
 
         ref_out_sum, (ref_dgrad, ref_wgrad, ref_dbias) = value_n_grad_ref_func(
             x,

@@ -9,7 +9,6 @@ architectures. It supports various normalization types, quantization, and
 distributed training through sharding constraints.
 """
 
-import warnings
 from functools import partial
 from typing import Tuple
 
@@ -26,16 +25,6 @@ from .quantize import (
 )
 
 
-LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED = False
-
-
-def _issue_batch_first_warning(msg):
-    global LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED
-    if not LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED:
-        warnings.warn(msg, UserWarning)
-        LAYERNORM_DENSE_BATCH_FIRST_WARNING_ISSUED = True
-
-
 def layernorm_dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
@@ -48,7 +37,6 @@ def layernorm_dense(
     layernorm_input_axes: Tuple[str, ...] = None,
     dot_input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
-    batch_first: bool = True,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ) -> jnp.ndarray:
     """Apply layer normalization followed by dense layer transformation.
@@ -69,7 +57,6 @@ def layernorm_dense(
         layernorm_input_axes: Logical axes for sharding the layernorm input
         dot_input_axes: Logical axes for sharding the matrix multiplication input
         kernel_axes: Logical axes for sharding the weight matrix
-        batch_first: Assume that X is batched in the first dimension if it has more than 2 dims.
         quantizer_set: Set of quantizers for different tensor types
 
     Returns:
@@ -93,7 +80,6 @@ def layernorm_dense(
         layernorm_input_axes,
         dot_input_axes,
         kernel_axes,
-        batch_first,
         quantizer_set,
     )
     return output
@@ -108,7 +94,6 @@ def layernorm_dense(
         8,
         9,
         10,
-        11,
     ),
 )
 def _layernorm_dense(
@@ -123,7 +108,6 @@ def _layernorm_dense(
     layernorm_input_axes: Tuple[str, ...],
     dot_input_axes: Tuple[str, ...],
     kernel_axes: Tuple[str, ...],
-    batch_first: bool,
     quantizer_set,
 ):
     """Internal implementation of layernorm_dense with custom VJP.
@@ -143,7 +127,6 @@ def _layernorm_dense(
         epsilon: Small constant for numerical stability
         layernorm_input_axes: Logical axes for layernorm sharding
         dot_input_axes: Logical axes for matrix multiplication sharding
-        batch_first: Assume that X is batched in the first dimension.
         quantizer_set: Set of quantizers
 
     Returns:
@@ -161,7 +144,6 @@ def _layernorm_dense(
         layernorm_input_axes,
         dot_input_axes,
         kernel_axes,
-        batch_first,
         quantizer_set,
     )
     return output
@@ -179,7 +161,6 @@ def _layernorm_dense_fwd_rule(
     layernorm_input_axes,
     dot_input_axes,
     kernel_axes,
-    batch_first,
     quantizer_set,
 ):
     """Forward pass rule for layernorm_dense.
@@ -196,17 +177,6 @@ def _layernorm_dense_fwd_rule(
     x_contracting_dims = (len(x.shape) - 1,)
     k_contracting_dims = (0,)
     assert x.shape[-1] == kernel.shape[0]
-
-    x_bdim = None
-    if x.ndim > 2:
-        if not batch_first:
-            _issue_batch_first_warning(
-                "TE/JAX `layernorm_dense()` fused-layer implementation does not officially "
-                "support sequence-first inputs and may produce incorrect results when "
-                "`batch_first=False` or `transpose_batch_sequence=True`. Use sequence-first "
-                "inputs at your own discretion."
-            )
-        x_bdim = 0 if batch_first else x.ndim - 2
 
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
@@ -236,7 +206,6 @@ def _layernorm_dense_fwd_rule(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
-        batched_dims=((x_bdim,), ()),
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
     )
@@ -260,7 +229,6 @@ def _layernorm_dense_fwd_rule(
         use_bias,
         quantizer_set,
         flatten_axis,
-        x_bdim,
     )
 
     return output, ctx
@@ -271,9 +239,8 @@ def _layernorm_dense_bwd_rule(
     zero_centered_gamma,
     epsilon,
     layernorm_input_axes,
-    dot_input_axes,  # pylint: disable=unused-argument
+    dot_input_axes,
     kernel_axes,
-    batch_first,  # pylint: disable=unused-argument
     ctx,
     grad,
 ):
@@ -288,6 +255,7 @@ def _layernorm_dense_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
+    del dot_input_axes
     (
         casted_ln_out,
         casted_kernel,
@@ -303,7 +271,6 @@ def _layernorm_dense_bwd_rule(
         use_bias,
         quantizer_set,
         flatten_axis,
-        x_bdim,
     ) = ctx
 
     casted_grad, dbias = tex.quantize_dbias(
@@ -328,7 +295,6 @@ def _layernorm_dense_bwd_rule(
         casted_grad.get_tensor(TensorUsage.LHS),
         casted_kernel,
         contracting_dims=(g_constracting_dim, k_constracting_dim),
-        batched_dims=((x_bdim,), ()),
     )
 
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
@@ -342,7 +308,6 @@ def _layernorm_dense_bwd_rule(
         casted_ln_out,
         casted_grad.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_constracting_dim, g_constracting_dim),
-        batched_dims=((x_bdim,), (x_bdim,)),
     )
 
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)

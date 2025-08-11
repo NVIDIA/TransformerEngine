@@ -101,7 +101,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Mark input tensors as not deletable in backward
         for tensor in (input_,) + params_and_extra_inputs:
-            tensor.do_not_clear = True
+            tensor._do_not_clear = True
 
         # Unflatten list of parameters and extra tensor inputs
         extra_inputs = params_and_extra_inputs[-fuser.num_extra_inputs :]
@@ -196,6 +196,10 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
             func_ctx.with_quantized_compute = with_quantized_compute
+
+        # Mark output tensors as not deletable in backward
+        for tensor in [x] + extra_outputs_flat:
+            tensor._do_not_clear = True
 
         x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
@@ -398,27 +402,30 @@ class OperationFuser:
                     break
 
         # Early exit if fusion parameters haven't changed
+        need_reset = False
         recipe_type = type(recipe)
         fusion_params = (recipe_type, first_op_requiring_backward)
-        if fusion_params == (self.recipe_type, self.first_op_requiring_backward):
+        if fusion_params != (self.recipe_type, self.first_op_requiring_backward):
+            # Recipe type or grad requirmenets have changed
+            need_reset = True
+        elif (
+            recipe is not None
+            and recipe.delayed()
+            and self._last_amax_history_len != recipe.amax_history_len
+        ):
+            # FP8 delayed scaling has changed amax history length
+            need_reset = True
+        if not need_reset:
             return
 
-        # Initialize ops if recipe type has changed
-        if self.recipe_type != recipe_type:
-            # Check if this is the first iteration
-            if self.recipe_type is None:
-                for op in self._basic_ops:
-                    op.pre_first_fuser_forward()
-            # Inform ops that the recipe type has changed
+        # Reset recipe state
+        for op in self._basic_ops:
+            op.reset_recipe_state(recipe=recipe)
+
+        # Check if this is the first iteration
+        if self.recipe_type is None:
             for op in self._basic_ops:
-                op.reset_recipe_type(recipe=recipe)
-        # Check if amax history was invalidated
-        elif isinstance(recipe, DelayedScaling):
-            if recipe.amax_history_len != self._last_amax_history_len:
-                raise RuntimeError(
-                    "Detected change of amax history length. "
-                    "Changing the length of amax history is currently not supported."
-                )
+                op.pre_first_fuser_forward()
 
         # Prepare basic op lists for fusions
         forward_ops = [(op, [idx]) for idx, op in enumerate(self._basic_ops)]

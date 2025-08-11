@@ -86,17 +86,37 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def generate_pspec(logical_axis_names):
+def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
     """
     Convert logical axes to PartitionSpec
     """
-    rules = get_sharding_map_logic_axis_to_mesh_axis()
+    rules = None
+    if with_flax_rules:
+        try:
+            import flax
+
+            rules = dict(flax.linen.get_logical_axis_rules())
+        except ImportError:
+            pass
+
+    if rules is None:
+        warnings.warn(
+            "Transformer Engine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated"
+            " and removed in a future version. Please use Flax logical axes with the"
+            " `flax.linen.logical_axis_rules()` context and optionally use"
+            " `transformer_engine.jax.flax.extend_logical_axis_rules()` to extend Flax axis rules"
+            " with Transformer Engine logical axes.",
+            DeprecationWarning,
+        )
+        rules = get_sharding_map_logic_axis_to_mesh_axis()
     # mesh_axis_names = [rules[name] for name in logical_axis_names]
     mesh_axis_names = []
     for name in logical_axis_names:
         axis_name = rules[name] if name in rules else None
         mesh_axis_names.append(axis_name)
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
+    if padded:
+        pspec = get_padded_spec(pspec, len(mesh_axis_names))
     return pspec
 
 
@@ -383,24 +403,3 @@ class ShardingType(Enum):
     TP_ROW = (MajorShardingType.TP, "tp_row")
     DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
-
-
-def get_non_contracting_logical_axes(
-    ndim, logical_axes: tuple[Optional[str]], contracting_dims
-) -> tuple[Optional[str]]:
-    """Get logical axes for non-contracting dimensions.
-
-    Args:
-        ndim: Number of dimensions in the tensor.
-        logical_axes: Tuple of logical axes for each dimension.
-        contracting_dims: Set of dimensions that are being contracted.
-
-    Returns:
-        Tuple of logical axes for non-contracting dimensions.
-    """
-    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
-    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
-
-    non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
-    non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
-    return non_contracting_logical_axes

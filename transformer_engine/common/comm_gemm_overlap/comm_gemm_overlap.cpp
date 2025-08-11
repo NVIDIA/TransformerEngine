@@ -138,6 +138,11 @@ CommOverlapCore::~CommOverlapCore() {
     cudaStreamDestroy(_stream_compute[i]);
   }
 
+  auto error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    NVTE_WARN("Error detected while destroying communicator: ", cudaGetErrorString(error));
+  }
+
   if (_comm_created) {
     try {
 #ifdef NVTE_UB_WITH_MPI
@@ -289,6 +294,7 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
 
 CommOverlapBase::~CommOverlapBase() {
   cudaEventDestroy(_start_d2dcopy);
+  cudaStreamSynchronize(_stream_comm);
   cudaStreamDestroy(_stream_comm);
 }
 
@@ -590,6 +596,25 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
 }  // CommOverlapBase::split_overlap_rs
+
+void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
+                                               cudaStream_t stream_main) {
+  int comm_bytes = _ubuf.bytes();
+  int comm_bytes_per_rank = comm_bytes / _tp_size;
+
+  // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
+  userbuffers_send_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
+                       send_stream);
+  userbuffers_recv_all(_ub_reg, 0, _ub_reg, 0, comm_bytes_per_rank, _tp_id, _tp_size, _ub_comm,
+                       recv_stream);
+
+  for (auto stream : {send_stream, recv_stream}) {
+    NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+    // We sync with the comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_comm, _stop_comm, 0));
+  }
+}
 
 /***************************************************************************************************
  * Comm+GEMM Overlap P2P Base (Ring-Exchange)

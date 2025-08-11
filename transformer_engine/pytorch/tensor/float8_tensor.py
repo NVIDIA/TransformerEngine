@@ -108,10 +108,9 @@ class Float8Quantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            inner_dim = data.size(-1)
+            transpose_shape = [data.size(-1)] + list(data.shape[:-1])
             data_transpose = torch.empty(
-                inner_dim,
-                data.numel() // inner_dim,
+                transpose_shape,
                 dtype=torch.uint8,
                 device=device,
             )
@@ -185,6 +184,12 @@ class Float8Quantizer(Quantizer):
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return DelayedScaling
 
+    def supports_only_rowwise_all_gather(self) -> bool:
+        """
+        Float8Quantizer supports only rowwise all-gather
+        """
+        return True
+
 
 class Float8CurrentScalingQuantizer(Quantizer):
     """Builder class for FP8 tensors with per-tensor current scaling
@@ -230,7 +235,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.ones(1, dtype=torch.float32, device=device)
+        self.scale = torch.empty(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
@@ -361,6 +366,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8CurrentScaling
+
+    def supports_only_rowwise_all_gather(self) -> bool:
+        """
+        Float8CurrentScalingQuantizer supports only rowwise all-gather
+        """
+        return True
 
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
@@ -690,7 +701,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
             # Float8Tensor attributes
             self._data = tensor._data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._scale_inv = tensor._scale_inv
             self._transpose = tensor._transpose

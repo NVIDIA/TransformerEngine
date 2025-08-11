@@ -48,6 +48,7 @@ Transformer Engine documentation
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
    examples/te_gemma/tutorial_accelerate_hf_gemma_finetuning_with_te.ipynb
    examples/te_gemma/tutorial_generation_gemma_with_te.ipynb
+   examples/onnx/onnx_export.ipynb
 
 .. toctree::
    :hidden:
