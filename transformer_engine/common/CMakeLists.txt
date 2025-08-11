@@ -163,6 +163,7 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
+     recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 

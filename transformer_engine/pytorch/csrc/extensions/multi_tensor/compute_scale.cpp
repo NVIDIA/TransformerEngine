@@ -20,4 +20,15 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
       force_pow_2_scales, epsilon, at::cuda::getCurrentCUDAStream());
 }
 
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, at::Tensor noop_flag,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists) {
+  auto noop_flag_cu = makeTransformerEngineTensor(noop_flag);
+  auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
+      makeTransformerEngineTensorList(tensor_lists);
+
+  nvte_multi_tensor_compute_scale_inv_e8m0_cuda(chunk_size, noop_flag_cu.data(),
+                                                tensor_lists_ptr.data(), num_lists, num_tensors,
+                                                at::cuda::getCurrentCUDAStream());
+}
+
 }  // namespace transformer_engine::pytorch
