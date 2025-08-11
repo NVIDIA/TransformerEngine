@@ -50,4 +50,4 @@ class DisableFP8GEMM(TEConfigAPIMapper):
         # If this feature is invoked, then FP8 GEMM is disabled.
         # If not, then default behaviour in TransformerEngineAPI
         # is that fp8_gemm() API call returns True.
-        return False
+        return False, None

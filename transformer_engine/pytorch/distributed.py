@@ -982,6 +982,15 @@ def _all_gather_fp8(
     return out, handle
 
 
+def _get_quantizer_format(quantizer: Quantizer) -> Optional[bool]:
+    """Get quantizer format."""
+    if isinstance(quantizer, DebugQuantizer):
+        quantizer = quantizer.parent_quantizer
+    if isinstance(quantizer, Float8BlockQuantizer):
+        return quantizer.all_gather_usage
+    return None
+
+
 def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
     """Make quantizer compact"""
     _quantizer = quantizer
@@ -1344,6 +1353,44 @@ def gather_along_first_dim(
             inp = quantizer(inp)
         return inp, None
 
+    # Debug case - call gather_along_first_dim on each tensor
+    if isinstance(inp, DebugQuantizedTensor):
+        out_obj = DebugQuantizedTensor(
+            rowwise_gemm_tensor=inp.rowwise_gemm_tensor,
+            columnwise_gemm_tensor=inp.columnwise_gemm_tensor,
+            quantizer=inp.quantizer,
+            layer_name=inp._layer_name,
+            tensor_name=inp._tensor_name,
+        )
+        rowwise = inp.get_tensor(False)
+        columnwise = inp.get_tensor(True)
+        # shapes
+        final_quantizer = (
+            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
+        )
+        rowwise_total = None
+        if rowwise is not None:
+            rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[
+                0
+            ]
+        out_obj.rowwise_gemm_tensor = rowwise_total
+        if rowwise is not columnwise:
+            final_quantizer_columnwise = (
+                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
+            )
+            columnwise_total = None
+            if columnwise is not None:
+                columnwise_total, _ = gather_along_first_dim(
+                    columnwise, process_group, False, final_quantizer_columnwise
+                )
+            out_obj.columnwise_gemm_tensor = columnwise_total
+        else:
+            # Sometimes the same object is used both for rowwise and columnwise gemms,
+            # and we want to avoid double all-gathers.
+            out_obj.columnwise_gemm_tensor = out_obj.rowwise_gemm_tensor
+
+        return out_obj, None
+
     # Output tensor dims
     out_shape = list(inp.size())
     out_shape[0] *= world_size
@@ -1381,34 +1428,6 @@ def gather_along_first_dim(
             out_shape=out_shape,
         )
 
-    # Debug case - call gather_along_first_dim on each tensor
-    if isinstance(inp, DebugQuantizedTensor):
-        out_obj = inp
-        rowwise = inp.get_tensor(False)
-        columnwise = inp.get_tensor(True)
-        final_quantizer = (
-            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
-        )
-        # Temporary fix for TP communication of Float8BlockwiseQTensorBase
-        if isinstance(rowwise, Float8BlockwiseQTensorBase):
-            rowwise = inp._original_tensor
-        rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
-        out_obj.rowwise_gemm_tensor = rowwise_total
-        if rowwise is not columnwise:
-            final_quantizer_columnwise = (
-                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
-            )
-            # Temporary fix for TP communication of Float8BlockwiseQTensorBase
-            if isinstance(columnwise, Float8BlockwiseQTensorBase):
-                columnwise = inp._original_tensor
-            columnwise_total, _ = gather_along_first_dim(
-                columnwise, process_group, False, final_quantizer_columnwise
-            )
-            out_obj.columnwise_gemm_tensor = columnwise_total
-        else:
-            out_obj.rowwise_gemm_tensor = out_obj.rowwise_gemm_tensor
-        return out_obj, None
-
     # High-precision communication for quantized tensors
     if quantizer is not None:
         warnings.warn(
@@ -1419,6 +1438,7 @@ def gather_along_first_dim(
             inp = inp.dequantize()
         # Falling back to high-precision all-gather for Float8BlockQuantizer
         # means that it should directly output GEMM_READY format
+        compact = _get_quantizer_format(quantizer)
         _set_quantizer_format(quantizer, compact=False)
         out = torch.empty(
             out_shape,
@@ -1428,6 +1448,7 @@ def gather_along_first_dim(
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
+        _set_quantizer_format(quantizer, compact=compact)
         return out, None
 
     # Dequantize quantized tensor if not supported

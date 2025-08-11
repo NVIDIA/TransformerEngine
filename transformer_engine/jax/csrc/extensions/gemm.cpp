@@ -592,8 +592,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias")
-                                  .Attr<bool>("is_grouped_dense_wgrad"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<bool>("is_grouped_dense_wgrad"));
 
 }  // namespace jax
 }  // namespace transformer_engine
