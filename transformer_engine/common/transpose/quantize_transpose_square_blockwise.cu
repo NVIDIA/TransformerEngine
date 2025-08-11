@@ -168,6 +168,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     }
   }
 
+// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
+// store to global memory.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaTriggerProgrammaticLaunchCompletion();
 #endif
@@ -395,6 +397,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     }
   }
 
+// Trigger the next kernel here so that it's load from global memory can overlap with this kernel's
+// store to global memory.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaTriggerProgrammaticLaunchCompletion();
 #endif

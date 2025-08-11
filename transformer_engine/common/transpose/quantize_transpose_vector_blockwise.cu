@@ -235,6 +235,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   __syncthreads();
 
+// If not return columnwise, we trigger the next kernel here so that it's load from global memory
+// can overlap with this kernel's return rowwise.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   if (!return_columnwise_gemm_ready && !return_columnwise_compact) {
     cudaTriggerProgrammaticLaunchCompletion();
@@ -332,6 +334,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
+// If return columnwise, we trigger the next kernel here so that it's load from global memory
+// can overlap with this kernel's return columnwise.
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   if (return_columnwise_gemm_ready || return_columnwise_compact) {
     cudaTriggerProgrammaticLaunchCompletion();
