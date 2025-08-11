@@ -29,6 +29,7 @@ from te_gemma import TEGemmaForCausalLM, TEGemmaForCausalLMCudaGraphs
 
 random.seed(42)
 
+
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
@@ -62,6 +63,10 @@ class HyperParameters:
 
         # Attention
         self.is_paged = False
+
+        # This is either provided by the user or it will be set when the
+        # model weights are downloaded.
+        self.weights_cache_dir = ""
 
 
 hyperparams = HyperParameters()
@@ -108,7 +113,41 @@ def get_dataloaders(accelerator: Accelerator, hyperparams):
     return train_dataloader
 
 
+def ensure_model_is_downloaded(hyperparams):
+    assert hyperparams.model_name in [
+        "google/gemma-7b",
+    ], "Only Gemma 7B model is supported!"
+
+    # Login using Huggingface Hub API
+    from huggingface_hub import login
+
+    try:
+        login(hyperparams.hf_access_token)
+    except Exception as e:
+        if "Invalid token passed!" in str(e):
+            print(
+                "Please pass a valid HF Access Token! More info at"
+                " https://huggingface.co/docs/hub/en/security-tokens."
+            )
+        else:
+            print(f"Exception is {e}")
+
+    # Download the model if it doesn't exist
+    from huggingface_hub import snapshot_download
+
+    supplied_cache_dir = (
+        hyperparams.weights_cache_dir if hyperparams.weights_cache_dir != "" else None
+    )
+    hyperparams.weights_cache_dir = snapshot_download(
+        repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir
+    )
+
+    print(f"Model cache directory : {hyperparams.weights_cache_dir}")
+
 def init_baseline_model(hyperparams):
+    # Download and cache the weights if not already downloaded
+    ensure_model_is_downloaded(hyperparams)
+
     # Init the model
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     # make sure to use flash_attention to do iso comparison with TEGemmaModel
@@ -122,6 +161,9 @@ def init_baseline_model(hyperparams):
 
 
 def init_te_gemma_model(hyperparams):
+    # Download and cache the weights if not already downloaded
+    ensure_model_is_downloaded(hyperparams)
+
     cls = TEGemmaForCausalLMCudaGraphs if hyperparams.generation_cuda_graphs else TEGemmaForCausalLM
     config = AutoConfig.from_pretrained(hyperparams.model_name)
     config._attn_implementation = "flash_attention_2"
@@ -270,12 +312,15 @@ def print_sample_of_generated_texts(model, hyperparams):
         "The fundamental theorem of calculus for the layman:",
         "A fact about AI:",
     ]
-    prompts *= hyperparams.batch_size // len(prompts) # repeat prompts to match batch size
+    prompts *= hyperparams.batch_size // len(prompts)  # repeat prompts to match batch size
 
     inputs = tokenizer(prompts, return_tensors="pt", padding=True)
 
-    max_total_tokens = (hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs
-                       else hyperparams.cuda_graphs_static_max_seq_len)
+    max_total_tokens = (
+        hyperparams.max_seq_length
+        if not hyperparams.generation_cuda_graphs
+        else hyperparams.cuda_graphs_static_max_seq_len
+    )
 
     max_length = inputs["input_ids"].size(1)
     new_length = ((max_length + 63) // 64) * max_total_tokens
@@ -317,11 +362,15 @@ def _generate_random_words(num_words, max_word_length):
     return words
 
 
-def benchmark_generation(model, hyperparams, context_length = 20):
+def benchmark_generation(model, hyperparams, context_length=20):
     batch_size = hyperparams.batch_size
     # hyperparams.max_seq_length = 512
 
-    max_total_tokens = hyperparams.max_seq_length if not hyperparams.generation_cuda_graphs else hyperparams.cuda_graphs_static_max_seq_len
+    max_total_tokens = (
+        hyperparams.max_seq_length
+        if not hyperparams.generation_cuda_graphs
+        else hyperparams.cuda_graphs_static_max_seq_len
+    )
     max_new_tokens = max_total_tokens - context_length
 
     print(
@@ -338,7 +387,9 @@ def benchmark_generation(model, hyperparams, context_length = 20):
 
     # Add padding to the left
     inputs["input_ids"] = torch.nn.functional.pad(
-        inputs["input_ids"], (max_total_tokens - max_context_tokens, 0), value=tokenizer.pad_token_id
+        inputs["input_ids"],
+        (max_total_tokens - max_context_tokens, 0),
+        value=tokenizer.pad_token_id,
     )
 
     # Add padding to the left (only intended for baseline generation with HF

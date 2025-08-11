@@ -11,7 +11,7 @@ from typing import List
 
 from transformer_engine.pytorch.fp8 import fp8_model_init
 
-from transformers.modeling_utils import load_state_dict, _load_state_dict_into_model
+from transformers.modeling_utils import load_state_dict
 from transformers.utils.hub import get_checkpoint_shard_files
 
 """
@@ -45,8 +45,8 @@ def _load_weights_for_fp8_model(vanilla_model, hyperparams):
 
 def _load_weights_for_standard_model(vanilla_model, config):
     # The weights are loaded from the file with original weights.
-    archive_file = os.path.join(config.model_name, "model.safetensors.index.json")
-    resolved_archive_file, _ = get_checkpoint_shard_files(config.model_name, archive_file)
+    archive_file = os.path.join(config.weights_cache_dir, "model.safetensors.index.json")
+    resolved_archive_file, _ = get_checkpoint_shard_files(config.weights_cache_dir, archive_file)
     total_dict = {}
     for shard_file in resolved_archive_file:
         state_dict = load_state_dict(shard_file)
@@ -59,7 +59,8 @@ def _load_weights_for_standard_model(vanilla_model, config):
         qkv_fused_and_interleaved=config.fuse_qkv_params,
     )
     # Copy parameters like embedding:
-    _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="")
+    # _load_state_dict_into_model(vanilla_model, total_dict, start_prefix="")
+    vanilla_model.load_state_dict(total_dict, strict=False)
 
     # Force mem release. Taken from huggingface code.
     del total_dict
