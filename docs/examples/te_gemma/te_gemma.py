@@ -412,7 +412,9 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         hidden_states = self.model.embed_tokens(kwargs["input_ids"])
         logits = self._model_context_phase(
             hidden_states,
-            attention_mask=(kwargs["input_ids"] == 0), # Hardcoded, this only applies to bshd/sbhd layouts.
+            attention_mask=(
+                kwargs["input_ids"] == 0
+            ),  # Hardcoded, this only applies to bshd/sbhd layouts.
             attn_mask_type="padding_causal",
         )
         return logits
