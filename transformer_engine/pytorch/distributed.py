@@ -1230,7 +1230,7 @@ def _all_gather_mxfp8(
             device = inp._columnwise_data.device
         else:
             raise ValueError("Got MXFP8 input tensor without any data")
-        dtype = torch.bfloat16
+        dtype = torch.bfloat16  # Guess high-precision dtype.
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorBase, "
