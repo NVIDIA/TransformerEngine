@@ -21,7 +21,7 @@ RUN dnf -y install --allowerasing cudnn9-cuda-12
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 RUN echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/999_nvidia_cuda.conf
-RUN dnf -y install cuda-toolkit
+RUN dnf -y install cuda-toolkit-12
 RUN dnf clean all
 RUN dnf -y install glog.x86_64 glog-devel.x86_64
 
