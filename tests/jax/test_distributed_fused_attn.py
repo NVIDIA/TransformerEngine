@@ -29,10 +29,9 @@ from transformer_engine.jax.attention import (
 
 DTYPES = [jnp.bfloat16]
 
-DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {
-    "L1": (32, 1024, 16, 128),
-    "L2": (32, 512, 12, 64)
-}
+DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {"L1": (32, 1024, 16, 128), "L2": (32, 512, 12, 64)}
+
+
 class TestDistributedSelfAttn:
 
     def generate_collectives_count_ref(
@@ -123,10 +122,7 @@ class TestDistributedSelfAttn:
         runner.test_backward()
 
     @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest_parametrize_wrapper(
-        "data_shape",
-        DISTRIBUTED_SELF_ATTN_DATA_SHAPES
-    )
+    @pytest_parametrize_wrapper("data_shape", DISTRIBUTED_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize(
         "attn_bias_type, bias_shape",
         [
@@ -193,10 +189,10 @@ class TestDistributedSelfAttn:
             use_shardy=True,
         )
 
-DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {
-    "L1": [32, 512, 16, 64],
-    "L2": [32, 128, 12, 64]
-}
+
+DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {"L1": [32, 512, 16, 64], "L2": [32, 128, 12, 64]}
+
+
 class TestDistributedCrossAttn:
 
     def generate_collectives_count_ref(self):
@@ -472,7 +468,9 @@ class TestDistributedContextParallelSelfAttn:
             use_shardy=False,
         )
 
-    @pytest_parametrize_wrapper("device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs())
+    @pytest_parametrize_wrapper(
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+    )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -571,16 +569,16 @@ class TestDistributedContextParallelSelfAttn:
             use_scan_ring=True,
         )
 
+
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
     "L1": [1, 16, 1, 1],
-    "L2": [[4, 32, 12, 32], [3, 32, 8, 64]]
+    "L2": [[4, 32, 12, 32], [3, 32, 8, 64]],
 }
+
+
 class TestReorderCausalLoadBalancing:
     @pytest.mark.parametrize("cp_size", [2, 4, 8])
-    @pytest_parametrize_wrapper(
-        "shape",
-        REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES
-    )
+    @pytest_parametrize_wrapper("shape", REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES)
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
     @pytest.mark.parametrize(
         "reorder_strategy",

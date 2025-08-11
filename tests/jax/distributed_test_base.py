@@ -51,9 +51,13 @@ def generate_context_parallel_configs():
         ndev = cp * tp * dp
         if is_devices_enough(ndev):
             if cp != 1:
-                configsL1.append(pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}"))
+                configsL1.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
+                )
             else:
-                configsL2.append(pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}"))
+                configsL2.append(
+                    pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
+                )
     configs = {"L1": configsL1, "L2": configsL2}
     return configs
 
