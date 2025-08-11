@@ -126,8 +126,8 @@ def restore_from_saved(
     return tensor_objects
 
 
-class QuantizerBase(abc.ABC):
-    """Base builder class for quantized tensors.
+class Quantizer(abc.ABC):
+    """Builder class for quantized tensors.
 
     This class is typically used to convert a high-precision tensor
     (e.g. in FP32 or BF16) into a quantized tensor (e.g. in FP8).
@@ -154,45 +154,6 @@ class QuantizerBase(abc.ABC):
     """
     columnwise_usage: bool
 
-    def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
-        self.rowwise_usage = rowwise
-        self.columnwise_usage = columnwise
-
-    def __repr__(self):
-        return (
-            f"{self.__class__.__name__}("
-            f"rowwise_usage={self.rowwise_usage}, "
-            f"columnwise_usage={self.columnwise_usage}"
-            ")"
-        )
-
-    @abc.abstractmethod
-    def quantize(self, tensor: torch.Tensor, **kwargs) -> QuantizedTensorBase:
-        """Quantize tensor"""
-
-    def __call__(self, tensor: torch.Tensor) -> QuantizedTensorBase:
-        """Quantize tensor"""
-        return self.quantize(tensor)
-
-    def set_usage(
-        self,
-        rowwise: Optional[bool] = None,
-        columnwise: Optional[bool] = None,
-    ) -> None:
-        """Set how the quantized tensor is expected to be used"""
-        if rowwise is not None:
-            self.rowwise_usage = rowwise
-        if columnwise is not None:
-            self.columnwise_usage = columnwise
-
-
-class Quantizer(QuantizerBase):
-    """Builder class for quantized tensors.
-
-    This class is typically used to convert a high-precision tensor
-    (e.g. in FP32 or BF16) into a quantized tensor (e.g. in FP8).
-    """
-
     """Whether to instantiates tensor for purely internal usage
 
     Internal tensors are storage classes with minimal logic. They have
@@ -204,7 +165,8 @@ class Quantizer(QuantizerBase):
     internal: bool
 
     def __init__(self, *, rowwise: bool, columnwise: bool) -> None:
-        super().__init__(rowwise=rowwise, columnwise=columnwise)
+        self.rowwise_usage = rowwise
+        self.columnwise_usage = columnwise
         self.internal = False
 
     def __repr__(self):
@@ -212,7 +174,7 @@ class Quantizer(QuantizerBase):
             f"{self.__class__.__name__}("
             f"rowwise_usage={self.rowwise_usage}, "
             f"columnwise_usage={self.columnwise_usage}, "
-            f"internal={self.internal}"
+            f"internal={self.internal}, "
             ")"
         )
 
@@ -233,16 +195,7 @@ class Quantizer(QuantizerBase):
         out: Optional[QuantizedTensor] = None,
         dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
     ) -> QuantizedTensor:
-        """Quantize tensor with PyTorch autograd support.
-
-        Args:
-            tensor (torch.Tensor): Input tensor to quantize.
-            out (Optional[QuantizedTensor]): Pre-allocated output tensor for in-place operation.
-            dtype (Optional[torch.dtype]): Target dtype (may be used by subclasses).
-
-        Returns:
-            QuantizedTensor: Quantized tensor.
-        """
+        """Quantize tensor"""
         if out is not None:
             return self.update_quantized(tensor, out)
         if (not self.internal) and torch.is_grad_enabled():
@@ -255,6 +208,10 @@ class Quantizer(QuantizerBase):
         for tensor in list_of_tensors:
             list_of_output_tensors.append(self.quantize(tensor))
         return list_of_output_tensors
+
+    def __call__(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor"""
+        return self.quantize(tensor)
 
     @abc.abstractmethod
     def make_empty(
@@ -275,12 +232,22 @@ class Quantizer(QuantizerBase):
 
         """
 
-    def copy(self) -> Quantizer:
-        """Create shallow copy of this quantizer.
+    def set_usage(
+        self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
+    ) -> None:
+        """Set how the quantized tensor is expected to be used
 
-        Returns:
-            Quantizer: A copy of this quantizer instance.
+        See documentation for `rowwise_usage` and `columnwise_usage`
+        variables.
+
         """
+        if rowwise is not None:
+            self.rowwise_usage = rowwise
+        if columnwise is not None:
+            self.columnwise_usage = columnwise
+
+    def copy(self) -> Quantizer:
+        """Create shallow copy"""
         return copy.copy(self)
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
