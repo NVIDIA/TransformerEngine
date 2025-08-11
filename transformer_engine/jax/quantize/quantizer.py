@@ -885,7 +885,7 @@ class QuantizerFactory:
         bwd_dtype: jnp.dtype = None,
         is_2x2x: bool = None,
         n_groups: int = None,
-        recipe: Optional[recipe.Recipe] = None,
+        fp8_recipe: Optional[recipe.Recipe] = None,
         **kwargs,
     ) -> tuple[Union[tuple[Quantizer], None]]:
         """Create one or more sets of quantizers.
@@ -897,18 +897,23 @@ class QuantizerFactory:
             bwd_dtype: Data type for backward pass, default is QuantizeConfig.BWD_DTYPE
             is_2x2x: Whether to use 2x2x quantization, default is QuantizeConfig.IF_QUANTIZE_2X
             n_groups:
-            recipe: Recipe to use for quantization. Scaling mode can be specified directly via the scaling_mode parameter or indirectly via recipe. Recipe is preferred as it will support additional recipes in future where scaling mode differs between x, kernel, and grad in the quantizer set.
+            fp8_recipe: Recipe to use for quantization. Scaling mode can be specified directly via the scaling_mode parameter or indirectly via recipe. Recipe is preferred as it will support additional recipes in future where scaling mode differs between x, kernel, and grad in the quantizer set.
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
             A single quantizer set or tuple of quantizer sets
         """
 
-        assert scaling_mode is None or recipe is None, "Cannot specify both scaling_mode and recipe when creating a quantizer set. Scaling mode can be specified directly via the scaling_mode parameter or indirectly via recipe. Recipe is preferred as it will support additional recipes in future where scaling mode differs between x, kernel, and grad in the quantizer set."
+        assert scaling_mode is None or fp8_recipe is None, (
+            "Cannot specify both scaling_mode and fp8_recipe when creating a quantizer set. Scaling"
+            " mode can be specified directly via the scaling_mode parameter or indirectly via"
+            " recipe. Recipe is preferred as it will support additional recipes in future where"
+            " scaling mode differs between x, kernel, and grad in the quantizer set."
+        )
 
-        if recipe is not None:
+        if fp8_recipe is not None:
             # TODO(jberchtold): once recipe and scaling mode are decoupled update this logic
-            scaling_mode = _get_scaling_mode(recipe)
+            scaling_mode = _get_scaling_mode(fp8_recipe)
         else:
             scaling_mode = scaling_mode or QuantizeConfig.SCALING_MODE
         fwd_dtype = fwd_dtype or QuantizeConfig.FWD_DTYPE
