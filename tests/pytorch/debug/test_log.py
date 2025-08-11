@@ -59,10 +59,13 @@ for r in recipes:
     for stat in bare_stats:
         for columnwise_postfix in ["", "_columnwise"]:
             if (
-                r in ["fp8_current_scaling", "fp8_block_scaling", "mxfp8"]
+                r in ["fp8_current_scaling", "fp8_block_scaling"]
                 and torch.cuda.get_device_capability()[0] < 9
             ):
-                # hopper in needed for current-scaling, block-scaling and mxfp8
+                # hopper is needed for current-scaling, block-scaling
+                continue
+            if r == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
+                # blackwell is needed for mxfp8
                 continue
             if (
                 r in ["fp8_delayed_scaling", "fp8_current_scaling"]
