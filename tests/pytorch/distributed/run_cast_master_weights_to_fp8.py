@@ -17,26 +17,27 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    MXFP8BlockScaling,
     Format,
     Recipe,
 )
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor import QuantizedTensor, cast_master_weights_to_fp8
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
-    Float8CurrentScalingQuantizer,
-)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
 
 
-def _get_raw_data(quantized_tensor):
+def _get_raw_data(quantized_tensor, colwise=False):
     """Get the underlying data of a quantized tensor, used in zero-1 optimizer"""
     if isinstance(quantized_tensor, Float8Tensor):
+        assert not colwise, "Float8Tensor does not support get colwise data"
         assert hasattr(quantized_tensor, "_data"), "Float8Tensor does not have _data attribute"
         assert quantized_tensor._data.dtype == torch.uint8, "Float8Tensor _data must be uint8"
         return quantized_tensor._data
     elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
+        assert not colwise, "Float8BlockwiseQTensor does not support get colwise data"
         assert hasattr(
             quantized_tensor, "_rowwise_data"
         ), "Float8BlockwiseQTensor does not have _rowwise_data attribute"
@@ -44,6 +45,23 @@ def _get_raw_data(quantized_tensor):
             quantized_tensor._rowwise_data.dtype == torch.uint8
         ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
         return quantized_tensor._rowwise_data
+    elif isinstance(quantized_tensor, MXFP8Tensor):
+        if colwise:
+            assert hasattr(
+                quantized_tensor, "_columnwise_data"
+            ), "MXFP8Tensor does not have columnwise_data attribute"
+            assert (
+                quantized_tensor._columnwise_data.dtype == torch.uint8
+            ), "MXFP8Tensor columnwise_data must be uint8"
+            return quantized_tensor._columnwise_data
+        else:
+            assert hasattr(
+                quantized_tensor, "_rowwise_data"
+            ), "MXFP8Tensor does not have rowwise_data attribute"
+            assert (
+                quantized_tensor._rowwise_data.dtype == torch.uint8
+            ), "MXFP8Tensor rowwise_data must be uint8"
+            return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
 
@@ -177,38 +195,43 @@ class MiniZero_1:
                 end = start_offset + master_weight.numel()
                 weight.data.view(-1)[start:end].copy_(master_weight)
 
-        # -----------------------------------------------------------------------------------------
-        # Step 5: Copy the updated weights (not all weights) to the weight buffer
-        # -----------------------------------------------------------------------------------------
-        for i in range(len(self.weights)):
-            master_weight = self.master_weights[i]
-            if master_weight is None:
-                continue
-            start_offset = self.start_offsets[i]
-            if isinstance(self.weights[i], QuantizedTensor):
-                weight = _get_raw_data(self.weights[i])
-            else:
-                weight = self.weights[i]
-            weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
-            overlapping_start, overlapping_end = self.overlapping_areas[i]
-            self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
+        colwise_list = [False]
+        if isinstance(self.weights[0], MXFP8Tensor):
+            colwise_list.append(True)
 
-        # -----------------------------------------------------------------------------------------
-        # Step 6: Weight all-gather (FP8 or BF16)
-        # -----------------------------------------------------------------------------------------
-        dist.all_gather_into_tensor(
-            self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
-        )
+        for colwise in colwise_list:
+            # -------------------------------------------------------------------------------------
+            # Step 5: Copy the updated weights (not all weights) to the weight buffer
+            # -------------------------------------------------------------------------------------
+            for i in range(len(self.weights)):
+                master_weight = self.master_weights[i]
+                if master_weight is None:
+                    continue
+                start_offset = self.start_offsets[i]
+                if isinstance(self.weights[i], QuantizedTensor):
+                    weight = _get_raw_data(self.weights[i], colwise)
+                else:
+                    weight = self.weights[i]
+                weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
+                overlapping_start, overlapping_end = self.overlapping_areas[i]
+                self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
 
-        # -----------------------------------------------------------------------------------------
-        # Step 7: Copy the gathered weights from weight buffer to the actual weights
-        # -----------------------------------------------------------------------------------------
-        for weight, offset in zip(self.weights, self.offsets[:-1]):
-            start = offset
-            end = offset + weight.numel()
-            if isinstance(weight, QuantizedTensor):
-                weight = _get_raw_data(weight)
-            weight.view(-1).data.copy_(self.weight_buffer[start:end])
+            # -------------------------------------------------------------------------------------
+            # Step 6: Weight all-gather (FP8 or BF16)
+            # -------------------------------------------------------------------------------------
+            dist.all_gather_into_tensor(
+                self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
+            )
+
+            # -------------------------------------------------------------------------------------
+            # Step 7: Copy the gathered weights from weight buffer to the actual weights
+            # -------------------------------------------------------------------------------------
+            for weight, offset in zip(self.weights, self.offsets[:-1]):
+                start = offset
+                end = offset + weight.numel()
+                if isinstance(weight, QuantizedTensor):
+                    weight = _get_raw_data(weight, colwise)
+                weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
 
 class MiniOptimizer:
@@ -419,6 +442,9 @@ class MiniFSDP:
 
 
 def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
+    if quantization == "mxfp8":
+        return
+
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
@@ -445,15 +471,15 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 16, **linear_kwargs),
-            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 32, **linear_kwargs),
+            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 16, **linear_kwargs),
-        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 32, **linear_kwargs),
+        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -470,7 +496,7 @@ def _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group):
         optimizer.zero_grad()
 
         inputs = [
-            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
@@ -556,6 +582,8 @@ def quantization_recipe(quantization) -> Recipe:
         return Float8CurrentScaling(fp8_format=fp8_format)
     elif quantization == "fp8_block":
         return Float8BlockScaling(fp8_format=fp8_format)
+    elif quantization == "mxfp8":
+        return MXFP8BlockScaling()
     else:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
@@ -579,15 +607,15 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256 + 16, **linear_kwargs),
-            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 32, **linear_kwargs),
+            te.Linear(256 + 32, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256 + 16, **linear_kwargs),
-        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 32, **linear_kwargs),
+        te.Linear(256 + 32, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -610,7 +638,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
             w.main_grad.zero_()
 
         inputs = [
-            torch.randn(16, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
+            torch.randn(32, 128, dtype=torch.bfloat16, device="cuda") for _ in range(world_size)
         ]
         # Choose based on rank to make sure the inputs of different ranks are different.
         x = inputs[rank]
@@ -666,7 +694,7 @@ def main(argv=None, namespace=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
+        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block", "mxfp8"]
     )
     args = parser.parse_args(argv, namespace)
 

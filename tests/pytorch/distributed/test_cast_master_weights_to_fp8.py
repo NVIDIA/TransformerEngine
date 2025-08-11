@@ -18,6 +18,7 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
     FP8GlobalStateManager.is_fp8_block_scaling_available()
 )
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(2, torch.cuda.device_count())
@@ -31,10 +32,12 @@ def _run_test(quantization):
     assert result.returncode == 0
 
 
-@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block"])
+@pytest.mark.parametrize("quantization", ["fp8", "fp8_cs", "fp8_block", "mxfp8"])
 def test_cast_master_weights_to_fp8(quantization):
     if quantization in ("fp8", "fp8_cs") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "fp8_block" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
     _run_test(quantization)
