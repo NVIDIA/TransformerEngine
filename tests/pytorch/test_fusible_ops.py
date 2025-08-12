@@ -21,6 +21,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
+    BackwardAddRMSNorm,
     BackwardLinearAdd,
     ForwardLinearBiasActivation,
     ForwardLinearBiasAdd,
@@ -2100,6 +2101,94 @@ class TestFusedOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
+
+    @pytest.mark.parametrize("weight_shape", ((19,), (64,)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("zero_centered_gamma", (False, True))
+    def test_backward_add_rmsnorm(
+        self,
+        *,
+        weight_shape: Iterable[int],
+        in_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        eps: float = 0.3,
+        zero_centered_gamma: bool,
+    ) -> None:
+        """Fused backward RMNorm + add"""
+
+        # Make input and weight shapes consistent
+        in_shape = list(in_shape)[:-1] + list(weight_shape)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w_ref, w_test = make_reference_and_test_tensors(
+            weight_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy1_ref, dy1_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+        dy2_ref, dy2_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        inner_dims = tuple(range(len(in_shape) - len(weight_shape), len(in_shape)))
+        var_ref = x_ref.square().sum(dim=inner_dims, keepdim=True) / math.prod(weight_shape)
+        if zero_centered_gamma:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * (1 + w_ref)
+        else:
+            y1_ref = x_ref / torch.sqrt(eps + var_ref) * w_ref
+        y2_ref = x_ref
+        (y1_ref * dy1_ref + y2_ref * dy2_ref).sum().backward()
+
+        # Implementation with fusible operations
+        model = te_ops.Sequential(
+            te_ops.MakeExtraOutput(),
+            te_ops.RMSNorm(
+                weight_shape,
+                eps=eps,
+                device=device,
+                dtype=dtype,
+                zero_centered_gamma=zero_centered_gamma,
+            ),
+        )
+        with torch.no_grad():
+            model[1].weight.copy_(w_test)
+            del w_test
+        y1_test, y2_test = model(x_test)
+        (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
+
+        # Check that backward operations have been fused
+        backward_ops = model._module_groups[0]._backward_ops
+        assert len(backward_ops) == 1
+        assert isinstance(backward_ops[0][0], BackwardAddRMSNorm)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+
+        # Check results
+        y1_test = y1_test.to(dtype=torch.float64, device="cpu")
+        y2_test = y2_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        dw_test = model[1].weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y1_test, y1_ref, **tols)
+        torch.testing.assert_close(y2_test, y2_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+        torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
