@@ -936,6 +936,7 @@ template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, cons
 void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, Tensor *dbias,
                  Tensor *workspace, cudaStream_t stream) {
   checkCuDriverContext(stream);
+  cuda_driver::ensure_context_exists();
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
@@ -1009,6 +1010,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   bool use_rowwise_scaling = output->has_data();
   bool use_colwise_scaling = output->has_columnwise_data();
   checkCuDriverContext(stream);
+  cuda_driver::ensure_context_exists();
+
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
