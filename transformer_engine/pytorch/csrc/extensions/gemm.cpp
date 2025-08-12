@@ -90,7 +90,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                             bool use_split_accumulator, CommOverlapCore* comm_overlap,
+                             bool use_split_accumulator, bool ag_on_B, CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap) {
   // Input tensors
@@ -214,8 +214,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
                                            bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                           accumulate, use_split_accumulator, extra_output_tensor,
-                                           main_stream);
+                                           accumulate, use_split_accumulator, ag_on_B,
+                                           extra_output_tensor, main_stream);
           });
         }
       } else {

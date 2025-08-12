@@ -39,6 +39,7 @@ def general_gemm(
     ub_type: tex.CommOverlapType = None,
     extra_output: Optional[torch.Tensor] = None,
     bulk_overlap: bool = False,
+    ag_on_B: bool = True,
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
@@ -46,6 +47,9 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     # assert quantization_params is None, "FP8 output not supported yet"
+
+    if layout == "NT":
+        assert gelu == False, "When layout='NT', gelu should be false."
 
     if ub_type is not None:
         assert ub is not None, (
@@ -102,6 +106,7 @@ def general_gemm(
         workspace.shape[0],
         accumulate,
         use_split_accumulator,
+        ag_on_B, # ag_on_B
     )
     kwargs = {
         "comm_overlap": ub,
