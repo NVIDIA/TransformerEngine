@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.module.base import get_workspace
-from ...cpp_extensions import general_gemm, validate_gemm_scale
+from ...cpp_extensions.gemm import general_gemm, validate_gemm_scale
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,

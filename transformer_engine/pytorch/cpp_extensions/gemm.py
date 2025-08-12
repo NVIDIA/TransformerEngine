@@ -18,7 +18,6 @@ from ...debug.pytorch.debug_quantization import DebugQuantizer
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
-    "validate_gemm_scale",
 ]
 
 

@@ -2081,6 +2081,7 @@ class TestFusedOps:
                 ),
                 te_ops.ConstantScale(scale),
                 te_ops.AddExtraInput(in_place=True),
+                te_ops.Quantize(),
             )
         with torch.no_grad():
             model[0].weight.copy_(w_test)
@@ -2091,8 +2092,9 @@ class TestFusedOps:
 
         # Check that forward operations have been fused
         forward_ops = model._module_groups[0]._forward_ops
-        assert len(forward_ops) == 1
+        assert len(forward_ops) == 2
         assert isinstance(forward_ops[0][0], ForwardLinearScaleAdd)
+        assert isinstance(forward_ops[1][0], te_ops.Quantize)
 
         # Expected numerical error
         tols = dtype_tols(dtype)

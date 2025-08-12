@@ -9,8 +9,8 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.basic import BasicLinear, ConstantScale
-from transformer_engine.pytorch.ops.op import (
+from ..basic import BasicLinear, ConstantScale
+from ..op import (
     FusedOperation,
     FusibleOperation,
     OperationContext,

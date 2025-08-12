@@ -10,14 +10,14 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.ops.basic import AddExtraInput, BasicLinear, ConstantScale
-from transformer_engine.pytorch.ops.op import (
+from ...fp8 import FP8GlobalStateManager
+from ..basic import AddExtraInput, BasicLinear, ConstantScale
+from ..op import (
     FusedOperation,
     FusibleOperation,
     OperationContext,
 )
-from transformer_engine.pytorch.tensor import Quantizer
+from ...tensor import Quantizer
 
 
 class ForwardLinearScaleAdd(FusedOperation):
@@ -60,7 +60,7 @@ class ForwardLinearScaleAdd(FusedOperation):
         # FP8 metadata
         input_quantizer = linear_op.get_quantizer("forward", 0)
         weight_quantizer = linear_op.get_quantizer("forward", 1)
-        output_quantizer = next_op_input_quantizer
+        output_quantizer = None
         grad_output_quantizer = linear_op.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
