@@ -29,7 +29,7 @@ from transformer_engine.jax.attention import (
 
 DTYPES = [jnp.bfloat16]
 
-DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {"L1": (32, 1024, 16, 128), "L2": (32, 512, 12, 64)}
+DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {"L1": [(32, 1024, 16, 128)], "L2": [(32, 512, 12, 64)]}
 
 
 class TestDistributedSelfAttn:
@@ -67,7 +67,6 @@ class TestDistributedSelfAttn:
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         dropout_prob = 0.0
         is_training = True
-
         batch, seqlen, num_head, hidden = data_shape
 
         if not is_fused_attn_kernel_available(
@@ -190,7 +189,7 @@ class TestDistributedSelfAttn:
         )
 
 
-DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {"L1": [32, 512, 16, 64], "L2": [32, 128, 12, 64]}
+DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {"L1": [[32, 512, 16, 64]], "L2": [[32, 128, 12, 64]]}
 
 
 class TestDistributedCrossAttn:
@@ -390,7 +389,7 @@ class TestDistributedContextParallelSelfAttn:
         runner.test_backward()
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
@@ -426,7 +425,7 @@ class TestDistributedContextParallelSelfAttn:
             use_shardy=True,
         )
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
@@ -532,7 +531,7 @@ class TestDistributedContextParallelSelfAttn:
             window_size=window_size,
         )
 
-    @pytest.mark.parametrize(
+    @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
@@ -571,7 +570,7 @@ class TestDistributedContextParallelSelfAttn:
 
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
-    "L1": [1, 16, 1, 1],
+    "L1": [[1, 16, 1, 1]],
     "L2": [[4, 32, 12, 32], [3, 32, 8, 64]],
 }
 
