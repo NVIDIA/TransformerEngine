@@ -304,4 +304,12 @@ void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inp
 
 void reduce_bf16(void *input, void *output, int num_inputs, int input_size, cudaStream_t stream);
 
+void userbuffers_send_all(const int srchandler, const size_t srcoffset, const int dsthandler,
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream);
+
+void userbuffers_recv_all(const int srchandler, const size_t srcoffset, const int dsthandler,
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream);
+
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

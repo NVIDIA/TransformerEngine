@@ -13,6 +13,7 @@ from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as Bas
 from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
+from transformer_engine.debug.features.utils import next_enabled_iter
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
@@ -92,8 +93,15 @@ class LogFp8TensorStats(BaseLogTensorStats):
         self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
-        # check whether logging should happen in this iteration
-        return self._check_params(config, layer_name, iteration=iteration)
+        run_current, next_iter = next_enabled_iter(
+            config.get("start_step", None),
+            config.get("end_step", None),
+            config.get("start_end_list", None),
+            config.get("freq", 1),
+            iteration,
+        )
+        STATS_BUFFERS.layers_to_next_iter[layer_name] = next_iter
+        return run_current, next_iter
 
     @api_method
     def inspect_tensor_postquantize(
