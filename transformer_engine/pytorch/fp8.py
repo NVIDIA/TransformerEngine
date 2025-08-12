@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import copy
 import itertools
 import os
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    CustomRecipe,
 )
 
 from .constants import dist_group_type
@@ -823,6 +825,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif isinstance(recipe, CustomRecipe):
+            cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1070,3 +1074,61 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class CustomRecipeState(RecipeState):
+    """State for CustomRecipe: produce quantizers per tensor."""
+
+    recipe: CustomRecipe
+    mode: str
+    num_quantizers: int
+    device: Optional[torch.device]
+
+    def __init__(
+        self,
+        recipe: CustomRecipe,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+        if getattr(recipe, "qparams", None) is None:
+            raise ValueError("CustomRecipe requires `qparams` with quantizers.")
+
+    def _clone(self, q: Optional[Any]):
+        if q is None:
+            return None
+        if hasattr(q, "copy"):
+            return q.copy()
+        return copy.copy(q)
+
+    def make_quantizers(self) -> list:
+        qparams = self.recipe.qparams
+        if self.mode == "forward":
+            if self.num_quantizers % 3 != 0:
+                raise ValueError(
+                    f"CustomRecipeState forward expects num_quantizers multiple of 3, got {self.num_quantizers}"
+                )
+            out = []
+            for _ in range(self.num_quantizers // 3):
+                out.append(self._clone(qparams.input_quantizer))
+                out.append(self._clone(qparams.weight_quantizer))
+                out.append(self._clone(qparams.output_quantizer))
+            return out
+
+        if self.num_quantizers % 2 != 0:
+            raise ValueError(
+                f"CustomRecipeState backward expects num_quantizers multiple of 2, got {self.num_quantizers}"
+            )
+        out = []
+        for _ in range(self.num_quantizers // 2):
+            out.append(self._clone(qparams.grad_output_quantizer))
+            out.append(self._clone(qparams.grad_input_quantizer))
+        return out

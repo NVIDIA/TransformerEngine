@@ -7,8 +7,9 @@ from __future__ import annotations
 import warnings
 import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
 from pydantic.dataclasses import dataclass
+from dataclasses import field
 
 
 class _FormatHelper(NamedTuple):
@@ -85,6 +86,10 @@ class Recipe:
     def float8_block_scaling(self):
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
+
+    def custom(self):
+        """Whether the given recipe is custom."""
+        return isinstance(self, CustomRecipe)
 
 
 @dataclass()
@@ -350,4 +355,37 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class QLinearParams:
+    """Quantizers for linear-like modules.
+
+    Holds concrete quantizers.
+    Explicit control - None means "don't quantize this tensor".
+    """
+    input_quantizer: Optional[Any] = None
+    weight_quantizer: Optional[Any] = None
+    output_quantizer: Optional[Any] = None
+    grad_input_quantizer: Optional[Any] = None
+    grad_output_quantizer: Optional[Any] = None
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide pre-constructed quantizers.
+
+    Parameters
+    ----------
+    qparams : QLinearParams
+              Quantization parameters for linear-like modules.
+    """
+    qparams: QLinearParams = field(default_factory=QLinearParams)
+
+    def __repr__(self) -> str:
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"qparams={self.qparams}"
         )
