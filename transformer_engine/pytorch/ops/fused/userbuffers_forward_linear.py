@@ -4,33 +4,31 @@
 
 """Linear layer forward with Userbuffers communication."""
 
-# pylint: skip-file  ### TODO Debug Userbuffers support
-
 from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
 
-from transformer_engine_torch import CommOverlapAlgo
+from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
-from ...float8_tensor import Float8Tensor
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...module.base import get_ub, get_workspace
-from ...utils import canonicalize_device, canonicalize_dtype
+from ...fp8 import FP8GlobalStateManager
+from ...module.base import (
+    fill_userbuffers_buffer_for_all_gather,
+    get_ub,
+    get_workspace,
+    _2X_ACC_FPROP,
+)
+from ...tensor.quantized_tensor import Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from ...tensor._internal.float8_tensor_base import Float8TensorBase
+from .._common import maybe_dequantize, is_quantized_tensor
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
-    BasicOperation,
     FusedOperation,
     FusibleOperation,
     OperationContext,
-)
-from .._common import (
-    convert_tensor,
-    get_fp8_meta_from_fp8_tensor,
-    is_float8_tensor,
-    reshape,
 )
 
 
@@ -50,9 +48,6 @@ class UserbuffersForwardLinear(FusedOperation):
         bias: Optional[Bias],
         reduce_scatter: Optional[ReduceScatter],
     ) -> None:
-
-        ### TODO Debug Userbuffers support
-        raise NotImplementedError("Userbuffers support has been broken by recent refactors")
 
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": 0, "bias": None, "reduce_scatter": None}
@@ -92,16 +87,18 @@ class UserbuffersForwardLinear(FusedOperation):
         weight: torch.Tensor,
         *,
         bias: Optional[torch.Tensor] = None,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device,
+        dtype: torch.dtype,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
-        with_fp8_compute: bool = False,
-        input_fp8_meta: Optional[dict[str, Any]] = None,
-        weight_fp8_meta: Optional[dict[str, Any]] = None,
-        output_fp8_meta: Optional[dict[str, Any]] = None,
+        with_quantized_compute: bool = False,
+        input_quantizer: Optional[Quantizer] = None,
+        weight_quantizer: Optional[Quantizer] = None,
+        output_quantizer: Optional[Quantizer] = None,
+        input_requires_grad: bool = True,
+        weight_requires_grad: bool = True,
         ub_comm_name: str,
     ) -> tuple[torch.Tensor, dict]:
         """Functional API for forward pass
@@ -114,9 +111,9 @@ class UserbuffersForwardLinear(FusedOperation):
             Weight tensor
         bias: torch.Tensor, optional
             Bias tensor
-        device: torch.device, default = default CUDA device
+        device: torch.device
             Tensor device
-        dtype: torch.dtype, default = default dtype
+        dtype: torch.dtype
             Tensor datatype
         tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
             Mode for tensor parallelism
@@ -127,16 +124,20 @@ class UserbuffersForwardLinear(FusedOperation):
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_fp8_compute: bool, default = `False`
-            Whether to perform compute in FP8
-        input_fp8_meta: dict, optional
-            FP8 metadata for casting input tensor to FP8. Required for
-            FP8 compute if input is not already in FP8.
-        weight_fp8_meta: dict, optional
-            FP8 metadata for casting weight tensor to FP8. Required for
-            FP8 compute if weight is not already in FP8.
-        output_fp8_meta: dict, optional
-            FP8 metadata for casting output tensor to FP8
+        with_quantized_compute: bool, default = `False`
+            Whether to perform compute with quantized data.
+        input_quantizer: Quantizer, optional
+            Builder class for quantized input tensor.
+        weight_quantizer: Quantizer, optional
+            Builder class for quantized weight tensor.
+        output_quantizer: Quantizer, optional
+            Builder class for quantized output tensor.
+        input_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the input tensor is
+            required in the backward pass.
+        weight_requires_grad: bool, default = `True`
+            Whether the loss gradient w.r.t. the weight tensor is
+            required in the backward pass.
         ub_comm_name: str
             Layer type (e.g. "qkv", "proj", "fc1", "fc2"). This is
             used to access the corresponding Userbuffers communicators
@@ -147,41 +148,19 @@ class UserbuffersForwardLinear(FusedOperation):
         torch.Tensor
             Output tensor
         dict
-            Extra output tensors. "input" is the input tensor,
-            possibly cast and reshaped from the provided input tensor.
+            Extra output tensors. "input" is the input tensor and
+            "weight" is the weight tensor, both ready for use in the
+            backward pass.
 
         """
 
         # Check device
-        if device is None:
-            device = weight.device
-        device = canonicalize_device(device)
         if device.type != "cuda":
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
-        if dtype is None:
-            dtype = weight.dtype
-        dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
-
-        # Input tensor dims
-        input_dims = tuple(input.size())
-        weight_dims = tuple(weight.size())
-        if len(weight_dims) != 2:
-            raise ValueError(f"Weight tensor is not 2D (shape={weight_dims})")
-        if len(input_dims) == 0 or weight_dims[1] != input_dims[-1]:
-            raise ValueError(
-                f"Input tensor (shape={input_dims}) "
-                f"and weight tensor (shape={weight_dims}) "
-                "are not compatible"
-            )
-
-        # Output tensor dims
-        output_dims = list(input_dims)
-        output_dims[0] = -1
-        output_dims[-1] = weight_dims[0]
 
         # Check tensor parallel group
         if tensor_parallel_size is None:
@@ -196,235 +175,106 @@ class UserbuffersForwardLinear(FusedOperation):
         if not sequence_parallel:
             raise RuntimeError(f"Invalid configuration for Userbuffers ({sequence_parallel=})")
 
-        # Check if FP8 is enabled
-        if with_fp8_compute:
-            if input_fp8_meta is None and not is_float8_tensor(input):
-                raise ValueError("No FP8 metadata was provided for casting input to FP8")
-            if weight_fp8_meta is None and not is_float8_tensor(weight):
-                raise ValueError("No FP8 metadata was provided for casting weight to FP8")
+        # Check quantizers
+        if with_quantized_compute:
+            if input_quantizer is None:
+                raise ValueError("Missing quantizer for input tensor")
+            if weight_quantizer is None:
+                raise ValueError("Missing quantizer for weight tensor")
+            if output_quantizer is not None:
+                raise ValueError("Quantized output is not supported")
         else:
-            input_fp8_meta = None
-            weight_fp8_meta = None
-            output_fp8_meta = None
-        with_fp8_output = (
-            with_fp8_compute and tensor_parallel_mode != "row" and output_fp8_meta is not None
-        )
+            input_quantizer = None
+            weight_quantizer = None
+            output_quantizer = None
 
         # Get Userbuffers communicator
         ub_comm = get_ub(ub_comm_name + "_fprop")
-        ub_local_buffer = ub_comm.get_ubuf_output(0)
-        ub_global_buffer = ub_comm.get_ubuf_output(1)
         with_ub_all_gather = tensor_parallel_mode == "column"
         with_ub_reduce_scatter = tensor_parallel_mode == "row"
+        ub_type = CommOverlapType.AG if with_ub_all_gather else CommOverlapType.RS
 
-        # Choose Userbuffers communication algorithm
-        ub_algo = None
+        # Initialize input tensor
+        x_local = input
+        x = None
         if with_ub_all_gather:
-            if with_fp8_compute and ub_comm.is_atomic_gemm():
-                ub_algo = CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
-            else:
-                ub_algo = CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
-        elif with_ub_reduce_scatter:
-            is_atomic_gemm = with_fp8_compute and ub_comm.is_atomic_gemm()
-            ub_algo = {
-                (True, True): CommOverlapAlgo.ATOMIC_GEMM_RS_P2P,
-                (True, False): CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
-                (False, True): CommOverlapAlgo.ATOMIC_GEMM_RS,
-                (False, False): CommOverlapAlgo.SPLIT_PIPELINED_RS,
-            }[(ub_comm.is_p2p_overlap(), is_atomic_gemm)]
-        else:
-            raise RuntimeError("Could not choose Userbuffers communication algorithm")
-
-        # Cast input tensor to correct dtype
-        x_local = reshape(
-            input,
-            (-1, input_dims[-1]),
-            device=device,
-            dtype=dtype,
-        )
-        if with_fp8_compute and not is_float8_tensor(x_local):
-            fp8_dtype = get_fp8_te_dtype(
-                input_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            with_transpose_cache = weight.requires_grad
-            if tensor_parallel_mode == "column" and sequence_parallel:
-                with_transpose_cache = False
-            x_local = Float8Tensor.to_float8(
+            if input_quantizer is not None:
+                if not is_quantized_tensor(x_local):
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+                    if isinstance(
+                        input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+                    ):
+                        input_quantizer.set_usage(columnwise=False)
+                    x_local = input_quantizer(x_local)
+                input_quantizer.set_usage(rowwise=True, columnwise=False)
+            x, x_local = fill_userbuffers_buffer_for_all_gather(
+                ub_comm,
                 x_local,
-                fp8_meta=input_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                data=(ub_local_buffer if with_ub_all_gather else None),
-                with_transpose_cache=with_transpose_cache,
-            )
-        elif not with_fp8_compute and is_float8_tensor(x_local):
-            if with_ub_all_gather:
-                x_local = ub_local_buffer.copy_(x_local)
-            else:
-                x_local = x_local.dequantize()
-
-        # Initialize buffers for UB all-gather if needed
-        x = x_local
-        if with_ub_all_gather:
-            if with_fp8_compute:
-                x = Float8Tensor.make_like(x_local, data=ub_global_buffer)
-                if x_local._data.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(x_local._data)
-                else:
-                    x_local._data = torch.empty_like(x_local._data)
-            else:
-                x = ub_global_buffer
-                if x_local.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(x_local)
-                else:
-                    x_local = torch.empty_like(x_local)
-
-        # Check weight tensor
-        w = convert_tensor(
-            weight,
-            device=device,
-            dtype=dtype,
-            memory_format=torch.contiguous_format,
-        )
-        if with_fp8_compute and not is_float8_tensor(w):
-            fp8_dtype = get_fp8_te_dtype(
-                weight_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            w = Float8Tensor.to_float8(
-                w,
-                fp8_meta=weight_fp8_meta,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-            )
-        elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.dequantize()
-
-        # Check bias tensor
-        b = None
-        if bias is not None:
-            b = convert_tensor(
-                bias,
-                device=device,
-                dtype=dtype,
-                memory_format=torch.contiguous_format,
-            )
-
-        # Construct output tensor
-        y = None
-        y_local = None
-        if with_ub_reduce_scatter:
-            # Initialize buffers for UB reduce-scatter
-            if with_fp8_output:
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-                fp8_dtype = get_fp8_te_dtype(
-                    output_fp8_meta["recipe"],
-                    fprop_tensor=True,
-                )
-                y = Float8Tensor(
-                    data=ub_global_buffer,
-                    fp8_meta=output_fp8_meta,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=0,
-                    fp8_dtype=fp8_dtype,
-                    fp8_scale_inv=output_fp8_meta[fp8_meta_key].scale_inv[0],
-                    dtype=dtype,
-                )
-                ub_comm.set_ubuf_scale_inv(y._scale_inv)
-            else:
-                y = ub_global_buffer
-            y_local = torch.empty(
-                (x.size(0) // tensor_parallel_size, weight_dims[0]),
-                dtype=dtype,
-                device=device,
+                input_quantizer,
+                tensor_parallel_group,
             )
         else:
-            # Allocate output tensor
-            if with_fp8_output:
-                fp8_dtype = get_fp8_te_dtype(
-                    output_fp8_meta["recipe"],
-                    fprop_tensor=True,
-                )
-                data = torch.empty(
-                    (x.size(0), weight_dims[0]),
-                    dtype=torch.uint8,
-                    device=device,
-                )
-                y = Float8Tensor(
-                    data=data,
-                    fp8_meta=output_fp8_meta,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=0,
-                    fp8_dtype=fp8_dtype,
-                    dtype=dtype,
-                )
+            if with_quantized_compute:
+                if not is_quantized_tensor(x_local):
+                    input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+                    x_local = input_quantizer(x_local)
             else:
-                y = torch.empty(
-                    (x.size(0), weight_dims[0]),
-                    dtype=dtype,
-                    device=device,
-                )
-            y_local = y
+                x_local = maybe_dequantize(x_local, dtype)
+            x = x_local
+
+        # Initialize weight tensor
+        w = weight
+        if not with_quantized_compute:
+            w = maybe_dequantize(w, dtype)
+        elif with_quantized_compute and not is_quantized_tensor(w):
+            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+            w = weight_quantizer(w)
+
+        # Construct output tensor if needed
+        reduce_scatter_output = None
+        if with_ub_reduce_scatter:
+            y_local_size = list(x.size())
+            y_local_size[0] //= tensor_parallel_size
+            y_local_size[-1] = w.size(0)
+            reduce_scatter_output = torch.empty(y_local_size, dtype=dtype, device=device)
 
         # Perform GEMM
-        if with_fp8_compute:
-            kwargs = {
-                "out": y,
-                "bias": b,
-                "use_bias": (b is not None),
-                "use_split_accumulator": False,
-                "ub_algo": ub_algo,
-                "ub": ub_comm,
-            }
-            if with_ub_all_gather:
-                kwargs["extra_output_tensor"] = x_local._data
-            if with_ub_reduce_scatter:
-                kwargs["extra_output_tensor"] = y_local
-            if with_fp8_output:
-                fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(y)
-                kwargs.update(
-                    {
-                        "out": y._data,
-                        "out_index": fp8_meta_index,
-                        "fp8_meta_tensor": fp8_meta,
-                        "D_dtype": y._fp8_dtype,
-                    }
-                )
-            fp8_gemm(
-                w._data,
-                w._scale_inv,
-                0,
-                w._fp8_dtype,
-                x._data,
-                x._scale_inv,
-                0,
-                x._fp8_dtype,
-                y.dtype,
-                get_workspace(),
-                **kwargs,
-            )
+        gemm_output, *_, reduce_scatter_output = general_gemm(
+            w,
+            x,
+            get_workspace(),
+            out_dtype=dtype,
+            quantization_params=output_quantizer,
+            bias=bias,
+            use_split_accumulator=_2X_ACC_FPROP,
+            ub=ub_comm,
+            ub_type=ub_type,
+            extra_output=reduce_scatter_output,
+        )
+        if with_ub_reduce_scatter:
+            y_local = reduce_scatter_output
         else:
-            kwargs = {
-                "out": y,
-                "bias": b,
-                "use_bias": (b is not None),
-                "ub_algo": ub_algo,
-                "ub": ub_comm,
-            }
-            if with_ub_all_gather:
-                kwargs["extra_output_tensor"] = x_local
-            if with_ub_reduce_scatter:
-                kwargs["extra_output_tensor"] = y_local
-            gemm(w, x, y.dtype, get_workspace(), **kwargs)
+            y_local = gemm_output
 
-        # Reshape output tensor
-        out = reshape(y_local, output_dims)
+        # Prepare weight tensor for backward pass
+        if input_requires_grad:
+            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
+                w.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            w = None
+
+        # Prepare input tensor for backward pass
+        if weight_requires_grad:
+            if with_quantized_compute and is_quantized_tensor(x_local):
+                if not (isinstance(x_local, Float8TensorBase) and with_ub_all_gather):
+                    # FP8 does not support all-gather of transpose data
+                    x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
+        else:
+            x_local = None
 
         # Return cast tensors
         extra_outputs = {"input": x_local, "weight": w}
-        return out, extra_outputs
+        return y_local, extra_outputs
 
     def fuser_forward(
         self,
@@ -432,8 +282,8 @@ class UserbuffersForwardLinear(FusedOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        basic_op_prev_ops: list[Optional[BasicOperation]],
-        basic_op_next_ops: list[Optional[BasicOperation]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
@@ -442,36 +292,38 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op = self.basic_ops[idx]
         linear_op_ctx = basic_op_ctxs[idx]
         bias_op = None
+        bias_op_ctx = None
         bias = None
         if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
             bias_op = self.basic_ops[idx]
+            bias_op_ctx = basic_op_ctxs[idx]
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
 
-        # FP8 metadata
-        with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
-        input_fp8_meta = None
-        weight_fp8_meta = None
-        output_fp8_meta = None
-        grad_output_fp8_meta = None
-        grad_input_fp8_meta = None
-        if with_fp8_compute:
-            input_fp8_meta = linear_op.get_fp8_meta("input")
-            weight_fp8_meta = linear_op.get_fp8_meta("param")
-            next_op = basic_op_next_ops[-1]
-            if next_op is not None and next_op.num_fp8_scales("input") > 0:
-                output_fp8_meta = next_op.get_fp8_meta("input")
-            grad_output_fp8_meta = linear_op.get_fp8_meta("grad_output")
-            prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
-                grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
+        # Check which grads are required
+        input_requires_grad = linear_op_ctx.requires_grad
+        weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
+
+        # Quantization metadata
+        input_quantizer = linear_op.get_quantizer("forward", 0)
+        weight_quantizer = linear_op.get_quantizer("forward", 1)
+        grad_output_quantizer = linear_op.get_quantizer("backward", 0)
+        grad_input_quantizer = prev_op_grad_output_quantizer
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if not any((recipe.delayed(), recipe.float8_current_scaling(), recipe.mxfp8())):
+                raise RuntimeError(
+                    f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
+                )
 
         # Get autocast dtype if needed
-        dtype = None
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = linear_op.weight.dtype
 
         # Userbuffers options
         if linear_op._userbuffers_options is None:
@@ -482,31 +334,37 @@ class UserbuffersForwardLinear(FusedOperation):
             input=input_,
             weight=linear_op.weight,
             bias=bias,
-            device=linear_op.device,
             dtype=dtype,
+            device=linear_op.weight.device,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             tensor_parallel_size=self.tensor_parallel_size,
             sequence_parallel=self.sequence_parallel,
-            with_fp8_compute=with_fp8_compute,
-            input_fp8_meta=input_fp8_meta,
-            weight_fp8_meta=weight_fp8_meta,
-            output_fp8_meta=output_fp8_meta,
+            with_quantized_compute=with_quantized_compute,
+            input_quantizer=input_quantizer,
+            weight_quantizer=weight_quantizer,
+            output_quantizer=None,  # Not supported
+            input_requires_grad=input_requires_grad,
+            weight_requires_grad=weight_requires_grad,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         x_local = extra_outputs["input"]
+        w = extra_outputs["weight"]
 
         # Save state for backward pass
-        linear_op_ctx.save_for_backward(x_local)
-        linear_op_ctx.with_fp8_compute = with_fp8_compute
-        linear_op_ctx.weight_fp8_meta = weight_fp8_meta
-        linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
-        linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
-        linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_dims = input_.size()
-        linear_op_ctx.input_requires_grad = input_.requires_grad
-        linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
-        linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
+        if linear_op_ctx.requires_grad:
+            linear_op_ctx.save_for_backward(x_local, w)
+            linear_op_ctx.with_quantized_compute = with_quantized_compute
+            linear_op_ctx.input_quantizer = input_quantizer
+            linear_op_ctx.weight_quantizer = weight_quantizer
+            linear_op_ctx.grad_output_quantizer = grad_output_quantizer
+            linear_op_ctx.grad_input_quantizer = grad_input_quantizer
+            linear_op_ctx.dtype = dtype
+            linear_op_ctx.input_dims = input_.size()
+            linear_op_ctx.input_requires_grad = input_requires_grad
+            linear_op_ctx.weight_requires_grad = weight_requires_grad
+        if bias_op is not None and bias_op_ctx.requires_grad:
+            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
 
         return output, [() for _ in range(len(self.basic_ops))]
 
@@ -528,8 +386,6 @@ def fuse_userbuffers_forward_linear(
         Updated forward pass operations
 
     """
-
-    return ops  ### TODO Debug Userbuffers support
 
     # Return immediately if environment is not distributed
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:

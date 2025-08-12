@@ -502,7 +502,16 @@ class NormFwdPrimitive(BasePrimitive):
         )
         amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="NormFwdPrimitive.amax")
 
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
+        # Enforce no sharding of hidden dim for x, gamma and beta
+        arg_shardings[0] = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.x")
+        arg_shardings[2] = NamedSharding(
+            mesh, PartitionSpec(*g_spec[:-1], None), desc="NormFwdPrimitive.gamma"
+        )
+        arg_shardings[3] = NamedSharding(
+            mesh, PartitionSpec(*b_spec[:-1], None), desc="NormFwdPrimitive.beta"
+        )
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
@@ -578,16 +587,17 @@ class NormFwdPrimitive(BasePrimitive):
             result_types,
         )
 
+        prefix = "NormFwdPrimitive_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var="NormFwdPrimitive_i", flatten_axis=-1
+            len(value_types[0].shape), unique_var=prefix + "x", flatten_axis=-1
         )
         x_axes = scale_rules.input_spec
 
-        out = x_axes[:-1] + ("k",)
-        colwise_out = out if is_2x else ("…4",)
+        out = x_axes
+        colwise_out = out if is_2x else (prefix + "out_colwise",)
         rsigma = x_axes[:-1]
-        mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
-        amax = ("…6",)
+        mu = (prefix + "mu",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (x_axes, ("…1",), ("…2",), ("…3",)),
@@ -600,7 +610,6 @@ class NormFwdPrimitive(BasePrimitive):
                 mu,
                 rsigma,
             ),
-            **scale_rules.factor_sizes,
         )
 
 
@@ -1267,6 +1276,7 @@ def normalization_fwd(
     epsilon: float,
     norm_type: str,
     quantizer: Optional[Quantizer],
+    noop_scaled_tensor: bool = False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1283,6 +1293,7 @@ def normalization_fwd(
             - 'layernorm': Layer normalization
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
+        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         A tuple containing:
@@ -1309,6 +1320,15 @@ def normalization_fwd(
         mu = None
     else:
         raise ValueError(f"{norm_type=} is not supported.")
+
+    if quantizer is None and noop_scaled_tensor:
+        return (
+            ScaledTensorFactory.create_2x(
+                output, None, output, None, ScalingMode.NO_SCALING, dq_dtype=output.dtype
+            ),
+            mu,
+            rsigma,
+        )
 
     return output, mu, rsigma
 

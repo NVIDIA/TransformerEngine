@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 
+from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
@@ -24,6 +25,7 @@ from transformer_engine.pytorch.jit import (
 from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
+    torch_get_autocast_gpu_dtype,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -31,6 +33,7 @@ from transformer_engine.pytorch.constants import (
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 
 
@@ -166,6 +169,8 @@ class TransformerLayer(torch.nn.Module):
                             interpretation is that the individual `q`, `k`, and `v` weights for each
                             attention head are interleaved. This parameter is set to `False` when
                             using :attr:`fuse_qkv_params=False`.
+    rotary_pos_interleaved : bool, default = `False`
+                            whether to use interleaved rotary position embeddings.
     bias : bool, default = `True`
           if set to `False`, the transformer layer will not learn any additive biases.
     activation : str, default = 'gelu'
@@ -175,12 +180,12 @@ class TransformerLayer(torch.nn.Module):
           The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
-    attn_input_format: {'sbhd', 'bshd'}, default = 'sbhd'
+    attn_input_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
                          This controls whether the dimensions of the
-                         intermediate hidden states is 'batch first' ('bshd') or
-                         'sequence first' ('sbhd'). `s` stands for the sequence
-                         length, `b` batch size, `h` the number of heads, `d`
-                         head size. Note that these formats are very closely
+                         intermediate hidden states is 'sequence first' ('sbhd'), 'batch first' ('bshd'),
+                         or 'token first' ('thd'). `s` stands for the sequence length, `b` batch size,
+                         `t` the total number of tokens, `h` the number of heads, `d` head size.
+                         Note that these formats are very closely
                          related to the `qkv_format` in the `MultiHeadAttention`
                          and `DotProductAttention` modules.
     name: str, default = `None`
@@ -231,6 +236,23 @@ class TransformerLayer(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
+    qk_norm_type: Optional[str], default = None
+                    type of normalization to apply to query and key tensors.
+                    Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'. When None, no normalization is applied.
+                    When 'L2Normalization', L2 normalization is applied to query and key tensors.
+                    When 'RMSNorm', RMS normalization is applied to query and key tensors.
+                    When 'LayerNorm', layer normalization is applied to query and key tensors.
+                    Normalization is applied after RoPE (if applicable) but before attention computation
+                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach for
+                    QK normalization to improve training stability and model performance.
+    qk_norm_eps: float, default = 1e-6
+                    epsilon value for normalization of query and key tensors.
+                    Only used when `qk_norm_type` is not None.
+    qk_norm_before_rope: bool, default = `False`
+                    if set to `True`, query and key normalization is applied before rotary position
+                    embedding. When `False` (default), normalization is applied after RoPE.
+                    This parameter allows supporting different architectural variants that apply
+                    QK normalization at different points.
     """
 
     def __init__(
@@ -265,6 +287,7 @@ class TransformerLayer(torch.nn.Module):
         drop_path_rate: float = 0.0,
         set_parallel_mode: bool = False,
         fuse_qkv_params: bool = False,
+        rotary_pos_interleaved: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
@@ -279,6 +302,9 @@ class TransformerLayer(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
         name: str = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_eps: float = 1e-6,
+        qk_norm_before_rope: bool = False,
     ) -> None:
         super().__init__()
 
@@ -361,12 +387,15 @@ class TransformerLayer(torch.nn.Module):
             "fuse_qkv_params": fuse_qkv_params,
             "zero_centered_gamma": zero_centered_gamma,
             "qkv_weight_interleaved": qkv_weight_interleaved,
+            "rotary_pos_interleaved": rotary_pos_interleaved,
             "ub_bulk_wgrad": ub_bulk_wgrad,
             "ub_bulk_dgrad": ub_bulk_dgrad,
             "ub_overlap_ag": ub_overlap_ag,
             "ub_overlap_rs": ub_overlap_rs,
             "ub_overlap_rs_dgrad": ub_overlap_rs_dgrad,
             "qkv_format": self.attn_input_format,
+            "seq_length": seq_length,
+            "micro_batch_size": micro_batch_size,
         }
 
         self.self_attention = MultiheadAttention(
@@ -378,6 +407,9 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
+            qk_norm_type=qk_norm_type,
+            qk_norm_eps=qk_norm_eps,
+            qk_norm_before_rope=qk_norm_before_rope,
             name=name + ".self_attention" if name is not None else None,
         )
 
@@ -392,6 +424,9 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
+                qk_norm_type=qk_norm_type,
+                qk_norm_eps=qk_norm_eps,
+                qk_norm_before_rope=qk_norm_before_rope,
                 name=name + ".inter_attention" if name is not None else None,
             )
 
@@ -435,9 +470,7 @@ class TransformerLayer(torch.nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        TORCH_MINOR = int(torch.__version__.split(".")[1])
-        use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
+        use_nvfuser = torch_version() >= (1, 10, 0) and torch_version() < (2, 2, 0)
         self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
 
         if self.bias_dropout_fusion:
@@ -548,6 +581,8 @@ class TransformerLayer(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
@@ -564,88 +599,99 @@ class TransformerLayer(torch.nn.Module):
         Parameters
         ----------
         hidden_states : torch.Tensor
-             Input tensor.
+            Input tensor.
         attention_mask : Optional[torch.Tensor], default = `None`
-                        Boolean tensor used to mask out self-attention softmax input. It should be
-                        in [batch_size, 1, 1, seqlen_q] for padding masks, and broadcastable
-                        to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] for "`arbitrary`"
-                        mask. It should be `None` for causal masks and "`no_mask`" type.
-                        A `True` value means the corresponding position is masked out and
-                        a `False` means that position is allowed to participate in attention.
+            Boolean tensor used to mask out self-attention softmax input. It should be
+            in [batch_size, 1, 1, seqlen_q] for padding masks, and broadcastable
+            to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] for "`arbitrary`"
+            mask. It should be `None` for causal masks and "`no_mask`" type.
+            A `True` value means the corresponding position is masked out and
+            a `False` means that position is allowed to participate in attention.
         self_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal',
-                            'causal_bottom_right', 'padding_causal_bottom_right','arbitrary'},
-                            default = `causal`
-                            Type of attention mask passed into softmax operation for encoder.
-                            By default, causal masks are aligned to the top left corner of
-                            the softmax matrix. When "`bottom_right`" is specified in the mask type,
-                            causal masks are aligned to the bottom right corner.
+            'causal_bottom_right', 'padding_causal_bottom_right','arbitrary'},
+            default = `causal`
+            Type of attention mask passed into softmax operation for encoder.
+            By default, causal masks are aligned to the top left corner of
+            the softmax matrix. When "`bottom_right`" is specified in the mask type,
+            causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
-                    Sliding window size for local attention in encoder.
+            Sliding window size for local attention in encoder.
         encoder_output : Optional[torch.Tensor], default = `None`
-             Output of the encoder block to be fed into the decoder block if using
-             `layer_type="decoder"`.
+            Output of the encoder block to be fed into the decoder block if using
+            `layer_type="decoder"`.
         enc_dec_attn_mask : Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
-             default = `None`. Boolean tensors used to mask out inter-attention softmax input if
-             using `layer_type="decoder"`. It should be a tuple of two masks in
-             [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for padding masks.
-             It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
-             for "`arbitrary`" mask. It should be `None` for causal masks and "`no_mask`".
-             A `True` value means the corresponding position is masked out and a `False`
-             means that position is allowed to participate in attention.
+            default = `None`. Boolean tensors used to mask out inter-attention softmax input if
+            using `layer_type="decoder"`. It should be a tuple of two masks in
+            [batch_size, 1, 1, seqlen_q] and [batch_size, 1, 1, seqlen_kv] for padding masks.
+            It should be broadcastable to [batch_size, num_heads, max_seqlen_q, max_seqlen_kv]
+            for "`arbitrary`" mask. It should be `None` for causal masks and "`no_mask`".
+            A `True` value means the corresponding position is masked out and a `False`
+            means that position is allowed to participate in attention.
         enc_dec_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
-                               default = `None`
-                               Type of attention mask passed into softmax operation for decoder.
+            default = `None`
+            Type of attention mask passed into softmax operation for decoder.
         enc_dec_window_size: Optional[Tuple[int, int]], default = `None`
-                            Sliding window size for local attention in decoder.
+            Sliding window size for local attention in decoder.
         is_first_microbatch : {True, False, None}, default = None
-                             During training using either gradient accumulation or
-                             pipeline parallelism a minibatch of data is further split
-                             into microbatches. Between the microbatches of the same minibatch
-                             the model weights are not updated. Setting this parameter indicates
-                             whether the current microbatch is the first in a minibatch or not.
-                             When set, this parameter enables additional optimizations:
+            During training using either gradient accumulation or
+            pipeline parallelism a minibatch of data is further split
+            into microbatches. Between the microbatches of the same minibatch
+            the model weights are not updated. Setting this parameter indicates
+            whether the current microbatch is the first in a minibatch or not.
+            When set, this parameter enables additional optimizations:
 
-                             * during FP8 training, it allows caching of the FP8 versions of
-                               the weights
-                             * it also allows skipping gradient accumulation during the
-                               first microbatch (since it is the first gradient being
-                               produced)
+            * during FP8 training, it allows caching of the FP8 versions of
+              the weights
+            * it also allows skipping gradient accumulation during the
+              first microbatch (since it is the first gradient being
+              produced)
         checkpoint_core_attention: bool, default = `False`
-                                  If true, forward activations for core attention are recomputed
-                                  during the backward pass in order to save memory that would
-                                  otherwise be occupied to store the forward activations until
-                                  backprop.
+            If true, forward activations for core attention are recomputed
+            during the backward pass in order to save memory that would
+            otherwise be occupied to store the forward activations until
+            backprop.
         rotary_pos_emb: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], default = `None`
-                       Embeddings for query and key tensors for applying rotary position
-                       embedding. By default no input embedding is applied.
+            Embeddings for query and key tensors for applying rotary position
+            embedding. By default no input embedding is applied.
         core_attention_bias_type: str, default = `no_bias`
-                    Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
+            Bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}
         core_attention_bias: Optional[torch.Tensor], default = `None`
-                    Bias tensor for Q * K.T
+            Bias tensor for Q * K.T
         alibi_slopes: Optional[torch.Tensor], default = `None`
-                     ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
-                     It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
-                     to the attention score of query i and key j.
+            ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
+            It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
+            to the attention score of query i and key j.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
-                   with shape [batch_size + 1] and dtype torch.int32.
+            Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
+            with shape [batch_size + 1] and dtype torch.int32.
+            Used by encoders, or decoders' self-attention.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
-                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+            Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+            and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+            Used by decoders' cross-attention.
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+            Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
+            with shape [batch_size + 1] and dtype torch.int32. Set to `cu_seqlens_q` if None.
+            Used by encoders, or decoders' self-attention.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
+            Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
+            and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+            Set to `cu_seqlens_kv` if None. Used by decoders' cross-attention.
         max_seqlen_q: Optional[int], default = `None`
-                      Maximum sequence length in `query_layer`.
-                      Calculated from `cu_seqlens_q` if not provided.
+            Maximum sequence length in `query_layer`.
+            Calculated from `cu_seqlens_q_padded` if not provided.
         max_seqlen_kv: Optional[int], default = `None`
-                       Maximum sequence length in `key_layer` and `value_layer`.
-                       Calculated from `cu_seqlens_kv` if not provided.
+            Maximum sequence length in `key_layer` and `value_layer`.
+            Calculated from `cu_seqlens_kv_padded` if not provided.
         fast_zero_fill: bool, default = `True`
-                    Whether to set output tensors to 0 or not before use.
+            Whether to set output tensors to 0 or not before use.
         inference_params: InferenceParams, default = None
-                         Inference parameters that are passed to the main model in order
-                         to efficiently calculate and store the context during inference.
+            Inference parameters that are passed to the main model in order
+            to efficiently calculate and store the context during inference.
         pad_between_seqs: Optional[bool], default = `None`
             If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
-            If true, there are padding tokens between individual sequences in a packed batch.
+            If true, there are padding tokens between individual sequences in a packed batch,
+            i.e. qkv_format = 'thd'.
         """
 
         if self_attn_mask_type is None:
@@ -674,7 +720,9 @@ class TransformerLayer(torch.nn.Module):
         if (
             "padding" in self_attn_mask_type or self_attn_mask_type == "arbitrary"
         ) and attention_mask is not None:
-            assert attention_mask.dtype == torch.bool, "Attention mask must be a boolean tensor"
+            assert all(
+                attention_mask[i].dtype == torch.bool for i in range(len(attention_mask))
+            ), "Attention mask must be a boolean tensor or a list/tuple of two boolean tensors"
         if (
             "padding" in enc_dec_attn_mask_type or enc_dec_attn_mask_type == "arbitrary"
         ) and enc_dec_attn_mask is not None:
@@ -687,7 +735,7 @@ class TransformerLayer(torch.nn.Module):
 
         # For AMP
         if torch.is_autocast_enabled():
-            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_gpu_dtype())
+            hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.
         self_attention_outputs = self.self_attention(
@@ -703,9 +751,11 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
             cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_kv=cu_seqlens_q,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_q_padded,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
+            max_seqlen_kv=max_seqlen_q,
             fast_zero_fill=fast_zero_fill,
             pad_between_seqs=pad_between_seqs,
         )
@@ -729,12 +779,21 @@ class TransformerLayer(torch.nn.Module):
                 attn_mask_type=enc_dec_attn_mask_type,
                 window_size=enc_dec_window_size,
                 encoder_output=encoder_output,
+                inference_params=inference_params,
                 is_first_microbatch=is_first_microbatch,
                 checkpoint_core_attention=checkpoint_core_attention,
+                rotary_pos_emb=rotary_pos_emb,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
                 fast_zero_fill=fast_zero_fill,
+                pad_between_seqs=pad_between_seqs,
             )
             if self.apply_residual_connection_post_layernorm:
                 attention_output, attention_bias, residual = inter_attention_outputs
@@ -768,7 +827,12 @@ class TransformerLayer(torch.nn.Module):
         return output
 
     def _bias_dropout_add(self, hidden_state, bias, residual, drop_path=None):
-        if drop_path is None and bias is not None and bias.numel() != 0:
+        if (
+            drop_path is None
+            and bias is not None
+            and bias.numel() != 0
+            and not is_in_onnx_export_mode()
+        ):
             if self.bias_dropout_fusion:
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train

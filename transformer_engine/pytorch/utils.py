@@ -7,11 +7,12 @@ from __future__ import annotations
 import functools
 import math
 import os
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 import numpy as np
-
 import torch
+
 import transformer_engine.pytorch.cpp_extensions as ext
+from . import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -23,6 +24,12 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     return False
 
 
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor().cuda()
+
+
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     Trick to deallocate tensor memory when delete operation does not
@@ -30,12 +37,20 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
+
     for t in tensors:
         if t is not None:
+            # Workaround for double buffering in cpu offload
+            if hasattr(t, "_do_not_clear"):
+                continue
+            if hasattr(t, "get_data_tensors"):
+                if any(hasattr(tensor, "_do_not_clear") for tensor in t.get_data_tensors()):
+                    continue
+
             if hasattr(t, "clear"):
                 t.clear()
             else:
-                t.data = torch.Tensor()
+                t.data = _empty_tensor()
             del t
 
 
@@ -433,6 +448,7 @@ def is_bf16_compatible() -> None:
     return torch.cuda.get_device_capability()[0] >= 8
 
 
+@functools.lru_cache(maxsize=None)
 def is_non_tn_fp8_gemm_supported() -> bool:
     """Checks whether the device supports
     non-TN layouts for FP8 GEMMs.
@@ -596,3 +612,124 @@ def canonicalize_process_group(
     if group is None:
         return torch.distributed.distributed_c10d._get_default_group()
     return group
+
+
+def torch_get_autocast_gpu_dtype() -> torch.dtype:
+    """Get PyTorch autocast GPU dtype."""
+    if torch_version() >= (2, 4, 0):
+        return torch.get_autocast_dtype("cuda")
+    return torch.get_autocast_gpu_dtype()
+
+
+if torch_version() >= (2, 4, 0):
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+else:
+    gpu_autocast_ctx = torch.cuda.amp.autocast
+
+
+_torch_dtype_to_np_typestr_dict = {
+    torch.float16: "<f2",
+    torch.float32: "<f4",
+    torch.int64: "<i8",
+    torch.int32: "<i4",
+    torch.int8: "|i1",
+    torch.float8_e4m3fn: "|i1",
+    torch.qint8: "|u1",
+    torch.bool: "|b1",
+    torch.bfloat16: "<f2",
+}
+
+
+class _WeakRefTensor:
+    """
+    A wrapper wraps raw data pointer to a tensor-like object. Could be compatibale with openai triton kernel and be converted to `torch.Tensor` with zero-copy overhead.
+    """
+
+    def __init__(
+        self,
+        data_ptr: int,
+        dtype: torch.dtype,
+        shape: Sequence[int],
+    ):
+        self._data_ptr = data_ptr
+        self.dtype = dtype
+        self.shape = shape
+
+    def data_ptr(self):
+        """Data pointer of the tensor."""
+        return self._data_ptr
+
+    @property
+    def dtype(self):
+        """Dtype of the tensor."""
+        return self._dtype
+
+    @property
+    def shape(self):
+        """Shape of the tensor."""
+        return getattr(self, "_shape", None)
+
+    @dtype.setter
+    def dtype(self, dtype: torch.dtype):
+        self._dtype = dtype
+
+    @shape.setter
+    def shape(self, shape: Sequence[int]):
+        self._shape = tuple(int(i) for i in shape)
+
+    def numel(self):
+        """Number of elements in the tensor."""
+        return np.prod(self.shape)
+
+    @property
+    def __cuda_array_interface__(self):
+        return {
+            "shape": self.shape,
+            "typestr": self.torch_dtype_to_np_typestr(),
+            "data": (self.data_ptr() if self.numel() > 0 else 0, False),
+            "version": 3,
+        }
+
+    def torch_dtype_to_np_typestr(self):
+        """Convert PyTorch dtype to numpy typestr."""
+        ret = _torch_dtype_to_np_typestr_dict.get(self.dtype)
+        assert ret is not None, f"Unsupported dtype: {self.dtype}"
+        return ret
+
+
+def make_weak_ref(x):
+    """
+    This function is to make a weak reference to the input so that the memory can be released.
+    """
+
+    def convert_to_torch_tensor(tensor: Union[_WeakRefTensor, torch.Tensor]) -> torch.Tensor:
+        """
+        This function is to convert the `_WeakRefTensor` to torch.Tensor.
+        """
+        if isinstance(tensor, torch.Tensor):
+            return tensor
+
+        old_ptr = tensor.data_ptr()
+        new_tensor = torch.as_tensor(tensor).view(tensor.dtype)
+        new_ptr = new_tensor.data_ptr()
+        if old_ptr != new_ptr:
+            raise RuntimeError("Data pointer mismatch after converting to torch.Tensor")
+        return new_tensor
+
+    if isinstance(x, torch.Tensor):
+        return (
+            convert_to_torch_tensor(_WeakRefTensor(x.data_ptr(), x.dtype, x.shape))
+            if x.is_cuda
+            else x
+        )
+    if isinstance(x, tuple):
+        return tuple(make_weak_ref(i) for i in x)
+    if isinstance(x, list):
+        return [make_weak_ref(i) for i in x]
+    if isinstance(x, dict):
+        return {k: make_weak_ref(v) for k, v in x.items()}
+    if isinstance(x, (int, float, bool)):
+        return x
+    if x is None:
+        return None
+    raise TypeError(f"Invalid type {type(x)} to make weak ref")

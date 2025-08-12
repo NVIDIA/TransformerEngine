@@ -11,7 +11,8 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.module import LayerNormLinear, Linear
+from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
+from transformer_engine.pytorch.ops.basic.l2normalization import L2Normalization
 from transformer_engine.pytorch.utils import (
     SplitAlongDim,
     divide,
@@ -116,6 +117,8 @@ class MultiheadAttention(torch.nn.Module):
                             interpretation is that the individual `q`, `k`, and `v` weights for each
                             attention head are interleaved. This parameter is set to `False` when
                             using :attr:`fuse_qkv_params=False`.
+    rotary_pos_interleaved : bool, default = `False`
+                            whether to use interleaved rotary position embeddings.
     bias : bool, default = `True`
           if set to `False`, the transformer layer will not learn any additive biases.
     device : Union[torch.device, str], default = "cuda"
@@ -172,6 +175,31 @@ class MultiheadAttention(torch.nn.Module):
                     parameter for query-key-value. This enables optimizations such as QKV
                     fusion without concatentations/splits and also enables the argument
                     `fuse_wgrad_accumulation`.
+    qk_norm_type: Optional[str], default = None
+                    type of normalization to apply to query and key tensors.
+                    Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'. When None, no normalization is applied.
+                    When 'L2Normalization', L2 normalization is applied to query and key tensors.
+                    When 'RMSNorm', RMS normalization is applied to query and key tensors.
+                    When 'LayerNorm', layer normalization is applied to query and key tensors.
+                    Normalization is applied after RoPE (if applicable) but before attention computation
+                    when `qk_norm_before_rope` is False. This follows the e.g. Llama4 approach
+                    for QK normalization to improve training stability and model performance.
+    qk_norm_eps: float, default = 1e-6
+                    epsilon value for normalization of query and key tensors.
+                    Only used when `qk_norm_type` is not None.
+    qk_norm_before_rope: bool, default = `False`
+                    if set to `True`, query and key normalization is applied before rotary position
+                    embedding. When `False` (default), normalization is applied after RoPE.
+                    This parameter allows supporting different architectural variants that apply
+                    QK normalization at different points.
+    seq_length: Optional[int], default = `None`
+                    sequence length of input samples. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are used for
+                    forward propagation and activation recompute phase.
+    micro_batch_size: Optional[int], default = `None`
+                    batch size per training step. Needed for JIT Warmup, a technique where jit
+                    fused functions are warmed up before training to ensure same kernels are
+                    used for forward propagation and activation recompute phase.
     """
 
     def __init__(
@@ -201,6 +229,7 @@ class MultiheadAttention(torch.nn.Module):
         fuse_qkv_params: bool = False,
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
+        rotary_pos_interleaved: bool = False,
         ub_overlap_ag: bool = False,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
@@ -211,6 +240,11 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str] = "cuda",
         qkv_format: str = "sbhd",
         name: str = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_eps: float = 1e-6,
+        qk_norm_before_rope: bool = False,
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -239,6 +273,8 @@ class MultiheadAttention(torch.nn.Module):
         if not fuse_qkv_params:
             qkv_weight_interleaved = False
         self.qkv_weight_interleaved = qkv_weight_interleaved
+        self.rotary_pos_interleaved = rotary_pos_interleaved
+        self.qk_norm_before_rope = qk_norm_before_rope
 
         assert attention_type in AttnTypes, f"attention_type {attention_type} not supported"
         if layer_number is not None:
@@ -273,6 +309,10 @@ class MultiheadAttention(torch.nn.Module):
             "params_dtype": self.params_dtype,
             "device": device,
         }
+
+        self.q_norm, self.k_norm = self._create_qk_norm_modules(
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+        )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
 
@@ -393,6 +433,78 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+    def _create_qk_norm_modules(
+        self,
+        qk_norm_type: Optional[str],
+        qk_norm_eps: float,
+        device: Union[torch.device, str],
+        seq_length: Optional[int] = None,
+        micro_batch_size: Optional[int] = None,
+    ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
+        """
+        Create query and key normalization modules based on the specified normalization type.
+
+        Parameters
+        ----------
+        qk_norm_type : Optional[str]
+            Type of normalization to apply. Options: None, 'L2Normalization', 'RMSNorm', 'LayerNorm'
+        qk_norm_eps : float
+            Epsilon value for numerical stability
+        device : Union[torch.device, str]
+            Device to place the normalization modules on
+        seq_length : Optional[int], default = None
+            Sequence length for L2Normalization optimization
+        micro_batch_size : Optional[int], default = None
+            Micro batch size for L2Normalization optimization
+
+        Returns
+        -------
+        Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]
+            Query and key normalization modules (q_norm, k_norm)
+        """
+        if qk_norm_type is None:
+            return None, None
+
+        if qk_norm_type == "L2Normalization":
+            l2_norm = L2Normalization(
+                eps=qk_norm_eps,
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+            )
+            # L2Normalization is parameter-free, so we can share the same instance
+            return l2_norm, l2_norm
+
+        if qk_norm_type == "RMSNorm":
+            q_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            k_norm = RMSNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            return q_norm, k_norm
+
+        if qk_norm_type == "LayerNorm":
+            q_norm = LayerNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            k_norm = LayerNorm(
+                normalized_shape=self.hidden_size_per_attention_head,
+                eps=qk_norm_eps,
+                device=device,
+            )
+            return q_norm, k_norm
+
+        raise ValueError(
+            f"Unsupported QK norm type: {qk_norm_type}. "
+            "Supported types: ['L2Normalization', 'RMSNorm', 'LayerNorm']"
+        )
+
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
         Set the tensor parallel group for the given
@@ -478,6 +590,8 @@ class MultiheadAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
@@ -551,6 +665,12 @@ class MultiheadAttention(torch.nn.Module):
                    with shape [batch_size + 1] and dtype torch.int32.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `query_layer`,
+                   with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
@@ -710,6 +830,18 @@ class MultiheadAttention(torch.nn.Module):
                 for x in (key_layer, value_layer)
             )
 
+            if self.qkv_format == "thd":
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
+            else:
+                # key, value: -> [sq, b, ng, hn]
+                key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    for x in (key_layer, value_layer)
+                )
+
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
                 layernorm_query_outputs = self.layernorm_query(
@@ -734,6 +866,14 @@ class MultiheadAttention(torch.nn.Module):
                 self.hidden_size_per_attention_head,
             )
             query_layer = query_layer.view(*new_tensor_shape)
+
+        # ===========================
+        # Apply normalization to query and key tensors (before RoPE if configured)
+        # ===========================
+
+        if self.q_norm is not None and self.qk_norm_before_rope:
+            query_layer = self.q_norm(query_layer)
+            key_layer = self.k_norm(key_layer)
 
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
@@ -775,6 +915,7 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=cu_seqlens_q,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                interleaved=self.rotary_pos_interleaved,
             )
             key_layer = apply_rotary_pos_emb(
                 key_layer,
@@ -784,7 +925,16 @@ class MultiheadAttention(torch.nn.Module):
                 cu_seqlens=cu_seqlens_kv,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
+                interleaved=self.rotary_pos_interleaved,
             )
+
+        # ===========================
+        # Apply normalization to query and key tensors (after RoPE if not applied before)
+        # ===========================
+
+        if self.q_norm is not None and not self.qk_norm_before_rope:
+            query_layer = self.q_norm(query_layer)
+            key_layer = self.k_norm(key_layer)
 
         # ===========================
         # Core attention computation
@@ -797,6 +947,8 @@ class MultiheadAttention(torch.nn.Module):
             qkv_format=self.qkv_format,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             attention_mask=attention_mask,

@@ -107,6 +107,7 @@ struct communicator {
 
   CUmemGenericAllocationHandle *uchandles[NVTE_MAX_REGIONS];
   void *ucbase_ptr[NVTE_MAX_REGIONS];  // only for cuMem allocated memory
+  size_t uc_offsets[NVTE_MAX_REGIONS];
   size_t mem_size[NVTE_MAX_REGIONS];
   bool mem_dealloc[NVTE_MAX_REGIONS];
 
@@ -125,7 +126,7 @@ struct communicator {
   // max value for running block counters in hostflags
   int basecounter[userbuffers_op_types];  // NOLINT(*)
 
-  int *flags, *map_flags;
+  int *flags_baseptr, *flags, *map_flags;
 
   void *mem_mr[NVTE_MAX_REGIONS];
 
@@ -302,5 +303,13 @@ void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inp
                             cudaStream_t stream);
 
 void reduce_bf16(void *input, void *output, int num_inputs, int input_size, cudaStream_t stream);
+
+void userbuffers_send_all(const int srchandler, const size_t srcoffset, const int dsthandler,
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream);
+
+void userbuffers_recv_all(const int srchandler, const size_t srcoffset, const int dsthandler,
+                          const size_t dstoffset, const size_t bytes_per_slice, int tp_rank,
+                          int tp_size, communicator *comm, cudaStream_t stream);
 
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_

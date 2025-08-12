@@ -22,7 +22,13 @@ class CrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, _input, target, label_smoothing=0.0, reduce_loss=False, dist_process_group=None
+        ctx,
+        _input,
+        target,
+        label_smoothing=0.0,
+        reduce_loss=False,
+        dist_process_group=None,
+        ignore_idx=-100,
     ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
@@ -35,12 +41,13 @@ class CrossEntropyFunction(torch.autograd.Function):
         label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
         reduce_loss (bool): If true, returns the averaged loss across the B*SQ dimension.
         dist_process_group (torch.dist.ProcessGroup): The distributed process group the loss computation is split across, None if on 1 device.
+        ignore_idx (int): The index for which loss and gradients are made to zero
 
         Returns:
         tensor: The computed loss.
         """
         loss, _input = triton_cross_entropy.cross_entropy_forward(
-            _input, target, label_smoothing, reduce_loss, dist_process_group
+            _input, target, label_smoothing, reduce_loss, dist_process_group, ignore_idx
         )
 
         ctx.save_for_backward(_input.detach())

@@ -5,7 +5,6 @@
 """Helper functions for using fp8 tensors as weights"""
 
 import torch
-
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
@@ -194,7 +193,7 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group, use_fsdp_shard_mo
         quantizer.update_quantized(master_weight.view(1, -1), shard_model_weight_fp8)
 
     if len(amaxes) > 0:
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=amaxes[0].device)
+        dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=amaxes[0].device)
 
         # Reduce amaxes.
         packed_amaxes = torch.empty(len(amaxes), dtype=torch.float32, device=amaxes[0].device)

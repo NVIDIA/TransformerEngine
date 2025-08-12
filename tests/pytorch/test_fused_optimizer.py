@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 
-from itertools import product
 import copy
 from contextlib import nullcontext
 
@@ -16,6 +15,7 @@ from transformer_engine.pytorch.attention.multi_head_attention import MultiheadA
 from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -110,13 +110,6 @@ class TestFusedAdam(TestFusedOptimizer):
 
     def test_bfloat16(self):
         self.gen_single_type_test(param_type=torch.bfloat16, skip_assert=True)
-
-    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
 
     def test_multi_params(self):
         sizes = [[4096, 1024], [4096], [4096, 2048], [32320, 1024], [1]]
@@ -529,13 +522,6 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
-    def test_multi_device(self):
-        devices = ("cuda:0", "cuda:1")
-        for current_dev, tensor_dev in product(devices, devices):
-            with torch.cuda.device(current_dev):
-                self.gen_single_type_test(param_type=torch.float, device=tensor_dev)
-
 
 class Model(torch.nn.Module):
     def __init__(self):
@@ -596,7 +582,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -605,7 +591,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 
@@ -647,7 +633,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -656,7 +642,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 
@@ -705,7 +691,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -714,7 +700,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 

@@ -6,8 +6,6 @@
 
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
-from functools import reduce
-from operator import mul as multiply_op
 
 import queue
 import torch
@@ -15,7 +13,7 @@ import torch
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..utils import get_default_init_method
-from ..tensor.float8_tensor import Float8Tensor
+from ..export import is_in_onnx_export_mode
 
 
 def _get_normalization_func(normalization: str, forward: bool):
@@ -31,39 +29,6 @@ def _get_normalization_func(normalization: str, forward: bool):
     if forward:
         return fwd_normalization_funcs[normalization]
     return bwd_normalization_funcs[normalization]
-
-
-def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
-    """Reorder FP8 transposes after Userbuffers gather.
-
-    The all-gather is performed in-place in the Float8Tensor's
-    row-wise data, and afterwards we need to do a transpose to get the
-    correct ordering. This misuses data fields in Float8Tensor and
-    should be considered an evil hack. It would be best to move
-    transpose logic into CommOverlap::get_buffer.
-
-    Responsibility for fixing: adener, tmoon
-
-    """
-    assert isinstance(fp8_tensor, Float8Tensor), "Tensor is not a Float8Tensor"
-    assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
-    assert fp8_tensor._data is not None, "The tensor does not hold any rowwise data"
-    assert (
-        fp8_tensor._data.shape[0] % tp_size == 0
-    ), "Leading dimension of data is not divisble by TP size"
-
-    data = fp8_tensor._data
-    batched_size = reduce(multiply_op, data.shape[1:])
-    interleaved_shape = [tp_size, data.shape[0] // tp_size, batched_size]
-    transposed_shape = [data.shape[0] // tp_size, batched_size * tp_size]
-    fp8_tensor._transpose = (
-        data.view(interleaved_shape).transpose(0, 1).contiguous().view(transposed_shape)
-    )
-
-    fp8_tensor._transpose_invalid = False
-    fp8_tensor._data = None
-
-    return fp8_tensor
 
 
 def apply_normalization(
@@ -200,6 +165,8 @@ def noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 

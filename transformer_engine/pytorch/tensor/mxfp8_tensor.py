@@ -6,12 +6,13 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-
 from transformer_engine_torch import DType as TE_DType
+
+from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -135,6 +136,37 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
+    def create_tensor_from_data(
+        self,
+        data: torch.Tensor,
+        scale_inv: torch.Tensor,
+        fake_dtype: torch.dtype,
+        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+    ) -> MXFP8Tensor:
+        """Create a new MXFP8Tensor from data and scale_inv."""
+        return MXFP8Tensor(
+            shape=data.shape,
+            dtype=fake_dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=fp8_dtype,
+            quantizer=self,
+        )
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(dtype=torch.float32)
+        data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
+        return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
+        return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
+
+    def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
+        return MXFP8BlockScaling
+
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -160,6 +192,32 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
            Nominal tensor datatype.
 
     """
+
+    # NOTE: We reorder the *args so that we can instantiate a MXFP8TensorBase with positional args,
+    # which significantly reduces the Pybind11 overhead when calling the constructor from C++.
+    def __new__(
+        cls,
+        *args,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
+        columnwise_data: Optional[torch.Tensor],
+        columnwise_scale_inv: Optional[torch.Tensor],
+        fp8_dtype: TE_DType,
+        quantizer: Optional[Quantizer],
+        **kwargs,
+    ):
+        instance = super().__new__(
+            cls,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            quantizer,
+            *args,
+            **kwargs,
+        )
+        return instance
 
     def __repr__(self, *, tensor_contents=None):
         return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
@@ -216,51 +274,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         # TODO(ksivamani): Fix the detach bug
         return MXFP8Tensor.make_like(self)
-
-    def update_usage(
-        self,
-        rowwise_usage: Optional[bool] = None,
-        columnwise_usage: Optional[bool] = None,
-    ):
-        """
-        For MXFP8, columnwise scaled output is only produced by x2
-        scaling kernels, so this function only disables usages.
-        """
-
-        # Default usage is based on available data
-        if rowwise_usage is None:
-            rowwise_usage = self._rowwise_data is not None
-        if columnwise_usage is None:
-            columnwise_usage = self._columnwise_data is not None
-
-        # Update row-scaled data
-        if rowwise_usage:
-            if self._rowwise_data is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
-                )
-            if self._rowwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
-                )
-        else:
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-
-        # Update column-scaled data
-        if columnwise_usage:
-            if self._columnwise_data is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
-                )
-            if self._columnwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
-                )
-        else:
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
@@ -343,6 +356,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
         shape: torch.shape,
+        quantizer: Optional[Quantizer] = None,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
@@ -358,6 +372,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
             shape=shape,
+            quantizer=quantizer,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -372,6 +387,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 self._fp8_dtype,
                 self.dtype,
                 self.shape,
+                self._quantizer,
             ),
         )
 
@@ -417,7 +433,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
-            self._quantizer = tensor._quantizer
+            self._quantizer = tensor._quantizer.copy()
             self._fp8_dtype = tensor._fp8_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
@@ -425,6 +441,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
         # Quantize to FP8
         assert self._quantizer is not None, "Can't quantize without a quantizer"
+        self._quantizer.internal = False
         self.data = self._quantizer.quantize(tensor)
         if self.requires_grad != tensor.requires_grad:
             self.requires_grad_(requires_grad=tensor.requires_grad)
@@ -477,8 +494,7 @@ class _ViewFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.view(*shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
-            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+            new_columnwise_data = tensor._columnwise_data.view(*shape)
         return MXFP8Tensor(
             shape,
             tensor.dtype,
@@ -502,7 +518,7 @@ class _ViewFunc(torch.autograd.Function):
                 grad._rowwise_data.view(*ctx.shape) if grad._rowwise_data is not None else None
             )
             if grad._columnwise_data is not None:
-                new_columnwise_data = grad._columnwise_data.view(ctx.shape[-1], -1)
+                new_columnwise_data = grad._columnwise_data.view(*ctx.shape)
             else:
                 new_columnwise_data = None
             dgrad = MXFP8Tensor(
@@ -563,8 +579,7 @@ class _ReshapeFunc(torch.autograd.Function):
         if tensor._rowwise_data is not None:
             new_rowwise_data = tensor._rowwise_data.reshape(*shape)
         if tensor._columnwise_data is not None:
-            columnwise_shape = [shape[-1]] + list(shape[:-1])
-            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
+            new_columnwise_data = tensor._columnwise_data.view(*shape)
 
         return MXFP8Tensor(
             shape,
@@ -590,8 +605,7 @@ class _ReshapeFunc(torch.autograd.Function):
             if grad._rowwise_data is not None:
                 new_rowwise_data = grad._rowwise_data.view(*ctx.shape)
             if grad._columnwise_data is not None:
-                columnwise_shape = [ctx.shape[-1]] + list(ctx.shape[:-1])
-                new_columnwise_data = grad._columnwise_data.view(columnwise_shape)
+                new_columnwise_data = grad._columnwise_data.view(*ctx.shape)
             dgrad = MXFP8Tensor(
                 ctx.shape,
                 grad.dtype,
