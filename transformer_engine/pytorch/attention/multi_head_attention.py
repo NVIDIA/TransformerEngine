@@ -892,9 +892,7 @@ class MultiheadAttention(torch.nn.Module):
             # Applyig RoPE for inference needs start positions of sequences
             # for each iteration.
             sequence_start_positions = (
-                inference_params.get_seqlens_pre_step()
-                if inference_params is not None
-                else None
+                inference_params.get_seqlens_pre_step() if inference_params is not None else None
             )
 
             query_layer = apply_rotary_pos_emb(
