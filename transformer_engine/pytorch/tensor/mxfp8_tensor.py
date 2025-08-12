@@ -17,7 +17,12 @@ from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+    _quantize_default_impl,
+)
 
 aten = torch.ops.aten
 
@@ -66,6 +71,18 @@ class MXFP8Quantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def quantize(
+        self,
+        tensor: torch.Tensor,
+        *,
+        out: Optional[QuantizedTensor] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> QuantizedTensor:
+        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
+
+    def supports_only_rowwise_all_gather(self) -> bool:
+        return False
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""

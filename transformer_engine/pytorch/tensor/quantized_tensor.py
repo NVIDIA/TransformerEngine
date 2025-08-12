@@ -178,7 +178,6 @@ class Quantizer(abc.ABC):
             ")"
         )
 
-    @abc.abstractmethod
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -187,7 +186,12 @@ class Quantizer(abc.ABC):
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Quantize tensor in-place"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_quantized function, "
+            " required for weight workspace caching (in-place update of quantized tensor)"
+        )
 
+    @abc.abstractmethod
     def quantize(
         self,
         tensor: torch.Tensor,
@@ -196,11 +200,6 @@ class Quantizer(abc.ABC):
         dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
     ) -> QuantizedTensor:
         """Quantize tensor"""
-        if out is not None:
-            return self.update_quantized(tensor, out)
-        if (not self.internal) and torch.is_grad_enabled():
-            return _QuantizeFunc.apply(tensor, self)
-        return _QuantizeFunc.forward(None, tensor, self)
 
     def multi_quantize(self, list_of_tensors):
         """Quantize multiple tensors"""
@@ -213,7 +212,6 @@ class Quantizer(abc.ABC):
         """Quantize tensor"""
         return self.quantize(tensor)
 
-    @abc.abstractmethod
     def make_empty(
         self,
         shape: Iterable[int],
@@ -222,8 +220,11 @@ class Quantizer(abc.ABC):
         device: Optional[torch.device] = None,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement make_empty function, "
+            "required for construction of unintialized quantized tensor"
+        )
 
-    @abc.abstractmethod
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
 
@@ -231,6 +232,9 @@ class Quantizer(abc.ABC):
         without actually performing the quantization.
 
         """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement calibrate function"
+        )
 
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
@@ -252,17 +256,42 @@ class Quantizer(abc.ABC):
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_quantize"
+        )
 
     def onnx_dequantize(self, tensor) -> torch.Tensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_dequantize"
+        )
 
-    @abc.abstractmethod
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Returns recipe class that is compatible with this quantizer"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_compatible_recipe"
+        )
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Returns True if the quantizer supports only rowwise all-gather"""
-        return False
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement supports_only_rowwise_all_gather"
+        )
+
+
+def _quantize_default_impl(
+    quantizer: Quantizer,
+    tensor: torch.Tensor,
+    *,
+    out: Optional[QuantizedTensor] = None,
+    dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument
+) -> QuantizedTensor:
+    """Default TE implementation for quantize shared across TE quantizers."""
+    if out is not None:
+        return quantizer.update_quantized(tensor, out)
+    if (not quantizer.internal) and torch.is_grad_enabled():
+        return _QuantizeFunc.apply(tensor, quantizer)
+    return _QuantizeFunc.forward(None, tensor, quantizer)
 
 
 class _QuantizeFunc(torch.autograd.Function):

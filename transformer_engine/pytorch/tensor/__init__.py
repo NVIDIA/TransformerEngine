@@ -6,13 +6,12 @@
 
 import torch
 
-from .quantized_tensor import QuantizedTensor, Quantizer, QuantizerBase
+from .quantized_tensor import QuantizedTensor, Quantizer
 from .utils import cast_master_weights_to_fp8, replace_raw_data
 
 __all__ = [
     "QuantizedTensor",
     "Quantizer",
-    "QuantizerBase",
 ]
 
 

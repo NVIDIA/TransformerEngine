@@ -14,7 +14,12 @@ from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling, Recipe
 from ..utils import canonicalize_process_group, devices_match
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+    _quantize_default_impl,
+)
 from ..constants import dist_group_type
 
 aten = torch.ops.aten
@@ -88,6 +93,15 @@ class Float8Quantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def quantize(
+        self,
+        tensor: torch.Tensor,
+        *,
+        out: Optional[QuantizedTensor] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> QuantizedTensor:
+        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
 
     def make_empty(
         self,
@@ -266,6 +280,15 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dst._fp8_dtype = self.dtype
 
         return dst
+
+    def quantize(
+        self,
+        tensor: torch.Tensor,
+        *,
+        out: Optional[QuantizedTensor] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> QuantizedTensor:
+        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
 
     def make_empty(
         self,
