@@ -301,6 +301,7 @@ class BasicLinear(BasicOperation):
                 rowwise=True,
                 columnwise=torch.is_grad_enabled(),
             )
+            quantizer.internal = False
             with torch.no_grad():
                 weight = quantizer(weight)
 
@@ -317,11 +318,32 @@ class BasicLinear(BasicOperation):
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        if recipe is not None and not FP8GlobalStateManager.with_fp8_parameters():
-            # Make quantizers use internal tensors
-            self.get_input_quantizer().internal = True
-            self.get_grad_output_quantizer().internal = True
-            self.get_quantizer("forward", 1).internal = True
+        # Input/grad output quantizers use internal tensors
+        input_quantizer = self.get_quantizer("forward", 0)
+        grad_output_quantizer = self.get_quantizer("backward", 0)
+        if input_quantizer is not None:
+            input_quantizer.internal = True
+        if grad_output_quantizer is not None:
+            grad_output_quantizer.internal = True
+
+        # Handle weight quantizer
+        # Note: This function may be called in base class constructor,
+        # before any basic linear attrs have been set.
+        weight_quantizer = self.get_quantizer("forward", 1)
+        if weight_quantizer is None:
+            pass
+        elif is_quantized_tensor(getattr(self, "weight", None)):
+            # Make sure weight param has correct quantizer
+            weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
+            weight_quantizer.internal = False
+            self.weight.update_quantizer(weight_quantizer.copy())
+        else:
+            # Use internal tensors if quantized weights will not be
+            # exposed externally
+            weight_quantizer.internal = (
+                not FP8GlobalStateManager.with_fp8_parameters()
+                and not getattr(self, "_with_quantized_weight", False)
+            )
 
     @staticmethod
     def _functional_forward(
