@@ -1,4 +1,15 @@
-#pragma once
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file state_counter.cuh
+ *  \brief CUDA kernels to count state.
+ */
+
+#ifndef TRANSFORMER_ENGINE_STATE_COUNTER_CUH_
+#define TRANSFORMER_ENGINE_STATE_COUNTER_CUH_
 
 #include <cstdint>
 
@@ -59,3 +70,5 @@ struct PipeStateCounter {
 };
 
 } // namespace transformer_engine
+
+#endif // #ifndef TRANSFORMER_ENGINE_STATE_COUNTER_CUH_

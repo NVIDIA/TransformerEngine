@@ -1,4 +1,15 @@
-#pragma once
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file swizzle.cuh
+ *  \brief CUDA kernels to swizzle.
+ */
+
+#ifndef TRANSFORMER_ENGINE_SWIZZLE_CUH_
+#define TRANSFORMER_ENGINE_SWIZZLE_CUH_
 
 #include <cstdint>
 #include <cmath>
@@ -76,3 +87,5 @@ struct Linear {
 
 } // namespace swz
 } // namespace transformer_engine
+
+#endif // #ifndef TRANSFORMER_ENGINE_SWIZZLE_CUH_
