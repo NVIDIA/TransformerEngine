@@ -686,15 +686,15 @@ floatx4 up_cast(const bf16x4 &in) {
 
 
 inline bool is_cast_only_enabled() {
-    // static bool enabled = [](){
-    //     const char* env = std::getenv("ENABLE_CAST_ONLY");
-    //     return env != nullptr && (env[0] == '1');
-    // }();
-    // return enabled;
+    static bool enabled = [](){
+        const char* env = std::getenv("ENABLE_CAST_ONLY");
+        return env != nullptr && (env[0] == '1');
+    }();
+    return enabled;
 
-    // FIXME: when finish debugging, remove this
-    const char* env = std::getenv("ENABLE_CAST_ONLY");
-    return env != nullptr && (env[0] == '1');
+    // // FIXME: when finish debugging, remove this
+    // const char* env = std::getenv("ENABLE_CAST_ONLY");
+    // return env != nullptr && (env[0] == '1');
 }
 
 
