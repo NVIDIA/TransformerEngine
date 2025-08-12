@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
 import numpy as np
+from jax._src.mesh import AxisType
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
@@ -122,8 +123,10 @@ def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
 
 def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     """
-    A wrapper function to jax.lax.with_sharding_constraint to
-    support the case that Mesh is empty.
+    A wrapper function to jax.lax.with_sharding_constraint
+        1. Does nothing if mesh is empty.
+        2. If all mesh axes are manual axes, replaces pspec with all Nones.
+        3. Otherwise, strips only the manual axes.
     """
     if pspec is None:
         return x
@@ -131,7 +134,19 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
     mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
     if mesh.empty:
         return x
-    return jax.lax.with_sharding_constraint(x, pspec)
+
+    axis_names = mesh.axis_names
+    axis_types = mesh.axis_types
+    if all(t == AxisType.Manual for t in axis_types):
+        cleaned_pspec = PartitionSpec(*(None,) * len(pspec))
+        return jax.lax.with_sharding_constraint(x, cleaned_pspec)
+    non_manual_axis_names = tuple(
+        name for name, t in zip(axis_names, axis_types) if t != AxisType.Manual
+    )
+    cleaned_axis_names = tuple(name if name in non_manual_axis_names else None for name in pspec)
+
+    cleaned_pspec = PartitionSpec(*cleaned_axis_names)
+    return jax.lax.with_sharding_constraint(x, cleaned_pspec)
 
 
 def with_sharding_constraint_by_logical_axes(
