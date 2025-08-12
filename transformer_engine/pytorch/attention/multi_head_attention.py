@@ -900,7 +900,7 @@ class MultiheadAttention(torch.nn.Module):
                 self.qkv_format,
                 fused=True,
                 cu_seqlens=cu_seqlens_q,
-                cp_size=self.cp_size
+                cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 start_positions=sequence_start,
                 interleaved=self.rotary_pos_interleaved,
