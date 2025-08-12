@@ -1114,7 +1114,8 @@ class CustomRecipeState(RecipeState):
         if self.mode == "forward":
             if self.num_quantizers % 3 != 0:
                 raise ValueError(
-                    f"CustomRecipeState forward expects num_quantizers multiple of 3, got {self.num_quantizers}"
+                    "CustomRecipeState forward expects num_quantizers multiple of 3, got"
+                    f" {self.num_quantizers}"
                 )
             out = []
             for _ in range(self.num_quantizers // 3):
@@ -1125,7 +1126,8 @@ class CustomRecipeState(RecipeState):
 
         if self.num_quantizers % 2 != 0:
             raise ValueError(
-                f"CustomRecipeState backward expects num_quantizers multiple of 2, got {self.num_quantizers}"
+                "CustomRecipeState backward expects num_quantizers multiple of 2, got"
+                f" {self.num_quantizers}"
             )
         out = []
         for _ in range(self.num_quantizers // 2):

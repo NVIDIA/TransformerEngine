@@ -365,6 +365,7 @@ class QLinearParams:
     Holds concrete quantizers.
     Explicit control - None means "don't quantize this tensor".
     """
+
     input_quantizer: Optional[Any] = None
     weight_quantizer: Optional[Any] = None
     output_quantizer: Optional[Any] = None
@@ -382,10 +383,8 @@ class CustomRecipe(Recipe):
     qparams : QLinearParams
               Quantization parameters for linear-like modules.
     """
+
     qparams: QLinearParams = field(default_factory=QLinearParams)
 
     def __repr__(self) -> str:
-        return (
-            f"recipe_type={self.__class__.__name__}, "
-            f"qparams={self.qparams}"
-        )
+        return f"recipe_type={self.__class__.__name__}, qparams={self.qparams}"
