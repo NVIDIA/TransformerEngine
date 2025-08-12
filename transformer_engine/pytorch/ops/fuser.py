@@ -110,14 +110,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             xs, extra_inputs = _split_tuple(extra_inputs, op.num_extra_inputs)
             basic_op_extra_inputs.append(xs)
 
-        # Get environment state
-        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
-        recipe = FP8GlobalStateManager.get_fp8_recipe() if with_quantized_compute else None
-        is_grad_enabled = func_ctx is not None
-
-        # Attempt to fuse operations if neccesary
-        fuser.maybe_fuse_ops(is_grad_enabled, recipe, input_, basic_op_extra_inputs)
-
         # Apply forward ops
         x = input_
         extra_outputs = [None] * fuser._num_basic_ops
@@ -167,7 +159,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             extra_outputs_flat.extend(ys)
 
         # Save context for backward pass
-        if is_grad_enabled:
+        if func_ctx is not None:
 
             # Flatten list of saved tensors
             to_save = []
@@ -180,12 +172,9 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 ctx._saved_tensors_range = (range_start, range_end)
 
             # Save tensors for backward
-            if with_quantized_compute:
-                tensors_to_save, tensor_objects = prepare_for_saving(*to_save)
-                func_ctx.save_for_backward(*tensors_to_save)
-                func_ctx.tensor_objects = tensor_objects
-            else:
-                func_ctx.save_for_backward(*to_save)
+            tensors_to_save, tensor_objects = prepare_for_saving(*to_save)
+            func_ctx.save_for_backward(*tensors_to_save)
+            func_ctx.tensor_objects = tensor_objects
 
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
@@ -195,7 +184,6 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.num_extra_inputs = fuser.num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
-            func_ctx.with_quantized_compute = with_quantized_compute
 
         # Mark output tensors as not deletable in backward
         for tensor in [x] + extra_outputs_flat:
@@ -223,10 +211,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Restore saved tensors
-        if func_ctx.with_quantized_compute:
-            saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
-        else:
-            saved_tensors = func_ctx.saved_tensors
+        saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
 
         # Unflatten list of saved tensors
         for ctx in basic_op_ctxs:
@@ -460,8 +445,24 @@ class OperationFuser:
         if basic_op_kwargs is None:
             basic_op_kwargs = [{}] * self._num_basic_ops
 
+        # Unflatten list of extra tensor inputs
+        extra_inputs_copy = list(extra_inputs)
+        basic_op_extra_inputs = []
+        for op in self._basic_ops:
+            xs, extra_inputs_copy = _split_tuple(extra_inputs_copy, op.num_extra_inputs)
+            basic_op_extra_inputs.append(xs)
+
+        # Get environment state
+        recipe = None
+        if FP8GlobalStateManager.is_fp8_enabled():
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+        is_grad_enabled = torch.is_grad_enabled()
+
+        # Attempt to fuse operations if neccesary
+        self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+
         # Fuser forward pass
-        if torch.is_grad_enabled():
+        if is_grad_enabled:
             forward_func = _OperationFuserAutogradFunction.apply
             args = []
         else:

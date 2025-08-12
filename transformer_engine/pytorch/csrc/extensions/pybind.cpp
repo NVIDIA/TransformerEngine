@@ -374,6 +374,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
+  // Comm+GEMM Overlap
+  m.def("bulk_overlap_ag_with_external_gemm",
+        &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,
+        "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
+        py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
+        py::arg("send_stream"), py::arg("recv_stream"));
+
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
       .def(py::init<>())

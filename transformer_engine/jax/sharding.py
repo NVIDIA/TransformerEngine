@@ -86,30 +86,6 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def get_sequence_parallel_dim(logical_axes, contracting_dims, batch_dims):
-    """
-    Get the index for the sequence-parallel dimension based on the given logical axes.
-
-    The sequence-parallel dimension is assumed to be the only sharded non-batched non-contracting
-    dimension.
-    """
-    if not logical_axes:
-        return None
-
-    pspec = generate_pspec(logical_axes, with_flax_rules=True, padded=True)
-    ldims = [i for i in range(len(logical_axes)) if i not in set(contracting_dims + batch_dims)]
-    lspecs = [pspec[i] for i in ldims if pspec[i] is not None]
-    if len(lspecs) == 0:
-        return None
-
-    assert len(lspecs) == 1, (
-        "Expected only 1 non-batched non-contracting dimension to be sharded for "
-        f"sequence-parallelism, but found {len(lspecs)}: {pspec} @ idx {ldims}"
-    )
-
-    return pspec.index(lspecs[0])
-
-
 def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
     """
     Convert logical axes to PartitionSpec
@@ -427,24 +403,3 @@ class ShardingType(Enum):
     TP_ROW = (MajorShardingType.TP, "tp_row")
     DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
     DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
-
-
-def get_non_contracting_logical_axes(
-    ndim, logical_axes: tuple[Optional[str]], contracting_dims
-) -> tuple[Optional[str]]:
-    """Get logical axes for non-contracting dimensions.
-
-    Args:
-        ndim: Number of dimensions in the tensor.
-        logical_axes: Tuple of logical axes for each dimension.
-        contracting_dims: Set of dimensions that are being contracted.
-
-    Returns:
-        Tuple of logical axes for non-contracting dimensions.
-    """
-    assert logical_axes is not None, "Logical axes must be a tuple and cannot be None."
-    assert len(logical_axes) == ndim, "Logical axes must match the number of dimensions."
-
-    non_contracting_dims = [i for i in range(ndim) if i not in contracting_dims]
-    non_contracting_logical_axes = tuple(logical_axes[i] for i in non_contracting_dims)
-    return non_contracting_logical_axes
