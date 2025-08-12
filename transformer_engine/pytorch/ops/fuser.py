@@ -187,6 +187,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             else:
                 func_ctx.save_for_backward(*to_save)
 
+            # Whether to perform recipe update in backward pass
+            is_first_module = False
+            if fuser.first_op_requiring_backward < fuser._num_basic_ops:
+                is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+
             # Other context
             func_ctx.backward_ops = fuser._backward_ops
             func_ctx.basic_ops = fuser._basic_ops
@@ -194,7 +199,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.basic_op_num_params = fuser._basic_op_num_params
             func_ctx.num_extra_inputs = fuser.num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
-            func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            func_ctx.is_first_module = is_first_module
             func_ctx.with_quantized_compute = with_quantized_compute
 
         # Mark output tensors as not deletable in backward
