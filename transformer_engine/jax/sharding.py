@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 import warnings
-from jax.interpreters import pxla
 import jax
 import jax.numpy as jnp
+from jax.interpreters import pxla
 from jax.sharding import PartitionSpec
-import numpy as np
 from jax._src.mesh import AxisType
+import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
