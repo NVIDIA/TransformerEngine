@@ -127,6 +127,21 @@ model_configs_fused_attn = {
         2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64),  # MLA
+    "cp_4_0": ModelConfig(
+        2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64,
+        kv_lora_rank=512, qk_pos_emb_head_dim=32
+    ),  # MLA
+    "cp_4_1": ModelConfig(
+        2, 4096, 12, 128, head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
+    ),  # MLA
+    "cp_4_2": ModelConfig(
+        2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias",
+        head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
+    ),  # MLA
+    "cp_4_3": ModelConfig(
+        2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64,
+        kv_lora_rank=512, qk_pos_emb_head_dim=32
+    ),  # MLA
 }
 
 
@@ -181,6 +196,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("Only fp8 works with fp8_mha=True!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
+    if "a2a" in cp_comm_type and config.kv_lora_rank != 0:
+        pytest.skip("MLA CP exchanging latent does not support QKV A2A!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently does not support FP8 attention!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
