@@ -64,6 +64,7 @@ if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if fp8_available:
     fp8_recipes.append(recipe.DelayedScaling())
+    fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
@@ -80,14 +81,15 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
     ],
     outputs=[PyCustomOpDef.dt_uint8],
 )
-def trt_fp8_quantize(t, scale):
+def trt_fp8_quantize(t, scale_inv):
     """FP8 quantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
+    print(f"scale_inv = {scale_inv}")
     return q(x)._data.cpu().numpy()
 
 
@@ -100,11 +102,11 @@ def trt_fp8_quantize(t, scale):
     ],
     outputs=[PyCustomOpDef.dt_float],
 )
-def trt_fp8_dequantize(t, scale):
+def trt_fp8_dequantize(t, scale_inv):
     """FP8 dequantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
