@@ -86,7 +86,6 @@ def onnx_quantize_fp8_op(tensor: torch.Tensor, scale: float) -> torch.Tensor:
     scale_tensor = torch.tensor(scale, dtype=torch.float32, device=tensor.device)
     amax_tensor = torch.tensor([1], dtype=torch.float32, device=tensor.device)
     quantizer = Float8Quantizer(scale_tensor, amax_tensor, tex.DType.kFloat8E4M3)
-    print(f"scale: {scale_tensor.item()}")
     return quantizer.quantize(tensor)._data
 
 

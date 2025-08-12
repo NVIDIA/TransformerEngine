@@ -89,7 +89,6 @@ def trt_fp8_quantize(t, scale_inv):
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
-    print(f"scale_inv = {scale_inv}")
     return q(x)._data.cpu().numpy()
 
 
@@ -594,7 +593,9 @@ def _test_export_layernorm_linear(
                     fname,
                     inp,
                     model,
-                    atol=1e-3,
+                    # For current scaling we use Float8Quantizer in tests + amax computed by hand,
+                    # which has slightly different numerics than Float8CurrentScalingQuantizer.
+                    atol=1e-3 if fp8_recipe.__class__ is not recipe.Float8CurrentScaling else 2e-2,
                     is_fp8=fp8_recipe is not None,
                     te_outputs=te_outputs,
                 )
