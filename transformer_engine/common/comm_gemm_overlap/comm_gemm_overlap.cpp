@@ -893,22 +893,22 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 
       // GEMM
       TensorWrapper input_a_chunk, input_b_chunk;
-      if (ag_on_B) { // AllGather is performed on input B tensor (default case).
-                     // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
-        input_a_chunk = get_tensor_chunk(A, transb ? input_a_chunk_size * send_chunk_id / 2 : 0,
+      if (ag_on_B) {  // AllGather is performed on input B tensor (default case).
+                      // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
+        input_a_chunk = get_tensor_chunk(
+            A, transb ? input_a_chunk_size * send_chunk_id / 2 : 0,
             transb ? std::vector<size_t>{k_chunk * 2, m} : shape_to_vector(A.shape()));
         input_b_chunk =
             get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id / 2, input_b_chunk_shape);
-      } else { // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
+      } else {  // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
         assert(transa == false && transb == true);
-        input_a_chunk = get_buffer_chunk_like(
-            A, input_a_chunk_size * send_chunk_id / 2, std::vector<size_t>{k_chunk * 2, m}
-        );
+        input_a_chunk = get_buffer_chunk_like(A, input_a_chunk_size * send_chunk_id / 2,
+                                              std::vector<size_t>{k_chunk * 2, m});
         input_b_chunk =
             get_tensor_chunk(B, input_b_chunk_size * send_chunk_id / 2, input_b_chunk_shape);
       }
-      auto output_chunk =
-          get_tensor_chunk(D, transb ? 0 : output_chunk_size * send_chunk_id / 2, output_chunk_shape);
+      auto output_chunk = get_tensor_chunk(D, transb ? 0 : output_chunk_size * send_chunk_id / 2,
+                                           output_chunk_shape);
       auto aux_chunk = (do_gelu)
                            ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id / 2,
                                               {2 * n_chunk, k})
@@ -963,15 +963,17 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 
       // GEMM
       TensorWrapper input_a_chunk, input_b_chunk;
-      if (ag_on_B) { // AllGather is performed on input B tensor (default case).
-                     // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
-        input_a_chunk = get_tensor_chunk(A, transb ? input_a_chunk_size * send_chunk_id : 0,
-            transb ? std::vector<size_t>{k_chunk, m} : shape_to_vector(A.shape()));
+      if (ag_on_B) {  // AllGather is performed on input B tensor (default case).
+                      // Use case: AG->{FC2, PROJ}_Wgrad, AG->{FC1, QKV}_FPROP.
+        input_a_chunk =
+            get_tensor_chunk(A, transb ? input_a_chunk_size * send_chunk_id : 0,
+                             transb ? std::vector<size_t>{k_chunk, m} : shape_to_vector(A.shape()));
         input_b_chunk =
             get_buffer_chunk_like(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);
-      } else { // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
+      } else {  // AllGather is performed on input A tensor. Use case: AG->{FC1, QKV}_Wgrad.
         assert(transa == false && transb == true);
-        input_a_chunk = get_buffer_chunk_like(A, input_a_chunk_size * send_chunk_id,
+        input_a_chunk = get_buffer_chunk_like(
+            A, input_a_chunk_size * send_chunk_id,
             transb ? std::vector<size_t>{k_chunk, m} : std::vector<size_t>{m, k});
         input_b_chunk =
             get_tensor_chunk(B, input_b_chunk_size * send_chunk_id, input_b_chunk_shape);

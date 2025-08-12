@@ -106,7 +106,7 @@ def general_gemm(
         workspace.shape[0],
         accumulate,
         use_split_accumulator,
-        ag_on_B, # ag_on_B
+        ag_on_B,  # ag_on_B
     )
     kwargs = {
         "comm_overlap": ub,

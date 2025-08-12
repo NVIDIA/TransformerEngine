@@ -90,7 +90,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
                              DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
                              at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                             bool use_split_accumulator, bool ag_on_B, CommOverlapCore* comm_overlap,
+                             bool use_split_accumulator, bool ag_on_B,
+                             CommOverlapCore* comm_overlap,
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap) {
   // Input tensors
