@@ -560,9 +560,9 @@ class _Linear(torch.autograd.Function):
                     quantizer.set_usage(columnwise=False)
 
             # Adjust the quantization direction approach depending
-            # on whether dgrad and wgrad calculations will be performed.
-            if not ctx.requires_dgrad and ctx.grad_output_quantizer is not None:
-                ctx.grad_output_quantizer.set_usage(rowwise=False)
+            # on whether wgrad calculations will be performed.
+            # NOTE: If requires_dgrad is False, disabling `rowwise` quantization and keeping `columnwise` quantization
+            #       results in `Assertion failed: output_tensor->has_data(). Quantizing in only the columnwise direction not supported yet!`
             if not ctx.requires_wgrad and ctx.grad_output_quantizer is not None:
                 ctx.grad_output_quantizer.set_usage(columnwise=False)
 
