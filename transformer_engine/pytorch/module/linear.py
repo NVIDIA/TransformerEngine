@@ -116,6 +116,7 @@ class _Linear(torch.autograd.Function):
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
         symmetric_ar_type: str,
+        input_pre_gathered_for_column_sp: bool = False,
         save_original_input: bool = False,
         debug: Optional[bool] = False,
     ) -> torch.Tensor:
@@ -135,6 +136,7 @@ class _Linear(torch.autograd.Function):
         backward_needs_input = is_grad_enabled and weight.requires_grad
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
+            and not input_pre_gathered_for_column_sp
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -366,6 +368,7 @@ class _Linear(torch.autograd.Function):
 
             ctx.backward_input_needs_gather = (
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                and not input_pre_gathered_for_column_sp
             )
 
             # Discard unneeded data in input tensor
@@ -453,6 +456,7 @@ class _Linear(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
+            ctx.input_pre_gathered_for_column_sp = input_pre_gathered_for_column_sp
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
@@ -736,11 +740,12 @@ class _Linear(torch.autograd.Function):
                     nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
                     dgrad = gemm_out
                     if ctx.sequence_parallel:
-                        dgrad, dgrad_work = reduce_scatter_along_first_dim(
-                            dgrad,
-                            ctx.tp_group,
-                            async_op=True,
-                        )
+                        if not ctx.input_pre_gathered_for_column_sp:
+                            dgrad, dgrad_work = reduce_scatter_along_first_dim(
+                                dgrad,
+                                ctx.tp_group,
+                                async_op=True,
+                            )
                     else:
                         dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
                     nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
@@ -1001,6 +1006,7 @@ class _Linear(torch.autograd.Function):
             None,  # module
             None,  # skip_fp8_weight_update
             None,  # symmetric_ar_type
+            None,  # input_pre_gathered_for_column_sp
             None,  # save_original_input
             None,  # debug
         )
@@ -1098,6 +1104,7 @@ class Linear(TransformerEngineBaseModule):
         in_features: int,
         out_features: int,
         sequence_parallel: bool = False,
+        input_pre_gathered_for_column_sp: bool = False,
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
@@ -1160,6 +1167,7 @@ class Linear(TransformerEngineBaseModule):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
+        self.input_pre_gathered_for_column_sp = input_pre_gathered_for_column_sp
 
         # Column parallel TP overlap options
         self.ub_overlap_ag_fprop = (
@@ -1488,6 +1496,7 @@ class Linear(TransformerEngineBaseModule):
                 self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
+                self.input_pre_gathered_for_column_sp,
                 self.save_original_input,
                 debug,
             )
@@ -1709,7 +1718,10 @@ class Linear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
 
         if fwd:
-            if self.sequence_parallel and self.parallel_mode == "column":
+            if (
+                self.sequence_parallel and self.parallel_mode == "column"
+                and not self.input_pre_gathered_for_column_sp
+            ):
                 # set compact for inp tensor X
                 self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM1_INPUT
