@@ -632,17 +632,18 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
                 NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
               } cudaLaunchKernelEx(&cfg,
-                  block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType,
-                                                        OutputType>,
-                  reinterpret_cast<const InputType*>(input.dptr),
-                  reinterpret_cast<OutputType*>(output.dptr),
-                  reinterpret_cast<OutputType*>(output_t.dptr),
-                  reinterpret_cast<float*>(scale_inv.dptr),
-                  reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows, scale_stride_x,
-                  scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon, rowwise_option,
-                  columnwise_option, pow2_scale);)  // kAligned
-          )                                         // OutputType
-      )                                             // InputType
+                                   block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType,
+                                                                         OutputType>,
+                                   reinterpret_cast<const InputType*>(input.dptr),
+                                   reinterpret_cast<OutputType*>(output.dptr),
+                                   reinterpret_cast<OutputType*>(output_t.dptr),
+                                   reinterpret_cast<float*>(scale_inv.dptr),
+                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
+                                   scale_t_stride_y, epsilon, rowwise_option, columnwise_option,
+                                   pow2_scale);)  // kAligned
+          )                                       // OutputType
+      )                                           // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
