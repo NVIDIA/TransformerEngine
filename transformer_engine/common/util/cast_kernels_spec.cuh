@@ -75,7 +75,7 @@ e8m0_t to_e8m0(IType amax) {
 #endif
 }
 
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 template <typename T>
 struct alignas(4 * sizeof(T)) FPx4 {
     T x, y, z, w;
@@ -680,7 +680,7 @@ floatx4 up_cast(const bf16x4 &in) {
     return out;
 }
 
-#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
 } // anonymous namespace
 
@@ -779,7 +779,7 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_rowwise,
     int32_t scale_stride_colwise
 ) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
     using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
     constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
     using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
@@ -1152,7 +1152,7 @@ __global__ void cast_mxfp8_kernel(
         }
     }
 
-#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 
@@ -1293,7 +1293,7 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_rowwise,
     int32_t scale_stride_colwise
 ) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
     using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
     using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
     constexpr int32_t numItersIType2 = sizeof(typename CastTraits::inputUnitType) / sizeof(IType2);
@@ -1599,6 +1599,8 @@ __global__ void cast_mxfp8_kernel(
                             }
 
                             float2 amaxs;
+                        #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+                             (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
                             asm volatile (
                                 "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
                                 : "=f"(amaxs.x)
@@ -1609,6 +1611,26 @@ __global__ void cast_mxfp8_kernel(
                                 : "=f"(amaxs.y)
                                 : "f"(values.y)
                             );
+                        #else
+                            asm volatile (
+                                "{\n\t"
+                                ".reg.b32 val;\n"
+                                "abs.f32 val, %1;\n"
+                                "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+                                "}\n\t"
+                                : "=r"(reinterpret_cast<uint32_t&>(amaxs.x))
+                                : "f"(values.x)
+                            );
+                            asm volatile (
+                                "{\n\t"
+                                ".reg.b32 val;\n"
+                                "abs.f32 val, %1;\n"
+                                "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+                                "}\n\t"
+                                : "=r"(reinterpret_cast<uint32_t&>(amaxs.y))
+                                : "f"(values.y)
+                            );
+                        #endif
                             if (leader) {
                                 sColwiseReduce_2x[i] = amaxs;
                             }
@@ -1977,7 +1999,7 @@ __global__ void cast_mxfp8_kernel(
             }
         }
     }
-#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 template <typename CastTraits,
@@ -1994,7 +2016,7 @@ __global__ void cast_mxfp8_kernel(
     int32_t scale_stride_rowwise,
     int32_t scale_stride_colwise
 ) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
     using IType2 = typename ptx::FPx2<typename CastTraits::IType>;
     using OType2 = typename ptx::FPx2<typename CastTraits::OType>;
     
@@ -2452,6 +2474,8 @@ __global__ void cast_mxfp8_kernel(
                         }
 
                         float2 amaxs;
+                    #if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+                         (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
                         asm volatile (
                             "redux.sync.max.abs.f32 %0, %1, 0xFFFFFFFF;"
                             : "=f"(amaxs.x)
@@ -2462,6 +2486,26 @@ __global__ void cast_mxfp8_kernel(
                             : "=f"(amaxs.y)
                             : "f"(values.y)
                         );
+                    #else
+                        asm volatile (
+                            "{\n\t"
+                            ".reg.b32 val;\n"
+                            "abs.f32 val, %1;\n"
+                            "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+                            "}\n\t"
+                            : "=r"(reinterpret_cast<uint32_t&>(amaxs.x))
+                            : "f"(values.x)
+                        );
+                        asm volatile (
+                            "{\n\t"
+                            ".reg.b32 val;\n"
+                            "abs.f32 val, %1;\n"
+                            "redux.sync.max.u32 %0, val, 0xFFFFFFFF;\n"
+                            "}\n\t"
+                            : "=r"(reinterpret_cast<uint32_t&>(amaxs.y))
+                            : "f"(values.y)
+                        );
+                    #endif
                         if (leader) {
                             sColwiseReduce_2x[i] = amaxs;
                         }
@@ -2849,7 +2893,7 @@ __global__ void cast_mxfp8_kernel(
 
     ptx::cp_async_bulk_wait_group_read<0>();
 
-#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#endif // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
 } // namespace spec
