@@ -86,37 +86,14 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def generate_pspec(logical_axis_names, with_flax_rules=False, padded=False):
+def generate_pspec(logical_axis_names):
     """
     Convert logical axes to PartitionSpec
     """
-    rules = None
-    if with_flax_rules:
-        try:
-            import flax
+    rules = get_sharding_map_logic_axis_to_mesh_axis()
 
-            rules = dict(flax.linen.get_logical_axis_rules())
-        except ImportError:
-            pass
-
-    if rules is None:
-        warnings.warn(
-            "Transformer Engine logical axes, such as BATCH_AXES, SEQLEN_AXES, etc. are deprecated"
-            " and removed in a future version. Please use Flax logical axes with the"
-            " `flax.linen.logical_axis_rules()` context and optionally use"
-            " `transformer_engine.jax.flax.extend_logical_axis_rules()` to extend Flax axis rules"
-            " with Transformer Engine logical axes.",
-            DeprecationWarning,
-        )
-        rules = get_sharding_map_logic_axis_to_mesh_axis()
-    # mesh_axis_names = [rules[name] for name in logical_axis_names]
-    mesh_axis_names = []
-    for name in logical_axis_names:
-        axis_name = rules[name] if name in rules else None
-        mesh_axis_names.append(axis_name)
+    mesh_axis_names = [rules[name] for name in logical_axis_names]
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
-    if padded:
-        pspec = get_padded_spec(pspec, len(mesh_axis_names))
     return pspec
 
 
