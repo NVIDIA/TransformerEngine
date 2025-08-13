@@ -1939,28 +1939,12 @@ void fused_attn_fp8_fwd_impl_v1(
         {amax_o, devPtrAmaxO},
         {Stats, devPtrM}};
 
-      float tmpp[4];
-      cudaMemcpy(&(tmpp[0]), devPtrDescaleQ, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[1]), devPtrDescaleK, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[2]), devPtrDescaleV, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[3]), devPtrAmaxO, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaDeviceSynchronize();
-      printf("CS FWD: descale_q %f, descale_k %f, descale_v %f, amax_o %f\n", tmpp[0], tmpp[1], tmpp[2], tmpp[3]);
-
     if (output_tensor_type == fwd_tensor_type) {
       // delayed scaling
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[scale_s] = devPtrScaleS;
       variant_pack[scale_o] = devPtrScaleO;
       variant_pack[amax_s] = devPtrAmaxS;
-      float tmp[4];
-      cudaMemcpy(&(tmp[0]), devPtrScaleS, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmp[1]), devPtrDescaleS, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmp[2]), devPtrAmaxS, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmp[3]), devPtrScaleO, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaDeviceSynchronize();
-      printf("DS FWD: scale_s %f, descale_s %f, amax_s %f, scale_o %f\n", tmp[0], tmp[1], tmp[2],
-             tmp[3]);
     }
 
     /* if (is_bias) {
@@ -1986,14 +1970,6 @@ void fused_attn_fp8_fwd_impl_v1(
     }
 
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
-      //float tmpp[4];
-      cudaMemcpy(&(tmpp[0]), devPtrDescaleQ, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[1]), devPtrDescaleK, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[2]), devPtrDescaleV, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaMemcpy(&(tmpp[3]), devPtrAmaxO, sizeof(float), cudaMemcpyDeviceToHost);
-      cudaDeviceSynchronize();
-      printf("CS FWD: descale_q %f, descale_k %f, descale_v %f, amax_o %f\n", tmpp[0], tmpp[1], tmpp[2], tmpp[3]);
-
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }
@@ -2420,45 +2396,7 @@ void fused_attn_fp8_bwd_impl_v1(
       variant_pack[dropout_seed] = devPtrDropoutSeed;
       variant_pack[dropout_offset] = devPtrDropoutOffset;
     }
-    cudaDeviceSynchronize();
-    float tmp[11];
-    cudaMemcpy(&(tmp[0]), devPtrScaledP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[1]), devPtrDescaledP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[2]), devPtrDescaleQ, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[3]), devPtrDescaleK, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[4]), devPtrDescaleV, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[5]), devPtrDescaleO, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[6]), devPtrDescaledO, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[7]), devPtrAmaxdP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[8]), devPtrAmaxdQ, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[9]), devPtrAmaxdK, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[10]), devPtrAmaxdV, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    printf(
-        "CS BWD before: scale_dp %f, descale_dp %f, descale_q %f, descale_k %f, descale_v %f, "
-        "descale_o %f, descale_do %f, amax_dp %f, amax_dq %f, amax_dk %f, amax_dv %f\n",
-        tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7], tmp[8], tmp[9], tmp[10]);
-
     NVTE_CHECK_CUDNN_FE(mha_graph->execute(handle, variant_pack, workspace));
-    cudaDeviceSynchronize();
-    //      float tmp[11];
-    cudaMemcpy(&(tmp[0]), devPtrScaledP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[1]), devPtrDescaledP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[2]), devPtrDescaleQ, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[3]), devPtrDescaleK, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[4]), devPtrDescaleV, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[5]), devPtrDescaleO, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[6]), devPtrDescaledO, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[7]), devPtrAmaxdP, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[8]), devPtrAmaxdQ, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[9]), devPtrAmaxdK, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&(tmp[10]), devPtrAmaxdV, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    printf(
-        "CS BWD after: scale_dp %f, descale_dp %f, descale_q %f, descale_k %f, descale_v %f, "
-        "descale_o %f, descale_do %f, amax_dp %f, amax_dq %f, amax_dk %f, amax_dv %f\n",
-        tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7], tmp[8], tmp[9], tmp[10]);
-
   } catch (cudnn_frontend::cudnnException& e) {
     NVTE_ERROR(e.what());
   }

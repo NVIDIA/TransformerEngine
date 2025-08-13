@@ -544,11 +544,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ) = dpa_utils.get_attention_quantizers(
             fp8, fp8_meta, quantizers, cp_specific_quantizers=True
         )
-        curdev = torch.cuda.current_device() == 0
-        names = ["QKV", "O", "O_CP", "S", "dQKV", "dQKV_CP", "dO", "dP"]
-        for i,x in enumerate([QKV_quantizer, O_quantizer, O_CP_quantizer, S_quantizer, dQKV_quantizer, dQKV_CP_quantizer, dO_quantizer, dP_quantizer]):
-            if x is not None and curdev:
-                print(f'CP FWD before: {names[i]}: {x.scale}, {x.amax}')
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         if cp_size_a2a > 1:
@@ -1327,8 +1322,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
-            print(f"O_CP_quantizer {O_CP_quantizer.scale}, {O_CP_quantizer.amax}")
-            print(f"O_quantizer {O_quantizer.scale}, {O_quantizer.amax}")
 
         # prepare for return and ctx saves
         out_fp8 = None
@@ -1346,9 +1339,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 kv_fp8._scale_inv = 1/QKV_quantizer.scale
         fp8_tensors = (None, None, None)
         f16_tensors = (None, None, None)
-        if ctx.fp8:
-            #print(f"FFFFFFFFFWD {q_fp8._data.shape} {kv_fp8._data.shape}")
-            print(f"FFFFFFFFFWD {out_fp8._data.dtype} {kv_fp8._data.dtype}")
         if ctx.fp8:
             # fwd: fp8, bwd: fp8, save all fp8
             fp8_tensors = (q_fp8, kv_fp8, out_fp8)
@@ -1416,17 +1406,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8 and fp8_meta["recipe"].delayed():
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
-            print(f"FWD save: {ctx.S_quantizer=}, {ctx.dP_quantizer.scale=}, {ctx.dP_quantizer.amax=}")
         if ctx.fp8:
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.O_quantizer.scale = O_quantizer.scale.clone()
-            print(f"FWD save: {ctx.QKV_quantizer.scale=}, {ctx.QKV_quantizer.amax=}")
 
-        for i,x in enumerate([QKV_quantizer, O_quantizer, O_CP_quantizer, S_quantizer, dQKV_quantizer, dQKV_CP_quantizer, dO_quantizer, dP_quantizer]):
-            if x is not None and curdev:
-                print(f'CP FWD after: {names[i]}: {x.scale}, {x.amax}')
         nvtx_range_pop(f"{nvtx_label}")
 
         return out_ret
@@ -2117,40 +2102,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         **fa_backward_kwargs,
                     )
 
-            # dq, dk, dv are reduced across steps in float32
-            # DelayedScaling: collect all results in uint8, dequantize buffer to float32, reduce over CP steps
-            # CurrentScaling: dequantize each step to float32, reduce over steps
-            # convert to buffer_type
-
-            #print(f"RRRRRRRRRRRRRRRRRRRRRRightq {dq_.view(-1)[:10]}")
-            #print(f"RRRRRRRRRRRRRRRRRRRRRRightk {dk_.view(-1)[:10]}")
-            #print(f"RRRRRRRRRRRRRRRRRRRRRRightv {dv_.view(-1)[:10]}")
+            # dq, dk, dv are reduced across steps in higher precision
+            # DelayedScaling: collect all results in uint8, dequantize to float32, reduce over cp_size steps
+            # CurrentScaling: dequantize each step to dqkv_nominal_dtype, reduce over cp_size steps
             if ctx.use_fused_attention and ctx.fp8:
                 if ctx.fp8_meta["recipe"].delayed():
                     dq_, dk_, dv_ = [x._data for x in [dq_, dk_, dv_]]
-                #if ctx.fp8_meta["recipe"].float8_current_scaling():
-                    #dq_, dk_, dv_ = [x.to(torchfor x in [dq_, dk_, dv_]]
-                    #dq_, dk_, dv_ = combine_and_dequantize(ctx.fp8_meta["recipe"], qkv_layout, dq_, dk_, dv_, src_nominal_dtype=dqkv_nominal_dtype, des_nominal_dtype=torch.float32)
-            #        dq_, dk_, dv_ = combine_and_dequantize(qkv_layout, dq_, dk_, dv_, src_nominal_dtype=dqkv_nominal_dtype, des_nominal_dtype=fp8_data_buffer_dtype)
-            #    if ctx.fp8 and ctx.fp8_meta["recipe"].float8_current_scaling():
-            #        dq_, dk_, dv_ = [x.to(dtype=fp8_data_buffer_dtype) for x in [dq_, dk_, dv_]]
-            #else:
-            #    dq_, dk_, dv_ = [x.to(dtype=fp8_data_buffer_dtype) for x in [dq_, dk_, dv_]]
-            #names = ["dq", "dk", "dv"]
-            #for j,x in enumerate([dq_, dk_, dv_]):
-            #    name = "dqkv_" + str(torch.cuda.current_device()) + "_" + names[j] + '.pt'
-            #    print(f"Shapes {[x.shape for x in [dq_, dk_, dv_]]}")
-            #    #torch.save(x, name)
-            #print(f"q_data dev{torch.cuda.current_device()} {dq_.reshape(-1)[:10]}")
-            #print(f"k_data dev{torch.cuda.current_device()} {dk_.reshape(-1)[:10]}")
-            #print(f"v_data dev{torch.cuda.current_device()} {dv_.reshape(-1)[:10]}")
 
             # copy dq_ into the right buffer position
             if ctx.fp8 and ctx.fp8_meta["recipe"].delayed():
                 dq = dq_buffer[(rank + i + 1) % cp_size]
             else:
                 dq = dq_buffer
-            print(f"sssss, {dq_.dtype} {dq_buffer.shape} {dq.shape} {dq_.shape}")
             if causal and ctx.qkv_format in ["bshd", "sbhd"] and i >= (cp_size - rank - 1):
                 # [b, sq, h, d] -> [b, 2, sq//2, h, d] or
                 # [sq, b, h, d] -> [2, sq//2, b, h, d]
@@ -2165,7 +2128,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     elif ctx.qkv_format == "sbhd":
                         dq[0].fill_(0)
                         dq[1].copy_(dq_)
-                print(f"cccccccccccc{i}-{torch.cuda.current_device()} {torch.count_nonzero(dq_)}, {torch.count_nonzero(dq)}")
             elif causal:
                 if i > (cp_size - rank - 1):
                     dq.add_(dq_)
@@ -2235,7 +2197,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             # [b, 2, sk//2, h, d] or
             # [2, sk//2, b, h, d]
-            print(f"KKKKKKKKKKKKK========== {dkv.shape} {ctx.k_shape} {ctx.v_shape}")
             dk = dkv[: ctx.k_numel].view(*ctx.k_shape)
             dv = dkv[ctx.k_numel :].view(*ctx.v_shape)
             if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
@@ -2261,7 +2222,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     dk.copy_(dk_)
                     dv.copy_(dv_)
-                print(f"kkkkkkkkkkkkkk{i}-{torch.cuda.current_device()} {dk_.shape} {torch.count_nonzero(dk_)}, {torch.count_nonzero(dk)} {torch.count_nonzero(dv_)}, {torch.count_nonzero(dv)}")
             elif causal:
                 # not fp8 and causal
                 if i == (cp_size - 1):
@@ -2334,7 +2294,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if ctx.fp8 and ctx.use_fused_attention:
             amax_cp_bwd = amax_per_step.amax(dim=1)
             ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
-            print(f"dP quant {ctx.dP_quantizer.scale} {ctx.dP_quantizer.amax}")
             ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
             ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
 
@@ -2343,22 +2302,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 # [cp, b, 2, sk//2, h, d] or [cp, 2, sk//2, b, h, d]
                 dk = dkv_send_buffer[:, : ctx.k_numel].view(cp_size, *ctx.k_shape)
                 dv = dkv_send_buffer[:, ctx.k_numel :].view(cp_size, *ctx.v_shape)
-                print(f"0dqqqqqqqqqqqqqqqqq {torch.count_nonzero(dq)} {torch.count_nonzero(dk)} ")
                 dq, dk, dv = [ctx.dQKV_CP_quantizer.create_tensor_from_data(x, fake_dtype=dqkv_nominal_dtype, internal=ctx.dQKV_CP_quantizer.internal) for x in [dq, dk, dv]]
-                print(f"ddddddq {dq.dequantize().view(-1)[:10]}")
-                print(f"ddddddk {dk.dequantize().view(-1)[:10]}")
-                print(f"dqqqqqqqqqqqqqqqqq {dq._scale_inv} {dk._scale_inv} ")
-                print(f"=============================+DEQ+========== {qkv_layout} {ctx.dQKV_CP_quantizer.scale} {ctx.dQKV_CP_quantizer.amax}")
                 dq, dk, dv = combine_and_dequantize(ctx.fp8_meta["recipe"], qkv_layout, dq, dk, dv, src_nominal_dtype=dqkv_nominal_dtype, des_nominal_dtype=torch.float32)
-                print(f"0dqkv min/max {[(x.min().item(), x.max().item()) for x in [dq, dk, dv]]}")
                 dq, dk, dv = [x.sum(dim=0).to(dqkv_nominal_dtype) for x in [dq, dk, dv]]
-                print(f"2dqkv min/max {[(x.min().item(), x.max().item()) for x in [dq, dk, dv]]}")
 
             if ctx.fp8_meta["recipe"].float8_current_scaling():
                 dk = dkv[: ctx.k_numel].view(ctx.k_shape)
                 dv = dkv[ctx.k_numel :].view(ctx.v_shape)
-                #dq, dk, dv = [x.to(dtype=torch.float32) for x in [dq, dk, dv]]
-                print(f"1dqkv min/max {[(x.min().item(), x.max().item()) for x in [dq, dk, dv]]}")
 
 
         if causal and ctx.qkv_format in ["bshd", "sbhd"]:
@@ -2845,10 +2795,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_bias_type=ctx.attn_bias_type,
                             window_size=window_size_per_step[i],
                             deterministic=ctx.deterministic,
-                        )
-                        print(
-                            "after__,"
-                            f" {[(x.min().item(), x.max().item()) for x in [dq_, dk_, dv_]]}"
                         )
                     else:
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [

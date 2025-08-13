@@ -1886,8 +1886,6 @@ def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
             q_data, kv_data = [qkv_fp8._data[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
             k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
         case 3:
-            if torch.cuda.current_device() == 0:
-                print("combine_and_quantize before ", qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
             tensors = [q, k, v]
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
@@ -1910,8 +1908,6 @@ def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
         q_fp8._scale_inv = 1/qkv_quantizer.scale
         k_fp8._scale_inv = 1/qkv_quantizer.scale
         v_fp8._scale_inv = 1/qkv_quantizer.scale
-    if torch.cuda.current_device() == 0:
-        print("combine_and_quantize after ", q_fp8._scale_inv, qkv_quantizer.scale, qkv_quantizer.amax, [x.max().item() for x in [q, k, v]])
     return q_fp8, k_fp8, v_fp8
 
 
@@ -1965,13 +1961,8 @@ def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nomi
             q, kv = [qkv[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
             k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
         case 3:
-            if torch.cuda.current_device() == 0:
-                print(f"combine_and_dequantize before , {q_fp8.__class__}, {q_fp8._data.dtype} {q_fp8._quantizer.scale}, {q_fp8._quantizer.amax}, {q_fp8._data.shape}, {k_fp8._data.shape}, {v_fp8._data.shape}")#, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
             q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
             tensors = [q_data, k_data, v_data]
-            #print(f"q_data {q_data.view(-1)[:10]}")
-            #print(f"k_data {k_data.reshape(-1)[:10]}")
-            #print(f"v_data {v_data.reshape(-1)[:10]}")
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
             numels = [x.numel() for x in tensors]
@@ -1988,10 +1979,6 @@ def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nomi
                     qkv_fp8._scale_inv = 1/qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
             q, k, v = [qkv[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
-            #print("combine_and_dequantize after ", q_fp8._quantizer.scale, q_fp8._quantizer.amax)#, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-            if torch.cuda.current_device() == 0:
-                print(f"combine_and_dequantize afterq , {q_fp8.__class__}, {q_fp8._quantizer.scale}, {q_fp8._quantizer.amax}, {q_fp8._data.shape}, {k_fp8._data.shape}, {v_fp8._data.shape}")#, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
-                print(f"combine_and_dequantize afterk , {q_fp8.__class__}, {k_fp8._quantizer.scale}, {k_fp8._quantizer.amax}, {q_fp8._data.shape}, {k_fp8._data.shape}, {v_fp8._data.shape}")#, [x.max().item() for x in [q_fp8, k_fp8, v_fp8]])
         case _:
             raise "Invalid qkv_layout " + qkv_layout
     return q, k, v

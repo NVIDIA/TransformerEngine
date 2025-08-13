@@ -152,7 +152,6 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
   TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
-    printf("FWD ext\n");
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];

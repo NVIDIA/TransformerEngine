@@ -969,11 +969,6 @@ class FusedAttnFunc(torch.autograd.Function):
             else:
                 q_fp8, k_fp8, v_fp8 = combine_and_quantize(fp8_meta["recipe"], qkv_layout, q, k, v, QKV_quantizer)
 
-            if torch.cuda.current_device() == 0:
-                if S_quantizer is not None:
-                    print(f"before FWD S, {S_quantizer.scale}, {S_quantizer.amax}, {S_quantizer.dtype}")
-                if O_quantizer is not None:
-                    print(f"before FWD O, {O_quantizer.scale}, {O_quantizer.amax}, {O_quantizer.dtype}")
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
@@ -1005,18 +1000,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
             )
-            if torch.cuda.current_device() == 0:
-                if S_quantizer is not None:
-                    print(f"after FWD S, {S_quantizer.scale}, {S_quantizer.amax}, {S_quantizer.dtype}")
-                if O_quantizer is not None:
-                    print(f"after FWD O, {O_quantizer.scale}, {O_quantizer.amax}, {O_quantizer.dtype}")
-                    #O_quantizer.scale.fill_(1.0)
-                    outt = out_
-                    if isinstance(out_, Float8Tensor):
-                        outt = out_.dequantize()
-                        print(f"after FWD out_ convert, {out_._scale_inv}")
-                    print(f"after FWD out_, {outt.min().item()}, {outt.max().item()}")
-                    print(f"after FWD O, {O_quantizer.scale}, {O_quantizer.amax}, {O_quantizer.dtype}")
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1220,14 +1203,6 @@ class FusedAttnFunc(torch.autograd.Function):
                     # DelayedScaling:               Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                    if torch.cuda.current_device() == 0:
-                        names = ["q", "k", "v", "out", "d_out", "S", "dP", "dQKV"]
-                        for i,x in enumerate([
-                            q_fp8._quantizer, k_fp8._quantizer, v_fp8._quantizer, out_fp8._quantizer, d_out_fp8._quantizer,
-                            ctx.S_quantizer, ctx.dP_quantizer, ctx.dQKV_quantizer]):
-                            if x is not None:
-                                print(f"BWD before quantizer , {names[i]}, {x.scale}, {x.amax}")
-
                     dq_, dk_, dv_, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -1256,13 +1231,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    if torch.cuda.current_device() == 0:
-                        for i,x in enumerate([
-                            q_fp8._quantizer, k_fp8._quantizer, v_fp8._quantizer, out_fp8._quantizer, d_out_fp8._quantizer,
-                            ctx.S_quantizer, ctx.dP_quantizer, ctx.dQKV_quantizer]):
-                            if x is not None:
-                                print(f"BWD after quantizer , {names[i]}, {x.scale}, {x.amax}")
-                        print("min/max ", [(x.min().item(), x.max().item()) for x in [dq_, dk_, dv_]])
 
                     # dq_fp8, dk_fp8, dv_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                                       fp8_dtype = tex.DType.kFloat8E4M3
