@@ -18,8 +18,7 @@ import warnings
 import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
-from jax.sharding import PartitionSpec
-from jax._src.mesh import AxisType
+from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
@@ -136,14 +135,12 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
         return x
 
     axis_names = mesh.axis_names
-    axis_types = mesh.axis_types
-    if all(t == AxisType.Manual for t in axis_types):
+    manual_axis_names = get_abstract_mesh().manual_axes
+    if len(manual_axis_names) == len(axis_names):
         cleaned_pspec = PartitionSpec(*(None,) * len(pspec))
         return jax.lax.with_sharding_constraint(x, cleaned_pspec)
-    non_manual_axis_names = tuple(
-        name for name, t in zip(axis_names, axis_types) if t != AxisType.Manual
-    )
-    cleaned_axis_names = tuple(name if name in non_manual_axis_names else None for name in pspec)
+
+    cleaned_axis_names = tuple(name if name not in manual_axis_names else None for name in pspec)
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
