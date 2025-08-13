@@ -154,18 +154,16 @@ class Linear(FusedOperation):
         Also updates the basic operation that owns the parameter.
 
         """
+        if name == "bias" and self._bias_idx is None and param is not None:
+            raise ValueError(
+                "Attempted to set bias parameter in Linear operation "
+                "that does not have bias enabled"
+            )
         super().register_parameter(name, param)
         if name == "weight":
             self.basic_ops[self._linear_idx].weight = param
-        elif name == "bias":
-            if self._bias_idx is None:
-                if param is not None:
-                    raise ValueError(
-                        "Attempted to set bias parameter in Linear operation "
-                        "that does not have bias enabled"
-                    )
-            else:
-                self.basic_ops[self._bias_idx].bias = param
+        elif name == "bias" and self._bias_idx is not None:
+            self.basic_ops[self._bias_idx].bias = param
 
     def state_dict(self, *, prefix: str = "", **kwargs) -> dict[str, Any]:
         """Save state"""
