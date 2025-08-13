@@ -654,11 +654,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ), "fp8_output must be False when FP8 is not enabled for DotProductAttention."
             if self.fp8:
                 if self.fp8_meta["recipe"].fp8_mha:
-                    if not fp8_output:
-                        fp8_output = True
-                        self.logger.warning(
-                            """Forcing fp8_output=True due to fp8_meta["recipe"].fp8_mha=True"""
-                        )
                     if not self.fp8_meta["recipe"].fp8_dpa:
                         self.fp8_meta["recipe"].fp8_dpa = True
                         self.logger.warning(
