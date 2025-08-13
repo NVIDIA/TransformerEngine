@@ -66,8 +66,8 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 
 from ..cpp_extensions import (
     general_gemm,
@@ -152,6 +152,8 @@ class _LayerNormLinear(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
+
+        start_offload_if_offload_enabled(inputmat)
 
         tp_world_size = get_distributed_world_size(tp_group)
 
@@ -407,9 +409,6 @@ class _LayerNormLinear(torch.autograd.Function):
             if isinstance(weightmat, QuantizedTensorBase):
                 weightmat.update_usage(columnwise_usage=True)
 
-            if cpu_offloading:
-                mark_activation_offload(inputmat, mu, rsigma, ln_out)
-
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves
@@ -425,15 +424,13 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
+                mark_is_weight(
+                    weightmat,
+                    weight,
+                    bias,
+                    ln_weight,
+                    ln_bias,
+                )
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
@@ -450,15 +447,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.quantized_weight = quantized_weight
-            if fuse_wgrad_accumulation and weight.requires_grad:
-                # This check is needed to ensure that main_grad is not created
-                # during the forward pass when using MCore FSDP as it creates
-                # the main_grad buffer lazily before backprop
-                if hasattr(weight, "__fsdp_param__"):
-                    # MCore FSDP creates main_grad lazily before backward
-                    ctx.main_grad_func = weight.get_main_grad
-                else:
-                    ctx.main_grad_func = lambda: weight.main_grad
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -533,16 +521,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 mu,
                 rsigma,
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
-
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
-            )
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -557,14 +539,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    origin_weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -836,12 +810,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        origin_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,
                     "layout": "NT",
-                    "out": main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "out": origin_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,

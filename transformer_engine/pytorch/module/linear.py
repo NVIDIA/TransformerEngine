@@ -65,8 +65,8 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..cpu_offload import is_cpu_offload_enabled, start_offload_if_offload_enabled, mark_is_weight
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
@@ -94,7 +94,7 @@ class _Linear(torch.autograd.Function):
         grad_weight_quantizer: Optional[Quantizer],
         grad_output_quantizer: Optional[Quantizer],
         fuse_wgrad_accumulation: bool,
-        cpu_offloading: bool,
+        cpu_offloading: bool,  # pylint: disable=unused-argument
         tp_group: Union[dist_group_type, None],
         tp_size: int,
         sequence_parallel: bool,
@@ -223,6 +223,8 @@ class _Linear(torch.autograd.Function):
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
             inputmat_total = inputmat
+
+        start_offload_if_offload_enabled(inputmat)
         nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
         # ------------------------------------------------------
         # Input tensor is ready for GEMM...
@@ -381,9 +383,6 @@ class _Linear(torch.autograd.Function):
                 if isinstance(weightmat, QuantizedTensorBase):
                     weightmat.update_usage(columnwise_usage=True)
 
-            if cpu_offloading and saved_inputmat is not None:
-                mark_activation_offload(saved_inputmat)
-
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
             nvtx_range_push(f"{nvtx_label}.fsdp_scatter")
@@ -395,17 +394,7 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
+            mark_is_weight(weight, weightmat, bias)
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -424,18 +413,8 @@ class _Linear(torch.autograd.Function):
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            if fuse_wgrad_accumulation and weight.requires_grad:
-                # This check is needed to ensure that main_grad is not created
-                # during the forward pass when using MCore FSDP as it creates
-                # the main_grad buffer lazily before backprop
-                if hasattr(weight, "__fsdp_param__"):
-                    # MCore FSDP creates main_grad lazily before backward
-                    ctx.main_grad_func = weight.get_main_grad
-                else:
-                    ctx.main_grad_func = lambda: weight.main_grad
 
             ctx.debug = debug
-            ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
@@ -485,19 +464,6 @@ class _Linear(torch.autograd.Function):
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
-
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
-            )
-
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    weight = ctx.weight_object
-                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                    weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -810,12 +776,14 @@ class _Linear(torch.autograd.Function):
                 wgrad_gemm_kwargs = {
                     "workspace": get_workspace(),
                     "out_dtype": (
-                        main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": accumulate_wgrad_into_param_main_grad,
                     "layout": "NT",
-                    "out": main_grad if ctx.fuse_wgrad_accumulation else None,
+                    "out": weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,

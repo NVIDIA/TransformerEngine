@@ -7,7 +7,6 @@ from contextlib import nullcontext
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import warnings
 import logging
 
 import torch
@@ -1129,14 +1128,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
-                )
-
-            from transformer_engine.pytorch.cpu_offload import CPUOffloadEnabled
-
-            if CPUOffloadEnabled:
-                warnings.warn(
-                    "Attention activation Offloading is only implemented"
-                    "with Flash Attention and Fused Attention!"
                 )
 
             if use_unfused_attention:

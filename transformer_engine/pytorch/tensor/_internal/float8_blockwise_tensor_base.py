@@ -124,9 +124,22 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, scales: bool = False):
         """Get this Tensor's data."""
-        return self._rowwise_data, self._columnwise_data
+        if scales:
+            return (
+                self._rowwise_data,
+                self._columnwise_data,
+                self._rowwise_scale_inv,
+                self._columnwise_scale_inv,
+            )
+        else:
+            return self._rowwise_data, self._columnwise_data
+
+    def set_data_tensors(self, rowwise_data: torch.Tensor, columnwise_data: torch.Tensor):
+        """Set this Tensor's data."""
+        self._rowwise_data = rowwise_data
+        self._columnwise_data = columnwise_data
 
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""
@@ -411,3 +424,7 @@ class Float8BlockwiseQTensorBase(QuantizedTensorBase):
             return
 
         return
+
+    def get_usage(self) -> Tuple[bool, bool]:
+        """Get the usage of the tensor"""
+        return self._rowwise_data is not None, self._columnwise_data is not None
