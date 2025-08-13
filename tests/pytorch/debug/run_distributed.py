@@ -365,6 +365,40 @@ def test_log_distributed(parallel_mode, gather_weight, **kwargs):
 
 
 @run_debug_test
+def sanity_test_log_quantized_stats(parallel_mode, gather_weight, **kwargs):
+    from test_log import LOG_QUANTIZED_CONFIG
+
+    kwargs["config_file"].write(LOG_QUANTIZED_CONFIG)
+    kwargs["config_file"].flush()
+    _init_debug(kwargs["config_file"].name, kwargs["log_dir"], FEATURE_DIRS)
+    set_weight_tensor_tp_group_reduce(gather_weight)
+    if WORLD_SIZE % 2 != 0:
+        return  # skip
+    TP_SIZE = WORLD_SIZE // 2
+    DP_SIZE = 2
+    TP_RANK = WORLD_RANK % TP_SIZE
+    DP_RANK = (WORLD_RANK - TP_RANK) // TP_SIZE
+
+    debug_api.set_tensor_reduction_group(NCCL_WORLD)
+
+    x, weight = _get_tensors(
+        parallel_mode,
+        weight_seed=TP_RANK * 1234,
+        data_seed=DP_RANK * 1234,
+        tp_size=TP_SIZE,
+        tp_rank=TP_RANK,
+    )
+
+    tp_group_ranks = [i for i in range(DP_RANK * TP_SIZE, (DP_RANK + 1) * TP_SIZE)]
+    tp_group = dist.new_group(ranks=tp_group_ranks)
+
+    model = _init_model(weight, parallel_mode=parallel_mode, tp_group=tp_group)
+    _run_forward_backward(x, model, parallel_mode=parallel_mode, group=tp_group)
+
+    set_weight_tensor_tp_group_reduce(True)  # reset
+
+
+@run_debug_test
 def test_log_expert_parallel(**kwargs):
     """
     This test tests the scenario, when one of the node of data parallel does not invoke the debug layer.
