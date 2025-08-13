@@ -21,7 +21,6 @@ from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     _IdentityFunc,
-    _quantize_default_impl,
 )
 
 aten = torch.ops.aten
@@ -72,17 +71,9 @@ class MXFP8Quantizer(Quantizer):
 
         return dst
 
-    def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
-
-    def supports_only_rowwise_all_gather(self) -> bool:
-        return False
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""

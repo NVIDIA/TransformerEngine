@@ -1111,26 +1111,28 @@ class CustomRecipeState(RecipeState):
 
     def make_quantizers(self) -> list:
         qparams = self.recipe.qparams
+        # Build a canonical, per-mode pool and cycle it to match num_quantizers.
         if self.mode == "forward":
-            if self.num_quantizers % 3 != 0:
-                raise ValueError(
-                    "CustomRecipeState forward expects num_quantizers multiple of 3, got"
-                    f" {self.num_quantizers}"
-                )
-            out = []
-            for _ in range(self.num_quantizers // 3):
-                out.append(self._clone(qparams.input_quantizer))
-                out.append(self._clone(qparams.weight_quantizer))
-                out.append(self._clone(qparams.output_quantizer))
-            return out
+            pool = [
+                self._clone(qparams.input_quantizer),
+                self._clone(qparams.weight_quantizer),
+                self._clone(qparams.output_quantizer),
+            ]
+        else:
+            pool = [
+                self._clone(qparams.grad_output_quantizer),
+                self._clone(qparams.grad_input_quantizer),
+            ]
 
-        if self.num_quantizers % 2 != 0:
+        # Filter out None entries; allow partial qparams and reuse as needed.
+        pool = [q for q in pool if q is not None]
+        if len(pool) == 0:
             raise ValueError(
-                "CustomRecipeState backward expects num_quantizers multiple of 2, got"
-                f" {self.num_quantizers}"
+                "CustomRecipe requires at least one quantizer for the requested mode; "
+                f"got none for mode={self.mode}."
             )
+
         out = []
-        for _ in range(self.num_quantizers // 2):
-            out.append(self._clone(qparams.grad_output_quantizer))
-            out.append(self._clone(qparams.grad_input_quantizer))
+        for i in range(self.num_quantizers):
+            out.append(self._clone(pool[i % len(pool)]))
         return out

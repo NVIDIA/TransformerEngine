@@ -8,8 +8,8 @@ import warnings
 import os
 from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
-from pydantic.dataclasses import dataclass
 from dataclasses import field
+from pydantic.dataclasses import dataclass
 
 
 class _FormatHelper(NamedTuple):

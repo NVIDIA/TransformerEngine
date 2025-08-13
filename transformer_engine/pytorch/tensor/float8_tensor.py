@@ -18,7 +18,6 @@ from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     _IdentityFunc,
-    _quantize_default_impl,
 )
 from ..constants import dist_group_type
 
@@ -94,14 +93,9 @@ class Float8Quantizer(Quantizer):
 
         return dst
 
-    def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,
@@ -281,14 +275,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         return dst
 
-    def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,

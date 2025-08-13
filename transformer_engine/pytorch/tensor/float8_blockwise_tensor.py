@@ -18,7 +18,6 @@ from .quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     _IdentityFunc,
-    _quantize_default_impl,
 )
 from ..utils import devices_match, round_up_to_nearest_multiple
 
@@ -106,17 +105,9 @@ class Float8BlockQuantizer(Quantizer):
         dst._fp8_dtype = self.dtype
         return dst
 
-    def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> QuantizedTensor:
-        return _quantize_default_impl(self, tensor, out=out, dtype=dtype)
-
-    def supports_only_rowwise_all_gather(self) -> bool:
-        return False
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for blockwise quantization.

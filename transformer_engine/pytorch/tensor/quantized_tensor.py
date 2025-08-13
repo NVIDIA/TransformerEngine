@@ -5,7 +5,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import Callable, Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
 import warnings
@@ -187,11 +187,9 @@ class Quantizer(abc.ABC):
     ) -> QuantizedTensor:
         """Quantize tensor in-place"""
         raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement update_quantized function, "
-            " required for weight workspace caching (in-place update of quantized tensor)"
+            f"{self.__class__.__name__} class does not implement update_quantized"
         )
 
-    @abc.abstractmethod
     def quantize(
         self,
         tensor: torch.Tensor,
@@ -200,6 +198,15 @@ class Quantizer(abc.ABC):
         dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
     ) -> QuantizedTensor:
         """Quantize tensor"""
+        if out is not None:
+            return self.update_quantized(tensor, out)
+        if (not self.internal) and torch.is_grad_enabled():
+            return _QuantizeFunc.apply(tensor, self.quantize_impl)
+        return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+
+    @abc.abstractmethod
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
 
     def multi_quantize(self, list_of_tensors):
         """Quantize multiple tensors"""
@@ -232,9 +239,6 @@ class Quantizer(abc.ABC):
         without actually performing the quantization.
 
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement calibrate function"
-        )
 
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
@@ -274,41 +278,25 @@ class Quantizer(abc.ABC):
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Returns True if the quantizer supports only rowwise all-gather"""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement supports_only_rowwise_all_gather"
-        )
-
-
-def _quantize_default_impl(
-    quantizer: Quantizer,
-    tensor: torch.Tensor,
-    *,
-    out: Optional[QuantizedTensor] = None,
-    dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument
-) -> QuantizedTensor:
-    """Default TE implementation for quantize shared across TE quantizers."""
-    if out is not None:
-        return quantizer.update_quantized(tensor, out)
-    if (not quantizer.internal) and torch.is_grad_enabled():
-        return _QuantizeFunc.apply(tensor, quantizer)
-    return _QuantizeFunc.forward(None, tensor, quantizer)
+        return False
 
 
 class _QuantizeFunc(torch.autograd.Function):
-    """Cast to FP8 from other dtype"""
+    """Quantize tensor"""
 
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
         tensor: torch.Tensor,
-        quantizer: Quantizer,
+        quantize_impl: Callable,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        return tex.quantize(tensor, quantizer)
+        return quantize_impl(tensor)
 
     @staticmethod
     def backward(
-        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
