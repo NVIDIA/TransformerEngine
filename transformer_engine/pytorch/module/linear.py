@@ -563,7 +563,13 @@ class _Linear(torch.autograd.Function):
             # on whether wgrad calculations will be performed.
             # NOTE: If requires_dgrad is False, disabling `rowwise` quantization and keeping `columnwise` quantization
             #       results in `Assertion failed: output_tensor->has_data(). Quantizing in only the columnwise direction not supported yet!`
-            if not ctx.requires_wgrad and ctx.grad_output_quantizer is not None:
+            # NOTE: For `ctx.bias is True`, selected quantize kernel errors with
+            #       `cast_kernels.cuh:1322 in function fp8_quantize_arch_l_100: Not implemented scaling mode or fusion: NVTE_DELAYED_TENSOR_SCALING or IS_DBIAS=true on GPU with compute capability < 10.0.`
+            if (
+                not ctx.use_bias
+                and not ctx.requires_wgrad
+                and ctx.grad_output_quantizer is not None
+            ):
                 ctx.grad_output_quantizer.set_usage(columnwise=False)
 
             # Prepare grad output tensor

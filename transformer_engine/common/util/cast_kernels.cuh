@@ -1320,7 +1320,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
   if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
     // zhongboz: should we just ignore IS_ACT here?
     NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-               " on GPU with compute capability < 10.0.");
+               " or IS_DBIAS=true" + " on GPU with compute capability < 10.0.");
   }
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
