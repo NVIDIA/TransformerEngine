@@ -886,7 +886,6 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
 void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                     cudaStream_t stream) {
   checkCuDriverContext(stream);
-  cuda_driver::ensure_context_exists();
 
   if (output->has_data()) {
     NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
@@ -968,7 +967,6 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
 void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                       cudaStream_t stream) {
   checkCuDriverContext(stream);
-  cuda_driver::ensure_context_exists();
 
   const bool USE_ROWWISE_SCALING = output->has_data();
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();

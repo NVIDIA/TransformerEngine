@@ -251,7 +251,6 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
   bool use_rowwise_scaling = input.has_data();
   bool use_colwise_scaling = input.has_columnwise_data();
   checkCuDriverContext(stream);
-  cuda_driver::ensure_context_exists();
 
   const auto &input_shape = input.data.shape;
   NVTE_CHECK(input_shape.size() >= 2, "Input must have at least 2 dimensions.");
