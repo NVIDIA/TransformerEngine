@@ -359,32 +359,33 @@ class Float8BlockScaling(Recipe):
 
 
 @dataclass()
-class QLinearParams:
-    """Quantizers for linear-like modules.
+class CustomQuantizerFactories:
+    """Quantizer factories used by CustomRecipe.
 
-    Holds concrete quantizers.
-    Explicit control - None means "don't quantize this tensor".
+    Each field is a callable that returns a fresh quantizer instance when invoked.
+    If a factory is None, that tensor is left unquantized.
+    Keep factories simple: no required args; use closures to share state (e.g., RNG).
     """
 
-    input_quantizer: Optional[Any] = None
-    weight_quantizer: Optional[Any] = None
-    output_quantizer: Optional[Any] = None
-    grad_input_quantizer: Optional[Any] = None
-    grad_output_quantizer: Optional[Any] = None
+    input_factory: Optional[Callable[[], Any]] = None
+    weight_factory: Optional[Callable[[], Any]] = None
+    output_factory: Optional[Callable[[], Any]] = None
+    grad_input_factory: Optional[Callable[[], Any]] = None
+    grad_output_factory: Optional[Callable[[], Any]] = None
 
 
 @dataclass()
 class CustomRecipe(Recipe):
     """
-    Custom recipe that allows users to provide pre-constructed quantizers.
+    Custom recipe that allows users to provide quantizer factories.
 
     Parameters
     ----------
-    qparams : QLinearParams
-              Quantization parameters for linear-like modules.
+    qfactories : CustomQuantizerFactories
+                 Quantization factories.
     """
 
-    qparams: QLinearParams = field(default_factory=QLinearParams)
+    qfactories: CustomQuantizerFactories = field(default_factory=CustomQuantizerFactories)
 
     def __repr__(self) -> str:
-        return f"recipe_type={self.__class__.__name__}, qparams={self.qparams}"
+        return f"recipe_type={self.__class__.__name__}, qfactories={self.qfactories}"

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import abc
-import copy
 import itertools
 import os
 from contextlib import contextmanager
@@ -1099,40 +1098,34 @@ class CustomRecipeState(RecipeState):
             device = torch.device("cuda")
         self.device = device
 
-        if getattr(recipe, "qparams", None) is None:
-            raise ValueError("CustomRecipe requires `qparams` with quantizers.")
-
-    def _clone(self, q: Optional[Any]):
-        if q is None:
-            return None
-        if hasattr(q, "copy"):
-            return q.copy()
-        return copy.copy(q)
+        if getattr(recipe, "qfactories", None) is None:
+            raise ValueError("CustomRecipe requires `qfactories` with factories.")
 
     def make_quantizers(self) -> list:
-        qparams = self.recipe.qparams
-        # Build a canonical, per-mode pool and cycle it to match num_quantizers.
+        qfactories = self.recipe.qfactories
+        # Build a canonical, per-mode pool of factories and cycle it to match num_quantizers.
         if self.mode == "forward":
             pool = [
-                self._clone(qparams.input_quantizer),
-                self._clone(qparams.weight_quantizer),
-                self._clone(qparams.output_quantizer),
+                qfactories.input_factory,
+                qfactories.weight_factory,
+                qfactories.output_factory,
             ]
         else:
             pool = [
-                self._clone(qparams.grad_output_quantizer),
-                self._clone(qparams.grad_input_quantizer),
+                qfactories.grad_output_factory,
+                qfactories.grad_input_factory,
             ]
 
-        # Filter out None entries; allow partial qparams and reuse as needed.
-        pool = [q for q in pool if q is not None]
-        if len(pool) == 0:
+        # Filter out None entries; allow partial factories and reuse as needed.
+        pool = [factory for factory in pool if factory is not None]
+        if len(pool) == 0: 
             raise ValueError(
-                "CustomRecipe requires at least one quantizer for the requested mode; "
+                "CustomRecipe requires at least one factory for the requested mode; "
                 f"got none for mode={self.mode}."
             )
 
         out = []
         for i in range(self.num_quantizers):
-            out.append(self._clone(pool[i % len(pool)]))
+            factory = pool[i % len(pool)]
+            out.append(factory())
         return out
