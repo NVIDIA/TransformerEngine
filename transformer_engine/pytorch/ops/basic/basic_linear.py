@@ -13,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine.pytorch.module.base import get_workspace
-from ...cpp_extensions.gemm import general_gemm, validate_gemm_scale
+from ...cpp_extensions import general_gemm
 from ...distributed import (
     CudaRNGStatesTracker,
     gather_along_first_dim,
@@ -421,10 +421,6 @@ class BasicLinear(BasicOperation):
         if out is not None and out.dtype != dtype:
             raise ValueError(f"Output tensor has invalid dtype (expected {dtype}, got {out.dtype})")
 
-        # Check scaling factors
-        alpha = validate_gemm_scale(alpha, True)
-        beta = validate_gemm_scale(beta, accumulate_into_out)
-
         # Check input tensor
         x_local = input
         x = None
@@ -654,12 +650,6 @@ class BasicLinear(BasicOperation):
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
-
-        # Check scaling factors
-        grad_input_alpha = validate_gemm_scale(grad_input_alpha, input_requires_grad)
-        grad_weight_alpha = validate_gemm_scale(grad_weight_alpha, weight_requires_grad)
-        grad_input_beta = validate_gemm_scale(grad_input_beta, accumulate_into_grad_input)
-        grad_weight_beta = validate_gemm_scale(grad_weight_beta, accumulate_into_grad_weight)
 
         # Check grad output tensor
         dy_local = grad_output
