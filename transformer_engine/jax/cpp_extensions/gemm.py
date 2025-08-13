@@ -1090,7 +1090,7 @@ def _jax_gemm(
         if lhs.scaling_mode == ScalingMode.MXFP8_1D_SCALING:
             return _jax_gemm_mxfp8_1d(lhs, rhs, dim_nums)
 
-        raise NotImplementedError("Unsupported ScalingMode: {lhs.scaling_mode}")
+        raise NotImplementedError(f"Unsupported ScalingMode: {lhs.scaling_mode}")
 
     lhs_q, rhs_q = _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_dims)
 
