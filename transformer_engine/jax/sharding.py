@@ -135,6 +135,7 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
         return x
 
     axis_names = mesh.axis_names
+    # We want to exclude the axes that already used by shard_map and shard_map only sets those in the abstract_mesh, not the physical one
     manual_axis_names = get_abstract_mesh().manual_axes
     if len(manual_axis_names) == len(axis_names):
         cleaned_pspec = PartitionSpec(*(None,) * len(pspec))
