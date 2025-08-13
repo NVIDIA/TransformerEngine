@@ -272,6 +272,23 @@ def fused_attn_fwd(
 
     # execute kernel
 
+    #if torch.cuda.current_device() == 0:
+    #    print("cpp_ext:fwd ",
+    #        max_seqlen_q,
+    #        max_seqlen_kv,
+    #        #is_training,
+    #        QKVLayout[qkv_layout],
+    #        AttnMaskType[attn_mask_type],
+    #        #window_size,
+    #        #cu_seqlens_q,
+    #        #cu_seqlens_kv,
+    #        q.dtype, q.__class__, q.shape,
+    #        k.dtype, k.__class__, k.shape,
+    #        #v.dtype, v.__class__, v.shape,
+    #        fake_dtype,
+    #        (s_quantizer.scale, s_quantizer.amax) if s_quantizer is not None else None,
+    #        (o_quantizer.scale, o_quantizer.amax) if o_quantizer is not None else None,
+    #        )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -435,6 +452,27 @@ def fused_attn_bwd(
             len(aux_ctx_tensors) == 3
         ), "aux_ctx_tensors is required to be [M, ZInv, rng_state] for FP8 fused attention."
 
+#    if torch.cuda.current_device() == 0:
+#        print("cpp_ext:bwd ",
+#            max_seqlen_q,
+#            max_seqlen_kv,
+#            fake_dtype,
+#            dqkv_dtype,
+#            #is_training,
+#            QKVLayout[qkv_layout],
+#            AttnMaskType[attn_mask_type],
+#            #window_size,
+#            #cu_seqlens_q,
+#            #cu_seqlens_kv,
+#            q.dtype, q.__class__, q.shape,
+#            k.dtype, k.__class__, k.shape,
+#            o.dtype, o.__class__, o.shape,
+#            d_o.dtype, d_o.__class__, d_o.shape,
+#            #v.dtype, v.__class__, v.shape,
+#            fake_dtype,
+#            (s_quantizer.scale, s_quantizer.amax) if s_quantizer is not None else None,
+#            (o_quantizer.scale, o_quantizer.amax) if o_quantizer is not None else None,
+#            )
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,

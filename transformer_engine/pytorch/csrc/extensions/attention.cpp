@@ -152,6 +152,7 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
   TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+    printf("FWD ext\n");
     // FP8
     auto h = q_shape[q_shape.size() - 2];
     auto d = q_shape[q_shape.size() - 1];
@@ -349,6 +350,9 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   std::vector<int64_t> tmp_shape;
   auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
+  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
+    options = options.dtype(torch::kUInt8);
+  }
   if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
     options = options.dtype(fake_dtype);
   }

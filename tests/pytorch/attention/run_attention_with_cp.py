@@ -31,13 +31,15 @@ def run_dpa_with_cp(
     qkv_format="bshd",
     kernel_backend="FlashAttention",
     cp_comm_type="p2p",
-    fp8_mha=False,
+    fp8_dpa="False",
+    fp8_mha="False",
     scaling_mode="delayed",
 ):
     """Test DotProductAttention module with context parallelism"""
 
     # args are passed as strings
-    fp8_mha = fp8_mha == "True"
+    fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
+    fp8_mha = fp8_mha == "True" and dtype == "fp8"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -90,9 +92,9 @@ def run_dpa_with_cp(
 
     if dtype == "fp8":
         if scaling_mode == "delayed":
-            fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+            fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
         if scaling_mode == "current":
-            fp8_recipe = Float8CurrentScaling(fp8_dpa=True, fp8_mha=fp8_mha)
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
