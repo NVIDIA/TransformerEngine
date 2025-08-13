@@ -38,7 +38,9 @@ def test_custom_recipe_sanity(module_type):
         model = LayerNormLinear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
     elif module_type == "LayerNormMLP":
         # hidden_size == in_features == out_features for simplicity
-        model = LayerNormMLP(hidden_size=in_features, ffn_hidden_size=out_features, params_dtype=torch.bfloat16).cuda()
+        model = LayerNormMLP(
+            hidden_size=in_features, ffn_hidden_size=out_features, params_dtype=torch.bfloat16
+        ).cuda()
     else:
         # OpsLinear path
         model = te_ops.Linear(in_features, out_features, device="cuda", dtype=torch.bfloat16)
@@ -47,8 +49,10 @@ def test_custom_recipe_sanity(module_type):
     # Provide factories for input, weight, and grad_output quantizers
     def make_inp():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
     def make_w():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
     def make_gout():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
 
@@ -90,8 +94,10 @@ def test_custom_recipe_grouped_linear_sanity():
 
     def make_inp():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
     def make_w():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
     def make_gout():
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
 
@@ -142,7 +148,9 @@ def test_custom_recipe_matches_current_scaling():
     qf = recipe.CustomQuantizerFactories(
         input_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         weight_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        grad_output_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        grad_output_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E5M2, device="cuda"
+        ),
     )
     custom_recipe = recipe.CustomRecipe(qfactories=qf)
 
@@ -188,7 +196,9 @@ def test_custom_recipe_ops_linear_2_1_layout():
     qf = recipe.CustomQuantizerFactories(
         input_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         weight_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
-        grad_output_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda"),
+        grad_output_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E5M2, device="cuda"
+        ),
     )
     custom = recipe.CustomRecipe(qfactories=qf)
 
@@ -243,7 +253,9 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     loss.backward()
 
     assert counts["input"] == 3  # input factory used for input, weight, output via cycling
-    assert counts["grad_output"] == 2  # grad_output factory used for grad_output and grad_input via cycling
+    assert (
+        counts["grad_output"] == 2
+    )  # grad_output factory used for grad_output and grad_input via cycling
 
 
 def test_factories_return_distinct_instances_and_buffers():

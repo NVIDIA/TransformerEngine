@@ -1118,7 +1118,7 @@ class CustomRecipeState(RecipeState):
 
         # Filter out None entries; allow partial factories and reuse as needed.
         pool = [factory for factory in pool if factory is not None]
-        if len(pool) == 0: 
+        if len(pool) == 0:
             raise ValueError(
                 "CustomRecipe requires at least one factory for the requested mode; "
                 f"got none for mode={self.mode}."
