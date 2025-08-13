@@ -45,7 +45,7 @@ void *get_symbol(const char *symbol, int cuda_version) {
 }
 
 void ensure_context_exists() {
-  static thread_local bool need_check = [] () {
+  static thread_local bool need_check = []() {
     CUcontext context;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
     if (context == nullptr) {
