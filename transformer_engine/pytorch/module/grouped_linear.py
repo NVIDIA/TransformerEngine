@@ -8,7 +8,6 @@ import warnings
 
 import functools
 import torch
-import os
 
 import transformer_engine_torch as tex
 
@@ -180,7 +179,6 @@ class _GroupedLinear(torch.autograd.Function):
             bias=biases,
             use_bias=use_bias,
             use_split_accumulator=use_split_accumulator,
-            gemm_type=os.getenv("TE_GROUPGEMM_TYPE", "te"),
         )
 
         if fp8_calibration:
@@ -356,7 +354,6 @@ class _GroupedLinear(torch.autograd.Function):
                     m_splits=ctx.m_splits,
                     grad=True,
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    gemm_type=os.getenv("TE_GROUPGEMM_TYPE", "te"),
                 )
 
             if ctx.weights_requires_grad:
@@ -406,7 +403,6 @@ class _GroupedLinear(torch.autograd.Function):
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
-                    gemm_type=os.getenv("TE_GROUPGEMM_TYPE", "te"),
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():

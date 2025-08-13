@@ -14,8 +14,6 @@
 #include <cub/cub.cuh>
 #include <type_traits>
 
-#include "../common.h"
-#include "../util/logging.h"
 #include "cute/tensor.hpp"
 #include "cutlass/bfloat16.h"
 #include "cutlass/complex.h"
@@ -30,6 +28,10 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/util/device_memory.h"
 #include "cutlass/util/packed_stride.hpp"
+
+#include "../common.h"
+#include "../util/logging.h"
+#include "common/util/system.h"
 
 namespace grouped_gemm {
 
@@ -176,16 +178,6 @@ StrideT infer_stride(int rows, int cols, bool is_col_major) {
   }
 }
 
-inline void check_device_ptr(const void* ptr, const char* name) {
-  cudaPointerAttributes attr;
-  auto err = cudaPointerGetAttributes(&attr, ptr);
-  if (err != cudaSuccess || attr.devicePointer == nullptr) {
-    printf("[Error] Pointer %s is not a valid device pointer\n", name);
-  } else {
-    printf("[OK] Pointer %s is valid on device %d\n", name, attr.device);
-  }
-}
-
 template <typename T>
 inline __device__ __host__ T DIV_UP(T m, T n) {
   return (m + n - 1) / n;
@@ -227,16 +219,21 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
 
   typename Gemm::Arguments arguments;
   size_t workspace_size = Gemm::get_workspace_size(arguments);
-
-  transformer_engine::Tensor* wspace = transformer_engine::convertNVTETensor(workspace[0]);
-  char* all_workspace = (char*)(wspace->data.dptr);
-
-  char* workspace_ptr = nullptr;
   auto gemm_coord_size = getGemmCoordSize(num_gemms);
   auto ptr_size = getPtrSize(num_gemms);
   auto ldd_size = getLddSize(num_gemms);
-
   auto param_workspace_size = 3 * ptr_size + 3 * ldd_size + gemm_coord_size;
+
+  auto total_workspace_size = param_workspace_size + workspace_size;
+  transformer_engine::Tensor* wspace = transformer_engine::convertNVTETensor(workspace[0]);
+
+  NVTE_CHECK(total_workspace_size < wspace->numel(), "Insufficient workspace[0] size: required=",
+             static_cast<int64_t>(total_workspace_size),
+             ", available=", static_cast<int64_t>(wspace->numel()), " for CUTLASS grouped GEMM.");
+
+  char* all_workspace = (char*)(wspace->data.dptr);
+
+  char* workspace_ptr = nullptr;
 
   char* host_workspace = (char*)std::malloc(param_workspace_size);
 
@@ -262,20 +259,12 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
     const int k = transa ? inputA->data.shape[0] : inputA->data.shape[1];
     const int n = transb ? inputB->data.shape[0] : inputB->data.shape[1];
 
-    // const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
-    // const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];
-    // const int n = transb ? inputB->data.shape[1] : inputB->data.shape[0];
-
     auto problem = ProblemShapeType(m, n, k);
     problem_sizes_host[i] = problem;
 
     ptr_A_host[i] = (ElementA*)inputA->data.dptr;
     ptr_B_host[i] = (ElementB*)inputB->data.dptr;
     ptr_C_host[i] = (ElementC*)outputD->data.dptr;
-
-    // lda_host[i] = LayoutA::packed({m, k}).stride(0);
-    // ldb_host[i] = LayoutB::packed({k, n}).stride(0);
-    // ldc_host[i] = LayoutC::packed({m, n}).stride(0);
 
     lda_host[i] =
         infer_stride<StrideA>(m, k, std::is_same_v<LayoutA, cutlass::layout::ColumnMajor>);
@@ -330,22 +319,9 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
   std::free(host_workspace);
 }
 
-template <typename T>
-void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVTETensor* B,
-                        NVTETensor* D, NVTETensor* workspace, float alpha, float beta,
-                        int num_gemms, cudaStream_t stream, int device, int math_sm_count) {
-  if (!transa && !transb) {
-    CutlassGroupedGemm<false, false, T>(transa, transb, A, B, D, workspace, alpha, beta, num_gemms,
-                                        stream, device, math_sm_count);
-  } else if (transa) {
-    CutlassGroupedGemm<true, false, T>(transa, transb, A, B, D, workspace, alpha, beta, num_gemms,
-                                       stream, device, math_sm_count);
-  } else if (transb) {
-    CutlassGroupedGemm<false, true, T>(transa, transb, A, B, D, workspace, alpha, beta, num_gemms,
-                                       stream, device, math_sm_count);
-  } else {
-    throw std::invalid_argument("Invalid transpose combination");
-  }
-}
-
 }  // namespace grouped_gemm
+
+void nvte_cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
+                               int num_gemms, bool transa, bool transb, bool grad,
+                               NVTETensor* workspace, bool accumulate, int device,
+                               int math_sm_count, cudaStream_t stream);
