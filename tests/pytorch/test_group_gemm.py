@@ -63,9 +63,7 @@ class TEGPUGroupGemmTester:
             ref_C_list.append(ref_C)
         return A_list, B_list, C_list, ref_C_list
 
-    def test_grouped_gemm(
-        self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False
-    ):
+    def test_grouped_gemm(self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False):
 
         WARM_ITERS = 10
         ITERS = 1000
@@ -91,11 +89,14 @@ class TEGPUGroupGemmTester:
             get_multi_stream_cublas_workspace(),
             layout=layout,
             m_splits=self.m_splits,
-            accumulate=self.accumulate
+            accumulate=self.accumulate,
         )
         torch.cuda.synchronize()
 
-        print(f'\n=== Accuracy Testing with Layout:{layout} GemmType:{os.getenv("NVTE_USE_CUTLASS_GROUPGEMM", "0")}')
+        print(
+            "\n=== Accuracy Testing with"
+            f" Layout:{layout} GemmType:{os.getenv('NVTE_USE_CUTLASS_GROUPGEMM', '0')}"
+        )
         if check_accuracy:
 
             alpha = 1.0
@@ -140,7 +141,7 @@ class TEGPUGroupGemmTester:
                     get_multi_stream_cublas_workspace(),
                     layout=layout,
                     m_splits=self.m_splits,
-                    accumulate=self.accumulate
+                    accumulate=self.accumulate,
                 )
 
             torch.cuda.synchronize()
@@ -154,7 +155,7 @@ class TEGPUGroupGemmTester:
                     get_multi_stream_cublas_workspace(),
                     layout=layout,
                     m_splits=self.m_splits,
-                    accumulate=self.accumulate
+                    accumulate=self.accumulate,
                 )
             torch.cuda.synchronize()
             end_time = time.perf_counter()
@@ -193,12 +194,12 @@ if __name__ == "__main__":
                     [4096, 768, 2048],
                     [4096, 768, 2048],
                     [4096, 768, 2048],
-                    [4096, 768, 2048]
+                    [4096, 768, 2048],
                 ],
                 "accumulate": False,
                 "check_performance": True,
                 "transa": False,
-                "transb": True
+                "transb": True,
             },
             {
                 "group_config": [
@@ -217,16 +218,16 @@ if __name__ == "__main__":
                     [2048, 768, 2048],
                     [2048, 768, 2048],
                     [2048, 768, 2048],
-                    [2048, 768, 2048]
+                    [2048, 768, 2048],
                 ],
                 "accumulate": False,
                 "check_performance": True,
                 "transa": False,
-                "transb": True
-            }
+                "transb": True,
+            },
         ]
     }
-    
+
     for i, case in enumerate(config_data["configs"]):
         group_config = [tuple(x) for x in case["group_config"]]
         accumulate = case.get("accumulate", False)
