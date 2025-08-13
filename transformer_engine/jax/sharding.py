@@ -98,7 +98,7 @@ def _generate_pspec(logical_axis_names):
     """
     rules = get_sharding_map_logic_axis_to_mesh_axis()
 
-    mesh_axis_names = [rules[name] for name in logical_axis_names]
+    mesh_axis_names = [rules.get(name) for name in logical_axis_names]
     pspec = jax.sharding.PartitionSpec(*mesh_axis_names)
     return pspec
 
