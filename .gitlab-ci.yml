@@ -1670,6 +1670,33 @@ L2_jax_unittest--GB200NVL_4GPU:
     - .L2_test_on_cluster
     - .GB200NVL_4GPU
 
+L2_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test
+    - .H100_4GPU
+
+L2_jax_distributed_unittest--B200_8GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: amd64
+    needs: [ jax-py3-devel-amd64 ]
+    extends:
+    - .L2_test_on_cluster
+    - .B200_8GPU
+
+L2_jax_distributed_unittest--GB200_4GPU:
+    variables:
+      FRAMEWORK: jax
+      ARCH: arm64
+    needs: [ jax-py3-devel-arm64 ]
+    extends:
+    - .L2_test
+    - .GB200_4GPU
+
 docs:
     variables:
       FRAMEWORK: core
