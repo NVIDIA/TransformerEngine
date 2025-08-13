@@ -86,9 +86,15 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     return te_logical_axis_to_mesh_axis
 
 
-def generate_pspec(logical_axis_names):
+def _generate_pspec(logical_axis_names):
     """
-    Convert logical axes to PartitionSpec
+    Convert TransformerEngine logical axes (e.g. BATCH_AXES) to a JAX PartitionSpec.
+    Note, this method does not support Flax logical axes.
+
+    Args:
+        logical_axis_names: TransformerEngine logical axes to convert to a JAX PartitionSpec.
+    Returns:
+        A JAX PartitionSpec with the mesh axes corresponding to the given TransformerEngine logical axis names
     """
     rules = get_sharding_map_logic_axis_to_mesh_axis()
 
@@ -156,7 +162,7 @@ def with_sharding_constraint_by_logical_axes(
 
     # If no logical axis rules are available from Flax, fallback to TE's hardcoded logical axis rule table
     assert len(x.shape) == len(logical_axis_names)
-    pspec = generate_pspec(logical_axis_names)
+    pspec = _generate_pspec(logical_axis_names)
     return with_sharding_constraint(x, pspec)
 
 
