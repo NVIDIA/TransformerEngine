@@ -15,7 +15,6 @@ quantization, and distributed training through sharding constraints.
 
 from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
-import warnings
 
 import jax
 import jax.numpy as jnp
