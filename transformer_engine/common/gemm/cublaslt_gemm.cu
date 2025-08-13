@@ -19,6 +19,7 @@
 #include "../util/logging.h"
 #include "../util/multi_stream.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
 #include "cutlass_groupgemm.cuh"
 
 namespace {
@@ -722,10 +723,9 @@ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHan
 }  //  namespace transformer_engine
 
 void nvte_cutlass_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-                               const NVTETensor *bias, NVTETensor *pre_gelu_out,
                                const int num_gemms, bool transa, bool transb, bool grad,
-                               NVTETensor *workspace, bool accumulate, bool use_split_accumulator,
-                               int math_sm_count, cudaStream_t stream) {
+                               NVTETensor *workspace, bool accumulate, int math_sm_count,
+                               cudaStream_t stream) {
   NVTE_API_CALL(nvte_cutlass_grouped_gemm);
   using namespace transformer_engine;
 
@@ -762,4 +762,45 @@ void nvte_cutlass_grouped_gemm(const NVTETensor *A, const NVTETensor *B, NVTETen
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, finish_event));
 
   return;
+}
+
+void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                            const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                            bool transa, bool transb, bool grad, NVTETensor *workspace,
+                            bool accumulate, bool use_split_accumulator, int math_sm_count,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_gemm);
+  using namespace transformer_engine;
+
+  // NOTE(Alan): Read env flag (default = false)
+  bool cutlass_group_gemm_flag =
+      transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPGEMM", false);
+
+  if (!cutlass_group_gemm_flag) {
+    nvte_multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                                  workspace, accumulate, use_split_accumulator, math_sm_count,
+                                  stream);
+    return;
+  }
+
+  auto is_empty_arr = [&](const NVTETensor *p) -> bool {
+    if (p == nullptr) return true;
+    for (int i = 0; i < num_gemms; ++i) {
+      if (convertNVTETensor(p[i])->has_data()) return false;
+    }
+    return true;
+  };
+
+  // NOTE(Alan): Currently, only allow CUTLASS Grouped GEMM if: no bias, no pre_gelu_out, no split accumulator
+  cutlass_group_gemm_flag &=
+      is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator;
+
+  if (cutlass_group_gemm_flag) {
+    nvte_cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+                              math_sm_count, stream);
+  } else {
+    NVTE_ERROR(
+        "Invalid param type with cutlass group gemm: only no bias, no pre_gelu_out, no split "
+        "accumulator supported.");
+  }
 }

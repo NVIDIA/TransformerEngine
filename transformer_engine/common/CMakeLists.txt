@@ -45,12 +45,10 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
-set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
-set(CUTLASS_DEBUG_TRACE_LEVEL 1 CACHE STRING "Enable CUTLASS trace output for debugging")
-
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gemm/cutlass)
-set(CUTLASS_TOOLS_HEAD_DIR ${PROJECT_SOURCE_DIR}/gemm/cutlass/tools/util/include)
-set(CUTLASS_HEADER_DIR ${PROJECT_SOURCE_DIR}/gemm/cutlass/include)
+set(CUTLASS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
+set(CUTLASS_TOOLS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
@@ -135,12 +133,11 @@ endif()
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
-                      CUDNN::cudnn_all
-                      nvidia::cutlass::cutlass)
+                      CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES} 
-                           ${CUTLASS_HEADER_DIR}
-                           ${CUTLASS_TOOLS_HEAD_DIR})
+                          ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+                          ${CUTLASS_INCLUDE_DIR}
+                          ${CUTLASS_TOOLS_INCLUDE_DIR})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI

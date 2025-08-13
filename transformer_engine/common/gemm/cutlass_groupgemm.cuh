@@ -262,20 +262,12 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
     const int k = transa ? inputA->data.shape[0] : inputA->data.shape[1];
     const int n = transb ? inputB->data.shape[0] : inputB->data.shape[1];
 
-    // const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
-    // const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];
-    // const int n = transb ? inputB->data.shape[1] : inputB->data.shape[0];
-
     auto problem = ProblemShapeType(m, n, k);
     problem_sizes_host[i] = problem;
 
     ptr_A_host[i] = (ElementA*)inputA->data.dptr;
     ptr_B_host[i] = (ElementB*)inputB->data.dptr;
     ptr_C_host[i] = (ElementC*)outputD->data.dptr;
-
-    // lda_host[i] = LayoutA::packed({m, k}).stride(0);
-    // ldb_host[i] = LayoutB::packed({k, n}).stride(0);
-    // ldc_host[i] = LayoutC::packed({m, n}).stride(0);
 
     lda_host[i] =
         infer_stride<StrideA>(m, k, std::is_same_v<LayoutA, cutlass::layout::ColumnMajor>);
@@ -344,7 +336,7 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
     CutlassGroupedGemm<false, true, T>(transa, transb, A, B, D, workspace, alpha, beta, num_gemms,
                                        stream, device, math_sm_count);
   } else {
-    throw std::invalid_argument("Invalid transpose combination");
+    NVTE_ERROR("Invalid param type with cutlass group gemm: layout with 'TT' not supported.");
   }
 }
 

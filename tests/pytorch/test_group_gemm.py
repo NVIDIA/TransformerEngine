@@ -18,6 +18,7 @@ from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace
 import argparse
 import json
+import os
 
 
 class TEGPUGroupGemmTester:
@@ -63,7 +64,7 @@ class TEGPUGroupGemmTester:
         return A_list, B_list, C_list, ref_C_list
 
     def test_grouped_gemm(
-        self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False, gemm_type="te"
+        self, atol=1e-2, rtol=1e-2, check_accuracy=True, check_performance=False
     ):
 
         WARM_ITERS = 10
@@ -90,12 +91,11 @@ class TEGPUGroupGemmTester:
             get_multi_stream_cublas_workspace(),
             layout=layout,
             m_splits=self.m_splits,
-            accumulate=self.accumulate,
-            gemm_type=gemm_type,
+            accumulate=self.accumulate
         )
         torch.cuda.synchronize()
 
-        print(f"\n=== Accuracy Testing with Layout:{layout} GemmType:{gemm_type} ===")
+        print(f'\n=== Accuracy Testing with Layout:{layout} GemmType:{os.getenv("NVTE_USE_CUTLASS_GROUPGEMM", "0")}')
         if check_accuracy:
 
             alpha = 1.0
@@ -140,8 +140,7 @@ class TEGPUGroupGemmTester:
                     get_multi_stream_cublas_workspace(),
                     layout=layout,
                     m_splits=self.m_splits,
-                    accumulate=self.accumulate,
-                    gemm_type=gemm_type,
+                    accumulate=self.accumulate
                 )
 
             torch.cuda.synchronize()
@@ -155,8 +154,7 @@ class TEGPUGroupGemmTester:
                     get_multi_stream_cublas_workspace(),
                     layout=layout,
                     m_splits=self.m_splits,
-                    accumulate=self.accumulate,
-                    gemm_type=gemm_type,
+                    accumulate=self.accumulate
                 )
             torch.cuda.synchronize()
             end_time = time.perf_counter()
@@ -172,30 +170,65 @@ class TEGPUGroupGemmTester:
             print(f"⚡ average throughput: {tflops:.2f} TFLOPs")
 
 
-def run_grouped_gemm(group_config, gemm_type, check_performance, transa, transb, accumulate):
+def run_grouped_gemm(group_config, check_performance, transa, transb, accumulate):
     print(f"🔧 Running grouped GEMM with:")
     print(f"  group_config = {group_config}")
-    print(f"  gemm_type = {gemm_type}")
     print(f"  check_performance = {check_performance}")
     print(f"  transa = {transa}, transb = {transb}")
     print("-" * 50)
     tester = TEGPUGroupGemmTester(group_config, transa=transa, transb=transb, accumulate=accumulate)
-    tester.test_grouped_gemm(gemm_type=gemm_type, check_performance=check_performance)
+    tester.test_grouped_gemm(check_performance=check_performance)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Grouped GEMM test from JSON config")
-    parser.add_argument(
-        "--config_file", type=str, required=True, help="Path to JSON config file with test cases"
-    )
-    args = parser.parse_args()
 
-    with open(args.config_file, "r") as f:
-        config_data = json.load(f)
-
+    config_data = {
+        "configs": [
+            {
+                "group_config": [
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048],
+                    [4096, 768, 2048]
+                ],
+                "accumulate": False,
+                "check_performance": True,
+                "transa": False,
+                "transb": True
+            },
+            {
+                "group_config": [
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048],
+                    [2048, 768, 2048]
+                ],
+                "accumulate": False,
+                "check_performance": True,
+                "transa": False,
+                "transb": True
+            }
+        ]
+    }
+    
     for i, case in enumerate(config_data["configs"]):
         group_config = [tuple(x) for x in case["group_config"]]
-        gemm_type = case["gemm_type"]
         accumulate = case.get("accumulate", False)
         check_performance = case.get("check_performance", False)
         # NOTE(Alan): for cublas weight is A, input is B
@@ -204,4 +237,4 @@ if __name__ == "__main__":
         transa = case.get("transb", False)
 
         print(f"\n🧪 Case {i+1}:")
-        run_grouped_gemm(group_config, gemm_type, check_performance, transa, transb, accumulate)
+        run_grouped_gemm(group_config, check_performance, transa, transb, accumulate)
