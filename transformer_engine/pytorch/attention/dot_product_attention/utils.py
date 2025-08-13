@@ -1824,8 +1824,9 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         dQKV_quantizer.scale.fill_(1.0)
     if fp8_meta["recipe"].float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-        #O_quantizer.scale.fill_(1.0)
-        #dQKV_quantizer.scale.fill_(1.0)
+
+        # O_quantizer.scale.fill_(1.0)
+        # dQKV_quantizer.scale.fill_(1.0)
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
 
         # two options:
@@ -1833,8 +1834,8 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         #    dP.scale_inv gets updated as 1.0/dP.scale in Float8Quantizer.create_tensor();
         #    mixed amax reduction/scale update is required: dP in DS stype and other tensors in CS;
         dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
-        #dP_quantizer.scale.fill_(448/0.1361) #1.0)
-        #dP_quantizer.amax.fill_(0.1361) #0.0)
+        # dP_quantizer.scale.fill_(448/0.1361) #1.0)
+        # dP_quantizer.amax.fill_(0.1361) #0.0)
         dP_quantizer.scale.fill_(1.0)
         dP_quantizer.amax.fill_(0.0)
 
@@ -1880,38 +1881,65 @@ def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
             numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors+1)]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
             qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
             qkv_fp8 = qkv_quantizer(qkv)
-            q_data, kv_data = [qkv_fp8._data[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
+            q_data, kv_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
             k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
         case 3:
             tensors = [q, k, v]
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
             numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors+1)]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
             qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
             qkv_fp8 = qkv_quantizer(qkv)
-            q_data, k_data, v_data = [qkv_fp8._data[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
+            q_data, k_data, v_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
         case _:
             raise "Invalid qkv_layout " + qkv_layout
     if not isinstance(qkv_fp8, Float8Tensor):
-        q_fp8 = qkv_quantizer.create_tensor_from_data(q_data, fake_dtype=q.dtype, internal=qkv_quantizer.internal)
-        k_fp8 = qkv_quantizer.create_tensor_from_data(k_data, fake_dtype=k.dtype, internal=qkv_quantizer.internal)
-        v_fp8 = qkv_quantizer.create_tensor_from_data(v_data, fake_dtype=v.dtype, internal=qkv_quantizer.internal)
+        q_fp8 = qkv_quantizer.create_tensor_from_data(
+            q_data, fake_dtype=q.dtype, internal=qkv_quantizer.internal
+        )
+        k_fp8 = qkv_quantizer.create_tensor_from_data(
+            k_data, fake_dtype=k.dtype, internal=qkv_quantizer.internal
+        )
+        v_fp8 = qkv_quantizer.create_tensor_from_data(
+            v_data, fake_dtype=v.dtype, internal=qkv_quantizer.internal
+        )
     else:
-        q_fp8 = qkv_quantizer.create_tensor_from_data(q_data, fake_dtype=q.dtype, requires_grad=q.requires_grad, internal=qkv_quantizer.internal)
-        k_fp8 = qkv_quantizer.create_tensor_from_data(k_data, fake_dtype=k.dtype, requires_grad=k.requires_grad, internal=qkv_quantizer.internal)
-        v_fp8 = qkv_quantizer.create_tensor_from_data(v_data, fake_dtype=v.dtype, requires_grad=v.requires_grad, internal=qkv_quantizer.internal)
+        q_fp8 = qkv_quantizer.create_tensor_from_data(
+            q_data,
+            fake_dtype=q.dtype,
+            requires_grad=q.requires_grad,
+            internal=qkv_quantizer.internal,
+        )
+        k_fp8 = qkv_quantizer.create_tensor_from_data(
+            k_data,
+            fake_dtype=k.dtype,
+            requires_grad=k.requires_grad,
+            internal=qkv_quantizer.internal,
+        )
+        v_fp8 = qkv_quantizer.create_tensor_from_data(
+            v_data,
+            fake_dtype=v.dtype,
+            requires_grad=v.requires_grad,
+            internal=qkv_quantizer.internal,
+        )
     if fp8_recipe.float8_current_scaling():
-        q_fp8._scale_inv = 1/qkv_quantizer.scale
-        k_fp8._scale_inv = 1/qkv_quantizer.scale
-        v_fp8._scale_inv = 1/qkv_quantizer.scale
+        q_fp8._scale_inv = 1 / qkv_quantizer.scale
+        k_fp8._scale_inv = 1 / qkv_quantizer.scale
+        v_fp8._scale_inv = 1 / qkv_quantizer.scale
     return q_fp8, k_fp8, v_fp8
 
 
-def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None):
+def combine_and_dequantize(
+    fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
+):
     # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
@@ -1928,14 +1956,21 @@ def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nomi
             q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
             qkv_data = combine_tensors([q_data, k_data, v_data], dim)
             if not all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize().to(dtype=des_nominal_dtype).view(qkv_data.shape)
             else:
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, requires_grad=q_fp8.requires_grad, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data,
+                    fake_dtype=src_nominal_dtype,
+                    requires_grad=q_fp8.requires_grad,
+                    internal=qkv_quantizer.internal,
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype).view(qkv_data.shape)
             q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
         case 2:
@@ -1946,19 +1981,26 @@ def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nomi
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
             numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors+1)]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
             qkv_data = torch.cat([x.reshape(-1) for x in tensors], dim=0)
             if not all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize().to(dtype=des_nominal_dtype)
             else:
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, requires_grad=q_fp8.requires_grad, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data,
+                    fake_dtype=src_nominal_dtype,
+                    requires_grad=q_fp8.requires_grad,
+                    internal=qkv_quantizer.internal,
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
-            q, kv = [qkv[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
+            q, kv = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
             k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
         case 3:
             q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
@@ -1969,16 +2011,23 @@ def combine_and_dequantize(fp8_recipe, qkv_layout, q_fp8, k_fp8, v_fp8, src_nomi
             numels = [sum(numels[:i]) for i in range(4)]
             qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
             if not all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data, fake_dtype=src_nominal_dtype, internal=qkv_quantizer.internal
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize().to(dtype=des_nominal_dtype)
             else:
-                qkv_fp8 = qkv_quantizer.create_tensor_from_data(qkv_data, fake_dtype=src_nominal_dtype, requires_grad=q_fp8.requires_grad, internal=qkv_quantizer.internal)
+                qkv_fp8 = qkv_quantizer.create_tensor_from_data(
+                    qkv_data,
+                    fake_dtype=src_nominal_dtype,
+                    requires_grad=q_fp8.requires_grad,
+                    internal=qkv_quantizer.internal,
+                )
                 if fp8_recipe.float8_current_scaling():
-                    qkv_fp8._scale_inv = 1/qkv_quantizer.scale
+                    qkv_fp8._scale_inv = 1 / qkv_quantizer.scale
                 qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
-            q, k, v = [qkv[numels[i]:numels[i+1]].view(shapes[i]) for i in range(num_tensors)]
+            q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
         case _:
             raise "Invalid qkv_layout " + qkv_layout
     return q, k, v

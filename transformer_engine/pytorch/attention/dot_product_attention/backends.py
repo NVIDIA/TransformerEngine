@@ -967,7 +967,9 @@ class FusedAttnFunc(torch.autograd.Function):
             if is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
-                q_fp8, k_fp8, v_fp8 = combine_and_quantize(fp8_meta["recipe"], qkv_layout, q, k, v, QKV_quantizer)
+                q_fp8, k_fp8, v_fp8 = combine_and_quantize(
+                    fp8_meta["recipe"], qkv_layout, q, k, v, QKV_quantizer
+                )
 
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1019,7 +1021,9 @@ class FusedAttnFunc(torch.autograd.Function):
             # save appropriate tensors
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8) if is_bwd_fp8 else (None, None, None, None)
             if not is_bwd_fp8 and is_input_fp8:
-                q, k, v = combine_and_dequantize(fp8_meta["recipe"], qkv_layout, q_fp8, k_fp8, v_fp8)
+                q, k, v = combine_and_dequantize(
+                    fp8_meta["recipe"], qkv_layout, q_fp8, k_fp8, v_fp8
+                )
             qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1238,10 +1242,19 @@ class FusedAttnFunc(torch.autograd.Function):
                     dq_fp8, dk_fp8, dv_fp8 = dq_, dk_, dv_
                     dq, dk, dv = dq_, dk_, dv_
                     if ctx.fp8_meta["recipe"].delayed() and not ctx.is_input_fp8:
-                        dq, dk, dv = combine_and_dequantize(ctx.fp8_meta["recipe"], ctx.qkv_layout, dq_fp8, dk_fp8, dv_fp8, src_nominal_dtype=dq_fp8.dtype)
+                        dq, dk, dv = combine_and_dequantize(
+                            ctx.fp8_meta["recipe"],
+                            ctx.qkv_layout,
+                            dq_fp8,
+                            dk_fp8,
+                            dv_fp8,
+                            src_nominal_dtype=dq_fp8.dtype,
+                        )
                     if ctx.fp8_meta["recipe"].float8_current_scaling() and ctx.is_input_fp8:
                         # return dq_fp8, dk_fp8, dv_fp8
-                        dq, dk, dv = combine_and_quantize(ctx.fp8_meta["recipe"], ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
+                        dq, dk, dv = combine_and_quantize(
+                            ctx.fp8_meta["recipe"], ctx.qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
+                        )
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()

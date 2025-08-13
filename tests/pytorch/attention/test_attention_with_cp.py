@@ -139,7 +139,9 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("fp8_mha", [False, True])
 @pytest.mark.parametrize("fp8_dpa", [False, True])
 @pytest.mark.parametrize("scaling_mode", [None, "delayed", "current"])
-def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha, fp8_dpa, scaling_mode):
+def test_cp_with_fused_attention(
+    dtype, model, qkv_format, cp_comm_type, fp8_mha, fp8_dpa, scaling_mode
+):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
