@@ -1650,8 +1650,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(
                 cp_size_a2a, out.device
             )
-            if torch.cuda.current_device() == 0:
-                print(f"bwd a2acomm before {[x.shape for x in [out, dout]]}")
             out, dout = flash_attn_a2a_communicate(
                 [out, dout],
                 chunk_ids_for_a2a,
