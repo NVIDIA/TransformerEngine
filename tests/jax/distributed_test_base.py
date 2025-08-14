@@ -39,8 +39,8 @@ def generate_configs():
     return configs
 
 
-def generate_context_parallel_configs():
-    """Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only"""
+def generate_context_parallel_configs_for_attn():
+    '''Generate CP combinations along with TP+DP for TestDistributedContextParallelSelfAttn only'''
     configsL1 = []
     configsL2 = []
     mr = MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp")

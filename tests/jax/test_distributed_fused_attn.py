@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import random
 from distributed_test_base import (
     generate_configs,
-    generate_context_parallel_configs,
+    generate_context_parallel_configs_for_attn,
     generate_collectives_count,
 )
 from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
@@ -398,7 +398,7 @@ class TestDistributedContextParallelSelfAttn:
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
 
     @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs_for_attn()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
@@ -434,7 +434,7 @@ class TestDistributedContextParallelSelfAttn:
         )
 
     @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs_for_attn()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
@@ -476,7 +476,7 @@ class TestDistributedContextParallelSelfAttn:
         )
 
     @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs_for_attn()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES)
     @pytest.mark.parametrize("kv_groups", [1, 8])
@@ -540,7 +540,7 @@ class TestDistributedContextParallelSelfAttn:
         )
 
     @pytest_parametrize_wrapper(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs_for_attn()
     )
     @pytest.mark.parametrize("data_shape", DISTRIBUTED_CONTEXT_SELF_ATTN_DATA_SHAPES[:1])
     @pytest.mark.parametrize("dtype", [pytest.param(jnp.bfloat16, id="BF16")])
