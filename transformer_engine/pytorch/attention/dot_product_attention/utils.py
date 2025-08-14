@@ -44,6 +44,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 from transformer_engine.pytorch.jit import jit_fuser
 
@@ -105,7 +106,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.7.4.post1")
+    max_version = PkgVersion("2.8.1")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -433,6 +434,9 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
+        if device_compute_capability == (8, 9) and cudnn_version <= (9, 12, 0):
+            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN <= 9.12")
+            use_fused_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
             use_flash_attention = False
@@ -605,9 +609,10 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif head_dim_qk != head_dim_v:
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and head_dim_qk != head_dim_v:
             logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with MLA"
+                "Disabling FusedAttention as it does not support context parallelism with FP8"
+                " MLA attention"
             )
             use_fused_attention = False
 
@@ -763,6 +768,7 @@ def get_attention_backend(
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
         fused_attention_backend = tex.get_fused_attn_backend(
+            is_training,
             q_type,
             kv_type,
             QKVLayout[qkv_layout],
@@ -943,16 +949,24 @@ def get_attention_backend(
 @torch.no_grad()
 def get_padding_mask(
     batch_size: int,
-    cu_seqlens_q: torch.Tensor,
-    cu_seqlens_kv: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
+    cu_seqlens_q: torch.Tensor = None,
+    cu_seqlens_kv: torch.Tensor = None,
+    max_seqlen_q: int = None,
+    max_seqlen_kv: int = None,
+    attention_type: str = "self",
 ):
     """Convert cu_seqlens to attention_mask"""
+    assert (
+        cu_seqlens_q is not None and max_seqlen_q is not None
+    ), "cu_seqlens_q and max_seqlen_q are required for self-attention and cross-attention"
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+    if attention_type == "cross":
+        assert (
+            cu_seqlens_kv is not None and max_seqlen_kv is not None
+        ), "cu_seqlens_kv and max_seqlen_kv are required for cross-attention"
+        seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+        attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
     for i in range(batch_size):
         attention_mask_q = torch.cat(
             [
@@ -965,21 +979,26 @@ def get_padding_mask(
             ],
             dim=0,
         )
-        attention_mask_kv = torch.cat(
-            [
-                attention_mask_kv,
-                torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
-                .to(dtype=torch.bool)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0),
-            ],
-            dim=0,
+        if attention_type == "cross":
+            attention_mask_kv = torch.cat(
+                [
+                    attention_mask_kv,
+                    torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
+                    .to(dtype=torch.bool)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .unsqueeze(0),
+                ],
+                dim=0,
+            )
+    attention_mask_q = attention_mask_q.to(device="cuda")
+    if attention_type == "self":
+        attention_mask = attention_mask_q
+    else:
+        attention_mask = (
+            attention_mask_q,
+            attention_mask_kv.to(device="cuda"),
         )
-    attention_mask = (
-        attention_mask_q.to(device="cuda"),
-        attention_mask_kv.to(device="cuda"),
-    )
     return attention_mask
 
 
@@ -1122,9 +1141,7 @@ def get_full_mask(
         swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q + window_size[1]
         ).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not(
-        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
-    )
+    swa_mask = torch.logical_not((swa_left <= 0) & ~(swa_right < 0))
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
     else:
@@ -1315,13 +1332,21 @@ def get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+
+    def _get_cu_seqlens(batch_size, max_seqlen, device):
+        return torch.arange(
             0,
             (batch_size + 1) * max_seqlen,
             step=max_seqlen,
             dtype=torch.int32,
             device=device,
+        )
+
+    if is_in_onnx_export_mode():
+        return _get_cu_seqlens(batch_size, max_seqlen, device)
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
+            batch_size, max_seqlen, device
         )
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
@@ -1598,11 +1623,16 @@ def get_qkv_layout(
 
     def run_iteratively(q, k, v):
         # check data pointers
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
-        data_ptr = k.untyped_storage().data_ptr()
-        check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
+        if is_in_onnx_export_mode():
+            check_ptrs_qkv = False
+            check_ptrs_qk = False
+            check_ptrs_kv = False
+        else:
+            data_ptr = q.untyped_storage().data_ptr()
+            check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+            check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
+            data_ptr = k.untyped_storage().data_ptr()
+            check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
 
         # check tensor shapes
         shape = q.shape
@@ -1690,7 +1720,10 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    qkv_layout = run_iteratively(q, k, v)
+    if not is_in_onnx_export_mode():
+        qkv_layout = run_iteratively(q, k, v)
+    else:
+        qkv_layout = "not_supported"
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]

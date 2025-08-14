@@ -6,21 +6,31 @@ from typing import Iterable, Optional
 
 import pytest
 import torch
+import warnings
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     _amax_and_scale_update,
-    get_default_fp8_recipe,
+    fp8_model_init,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch import Linear, LayerNormLinear, LayerNormMLP, GroupedLinear
+from transformer_engine.pytorch.distributed import fp8_autocast
+from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
 import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 
 # FP8 per tensor delayed scaling
@@ -181,12 +191,6 @@ class TestFP8Recipe:
             amax_compute_algo=amax_compute_algo,
         )
 
-        # Get FP8 meta tensors
-        with te.fp8_autocast(fp8_recipe=recipe):
-            x_fp8_meta = op.get_quantizer("forward", 0)
-            w_fp8_meta = op.get_quantizer("forward", 1)
-            dy_fp8_meta = op.get_quantizer("backward", 0)
-
         # Perform training steps
         x_history = []
         w_history = []
@@ -218,42 +222,36 @@ class TestFP8Recipe:
                 y = op(x)
             y.backward(dy)
 
-            def check_amax_history(
-                fp8_meta: dict,
-                ref_amax_history: Iterable[float],
-            ) -> None:
-                """Check that amax history matches expected values"""
-                if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-amax_history_len:]
+            def check_metas(
+                test_scale: float,
+                test_amax_history: torch.Tensor,
+                ref_amax_history_list: list[float],
+                stage: str,
+            ):
+                """Check that meta tensors match expected values"""
+
+                # Compute amax
+                if len(ref_amax_history_list) > amax_history_len:
+                    ref_amax_history_list = ref_amax_history_list[-(amax_history_len + 1) :]
                 ref_amax_history = torch.tensor(
-                    ref_amax_history,
+                    ref_amax_history_list,
                     dtype=torch.float32,
                     device=device,
                 )
-                test_amax_history = fp8_meta.amax_history[:, 0]
+                if amax_compute_algo == "max":
+                    ref_amax = max(ref_amax_history_list)
+                elif amax_compute_algo == "most_recent":
+                    ref_amax = ref_amax_history_list[-1]
+                else:
+                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
+
+                # Compare amax history
                 tols = dict(rtol=0, atol=0)
                 torch.testing.assert_close(
                     test_amax_history[-(step + 1) :],
                     ref_amax_history[: (step + 1)],
                     **tols,
                 )
-
-            def check_scale(
-                quantizer: Float8Quantizer,
-                ref_amax_history: Iterable[float],
-                stage: str,
-            ):
-                """Check that scale and scale reciprocal match expected values"""
-
-                # Compute amax
-                if len(ref_amax_history) > amax_history_len:
-                    ref_amax_history = ref_amax_history[-(amax_history_len + 1) :]
-                if amax_compute_algo == "max":
-                    ref_amax = max(ref_amax_history)
-                elif amax_compute_algo == "most_recent":
-                    ref_amax = ref_amax_history[-1]
-                else:
-                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
 
                 # Compute scale
                 max_val = {
@@ -262,16 +260,26 @@ class TestFP8Recipe:
                 }[stage]
                 ref_scale = (max_val / ref_amax) / (2**margin)
 
-                # Check values in FP8 meta tensors
+                # Compare scale
                 torch.testing.assert_close(
-                    quantizer.scale.item(),
+                    test_scale,
                     ref_scale,
                 )
 
+            # Get scaling factors
+            x_test_scale = op.get_quantizer("forward", 0).scale.item()
+            w_test_scale = op.get_quantizer("forward", 1).scale.item()
+            dy_test_scale = op.get_quantizer("backward", 0).scale.item()
+
+            # Get amax histories
+            x_test_history = op._fp8_metas["forward"][forward_key].amax_history[:, 0]
+            w_test_history = op._fp8_metas["forward"][forward_key].amax_history[:, 1]
+            dy_test_history = op._fp8_metas["backward"][backward_key].amax_history[:, 0]
+
             # Check that results match expected values
-            check_scale(x_fp8_meta, x_history, "forward")
-            check_scale(w_fp8_meta, w_history, "forward")
-            check_scale(dy_fp8_meta, dy_history, "backward")
+            check_metas(x_test_scale, x_test_history, x_history, "forward")
+            check_metas(w_test_scale, w_test_history, w_history, "forward")
+            check_metas(dy_test_scale, dy_test_history, dy_history, "backward")
 
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
@@ -367,3 +375,127 @@ class TestFP8Recipe:
             )
 
         torch.testing.assert_close(fp8_meta[forward_key].scale, expected_scale)
+
+    @pytest.mark.parametrize(
+        "model_init_recipe",
+        [
+            pytest.param(
+                MXFP8BlockScaling(),
+                marks=pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8),
+            ),
+            pytest.param(
+                Float8BlockScaling(),
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling
+                ),
+            ),
+        ],
+    )
+    def test_check_for_weight_tensor_and_recipe_correspondence(self, model_init_recipe):
+        with fp8_model_init(enabled=True, recipe=model_init_recipe):
+            linear = Linear(32, 32).cuda()
+
+        x = torch.randn(32, 32, device="cuda")
+        with fp8_autocast(enabled=True, fp8_recipe=DelayedScaling()):
+            with pytest.raises(RuntimeError) as excinfo:
+                _ = linear(x)
+            assert "Recipe mismatch for " in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "target_recipe_class, expected_quantizer_type, available_flag, reason",
+        [
+            pytest.param(
+                MXFP8BlockScaling,
+                MXFP8Quantizer,
+                mxfp8_available,
+                reason_for_no_mxfp8,
+                id="DelayedScaling->MXFP8BlockScaling",
+            ),
+            pytest.param(
+                Float8BlockScaling,
+                Float8BlockQuantizer,
+                fp8_block_scaling_available,
+                reason_for_no_fp8_block_scaling,
+                id="DelayedScaling->Float8BlockScaling",
+            ),
+        ],
+    )
+    def test_dynamic_recipe_update(
+        self, target_recipe_class, expected_quantizer_type, available_flag, reason
+    ):
+        if not available_flag:
+            pytest.skip(reason)
+
+        in_features = 32
+        out_features = 32
+        batch_size = 32
+        linear = Linear(in_features, out_features).cuda()
+        initial_recipe = DelayedScaling()
+
+        # Run initial iterations with DelayedScaling
+        for _ in range(3):
+            x = torch.randn(batch_size, in_features, device="cuda")
+            with fp8_autocast(enabled=True, fp8_recipe=initial_recipe):
+                y = linear(x)
+            loss = y.mean()
+            loss.backward()
+
+        for quantizer in linear.quantizers["scaling_fwd"]:
+            assert isinstance(quantizer, Float8Quantizer)
+
+        # Change recipe
+        target_recipe = target_recipe_class()
+
+        # Run subsequent iterations with the target recipe
+        for i in range(3):
+            x = torch.randn(batch_size, in_features, device="cuda")
+            if i == 0:
+                # Expect a warning on the first iteration with the new recipe
+                with pytest.warns(UserWarning, match="Recipe type changed"):
+                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                        y = linear(x)
+                for quantizer in linear.quantizers["scaling_fwd"]:
+                    assert isinstance(quantizer, expected_quantizer_type)
+            else:
+                # No warning expected on subsequent iterations
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")  # Raise error if unexpected warning occurs
+                    with fp8_autocast(enabled=True, fp8_recipe=target_recipe):
+                        y = linear(x)
+            loss = y.mean()
+            loss.backward()
+
+        # Final check
+        for quantizer in linear.quantizers["scaling_fwd"]:
+            assert isinstance(quantizer, expected_quantizer_type)
+
+    @pytest.mark.parametrize(
+        "module_class",
+        [
+            Linear,
+            LayerNormLinear,
+            LayerNormMLP,
+            GroupedLinear,
+        ],
+    )
+    def test_quantizer_update(self, module_class):
+        in_features = 32
+        out_features = 32
+        batch_size = 32
+
+        recipe = DelayedScaling(amax_history_len=1024)
+        with fp8_model_init(recipe=recipe):
+            if module_class == GroupedLinear:
+                module = module_class(1, in_features, out_features).cuda()
+            else:
+                module = module_class(in_features, out_features).cuda()
+
+        x = torch.randn(batch_size, in_features, device="cuda")
+        recipe = DelayedScaling(amax_history_len=1)
+        with fp8_autocast(enabled=True, fp8_recipe=recipe):
+            warn_msg = "Quantizer is being updated, this may affect model behavior"
+            with pytest.warns(UserWarning, match=warn_msg):
+                if module_class == GroupedLinear:
+                    y = module(x, [batch_size])
+                else:
+                    y = module(x)

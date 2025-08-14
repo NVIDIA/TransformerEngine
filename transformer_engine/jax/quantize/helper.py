@@ -9,23 +9,21 @@ in JAX, including support for different scaling modes and datatypes.
 """
 from contextlib import contextmanager
 from enum import Enum
-from typing import Optional, Tuple, Dict, Union
+from typing import Optional, Tuple, Dict, Union, Sequence
+from functools import reduce
+import operator
 
 import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
-from transformer_engine_jax import (
-    get_cuda_version,
-    get_device_compute_capability,
-)
+from transformer_engine_jax import DType, get_cublasLt_version, get_cuda_version
 from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 
 from .scaling_modes import ScalingMode
 from .. import cpp_extensions as tex
+from .device_utils import get_device_compute_capability
 
 __all__ = [
     "QuantizeConfig",
@@ -33,6 +31,8 @@ __all__ = [
     "is_fp8_available",
     "update_collections",
     "get_delayed_scaling",
+    "apply_padding_to_scale_inv",
+    "remove_padding_from_scale_inv",
     "NVTE_FP8_COLLECTION_NAME",
 ]
 
@@ -203,7 +203,7 @@ class QuantizeConfig:
         FP8_2X_ACC_FPROP: Whether to use 2x accumulation for forward pass
         FP8_2X_ACC_DGRAD: Whether to use 2x accumulation for data gradients
         FP8_2X_ACC_WGRAD: Whether to use 2x accumulation for weight gradients
-        IF_QUANTIZE_2X: Whether 2x quantization is enabled
+        INFERENCE_MODE: Whether to enable optimization for inference
         SCALING_MODE: Scaling mode
         AMAX_HISTORY_LEN: Length of AMAX history for delayed scaling
         AMAX_COMPUTE_ALGO: Algorithm for AMAX computation
@@ -218,7 +218,7 @@ class QuantizeConfig:
     FP8_2X_ACC_FPROP: bool = False
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False
-    IF_QUANTIZE_2X: bool = False
+    INFERENCE_MODE: bool = False
     SCALING_MODE: ScalingMode = ScalingMode.NO_SCALING
 
     # DelayedScaling
@@ -246,7 +246,6 @@ class QuantizeConfig:
         cls.FP8_FORMAT = fp8_recipe.fp8_format
         cls.FWD_DTYPE, cls.BWD_DTYPE = _format2dtypes(cls.FP8_FORMAT)
         cls.SCALING_MODE = _get_scaling_mode(fp8_recipe)
-        cls.IF_QUANTIZE_2X = True
 
     @classmethod
     def finalize(cls) -> None:
@@ -260,7 +259,7 @@ class QuantizeConfig:
         cls.FP8_2X_ACC_DGRAD = False
         cls.FP8_2X_ACC_WGRAD = False
         cls.SCALING_MODE = ScalingMode.NO_SCALING
-        cls.IF_QUANTIZE_2X = False
+        cls.INFERENCE_MODE = False
         # DelayedScaling
         cls.AMAX_HISTORY_LEN = 1024
         cls.AMAX_COMPUTE_ALGO = AmaxComputeAlgo.MAX
@@ -474,6 +473,117 @@ def update_collections(new: Collection, original: Collection) -> Collection:
     if not isinstance(original, FrozenDict):
         new_coll = new_coll.unfreeze()
     return new_coll
+
+
+def remove_padding_from_scale_inv(
+    scale_inv: jax.Array,
+    scaling_mode: ScalingMode,
+    data_shape: Sequence[int],
+    is_colwise: bool = False,
+    flatten_axis: int = -1,
+):
+    """
+    Slice padding out of padded inverse scale factors.
+
+    Args:
+        scale_inv: Inverse scale factor.
+        data_shape: Shape of the quantized data the inverse scale belongs to.
+        scaling_mode: ScalingMode representing the quantization method.
+        is_colwise: Whether the data was quantized column-wise.
+        flatten_axis: The axis along with the data could be flattened to 2D.
+
+    Returns:
+        Inverse scale factor without padding.
+    """
+    # Get expected unpadded scale shape and check if inverse scale already matches
+    unpadded_scale_shape = scaling_mode.get_scale_shape(
+        data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
+    )
+    if scaling_mode == ScalingMode.NO_SCALING or scale_inv.shape == unpadded_scale_shape:
+        return scale_inv
+
+    # Get the padded scale shape and make sure inverse scale matches
+    padded_scale_shape = scaling_mode.get_scale_shape(
+        data_shape,
+        is_colwise=is_colwise,
+        is_padded=True,
+        flatten_axis=flatten_axis,
+    )
+    assert scale_inv.shape == padded_scale_shape, (
+        f"Padded inverse scale factor has wrong shape, expected {padded_scale_shape} but got "
+        f"{scale_inv.shape} instead."
+    )
+
+    # Reshape scale inverse to 2D in two stages to preserve the flatten axis
+    padded_scale_shape_2d = (
+        reduce(operator.mul, padded_scale_shape[:flatten_axis]),
+        reduce(operator.mul, padded_scale_shape[flatten_axis:]),
+    )
+    scale_inv_2d = jnp.reshape(
+        jnp.reshape(scale_inv, (padded_scale_shape_2d[0], *scale_inv.shape[flatten_axis:])),
+        padded_scale_shape_2d,
+    )
+
+    # Slice reshaped 2D scale inverse using collapsed 2D unpadded_scale_shape
+    unpadded_scale_shape_2d = (
+        reduce(operator.mul, unpadded_scale_shape[:flatten_axis]),
+        reduce(operator.mul, unpadded_scale_shape[flatten_axis:]),
+    )
+    scale_inv_2d_unpadded = jnp.asarray(
+        scale_inv_2d[: unpadded_scale_shape_2d[0], : unpadded_scale_shape_2d[1]]
+    )
+
+    # Reshape 2D scale inverse back in two stages in order to preserve the flatten axis
+    scale_inv_unpadded = jnp.reshape(
+        jnp.reshape(
+            scale_inv_2d_unpadded,
+            (*unpadded_scale_shape[:flatten_axis], scale_inv_2d_unpadded.shape[1]),
+        ),
+        unpadded_scale_shape,
+    )
+    return scale_inv_unpadded
+
+
+def apply_padding_to_scale_inv(
+    scale_inv: jax.Array,
+    scaling_mode: ScalingMode,
+    data_shape: Sequence[int],
+    is_colwise: bool = False,
+    flatten_axis: int = -1,
+):
+    """
+    Pad the scale inverse with zeros to match the necessary padded shape for this scaling
+    mode.
+
+    Args:
+        scale_inv: Inverse scale factor.
+        data_shape: Shape of the quantized data the inverse scale belongs to.
+        scaling_mode: ScalingMode representing the quantization method.
+        is_colwise: Whether the data was quantized column-wise.
+        flatten_axis: The axis along with the data could be flattened to 2D.
+
+    Returns:
+        Padded inverse scale factor.
+    """
+    # Get the expected padded scale shape and check if inverse scale already matches
+    padded_scale_shape = scaling_mode.get_scale_shape(
+        data_shape, is_colwise=is_colwise, is_padded=True, flatten_axis=flatten_axis
+    )
+    if scaling_mode == ScalingMode.NO_SCALING or scale_inv.shape == padded_scale_shape:
+        return scale_inv
+
+    # Get the expected unpadded scale shape and make sure inverse scales match
+    unpadded_scale_shape = scaling_mode.get_scale_shape(
+        data_shape, is_colwise=is_colwise, is_padded=False, flatten_axis=flatten_axis
+    )
+    assert scale_inv.shape == unpadded_scale_shape, (
+        f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} but got "
+        f"{scale_inv.shape}."
+    )
+
+    # Pad the scales with the lowest representable value (2^-127) and return
+    pad_width = tuple((0, a - b) for a, b in zip(padded_scale_shape, unpadded_scale_shape))
+    return jnp.pad(scale_inv, pad_width=pad_width, mode="constant", constant_values=2**-127)
 
 
 NVTE_FP8_COLLECTION_NAME = QuantizeConfig.COLLECTION_NAME

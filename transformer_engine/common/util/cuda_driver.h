@@ -19,7 +19,7 @@ namespace transformer_engine {
 namespace cuda_driver {
 
 /*! \brief Get pointer corresponding to symbol in CUDA driver library */
-void *get_symbol(const char *symbol);
+void *get_symbol(const char *symbol, int cuda_version = 12010);
 
 /*! \brief Call function in CUDA driver library
  *
@@ -38,6 +38,14 @@ inline CUresult call(const char *symbol, ArgTs... args) {
   FuncT *func = reinterpret_cast<FuncT *>(get_symbol(symbol));
   return (*func)(args...);
 }
+
+/*! \brief Ensure that the calling thread has a CUDA context
+ *
+ * Each thread maintains a stack of CUDA contexts. If the calling
+ * thread has an empty stack, the primary context is added to the
+ * stack.
+ */
+void ensure_context_exists();
 
 }  // namespace cuda_driver
 

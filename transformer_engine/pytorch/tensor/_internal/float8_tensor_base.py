@@ -86,7 +86,7 @@ class Float8TensorBase(QuantizedTensorBase):
         else:
             instance = super().__new__(cls, *args, **kwargs)
         instance._data = data
-        instance._quantizer = quantizer
+        instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
         instance._scale_inv = fp8_scale_inv
         instance._transpose = data_transpose
@@ -128,9 +128,15 @@ class Float8TensorBase(QuantizedTensorBase):
         self._scale_inv = tensors[2]
         return tensors[3:]
 
-    def get_data_tensors(self):
+    def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""
-        return self._data, self._transpose
+        if rowwise_data and columnwise_data:
+            return self._data, self._transpose
+        if rowwise_data:
+            return self._data
+        if columnwise_data:
+            return self._transpose
+        raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
     def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Dequantize to a higher precision."""
@@ -142,6 +148,23 @@ class Float8TensorBase(QuantizedTensorBase):
             return self._data.size(*args, **kwargs)
         size = self._transpose.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
+
+    def view(self, shape: torch.Size):
+        # pylint: disable=missing-function-docstring
+        out_data = self._data.view(shape)
+        out_transpose = None if self._transpose_invalid else self._transpose
+        if out_transpose is not None:
+            out_transpose_shape = out_transpose.size()
+            if out_transpose_shape[0] != shape[-1] or out_transpose_shape[1:] != shape[:-1]:
+                out_transpose = None
+
+        return Float8TensorBase(
+            data=out_data,
+            fp8_scale_inv=self._scale_inv,
+            fp8_dtype=self._fp8_dtype,
+            data_transpose=out_transpose,
+            quantizer=self._quantizer,
+        )
 
     def __repr__(self):
         return (

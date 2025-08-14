@@ -49,7 +49,7 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):
             fp8_dtype = tex.DType.kFloat8E5M2
         amax = tensor.abs().max().float()
         one = torch.ones(1, device=tensor.device)
-        scale = _default_sf_compute(amax, one, fp8_max)
+        scale = _default_sf_compute(amax, one, fp8_max, 0)
 
         quantizer = Float8Quantizer(scale, amax, fp8_dtype)
     else:
@@ -127,14 +127,14 @@ class FakeQuant(TEConfigAPIMapper):
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for selecting between high-precision and FP8 GEMM execution."""
-        return False
+        return False, None
 
     @api_method
     def modify_tensor_enabled(
         self, config, layer_name: str, tensor_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run process_tensor() in the forward."""
-        return True
+        return True, iteration + 1
 
     @api_method
     def modify_tensor(

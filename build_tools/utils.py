@@ -21,13 +21,7 @@ from typing import List, Optional, Tuple, Union
 @functools.lru_cache(maxsize=None)
 def debug_build_enabled() -> bool:
     """Whether to build with a debug configuration"""
-    for arg in sys.argv:
-        if arg == "--debug":
-            sys.argv.remove(arg)
-            return True
-    if int(os.getenv("NVTE_BUILD_DEBUG", "0")):
-        return True
-    return False
+    return bool(int(os.getenv("NVTE_BUILD_DEBUG", "0")))
 
 
 @functools.lru_cache(maxsize=None)
@@ -56,7 +50,7 @@ def all_files_in_dir(path, name_extension=None):
     all_files = []
     for dirname, _, names in os.walk(path):
         for name in names:
-            if name_extension is not None and name_extension not in name:
+            if name_extension is not None and not name.endswith(f".{name_extension}"):
                 continue
             all_files.append(Path(dirname, name))
     return all_files
@@ -242,9 +236,12 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 def cuda_archs() -> str:
     version = cuda_version()
     if os.getenv("NVTE_CUDA_ARCHS") is None:
-        os.environ["NVTE_CUDA_ARCHS"] = (
-            "70;80;89;90;100;120" if version >= (12, 8) else "70;80;89;90"
-        )
+        if version >= (13, 0):
+            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+        elif version >= (12, 8):
+            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+        else:
+            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
     return os.getenv("NVTE_CUDA_ARCHS")
 
 
@@ -357,10 +354,3 @@ def copy_common_headers(
         new_path = dst_dir / path.relative_to(src_dir)
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
-
-
-def install_and_import(package):
-    """Install a package via pip (if not already installed) and import into globals."""
-    main_package = package.split("[")[0]
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-    globals()[main_package] = importlib.import_module(main_package)

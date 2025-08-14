@@ -15,6 +15,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
+    Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.debug.features.api import TEConfigAPIMapper
@@ -39,7 +40,7 @@ def per_tensor_cast(
     }, "[NVTORCH INSPECT ERROR] Only 2 FP8 types: E4M3 and E5M2 are supported in TE."
     tensor = tensor.contiguous()
 
-    quantizer = Float8CurrentScalingQuantizer(fp8_dtype)
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype, device=tensor.device)
 
     if out is not None:
         quantizer.update_quantized(tensor, out)
@@ -81,7 +82,6 @@ class PerTensorScaling(TEConfigAPIMapper):
             transformer_engine:
                 PerTensorScaling:
                     enabled: True
-                    margin: 1
                     gemms: [dgrad]
                     tensors: [weight, activation]
     """
@@ -91,14 +91,14 @@ class PerTensorScaling(TEConfigAPIMapper):
         self, config, layer_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call responsible for selecting between high-precision and FP8 GEMM execution."""
-        return False
+        return False, None
 
     @api_method
     def modify_tensor_enabled(
         self, config, layer_name: str, tensor_name: str, gemm: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run process_tensor() in the forward."""
-        return True
+        return True, iteration + 1
 
     @api_method
     def modify_tensor(
@@ -118,7 +118,7 @@ class PerTensorScaling(TEConfigAPIMapper):
             if key not in ["gemm", "tensor"]:
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
-        assert isinstance(default_quantizer, Float8CurrentScalingQuantizer), (
+        assert isinstance(default_quantizer, Float8Quantizer), (
             f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor: "
             "Per-tensor current scaling can be used only within `DelayedScaling` recipe autocast."
             f" {layer_name}"

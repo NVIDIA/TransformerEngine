@@ -6,10 +6,10 @@
 import os
 from functools import wraps
 from typing import Callable, Optional, Tuple
-
 import torch
 
 from . import torch_version
+from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
 
 # pylint: disable=unnecessary-lambda-assignment
@@ -46,7 +46,17 @@ if torch_version() >= (2, 2, 0) and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+no_torch_dynamo = lambda recursive=True: lambda func: func
+if torch.__version__ >= "2":
+    import torch._dynamo
+
+    if torch.__version__ >= "2.1":
+        no_torch_dynamo = lambda recursive=True: lambda f: (
+            f if is_in_onnx_export_mode() else torch._dynamo.disable(f, recursive=recursive)
+        )
+    else:
+        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
 
 
 def set_jit_fusion_options() -> None:
@@ -121,6 +131,48 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
     return dgelu
 
 
+@jit_fuser
+def l2normalization_fused_(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """L2 normalization fused - inference version"""
+    x_fp32 = x.float()
+    x_squared = x_fp32.pow(2)
+    l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
+    rsqrt_norm = torch.rsqrt(l2_norm_squared + eps)
+    y_fp32 = x_fp32 * rsqrt_norm
+    return y_fp32.to(x.dtype)
+
+
+@jit_fuser
+def l2normalization_fwd_fused_(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """L2 normalization fused - training version that returns intermediate values"""
+    x_fp32 = x.float()
+    x_squared = x_fp32.pow(2)
+    l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
+    l2_norm_squared_eps = l2_norm_squared + eps
+    rsqrt_norm = torch.rsqrt(l2_norm_squared_eps)
+    y_fp32 = x_fp32 * rsqrt_norm
+    y = y_fp32.to(x.dtype)
+    return y, rsqrt_norm
+
+
+@jit_fuser
+def l2normalization_backward_fused_(
+    grad_output: torch.Tensor,
+    x: torch.Tensor,
+    rsqrt_norm: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """L2 normalization backward fused"""
+    x_fp32 = x.float()
+    grad_output_fp32 = grad_output.float()
+    x_dy_sum = (x_fp32 * grad_output_fp32).sum(dim=-1, keepdim=True)
+    x_squared = x_fp32.pow(2)
+    l2_norm_squared = x_squared.sum(dim=-1, keepdim=True)
+    x_norm_squared = l2_norm_squared + eps
+    dx_fp32 = rsqrt_norm * (grad_output_fp32 - x_fp32 * x_dy_sum / x_norm_squared)
+    return dx_fp32.to(x.dtype)
+
+
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
     with gpu_autocast_ctx(enabled=False):
@@ -137,6 +189,29 @@ def bgrad_dgelu_fused(
         if bias is not None and bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
         return None, dgelu_fused_(grad_output, inp)
+
+
+def l2normalization_fused(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """Disable native AMP for l2normalization_fused_ - inference version"""
+    with gpu_autocast_ctx(enabled=False):
+        return l2normalization_fused_(x, eps)
+
+
+def l2normalization_fwd_fused(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Disable native AMP for l2normalization_fwd_fused_ - training version"""
+    with gpu_autocast_ctx(enabled=False):
+        return l2normalization_fwd_fused_(x, eps)
+
+
+def l2normalization_backward_fused(
+    grad_output: torch.Tensor,
+    x: torch.Tensor,
+    rsqrt_norm: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Disable native AMP for l2normalization_backward_fused_"""
+    with gpu_autocast_ctx(enabled=False):
+        return l2normalization_backward_fused_(grad_output, x, rsqrt_norm, eps)
 
 
 def bias_dropout_add(
@@ -264,3 +339,45 @@ def warmup_jit_bias_gelu_all_dtypes(
     """Call `warmup_jit_bias_gelu` for all training dtypes"""
     for dtype in [torch.float32, torch.bfloat16, torch.float16]:
         warmup_jit_bias_gelu(ffn_hidden_size, dtype, seq_length, micro_batch_size)
+
+
+def warmup_jit_l2normalization(
+    hidden_size: int, dtype: torch.dtype, seq_length: int, micro_batch_size: int
+) -> None:
+    """Compile L2Normalization JIT function before the main training steps"""
+
+    # Save cuda RNG state to ensure warmup does not affect reproducibility.
+    rng_state = torch.cuda.get_rng_state()
+
+    inp = torch.rand(
+        (seq_length * micro_batch_size, hidden_size),
+        dtype=dtype,
+        device="cuda",
+    )
+    eps = 1e-6
+    # Warmup JIT fusions with the input grad_enable state of both forward
+    # prop and recomputation
+    for input_grad in [False, True]:
+        inp.requires_grad = input_grad
+        for _ in range(5):
+            if input_grad:
+                # Test training version that returns intermediate values
+                output, rsqrt_norm = l2normalization_fwd_fused_(inp, eps)
+                # Test backward pass as well
+                grad_out = torch.rand_like(output)
+                _ = l2normalization_backward_fused_(grad_out, inp, rsqrt_norm, eps)
+            else:
+                # Test inference version
+                output = l2normalization_fused_(inp, eps)
+    del inp, output
+
+    torch.cuda.empty_cache()
+    torch.cuda.set_rng_state(rng_state)
+
+
+def warmup_jit_l2normalization_all_dtypes(
+    hidden_size: int, seq_length: int, micro_batch_size: int
+) -> None:
+    """Call `warmup_jit_l2normalization` for all training dtypes"""
+    for dtype in [torch.float32, torch.bfloat16, torch.float16]:
+        warmup_jit_l2normalization(hidden_size, dtype, seq_length, micro_batch_size)

@@ -415,37 +415,35 @@ class ActLuPrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, act_enum, act_len, scale_dtype, is_outer, mesh, result_types
-
+        prefix = "ActLuPrimitive_"
         x_rank = len(value_types[0].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank - 1, unique_var="ActLuPrimitive_i", flatten_axis=-2
+            x_rank - 1, unique_var=prefix + "x", flatten_axis=-2
         )
-        x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
+        x_axes = scale_rules.input_spec + (prefix + f"x{x_rank - 1}",)
         out = (*x_axes[:-2], x_axes[-1])
         scale_inv = scale_rules.rowwise_rule
-        colwise_scale_inv = scale_rules.colwise_rule
 
+        colwise_out = (prefix + "out_colwise",)
+        colwise_scale_inv = (prefix + "scale_inv_colwise",)
         if is_2x:
+            colwise_scale_inv = scale_rules.colwise_rule
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(
                     multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis=-2)
                 )
             else:
                 colwise_out = out
-        else:
-            colwise_out = ("j",)
-            colwise_scale_inv = ("k",)
 
         # amax is always a unit tensor.
-        amax = ("l",)
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
             (
                 x_axes,
-                "…1",
+                ("…1",),
             ),
             (out, colwise_out, scale_inv, colwise_scale_inv, amax),
-            **scale_rules.factor_sizes,
         )
 
 
@@ -453,7 +451,7 @@ register_primitive(ActLuPrimitive)
 
 
 # TODO(Jeremy): replace is_2x with q_layout
-class DActLuDBiasQuantizePrimitive(BasePrimitive):
+class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
     """
     DActLu DBias Cast Transpose Primitive
     """
@@ -561,7 +559,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p outer abstract
         """
         (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
-            DActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
+            BaseDActLuDBiasQuantizePrimitive.abstract(*args, **kwargs)
         )
         return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias
 
@@ -589,7 +587,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_aval.dtype
         assert scale_aval.dtype == jnp.float32
-        return ffi.ffi_lowering(DActLuDBiasQuantizePrimitive.name)(
+        return ffi.ffi_lowering(BaseDActLuDBiasQuantizePrimitive.name)(
             ctx,
             dz,
             x,
@@ -618,9 +616,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p impl
         """
         del is_outer
-        assert DActLuDBiasQuantizePrimitive.inner_primitive is not None
+        assert BaseDActLuDBiasQuantizePrimitive.inner_primitive is not None
         (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax, dbias, _) = (
-            DActLuDBiasQuantizePrimitive.inner_primitive.bind(
+            BaseDActLuDBiasQuantizePrimitive.inner_primitive.bind(
                 dz,
                 x,
                 scale,
@@ -666,7 +664,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         del is_outer
         check_valid_batch_dims(batch_dims)
-        assert DActLuDBiasQuantizePrimitive.outer_primitive is not None
+        assert BaseDActLuDBiasQuantizePrimitive.outer_primitive is not None
         dz, x, scale = batched_args
         _, x_bdim, scale_bdim = batch_dims
 
@@ -679,7 +677,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             x_bdim,  # dbias
         )
         return (
-            DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+            BaseDActLuDBiasQuantizePrimitive.outer_primitive.bind(
                 dz,
                 x,
                 scale,
@@ -718,7 +716,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         ), "Partitioned current tensor scaling is not yet supported."
 
         out_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+            mesh, PartitionSpec(*x_spec), desc="BaseDActLuDBiasQuantizePrimitive.out"
         )
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
@@ -728,14 +726,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         else:
             colwise_x_spec = (None,)
         colwise_out_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+            mesh,
+            PartitionSpec(*colwise_x_spec),
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_out",
         )
 
         dbias_spec = x_spec[-2:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DActLuDBiasQuantizePrimitive.dbias",
+            desc="BaseDActLuDBiasQuantizePrimitive.dbias",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -748,15 +748,15 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="BaseDActLuDBiasQuantizePrimitive.scale_inv"
         )
         amax_sharding = NamedSharding(
-            mesh, PartitionSpec(*amax_spec), desc="DActLuDBiasQuantizePrimitive.amax"
+            mesh, PartitionSpec(*amax_spec), desc="BaseDActLuDBiasQuantizePrimitive.amax"
         )
         colwise_scale_inv_sharding = NamedSharding(
             mesh,
             PartitionSpec(*colwise_scale_inv_spec),
-            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv",
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_scale_inv",
         )
         return (
             out_sharding,
@@ -786,7 +786,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scale_spec = get_padded_spec(arg_infos[2])
 
         out_sharding = NamedSharding(
-            mesh, PartitionSpec(*x_spec), desc="DActLuDBiasQuantizePrimitive.out"
+            mesh, PartitionSpec(*x_spec), desc="BaseDActLuDBiasQuantizePrimitive.out"
         )
 
         if is_2x:
@@ -797,14 +797,16 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         else:
             colwise_x_spec = (None,)
         colwise_out_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
+            mesh,
+            PartitionSpec(*colwise_x_spec),
+            desc="BaseDActLuDBiasQuantizePrimitive.colwise_out",
         )
 
         dbias_spec = x_spec[-2:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
             PartitionSpec(*dbias_spec),
-            desc="DActLuDBiasQuantizePrimitive.dbias",
+            desc="BaseDActLuDBiasQuantizePrimitive.dbias",
         )
 
         scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
@@ -827,7 +829,9 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
         # Ensure dz and x are partitioned the same way.
         arg_shardings[0] = NamedSharding(
-            mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]), desc="DActLuDBiasQuantizePrimitive.dz"
+            mesh,
+            PartitionSpec(*x_spec[:-2], x_spec[-1]),
+            desc="BaseDActLuDBiasQuantizePrimitive.dz",
         )
         arg_shardings = tuple(arg_shardings)
         out_shardings = (
@@ -841,7 +845,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
 
         def sharded_impl(dz, x, scale):
             (out, colwise_out, scale_inv, colwise_scale_inv, local_amax, local_dbias) = (
-                DActLuDBiasQuantizePrimitive.impl(
+                BaseDActLuDBiasQuantizePrimitive.impl(
                     dz,
                     x,
                     scale,
@@ -884,32 +888,38 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         result_types,
     ):
         del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types
-
-        x_rank = len(value_types[1].shape)
+        prefix = "BaseDActLuDBiasQuantizePrimitive_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            x_rank, unique_var="DActLuDbiasQuantizePrimitive_i", flatten_axis=-2
+            len(value_types[1].shape), unique_var=prefix + "x", flatten_axis=-2
         )
         x_axes = scale_rules.input_spec
+        dz_axes = (*x_axes[:-2], x_axes[-1])
         out = x_axes
+        colwise_out = (prefix + "out_colwise",)
         if is_2x:
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=-2))
             else:
-                colwise_out = tuple(x_axes)
-        else:
-            colwise_out = ("j",)
+                colwise_out = out
 
-        dbias = x_axes[-2:] if is_dbias else ("k",)
-        amax = ("…4",)
+        dbias = x_axes[-2:] if is_dbias else (prefix + "dbias",)
+        amax = (prefix + "amax",)
 
         return SdyShardingRule(
-            (("…0",), tuple(x_axes), ("…2",)),
+            (dz_axes, x_axes, ("…2",)),
             (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
-            **scale_rules.factor_sizes,
         )
 
 
-register_primitive(DActLuDBiasQuantizePrimitive)
+register_primitive(BaseDActLuDBiasQuantizePrimitive)
+
+
+class DActLuDBiasQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for DBias and fused activation quantization. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
+
+
+class DActLuQuantizePrimitive(BaseDActLuDBiasQuantizePrimitive):
+    """Subclass of BaseDActLuDBiasQuantizePrimitive for fused activation quantization without dbias. No change in functionality from the base primitive but named differently for use in more granular disabling of primitives via NVTE_JAX_CUSTOM_CALLS."""
 
 
 def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, ScaledTensor]:
@@ -971,6 +981,7 @@ def act_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
+    noop_scaled_tensor: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -979,6 +990,7 @@ def act_lu(
             Shape: (..., ACT_DIM, K) where ACT_DIM is 1 for non-gated activations and 2 for gated activations
         activation_type: Type of activation function to apply.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         If quantizer is None:
@@ -1023,6 +1035,10 @@ def act_lu(
             is_outer=True,
         )
         out = out.reshape(output_shape)
+        if noop_scaled_tensor:
+            return ScaledTensorFactory.create_2x(
+                out, None, out, None, ScalingMode.NO_SCALING, dq_dtype=out.dtype
+            )
         return out
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1076,6 +1092,7 @@ def quantize_dact_dbias(
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
+    noop_scaled_tensor: bool = False,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Compute gradients of activation and bias with optional quantization.
 
@@ -1086,6 +1103,7 @@ def quantize_dact_dbias(
         activation_type: Type of activation function used in the forward pass. Defaults to ("gelu",).
         is_dbias: If True, compute bias gradient. Defaults to True.
         quantizer: Optional quantizer for FP8 quantization of the output.
+        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         Tuple[ScaledTensor, jnp.ndarray]: A tuple containing:
@@ -1099,12 +1117,49 @@ def quantize_dact_dbias(
         f" {x.shape} and act_len {act_len}"
     )
 
-    if not DActLuDBiasQuantizePrimitive.enabled():
+    scale = jnp.empty((), jnp.float32)
+    act_type_id = ActivationEnum[activation_type]
+    PrimitiveClass = DActLuDBiasQuantizePrimitive if is_dbias else DActLuQuantizePrimitive
+    if not PrimitiveClass.enabled() or (
+        quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE
+    ):
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
-    # TE/common does not support colwise-only quantization yet
-    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
-        return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
+    if quantizer is None:
+        output, _, _, _, _, _ = PrimitiveClass.outer_primitive.bind(
+            dz,
+            x,
+            scale,
+            # outputs float32 for dbias accumulation
+            out_dtype=(jnp.float32 if is_dbias else x.dtype),
+            # default value for no scaling, TE/common ignore this value when scale is unset
+            scaling_mode=ScalingMode.NO_SCALING.value,
+            is_2x=False,  # unused
+            scale_dtype=jnp.float32,  # unused
+            is_dbias=False,
+            act_enum=act_type_id,
+            act_len=act_len,
+            is_outer=True,
+        )
+        output = output.astype(x.dtype)
+        dbias = None
+        if is_dbias:
+            dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
+
+        if noop_scaled_tensor:
+            return (
+                ScaledTensorFactory.create_2x(
+                    output,
+                    None,
+                    output,
+                    None,
+                    ScalingMode.NO_SCALING,
+                    dq_dtype=output.dtype,
+                ),
+                dbias,
+            )
+
+        return output, dbias
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
@@ -1130,31 +1185,6 @@ def quantize_dact_dbias(
         if war_output is not None:
             return war_output
 
-    scale = jnp.empty((), jnp.float32)
-
-    act_type_id = ActivationEnum[activation_type]
-
-    if quantizer is None:
-        output, _, _, _, _, _ = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
-            dz,
-            x,
-            scale,
-            # outputs float32 for dbias accumulation
-            out_dtype=(jnp.float32 if is_dbias else x.dtype),
-            # default value for no scaling, TE/common ignore this value when scale is unset
-            scaling_mode=ScalingMode.NO_SCALING.value,
-            is_2x=False,  # unused
-            scale_dtype=jnp.float32,  # unused
-            is_dbias=False,
-            act_enum=act_type_id,
-            act_len=act_len,
-            is_outer=True,
-        )
-        dbias = None
-        if is_dbias:
-            dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
-        return output.astype(x.dtype), dbias
-
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
         # Current scaling does not support fused operations. Perform dact in higher precision then quantize after.
         out = dact_lu(
@@ -1168,7 +1198,7 @@ def quantize_dact_dbias(
         )
         return out, dbias
 
-    if isinstance(quantizer, DelayedScaleQuantizer):
+    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
         scale = quantizer.scale
 
     # TE/common dact_dbias_quantize does not support gated act yet
@@ -1188,7 +1218,7 @@ def quantize_dact_dbias(
         colwise_scale_inv,
         updated_amax,
         dbias,
-    ) = DActLuDBiasQuantizePrimitive.outer_primitive.bind(
+    ) = PrimitiveClass.outer_primitive.bind(
         dz,
         x,
         scale,
@@ -1228,6 +1258,7 @@ def dact_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
+    noop_scale_tensor: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1237,6 +1268,7 @@ def dact_lu(
         x: Input tensor that was used in forward pass.
         activation_type: Type of activation function that was applied.
         quantizer: Optional quantizer for FP8 quantization of the output gradient.
+        noop_scaled_tensor: Wrap the unquantized output as a ScaledTensor2x when quantizer is None.
 
     Returns:
         The gradient of the activation with respect to the input.
@@ -1247,5 +1279,6 @@ def dact_lu(
         activation_type=activation_type,
         is_dbias=False,
         quantizer=quantizer,
+        noop_scaled_tensor=noop_scale_tensor,
     )
     return output

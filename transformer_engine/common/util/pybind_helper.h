@@ -75,6 +75,10 @@
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)      \
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                        \
       .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                         \
+  pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
+      m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
+      .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
+      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \
@@ -90,7 +94,9 @@
              transformer_engine::CommOverlapAlgo::SPLIT_PIPELINED_RS_P2P)                          \
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)                \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)        \
-      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);       \
+      .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P)        \
+      .value("EXTERNAL_BULK_OVERLAP_AG",                                                           \
+             transformer_engine::CommOverlapAlgo::EXTERNAL_BULK_OVERLAP_AG);                       \
   py::class_<transformer_engine::CommOverlapCore,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapCore>>(m, "CommOverlapCore",           \
                                                                    pybind11::module_local())       \

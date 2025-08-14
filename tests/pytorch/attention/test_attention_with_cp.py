@@ -4,6 +4,8 @@
 
 import os
 import subprocess
+import sys
+import pathlib
 
 import pytest
 import torch
@@ -12,26 +14,28 @@ from transformer_engine.pytorch.utils import (
     get_cudnn_version,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils
-from test_fused_attn import ModelConfig
+
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import ModelConfig, get_available_attention_backends
+
+# Initialize RNG state
+seed = 1234
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
-    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
-    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
-    "cp_1_2": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
-    ),  # MHA
-    "cp_1_3": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)
-    ),  # MHA
-    "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-    "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
+    "cp_1_2": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
+    "cp_1_3": ModelConfig(2, 4096, 12, 128, window_size=(512, 512)),  # MHA
+    "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
+    "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
     "cp_2_2": ModelConfig(
-        2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
     ),  # GQA
-    "cp_2_3": ModelConfig(
-        2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)
-    ),  # GQA
+    "cp_2_3": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, window_size=(512, 512)),  # GQA
 }
 
 
@@ -43,7 +47,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
         "--nproc-per-node=" + str(num_gpus_per_node),
     ]
     te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-    script_path = os.path.join(te_path, "tests/pytorch/fused_attn/run_fused_attn_with_cp.py")
+    script_path = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp.py")
     args.append(script_path)
     for k, v in kwargs.items():
         args.append(f"{k}={v}")
@@ -93,20 +97,36 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
 model_configs_fused_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
-    "cp_1_0": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # MHA
-    "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
-    "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
-    "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
-    "cp_1_4": ModelConfig(
-        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+    "cp_1_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal"),  # MHA
+    "cp_1_1": ModelConfig(2, 4096, 12, 128),  # MHA
+    "cp_1_2": ModelConfig(
+        2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),  # MHA
-    "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
-    "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
-    "cp_2_2": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
-    "cp_2_3": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
-    "cp_2_4": ModelConfig(
-        2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+    "cp_1_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias"),  # MHA
+    "cp_1_4": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", window_size=(512, 0)),  # MHA
+    "cp_2_0": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal"),  # GQA
+    "cp_2_1": ModelConfig(2, 4096, 12, 128, num_gqa_groups=2),  # GQA
+    "cp_2_2": ModelConfig(
+        2,
+        4096,
+        12,
+        128,
+        num_gqa_groups=2,
+        attn_mask_type="causal",
+        attn_bias_type="post_scale_bias",
     ),  # GQA
+    "cp_2_3": ModelConfig(
+        2, 4096, 12, 128, num_gqa_groups=2, attn_bias_type="post_scale_bias"
+    ),  # GQA
+    "cp_2_4": ModelConfig(
+        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", window_size=(512, 0)
+    ),  # GQA
+    "cp_3_0": ModelConfig(2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64),  # MLA
+    "cp_3_1": ModelConfig(2, 4096, 12, 128, head_dim_v=64),  # MLA
+    "cp_3_2": ModelConfig(
+        2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias", head_dim_v=64
+    ),  # MLA
+    "cp_3_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64),  # MLA
 }
 
 
@@ -159,6 +179,21 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         )
     if dtype != "fp8" and fp8_mha:
         pytest.skip("Only fp8 works with fp8_mha=True!")
+    if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently only support KV P2P!")
+    if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
+        pytest.skip("MLA CP currently does not support FP8 attention!")
+    dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtypes[dtype],
+        qkv_layout="_".join([qkv_format] * 3),
+        window_size=config.window_size,
+        context_parallel=True,
+    )
+    _, fused_attn_supported, _ = available_backends
+    if not fused_attn_supported:
+        pytest.skip("No attention backend available.")
 
     subprocess.run(
         get_bash_arguments(
