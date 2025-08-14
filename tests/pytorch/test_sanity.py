@@ -995,6 +995,7 @@ def test_sanity_checkpointing_on_callables():
     torch.testing.assert_close(grad_checkpoint, grad_standard)
 
 
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_linear_frozen_weights_memory_default_recipe():
     """Test that memory usage is optimized when weights are frozen for MXFP8."""
     dim = 1024
