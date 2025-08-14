@@ -254,10 +254,6 @@ def run_dpa_with_cp(
         else:
             out.backward(dout)
 
-    torch.cuda.synchronize()
-    print("=========================WITH========================")
-    print()
-    sys.stdout.flush()
     # run core_attn with CP
     q_, k_, v_, dout_, *rest = [
         x.clone().detach() for x in [q, k, v, dout] + ([] if bias is None else [bias])
@@ -316,11 +312,6 @@ def run_dpa_with_cp(
         fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
-    if scaling_mode == "current":
-        dout_quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E5M2,
-            device="cuda",
-        )
 
     with fp8_context:
         out_ = core_attn(
@@ -427,8 +418,6 @@ def run_dpa_with_cp(
         return torch.sqrt((a - b).square().mean()).item()
 
     def _error(a, b):
-        print("with cp   ", a.reshape(-1)[:16])
-        print("without cp", b.reshape(-1)[:16])
         if dtype != "fp8":
             torch.testing.assert_close(a, b, **tols)
         else:
@@ -449,7 +438,6 @@ def run_dpa_with_cp(
         count = 0
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
             if torch.cuda.current_device() == 0:
-                print(f"count {count}")
                 _error(a[:, 0], b[:, 0])
                 _error(a[:, 1], b[:, 1])
                 count += 2

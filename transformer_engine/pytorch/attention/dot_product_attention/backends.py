@@ -1192,6 +1192,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     # d_out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                          fp8_dtype = tex.DType.kFloat8E5M2
                     if ctx.is_output_fp8:
+                        ctx.dO_quantizer = d_out._quantizer
                         d_out_fp8 = d_out
                     else:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
@@ -1534,13 +1535,14 @@ class FusedAttention(torch.nn.Module):
                     "Amax reduction across TP+CP group is necessary when using context parallelism"
                     " with FP8!"
                 )
-            # if fp8_meta["recipe"].float8_current_scaling() and context_parallel:
-            #    all_quantizers = dpa_utils.get_attention_quantizers(
-            #        fp8, fp8_meta, quantizers, cp_specific_quantizers=True
-            #    )
-            #    for q in all_quantizers:
-            #        if isinstance(q, Float8CurrentScalingQuantizer):
-            #            q.with_amax_reduction = True
+            if fp8_meta["recipe"].float8_current_scaling() and context_parallel:
+               all_quantizers = dpa_utils.get_attention_quantizers(
+                   fp8, fp8_meta, quantizers, cp_specific_quantizers=True
+               )
+               for q in all_quantizers:
+                   if isinstance(q, Float8CurrentScalingQuantizer):
+                       q.with_amax_reduction = True
+                       q.amax_reduction_group = cp_group
 
         if context_parallel:
             assert (
