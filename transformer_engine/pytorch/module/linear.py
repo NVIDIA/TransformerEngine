@@ -378,7 +378,12 @@ class _Linear(torch.autograd.Function):
 
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
-                if not is_first_microbatch and weight.requires_grad and isinstance(weightmat, QuantizedTensorBase) and not module.primary_weights_in_fp8:
+                if (
+                    not is_first_microbatch
+                    and weight.requires_grad
+                    and isinstance(weightmat, QuantizedTensorBase)
+                    and not module.primary_weights_in_fp8
+                ):
                     # Clear rowwise quantized copy.
                     weightmat.update_usage(columnwise_usage=True, rowwise_usage=False)
                 elif isinstance(weightmat, QuantizedTensorBase):
