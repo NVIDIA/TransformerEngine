@@ -48,6 +48,7 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
   if (ctas_per_row == 1) {
     kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES, stream>>>(
         launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     dim3 grid(ctas_per_row * ctas_per_col);
     dim3 block(Kernel_traits::THREADS_PER_CTA);
@@ -65,6 +66,7 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
   auto kernel_f = &rmsnorm_bwd_finalize_tuned_kernel<Kernel_traits_f>;
   kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(
       launch_params.params);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
@@ -110,6 +112,7 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   dim3 block(Kernel_traits::THREADS_PER_CTA);
   if (ctas_per_row == 1) {
     kernel<<<grid, block, 0, stream>>>(launch_params.params);
+    NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
     void *params_ = reinterpret_cast<void *>(&launch_params.params);
     NVTE_CHECK_CUDA(cudaLaunchCooperativeKernel(reinterpret_cast<void *>(kernel), grid, block,
@@ -127,6 +130,7 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
   dim3 block_final(Kernel_traits::THREADS_PER_WARP * WARPS_N_FINAL, WARPS_M_FINAL);
   dim3 grid_final(ceil_div(cols, ELTS_N_PER_CTA_FINAL), 1);
   kernel_final<<<grid_final, block_final, 0, stream>>>(launch_params.params);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \

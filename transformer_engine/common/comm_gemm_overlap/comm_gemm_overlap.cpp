@@ -101,10 +101,10 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
                              DType::kInt32);
   }
   // CUDA event creation
-  cudaEventCreateWithFlags(&_start_compute, 0);
-  cudaEventCreateWithFlags(&_stop_compute, 0);
-  cudaEventCreateWithFlags(&_start_comm, 0);
-  cudaEventCreateWithFlags(&_stop_comm, 0);
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_compute, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_compute, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_start_comm, 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_comm, 0));
 
   /*
     Defining the launcher order between the communication and GEMM kernels
@@ -114,28 +114,32 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   */
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
   int runtime_version = 0;
-  cudaRuntimeGetVersion(&runtime_version);
+  NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&runtime_version));
   cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0);
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
   if (runtime_version >= 12030 && deviceProp.major == 9 && max_connection > 1) {
-    cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
+    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming));
   } else {
     _comm_launch_event = 0;
   }
 }
 
 CommOverlapCore::~CommOverlapCore() {
-  cudaEventDestroy(_stop_comm);
-  cudaEventDestroy(_start_comm);
-  cudaEventDestroy(_stop_compute);
-  cudaEventDestroy(_start_compute);
-  if (_comm_launch_event) cudaEventDestroy(_comm_launch_event);
+  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_comm));
+  NVTE_CHECK_CUDA(cudaEventDestroy(_start_comm));
+  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_compute));
+  NVTE_CHECK_CUDA(cudaEventDestroy(_start_compute));
+  if (_comm_launch_event) {
+    NVTE_CHECK_CUDA(cudaEventDestroy(_comm_launch_event));
+  }
 
-  if (_atomic_gemm) cudaFree(_counter.dptr());
+  if (_atomic_gemm) {
+    NVTE_CHECK_CUDA(cudaFree(_counter.dptr()));
+  }
 
   for (size_t i = 0; i < _stream_compute.size(); i++) {
-    cudaStreamSynchronize(_stream_compute[i]);
-    cudaStreamDestroy(_stream_compute[i]);
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(_stream_compute[i]));
+    NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_compute[i]));
   }
 
   auto error = cudaGetLastError();
@@ -293,9 +297,9 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
 }
 
 CommOverlapBase::~CommOverlapBase() {
-  cudaEventDestroy(_start_d2dcopy);
-  cudaStreamSynchronize(_stream_comm);
-  cudaStreamDestroy(_stream_comm);
+  NVTE_CHECK_CUDA(cudaEventDestroy(_start_d2dcopy));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(_stream_comm));
+  NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_comm));
 }
 
 /*
@@ -695,10 +699,12 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
-  cudaEventDestroy(_stop_recv);
-  cudaEventDestroy(_stop_send);
-  cudaStreamDestroy(_stream_recv);
-  for (size_t i = 0; i < _stream_send.size(); i++) cudaStreamDestroy(_stream_send[i]);
+  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_recv));
+  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_send));
+  NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_recv));
+  for (size_t i = 0; i < _stream_send.size(); i++) {
+    NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_send[i]));
+  }
 }
 
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
