@@ -733,7 +733,9 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False,
+                    fp8_output=(
+                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
+                    ),
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -743,7 +745,9 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False,
+                    fp8_output=(
+                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
+                    ),
                 )
 
             num_queries_per_key_value = (
@@ -852,7 +856,9 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False,
+                    fp8_output=(
+                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
+                    ),
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -862,7 +868,9 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False,
+                    fp8_output=(
+                        fp8_mha and rotary_pos_emb is None if not fp8_current_scaling else False
+                    ),
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]

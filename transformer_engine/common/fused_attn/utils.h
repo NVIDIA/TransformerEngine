@@ -118,7 +118,8 @@ struct FADescriptor_v1 {
     return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
                     page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h,
                     attnScale, isTraining, dropoutProbability, layout, mask_type, window_size_left,
-                    window_size_right, deterministic, bias_type, fwd_tensor_type, bwd_tensor_type, output_tensor_type) <
+                    window_size_right, deterministic, bias_type, fwd_tensor_type, bwd_tensor_type,
+                    output_tensor_type) <
            std::tie(rhs.b, rhs.h, rhs.hg, rhs.s_q, rhs.s_kv, rhs.d_qk, rhs.d_v, rhs.num_pages_k,
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.attnScale, rhs.isTraining,
