@@ -1622,12 +1622,12 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
     assert rmse < rmse_tol * rmse_range, (
-       name_a
-       + " vs "
-       + name_b
-       + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-           rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-       )
+        name_a
+        + " vs "
+        + name_b
+        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+        )
     )
 
 

@@ -429,9 +429,9 @@ def run_dpa_with_cp(
             rmse = _rmse(a, b)
             rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
             assert (
-               rmse < rmse_tol * rmse_range
+                rmse < rmse_tol * rmse_range
             ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-               rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
             )
 
     if qkv_format == "bshd":

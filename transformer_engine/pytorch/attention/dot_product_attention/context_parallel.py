@@ -1633,7 +1633,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
         else:
             if ctx.fp8_meta is not None and ctx.is_output_fp8:
-                assert isinstance(dout, Float8TensorBase), "dout must be Float8TensorBases for FP8 MHA!"
+                assert isinstance(
+                    dout, Float8TensorBase
+                ), "dout must be Float8TensorBases for FP8 MHA!"
                 dout = dout.dequantize()
             dq_buffer = torch.empty_like(q)
             p2p_comm_buffers = [

@@ -1536,13 +1536,13 @@ class FusedAttention(torch.nn.Module):
                     " with FP8!"
                 )
             if fp8_meta["recipe"].float8_current_scaling() and context_parallel:
-               all_quantizers = dpa_utils.get_attention_quantizers(
-                   fp8, fp8_meta, quantizers, cp_specific_quantizers=True
-               )
-               for q in all_quantizers:
-                   if isinstance(q, Float8CurrentScalingQuantizer):
-                       q.with_amax_reduction = True
-                       q.amax_reduction_group = cp_group
+                all_quantizers = dpa_utils.get_attention_quantizers(
+                    fp8, fp8_meta, quantizers, cp_specific_quantizers=True
+                )
+                for q in all_quantizers:
+                    if isinstance(q, Float8CurrentScalingQuantizer):
+                        q.with_amax_reduction = True
+                        q.amax_reduction_group = cp_group
 
         if context_parallel:
             assert (
