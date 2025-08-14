@@ -125,21 +125,21 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 }
 
 CommOverlapCore::~CommOverlapCore() {
-  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_comm));
-  NVTE_CHECK_CUDA(cudaEventDestroy(_start_comm));
-  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_compute));
-  NVTE_CHECK_CUDA(cudaEventDestroy(_start_compute));
+  cudaEventDestroy(_stop_comm);
+  cudaEventDestroy(_start_comm);
+  cudaEventDestroy(_stop_compute);
+  cudaEventDestroy(_start_compute);
   if (_comm_launch_event) {
-    NVTE_CHECK_CUDA(cudaEventDestroy(_comm_launch_event));
+    cudaEventDestroy(_comm_launch_event);
   }
 
   if (_atomic_gemm) {
-    NVTE_CHECK_CUDA(cudaFree(_counter.dptr()));
+    cudaFree(_counter.dptr());
   }
 
   for (size_t i = 0; i < _stream_compute.size(); i++) {
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(_stream_compute[i]));
-    NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_compute[i]));
+    cudaStreamSynchronize(_stream_compute[i]);
+    cudaStreamDestroy(_stream_compute[i]);
   }
 
   auto error = cudaGetLastError();
@@ -297,9 +297,9 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
 }
 
 CommOverlapBase::~CommOverlapBase() {
-  NVTE_CHECK_CUDA(cudaEventDestroy(_start_d2dcopy));
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(_stream_comm));
-  NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_comm));
+  cudaEventDestroy(_start_d2dcopy);
+  cudaStreamSynchronize(_stream_comm);
+  cudaStreamDestroy(_stream_comm);
 }
 
 /*
@@ -699,11 +699,11 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
-  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_recv));
-  NVTE_CHECK_CUDA(cudaEventDestroy(_stop_send));
-  NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_recv));
+  cudaEventDestroy(_stop_recv);
+  cudaEventDestroy(_stop_send);
+  cudaStreamDestroy(_stream_recv);
   for (size_t i = 0; i < _stream_send.size(); i++) {
-    NVTE_CHECK_CUDA(cudaStreamDestroy(_stream_send[i]));
+    cudaStreamDestroy(_stream_send[i]);
   }
 }
 
