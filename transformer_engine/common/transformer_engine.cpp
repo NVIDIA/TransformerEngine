@@ -544,11 +544,11 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   // Zero out tensor data if allocated
   if (t.data.dptr != nullptr) {
     const size_t size_in_bytes = nvte_tensor_size_bytes(tensor);
-    cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.data.dptr, 0, size_in_bytes, stream));
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream));
   }
 }
 
