@@ -1445,8 +1445,7 @@ class FusedAttention(torch.nn.Module):
         if isinstance(cp_group, dist_group_type):
             cp_size = get_distributed_world_size(cp_group)
         elif isinstance(cp_group, list):
-            for group in cp_group:
-                cp_size *= get_distributed_world_size(group)
+            cp_size = get_distributed_world_size(cp_group[0])
         context_parallel = cp_size > 1
 
         # get q_format and kv_format for training and inference
@@ -1542,7 +1541,7 @@ class FusedAttention(torch.nn.Module):
                 for q in all_quantizers:
                     if isinstance(q, Float8CurrentScalingQuantizer):
                         q.with_amax_reduction = True
-                        q.amax_reduction_group = cp_group
+                        q.amax_reduction_group = cp_group[0] if cp_comm_type == "a2a+p2p" else cp_group
 
         if context_parallel:
             assert (

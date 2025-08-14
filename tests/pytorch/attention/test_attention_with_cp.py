@@ -189,8 +189,8 @@ def test_cp_with_fused_attention(
         pytest.skip("Only fp8 works with scaling_mode != None!")
     if dtype == "fp8" and scaling_mode is None:
         pytest.skip("fp8 only works with scaling_mode != None!")
-    if dtype == "fp8" and scaling_mode == "current" and cp_comm_type != "p2p":
-        pytest.skip("fp8 only works with P2P for scaling_mode = current!")
+    if dtype == "fp8" and scaling_mode == "current" and cp_comm_type not in ["p2p", "a2a+p2p"]:
+        pytest.skip("fp8 only works with P2P and A2A+P2P for scaling_mode = current!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
