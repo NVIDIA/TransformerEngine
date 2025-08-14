@@ -122,10 +122,12 @@ class _Sequential(torch.nn.Sequential):
 
 # Supported modules
 _test_cuda_graphs_modules: List[str] = [
+    # Put linear first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
+    "linear",
     "transformer",
     "layernorm_mlp",
     "layernorm_linear",
-    "linear",
     "mha",
     "linear_op",
 ]
@@ -308,9 +310,11 @@ def test_make_graphed_callables(
         fp8_weight_caching=fp8_weight_caching,
         fp8_recipe=fp8_recipe,
     )
-    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
+    # Put graphed callables first to test the case where the cuda context might not be set in
+    # creating TMA descriptor for MXFP8 quantization.
     graph_outputs_mode1 = _test_cuda_graphs(graph_mode="full", **kwargs)
     graph_outputs_mode2 = _test_cuda_graphs(graph_mode="individual", **kwargs)
+    outputs = _test_cuda_graphs(graph_mode="none", **kwargs)
 
     # Check that results match.
     assert_all_equal(outputs, graph_outputs_mode1)

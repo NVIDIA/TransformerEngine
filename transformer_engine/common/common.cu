@@ -95,6 +95,9 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {
@@ -138,7 +141,6 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
                           const uint32_t offset_elems, const size_t type_num_bits) {
-  cuda_driver::ensure_context_exists();
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
   static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {

@@ -1006,9 +1006,10 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
                     Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
   using namespace mxfp8_kernel;
+  checkCuDriverContext(stream);
+
   bool use_rowwise_scaling = output->has_data();
   bool use_colwise_scaling = output->has_columnwise_data();
-  checkCuDriverContext(stream);
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
