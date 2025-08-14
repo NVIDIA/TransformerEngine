@@ -559,7 +559,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
             )
             if fp8 and is_input_fp8:
-                q_fp8, k_fp8, v_fp8 = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8, v_fp8], [q, k, v])]
+                q_fp8, k_fp8, v_fp8 = [
+                    Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                    for x, y in zip([q_fp8, k_fp8, v_fp8], [q, k, v])
+                ]
                 q, k, v = q_fp8, k_fp8, v_fp8
 
         # convert qkv to the right type
@@ -773,7 +776,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                                 fp8_meta_kwargs = {}
                                 if fp8:
-                                    q_part, k_part, v_part = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                    q_part, k_part, v_part = [
+                                        Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                        for x, y in zip(
+                                            [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                        )
+                                    ]
                                     fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
                                     fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
                                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
@@ -879,7 +887,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                                 fp8_meta_kwargs = {}
                                 if fp8:
-                                    q_part, k_part, v_part = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                    q_part, k_part, v_part = [
+                                        Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                        for x, y in zip(
+                                            [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                        )
+                                    ]
                                     fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
                                     fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
                                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
@@ -1000,7 +1013,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 q_part = q_inputs[i % 2]
                                 fp8_meta_kwargs = {}
                                 if fp8:
-                                    q_part, k_part, v_part = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                    q_part, k_part, v_part = [
+                                        Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                        for x, y in zip(
+                                            [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                        )
+                                    ]
                                     fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
                                     fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
                                 out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
@@ -1103,7 +1121,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             q_part = q
                             fp8_meta_kwargs = {}
                             if fp8:
-                                q_part, k_part, v_part = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])]
+                                q_part, k_part, v_part = [
+                                    Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                                    for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
+                                ]
                                 fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step[i]
                                 fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step[i]
                             out_per_step[i], aux_ctx_tensors = fused_attn_fwd(
@@ -1317,7 +1338,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.fp8 = fp8 and is_bwd_fp8
         kv = p2p_comm_buffers[-1]
         if fp8:
-            q_fp8, kv_fp8 = [Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype) for x,y in zip([q_fp8, k_fp8], [q, kv])]
+            q_fp8, kv_fp8 = [
+                Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
+                for x, y in zip([q_fp8, k_fp8], [q, kv])
+            ]
         fp8_tensors = (None, None, None)
         f16_tensors = (None, None, None)
         if ctx.fp8:
@@ -1706,8 +1730,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout_part = dout_
 
                         if ctx.fp8:
-                            q_part, k_part, v_part, out_part = [Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype) for x,y in zip([q_fp8, kv_fp8, kv_fp8, out_fp8], [q_part, k_part, v_part, out_part])]
-                            dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
+                            q_part, k_part, v_part, out_part = [
+                                Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype)
+                                for x, y in zip(
+                                    [q_fp8, kv_fp8, kv_fp8, out_fp8],
+                                    [q_part, k_part, v_part, out_part],
+                                )
+                            ]
+                            dout_part = Float8Tensor.make_like(
+                                dout_fp8, data=dout_part, dtype=bwd_nominal_dtype
+                            )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -1808,8 +1840,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout_part = dout_
 
                         if ctx.fp8:
-                            q_part, k_part, v_part, out_part = [Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype) for x,y in zip([q_fp8, kv_fp8, kv_fp8, out_fp8], [q_part, k_part, v_part, out_part])]
-                            dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
+                            q_part, k_part, v_part, out_part = [
+                                Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype)
+                                for x, y in zip(
+                                    [q_fp8, kv_fp8, kv_fp8, out_fp8],
+                                    [q_part, k_part, v_part, out_part],
+                                )
+                            ]
+                            dout_part = Float8Tensor.make_like(
+                                dout_fp8, data=dout_part, dtype=bwd_nominal_dtype
+                            )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -1911,8 +1951,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout_part = dout_
 
                         if ctx.fp8:
-                            q_part, k_part, v_part, out_part = [Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype) for x,y in zip([q_fp8, kv_fp8, kv_fp8, out_fp8], [q_part, k_part, v_part, out_part])]
-                            dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
+                            q_part, k_part, v_part, out_part = [
+                                Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype)
+                                for x, y in zip(
+                                    [q_fp8, kv_fp8, kv_fp8, out_fp8],
+                                    [q_part, k_part, v_part, out_part],
+                                )
+                            ]
+                            dout_part = Float8Tensor.make_like(
+                                dout_fp8, data=dout_part, dtype=bwd_nominal_dtype
+                            )
                             fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                             fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -1990,8 +2038,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dout_part = dout
 
                     if ctx.fp8:
-                        q_part, k_part, v_part, out_part = [Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype) for x,y in zip([q_fp8, kv_fp8, kv_fp8, out_fp8], [q_part, k_part, v_part, out_part])]
-                        dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
+                        q_part, k_part, v_part, out_part = [
+                            Float8Tensor.make_like(x, data=y, dtype=ctx.fwd_nominal_dtype)
+                            for x, y in zip(
+                                [q_fp8, kv_fp8, kv_fp8, out_fp8], [q_part, k_part, v_part, out_part]
+                            )
+                        ]
+                        dout_part = Float8Tensor.make_like(
+                            dout_fp8, data=dout_part, dtype=bwd_nominal_dtype
+                        )
                         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step[i]
                         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step[i]
                     dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -2297,7 +2352,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 False,
             )
             if ctx.fp8 and ctx.is_input_fp8:
-                dq, dk, dv = [Float8Tensor.make_like(x, data=y, dtype=bwd_nominal_dtype) for x,y in zip([dq_fp8, dk_fp8, dv_fp8], [dq, dk, dv])]
+                dq, dk, dv = [
+                    Float8Tensor.make_like(x, data=y, dtype=bwd_nominal_dtype)
+                    for x, y in zip([dq_fp8, dk_fp8, dv_fp8], [dq, dk, dv])
+                ]
             if ctx.qkv_format == "bshd":
                 dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
             elif ctx.qkv_format == "sbhd":

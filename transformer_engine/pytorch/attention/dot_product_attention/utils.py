@@ -1903,7 +1903,10 @@ def combine_and_quantize(fp8_recipe, qkv_layout, q, k, v, qkv_quantizer):
         case _:
             raise "Invalid qkv_layout " + qkv_layout
 
-    q_fp8, k_fp8, v_fp8 = [Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype) for x in [q_data, k_data, v_data]]
+    q_fp8, k_fp8, v_fp8 = [
+        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        for x in [q_data, k_data, v_data]
+    ]
 
     return q_fp8, k_fp8, v_fp8
 
