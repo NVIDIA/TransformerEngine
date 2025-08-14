@@ -1541,7 +1541,9 @@ class FusedAttention(torch.nn.Module):
                 for q in all_quantizers:
                     if isinstance(q, Float8CurrentScalingQuantizer):
                         q.with_amax_reduction = True
-                        q.amax_reduction_group = cp_group[0] if cp_comm_type == "a2a+p2p" else cp_group
+                        q.amax_reduction_group = (
+                            cp_group[0] if cp_comm_type == "a2a+p2p" else cp_group
+                        )
 
         if context_parallel:
             assert (

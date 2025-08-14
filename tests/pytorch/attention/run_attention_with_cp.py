@@ -25,6 +25,7 @@ from utils import get_available_attention_backends
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
+
 def run_each_config(
     rank,
     world_size,
@@ -419,6 +420,7 @@ def run_each_config(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
+
 def run_dpa_with_cp(
     dtype="bf16",
     qkv_format="bshd",
@@ -479,22 +481,53 @@ def run_dpa_with_cp(
         model_configs = model_configs_flash_attn
         for model in model_configs:
             config = model_configs_fused_attn[model]
-            if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-                logging.info(f"Skip model {model}: CP implementation with KV P2P does not support sliding window yet!")
-                continue
-            if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-                logging.info(f"Skip model {model}: CP implementation with KV all-gather does not support bias yet!")
-                continue
-            if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-                logging.info(f"Skip model {model}: CP implementation with QKVO A2A does not support bias yet!")
-                continue
-            if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
+            if (
+                "p2p" in cp_comm_type
+                and config.window_size != (-1, 0)
+                and config.window_size != (-1, -1)
+            ):
                 logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
-                    f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
+                    f"Skip model {model}: CP implementation with KV P2P does not support sliding"
+                    " window yet!"
                 )
                 continue
-            run_each_config(rank, world_size, cp_group, cp_comm_ranks, model, config, dtype, qkv_format, kernel_backend, cp_comm_type, fp8_dpa, fp8_mha, scaling_mode, fp8_recipe)
+            if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
+                logging.info(
+                    f"Skip model {model}: CP implementation with KV all-gather does not support"
+                    " bias yet!"
+                )
+                continue
+            if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
+                logging.info(
+                    f"Skip model {model}: CP implementation with QKVO A2A does not support bias"
+                    " yet!"
+                )
+                continue
+            if "a2a" in cp_comm_type and (
+                config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
+            ):
+                logging.info(
+                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads"
+                    f" ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be"
+                    " divisible by cp_size (2)!"
+                )
+                continue
+            run_each_config(
+                rank,
+                world_size,
+                cp_group,
+                cp_comm_ranks,
+                model,
+                config,
+                dtype,
+                qkv_format,
+                kernel_backend,
+                cp_comm_type,
+                fp8_dpa,
+                fp8_mha,
+                scaling_mode,
+                fp8_recipe,
+            )
 
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
@@ -502,34 +535,56 @@ def run_dpa_with_cp(
         for model in model_configs:
             config = model_configs_fused_attn[model]
             if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
-                logging.info(f"Skip model {model}: THD format does not support post_scale_bias yet!")
+                logging.info(
+                    f"Skip model {model}: THD format does not support post_scale_bias yet!"
+                )
                 continue
             if dtype == "fp8" and config.attn_bias_type != "no_bias":
                 logging.info(f"Skip model {model}: FP8 attention cannot work with bias yet!")
                 continue
             if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-                logging.info(f"Skip model {model}: FP8 attention cannot work with sliding window yet!")
+                logging.info(
+                    f"Skip model {model}: FP8 attention cannot work with sliding window yet!"
+                )
                 continue
-            if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-                logging.info(f"Skip model {model}: CP implementation with KV P2P does not support sliding window yet!")
+            if (
+                "p2p" in cp_comm_type
+                and config.window_size != (-1, 0)
+                and config.window_size != (-1, -1)
+            ):
+                logging.info(
+                    f"Skip model {model}: CP implementation with KV P2P does not support sliding"
+                    " window yet!"
+                )
                 continue
             if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-                logging.info(f"Skip model {model}: CP implementation with KV all-gather does not support bias yet!")
+                logging.info(
+                    f"Skip model {model}: CP implementation with KV all-gather does not support"
+                    " bias yet!"
+                )
                 continue
             if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-                logging.info(f"Skip model {model}: CP implementation with QKVO A2A does not support bias yet!")
-                continue
-            if "a2a" in cp_comm_type and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
                 logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
-                    f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
+                    f"Skip model {model}: CP implementation with QKVO A2A does not support bias"
+                    " yet!"
+                )
+                continue
+            if "a2a" in cp_comm_type and (
+                config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
+            ):
+                logging.info(
+                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads"
+                    f" ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be"
+                    " divisible by cp_size (2)!"
                 )
                 continue
             if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
                 logging.info(f"Skip model {model}: MLA CP currently only support KV P2P!")
                 continue
             if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
-                logging.info(f"Skip model {model}: MLA CP currently does not support FP8 attention!")
+                logging.info(
+                    f"Skip model {model}: MLA CP currently does not support FP8 attention!"
+                )
                 continue
             dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
             available_backends, _, fused_attn_backends = get_available_attention_backends(
@@ -543,7 +598,22 @@ def run_dpa_with_cp(
             if not fused_attn_supported:
                 logging.info(f"Skip model {model}: No attention backend available.")
                 continue
-            run_each_config(rank, world_size, cp_group, cp_comm_ranks, model, config, dtype, qkv_format, kernel_backend, cp_comm_type, fp8_dpa, fp8_mha, scaling_mode, fp8_recipe)
+            run_each_config(
+                rank,
+                world_size,
+                cp_group,
+                cp_comm_ranks,
+                model,
+                config,
+                dtype,
+                qkv_format,
+                kernel_backend,
+                cp_comm_type,
+                fp8_dpa,
+                fp8_mha,
+                scaling_mode,
+                fp8_recipe,
+            )
 
     dist.destroy_process_group()
 

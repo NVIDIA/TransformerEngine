@@ -3567,7 +3567,8 @@ def attn_forward_func_with_cp(
 
     if cp_comm_type == "a2a+p2p":
         assert isinstance(cp_group, list) and len(cp_group) == 3, (
-            "CP implementation a2a+p2p requires three CP groups, [global_cp_group, a2a_cp_group, p2p_cp_group]!"
+            "CP implementation a2a+p2p requires three CP groups, [global_cp_group, a2a_cp_group,"
+            " p2p_cp_group]!"
         )
         assert (
             qkv_format != "thd"
