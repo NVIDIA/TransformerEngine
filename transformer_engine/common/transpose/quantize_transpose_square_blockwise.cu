@@ -554,18 +554,19 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                   tensor_map_output_trans =
                       get_tensor_map<OutputType>(output_t, num_rows, row_length);
                 }
-                cudaLaunchKernelEx(&cfg,
-                                   block_scaled_cast_transpose_kernel<kReturnTranspose, float,
-                                                                      InputType, OutputType>,
-                                   reinterpret_cast<const InputType*>(input.dptr),
-                                   reinterpret_cast<OutputType*>(output.dptr),
-                                   reinterpret_cast<OutputType*>(output_t.dptr),
-                                   reinterpret_cast<float*>(scale_inv.dptr),
-                                   reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                                   scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                   scale_t_stride_y, epsilon, tensor_map_output_trans, pow_2_scale);
+                NVTE_CHECK_CUDA(cudaLaunchKernelEx(
+                    &cfg,
+                    block_scaled_cast_transpose_kernel<kReturnTranspose, float, InputType,
+                                                       OutputType>,
+                    reinterpret_cast<const InputType*>(input.dptr),
+                    reinterpret_cast<OutputType*>(output.dptr),
+                    reinterpret_cast<OutputType*>(output_t.dptr),
+                    reinterpret_cast<float*>(scale_inv.dptr),
+                    reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                    scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                    tensor_map_output_trans, pow_2_scale));
               } else {
-                cudaLaunchKernelEx(
+                NVTE_CHECK_CUDA(cudaLaunchKernelEx(
                     &cfg,
                     block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float,
                                                                   InputType, OutputType>,
@@ -575,12 +576,11 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                     reinterpret_cast<float*>(scale_inv.dptr),
                     reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                     scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
-                    pow_2_scale);
+                    pow_2_scale));
               }  // full-tile
               )  // return_transpose
           )      // OutputType
       )          // InputType
-  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 }  // namespace transformer_engine::detail
