@@ -420,8 +420,17 @@ def initialize_ub(
         # Loop over user configs and disable dgrad and wgrad bulk overlaps for
         # every layer that has a all-gather wgrad overlap.
         for name in layers_all_gather_wgrad_overlap:
-            if name in ub_cfgs and ub_cfgs[name]["method"] != "bulk":
-                dgrad_name = name.replace("wgrad", "dgrad")
+            if not name in ub_cfgs:
+                continue
+            dgrad_name = name.replace("wgrad", "dgrad")
+            # Update the default "external" methods list.
+            if name in methods["external"]:
+                methods["external"].remove(name)
+                methods["external"].append(dgrad_name)
+                del external_gemm_to_overlap[name]
+                external_gemm_to_overlap[dgrad_name] = name
+
+            if ub_cfgs[name]["method"] != "bulk":
                 if name in {"fc1_wgrad", "qkv_wgrad"}:
                     if name in layers_reduce_scatter_overlap:
                         layers_reduce_scatter_overlap.remove(name)
