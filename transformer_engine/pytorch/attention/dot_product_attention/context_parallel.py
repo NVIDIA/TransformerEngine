@@ -21,6 +21,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
 )
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.jit import jit_fuser
 from transformer_engine.pytorch.constants import (
     dist_group_type,
@@ -1560,53 +1561,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             softmax_lse.unsqueeze_(-1)
             dout = dout.contiguous()
 
-        # communicate for the 'a2a' part of 'a2a+p2p'
-        if cp_size_a2a > 1:
-            if ctx.fp8 and ctx.is_output_fp8:
-                out, dout = (out_fp8._data, dout_fp8._data)
-            if not ctx.use_fused_attention:
-                out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-                dout = dout.view(*out.shape)
-            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(
-                cp_size_a2a, out.device
-            )
-            out, dout = flash_attn_a2a_communicate(
-                [out, dout],
-                chunk_ids_for_a2a,
-                seq_dim,
-                cp_size_a2a,
-                ctx.cp_group_a2a,
-                ctx.cp_stream,
-                True,
-            )
-            if ctx.fp8 and ctx.is_output_fp8:
-                if not isinstance(out, Float8Tensor):
-                    out = ctx.O_quantizer.create_tensor_from_data(
-                        out, fake_dtype=ctx.out_nominal_dtype, internal=ctx.O_quantizer.internal
-                    )
-                else:
-                    out = ctx.O_quantizer.create_tensor_from_data(
-                        out,
-                        fake_dtype=ctx.out_nominal_dtype,
-                        requires_grad=True,
-                        internal=ctx.O_quantizer.internal,
-                    )
-                if not isinstance(dout, Float8Tensor):
-                    dout = ctx.O_quantizer.create_tensor_from_data(
-                        dout, fake_dtype=ctx.dqkv_nominal_dtype, internal=ctx.dO_quantizer.internal
-                    )
-                else:
-                    dout = ctx.O_quantizer.create_tensor_from_data(
-                        dout,
-                        fake_dtype=ctx.dqkv_nominal_dtype,
-                        requires_grad=True,
-                        internal=ctx.dO_quantizer.internal,
-                    )
-                if fp8_meta["recipe"].float8_current_scaling():
-                    out._scale_inv = 1 / ctx.O_quantizer.scale
-                    dout._scale_inv = 1 / ctx.dO_quantizer.scale
-                out_fp8, dout_fp8 = out, dout
-
         # convert out, dout to the right type
         dqkv_nominal_dtype = dout.dtype
         fused_attn_backend = None
@@ -1645,7 +1599,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.fp8_meta["recipe"].float8_current_scaling():
                 dq_buffer = torch.empty(
                     q.shape,
-                    dtype=dqkv_nominal_dtype,
+                    dtype=torch.float32,
                     device=q.device,
                 )
             kv_recv_buffer = torch.empty_like(kv)
@@ -1659,7 +1613,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.fp8_meta["recipe"].float8_current_scaling():
                 dkv_buffer = torch.empty(
                     kv.shape,
-                    dtype=dqkv_nominal_dtype,
+                    dtype=torch.float32,
                     device=kv.device,
                 )
 
@@ -1675,7 +1629,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
         else:
             if ctx.fp8_meta is not None and ctx.is_output_fp8:
-                assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
+                assert isinstance(dout, Float8TensorBase), "dout must be Float8TensorBases for FP8 MHA!"
                 dout = dout.dequantize()
             dq_buffer = torch.empty_like(q)
             p2p_comm_buffers = [
@@ -1687,6 +1641,26 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fp8_meta_kwargs = {}
                 dqkv_real_te_dtype = TE_DType[dqkv_nominal_dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
+        # communicate for the 'a2a' part of 'a2a+p2p'
+        if cp_size_a2a > 1:
+            if not ctx.use_fused_attention:
+                out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+                dout = dout.view(*out.shape)
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_before_attn(
+                cp_size_a2a, out.device
+            )
+            if torch.cuda.current_device() == 0:
+                print(f"bwd a2acomm before {[x.shape for x in [out, dout]]}")
+            out, dout = flash_attn_a2a_communicate(
+                [out, dout],
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                ctx.cp_group_a2a,
+                ctx.cp_stream,
+                True,
+            )
 
         if ctx.enable_mla:
             out = out.view(*ctx.v_shape)
@@ -2256,10 +2230,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             # dq, dk, dv are reduced across steps in higher precision
             # DelayedScaling: collect all results in uint8, dequantize to float32, reduce over cp_size steps
-            # CurrentScaling: dequantize each step to dqkv_nominal_dtype, reduce over cp_size steps
+            # CurrentScaling: dequantize each step to float32, reduce over cp_size steps
             if ctx.use_fused_attention and ctx.fp8:
                 if ctx.fp8_meta["recipe"].delayed():
                     dq_, dk_, dv_ = [x._data for x in [dq_, dk_, dv_]]
+                if ctx.fp8_meta["recipe"].float8_current_scaling():
+                    dq_, dk_, dv_ = [x.to(torch.float32) for x in [dq_, dk_, dv_]]
 
             # copy dq_ into the right buffer position
             if ctx.fp8 and ctx.fp8_meta["recipe"].delayed():
@@ -2280,6 +2256,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     elif ctx.qkv_format == "sbhd":
                         dq[0].fill_(0)
                         dq[1].copy_(dq_)
+                    else:
+                        dq.copy_(dq_)
             elif causal:
                 if i > (cp_size - rank - 1):
                     dq.add_(dq_)
@@ -2476,7 +2454,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv = combine_and_quantize(
-                fp8_meta["recipe"], qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
+                ctx.fp8_meta["recipe"], qkv_layout, dq, dk, dv, ctx.dQKV_quantizer
             )
 
         if cp_size_a2a > 1:

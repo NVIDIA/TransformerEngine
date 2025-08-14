@@ -246,8 +246,8 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=fp8_mha,
         )
-        print("out ", out.dtype, out.__class__)
         if fp8_mha:
             dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
@@ -333,6 +333,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            fp8_output=fp8_mha,
         )
         if fp8_mha:
             dout_fp8_ = dout_quantizer(dout_)
@@ -438,11 +439,11 @@ def run_dpa_with_cp(
 
             rmse = _rmse(a, b)
             rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-            # assert (
-            #    rmse < rmse_tol * rmse_range
-            # ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-            #    rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-            # )
+            assert (
+               rmse < rmse_tol * rmse_range
+            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+               rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+            )
 
     if qkv_format == "bshd":
         count = 0

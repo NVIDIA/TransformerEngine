@@ -181,10 +181,16 @@ def test_cp_with_fused_attention(
             f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
             f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
-    # if dtype != "fp8" and (fp8_mha or fp8_dpa):
-    #    pytest.skip("Only fp8 works with fp8_dpa=True or fp8_mha=True!")
-    # if dtype != "fp8" and scaling_mode is not None:
-    #    pytest.skip("Only fp8 works with scaling_mode != None!")
+    if dtype != "fp8" and (fp8_mha or fp8_dpa):
+        pytest.skip("Only fp8 works with fp8_dpa=True or fp8_mha=True!")
+    if dtype == "fp8" and not (fp8_mha or fp8_dpa):
+        pytest.skip("fp8 only works with fp8_dpa=True or fp8_mha=True!")
+    if dtype != "fp8" and scaling_mode is not None:
+        pytest.skip("Only fp8 works with scaling_mode != None!")
+    if dtype == "fp8" and scaling_mode is None:
+        pytest.skip("fp8 only works with scaling_mode != None!")
+    if dtype == "fp8" and scaling_mode == "current" and cp_comm_type not in ["p2p", "a2a+p2p"]:
+        pytest.skip("fp8 only works with P2P and A2A+P2P for current scaling mode!")
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:

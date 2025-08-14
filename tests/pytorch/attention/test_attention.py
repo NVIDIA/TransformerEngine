@@ -1621,15 +1621,14 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     rmse = _rmse(a, b)
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    # if '2' in name_a or '1' in name_a:
-    # assert rmse < rmse_tol * rmse_range, (
-    #    name_a
-    #    + " vs "
-    #    + name_b
-    #    + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-    #        rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-    #    )
-    # )
+    assert rmse < rmse_tol * rmse_range, (
+       name_a
+       + " vs "
+       + name_b
+       + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+           rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+       )
+    )
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")

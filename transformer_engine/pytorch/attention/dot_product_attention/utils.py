@@ -2008,7 +2008,7 @@ def combine_and_dequantize(
             num_tensors = len(tensors)
             shapes = [x.shape for x in tensors]
             numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(4)]
+            numels = [sum(numels[:i]) for i in range(num_tensors+1)]
             qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
             if not all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
                 qkv_fp8 = qkv_quantizer.create_tensor_from_data(
