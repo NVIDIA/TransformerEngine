@@ -471,6 +471,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}")
 
         # set up CP groups for cp_comm_type = {'p2p', 'a2a+p2p'}
+        cp_group_global = None
         cp_group_a2a = None
         cp_size_a2a = 1
         rank_a2a = 0
