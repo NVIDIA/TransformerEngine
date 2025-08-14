@@ -29,7 +29,7 @@ from transformer_engine.jax.attention import (
 
 DTYPES = [jnp.bfloat16]
 
-DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {"L1": [(32, 1024, 16, 128)], "L2": [(32, 512, 12, 64)]}
+DISTRIBUTED_SELF_ATTN_DATA_SHAPES = {"L0": [()], "L1": [(32, 1024, 16, 128)], "L2": [(32, 512, 12, 64)]}
 
 
 class TestDistributedSelfAttn:
@@ -189,7 +189,7 @@ class TestDistributedSelfAttn:
         )
 
 
-DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {"L1": [[32, 512, 16, 64]], "L2": [[32, 128, 12, 64]]}
+DISTRIBUTED_CROSS_ATTN_DATA_SHAPES = {"L0": [()], "L1": [[32, 512, 16, 64]], "L2": [[32, 128, 12, 64]]}
 
 
 class TestDistributedCrossAttn:
@@ -570,6 +570,7 @@ class TestDistributedContextParallelSelfAttn:
 
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
+    "L0": [[]],
     "L1": [[3, 32, 8, 64]],
     "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
