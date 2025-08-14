@@ -570,8 +570,8 @@ class TestDistributedContextParallelSelfAttn:
 
 
 REORDER_CAUSAL_LOAD_BALANCING_DATA_SHAPES = {
-    "L1": [[1, 16, 1, 1]],
-    "L2": [[4, 32, 12, 32], [3, 32, 8, 64]],
+    "L1": [[3, 32, 8, 64]],
+    "L2": [[4, 32, 12, 32], [1, 16, 1, 1]],
 }
 
 
