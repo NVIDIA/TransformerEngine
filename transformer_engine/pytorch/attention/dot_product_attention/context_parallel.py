@@ -421,10 +421,23 @@ def get_fa_args(
     ]
 
 
-def cp_p2p_fwd_prepare_qkv(q_part, k_part, v_part, qkv_format, pad_between_seqs,
-                           cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                           cu_seqlens_q_half, cu_seqlens_kv_half,
-                           rank, i, cp_size, section):
+def cp_p2p_fwd_prepare_qkv(
+    q_part,
+    k_part,
+    v_part,
+    qkv_format,
+    pad_between_seqs,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
+    cu_seqlens_q_half,
+    cu_seqlens_kv_half,
+    rank,
+    i,
+    cp_size,
+    section,
+):
     """Prepare q, k, v and cu_seqlens for CP P2P forward"""
     if section in ["diagonal", "all"]:
         if pad_between_seqs:
@@ -444,7 +457,9 @@ def cp_p2p_fwd_prepare_qkv(q_part, k_part, v_part, qkv_format, pad_between_seqs,
 
         if qkv_format == "bshd":
             # [b, 2, s//2, h, d] -> [b, s, h, d]
-            q_part, k_part, v_part = [x.view(x.shape[0], -1, *x.shape[-2:]) for x in [q_part, k_part, v_part]]
+            q_part, k_part, v_part = [
+                x.view(x.shape[0], -1, *x.shape[-2:]) for x in [q_part, k_part, v_part]
+            ]
         elif qkv_format == "sbhd":
             # [2, s//2, b, h, d] -> [s, b, h, d]
             q_part, k_part, v_part = [x.view(-1, *x.shape[-3:]) for x in [q_part, k_part, v_part]]
@@ -518,20 +533,38 @@ def cp_p2p_fwd_prepare_qkv(q_part, k_part, v_part, qkv_format, pad_between_seqs,
             k_part, v_part = [x.view(-1, *x.shape[-3:]) for x in [k_part, v_part]]
         elif qkv_format == "thd":
             # [t, h, d] -> [t/2, h, d]
-            q_part = tex.thd_read_half_tensor(
-                q_part, cu_seqlens_q_padded, 1
-            )
+            q_part = tex.thd_read_half_tensor(q_part, cu_seqlens_q_padded, 1)
 
     return q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step
 
 
-def cp_p2p_fwd_fused_attn(attn_bias,
-                          is_training, max_seqlen_q, max_seqlen_kv,
-                          cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                          fused_attn_backend, softmax_scale, dropout_p, qkv_layout, attn_mask_type, attn_bias_type,
-                          fp8, q_fp8, k_fp8, v_fp8, fwd_nominal_dtype, S_quantizer_per_step, O_CP_quantizer_per_step,
-                          q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step,
-                          section):
+def cp_p2p_fwd_fused_attn(
+    attn_bias,
+    is_training,
+    max_seqlen_q,
+    max_seqlen_kv,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
+    fused_attn_backend,
+    softmax_scale,
+    dropout_p,
+    qkv_layout,
+    attn_mask_type,
+    attn_bias_type,
+    fp8,
+    q_fp8,
+    k_fp8,
+    v_fp8,
+    fwd_nominal_dtype,
+    S_quantizer_per_step,
+    O_CP_quantizer_per_step,
+    q_part,
+    k_part,
+    v_part,
+    cu_seqlens_q_per_step,
+    cu_seqlens_kv_per_step,
+    section,
+):
     """Per-tile forward call of CP P2P with FusedAttention backend"""
     attn_bias_inputs = None
     if section == "diagonal":
@@ -563,7 +596,9 @@ def cp_p2p_fwd_fused_attn(attn_bias,
         cu_seqlens_kv_ = cu_seqlens_kv_per_step
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
         cu_seqlens_q_padded_ = cu_seqlens_q_padded
-        cu_seqlens_kv_padded_ = cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
+        cu_seqlens_kv_padded_ = (
+            cu_seqlens_kv_padded // 2 if cu_seqlens_kv_padded is not None else None
+        )
     elif section == "upper-triangle":
         q_part = q_part.contiguous()
         if attn_bias is not None:
@@ -587,9 +622,7 @@ def cp_p2p_fwd_fused_attn(attn_bias,
     if fp8:
         q_part, k_part, v_part = [
             Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
-            for x, y in zip(
-                [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
-            )
+            for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
         ]
         fp8_meta_kwargs["s_quantizer"] = S_quantizer_per_step
         fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer_per_step
@@ -625,10 +658,20 @@ def cp_p2p_fwd_fused_attn(attn_bias,
     return out_per_step, softmax_lse_per_step, rng_states, attn_bias
 
 
-def cp_p2p_fwd_flash_attn(use_flash_attn_3, qkv_format, fa_forward_kwargs, flash_attn_fwd,
-                                    max_seqlen_q, max_seqlen_kv,
-                                    q_part, k_part, v_part, cu_seqlens_q_per_step, cu_seqlens_kv_per_step,
-                                    section):
+def cp_p2p_fwd_flash_attn(
+    use_flash_attn_3,
+    qkv_format,
+    fa_forward_kwargs,
+    flash_attn_fwd,
+    max_seqlen_q,
+    max_seqlen_kv,
+    q_part,
+    k_part,
+    v_part,
+    cu_seqlens_q_per_step,
+    cu_seqlens_kv_per_step,
+    section,
+):
     """Per-tile forward call of CP P2P with FlashAttention backend"""
     cu_seqlens_q_ = cu_seqlens_q_per_step
     cu_seqlens_kv_ = cu_seqlens_kv_per_step
@@ -642,9 +685,7 @@ def cp_p2p_fwd_flash_attn(use_flash_attn_3, qkv_format, fa_forward_kwargs, flash
     elif section == "upper-triangle":
         max_seqlen_q_ = max_seqlen_q // 2
     if section in ["lower-triangle", "upper-triangle"]:
-        if use_flash_attn_3 or (
-            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-        ):
+        if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
             fa_forward_kwargs["window_size"] = (-1, -1)
         elif fa_utils.v2_7_0_plus:
             fa_forward_kwargs["window_size_left"] = -1
@@ -688,7 +729,8 @@ def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_form
         if qkv_format == "bshd":
             # [b, 2, s//2, h, d] -> [b, s, h, d]
             q_part, k_part, v_part, out_part, dout_part = [
-                x.view(x.shape[0], -1, *x.shape[-2:]) for x in [q_part, k_part, v_part, out_part, dout_part]
+                x.view(x.shape[0], -1, *x.shape[-2:])
+                for x in [q_part, k_part, v_part, out_part, dout_part]
             ]
         elif qkv_format == "sbhd":
             # [2, s//2, b, h, d] -> [s, b, h, d]
@@ -721,16 +763,12 @@ def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_form
             # [b, 2, sq//2, h, d] -> [b, sq//2, h, d]
             q_part, out_part, dout_part = q_part[:, 1], out_part[:, 1], dout_part[:, 1]
             # [b, 2, sk//2, h, d] -> [b, sk, h, d]
-            k_part, v_part = [
-                x.view(x.shape[0], -1, *x.shape[-2:]) for x in [k_part, v_part]
-            ]
+            k_part, v_part = [x.view(x.shape[0], -1, *x.shape[-2:]) for x in [k_part, v_part]]
         elif qkv_format == "sbhd":
             # [2, sq//2, b, h, d] -> [sq//2, b, h, d]
             q_part, out_part, dout_part = q_part[1], out_part[1], dout_part[1]
             # [2, sk//2, b, h, d] -> [sk, b, h, d]
-            k_part, v_part = [
-                x.view(-1, *x.shape[-3:]) for x in [k_part, v_part]
-            ]
+            k_part, v_part = [x.view(-1, *x.shape[-3:]) for x in [k_part, v_part]]
         elif qkv_format == "thd":
             # [t, h, d] -> [t/2, h, d]
             q_part, out_part, dout_part = [
@@ -741,14 +779,46 @@ def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_form
     return q_part, k_part, v_part, out_part, dout_part
 
 
-def cp_p2p_bwd_fused_attn(fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
-                          softmax_lse, softmax_lse_, rng_states, attn_dbias, attn_biases,
-                          max_seqlen_q, max_seqlen_kv, rank, i, cp_size,
-                          cu_seqlens_q_per_step, cu_seqlens_kv_per_step, cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                          fused_attn_backend, softmax_scale, dropout_p, qkv_layout, attn_mask_type, attn_bias_type, deterministic,
-                          fwd_nominal_dtype, bwd_nominal_dtype, bwd_output_te_dtype, S_quantizer, dP_quantizer_per_step, dQKV_CP_quantizer_per_step,
-                          q_part, k_part, v_part, out_part, dout_part,
-                          section):
+def cp_p2p_bwd_fused_attn(
+    fp8,
+    q_fp8,
+    kv_fp8,
+    out_fp8,
+    dout_fp8,
+    softmax_lse,
+    softmax_lse_,
+    rng_states,
+    attn_dbias,
+    attn_biases,
+    max_seqlen_q,
+    max_seqlen_kv,
+    rank,
+    i,
+    cp_size,
+    cu_seqlens_q_per_step,
+    cu_seqlens_kv_per_step,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
+    fused_attn_backend,
+    softmax_scale,
+    dropout_p,
+    qkv_layout,
+    attn_mask_type,
+    attn_bias_type,
+    deterministic,
+    fwd_nominal_dtype,
+    bwd_nominal_dtype,
+    bwd_output_te_dtype,
+    S_quantizer,
+    dP_quantizer_per_step,
+    dQKV_CP_quantizer_per_step,
+    q_part,
+    k_part,
+    v_part,
+    out_part,
+    dout_part,
+    section,
+):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
     if fp8:
         aux_tensors = [
@@ -770,9 +840,7 @@ def cp_p2p_bwd_fused_attn(fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
         k_part = k_part.contiguous()
         v_part = v_part.contiguous()
         max_seqlen_kv_ = max_seqlen_kv // 2
-        cu_seqlens_kv_padded_ = (
-            None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
-        )
+        cu_seqlens_kv_padded_ = None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // 2
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
     elif section == "upper-triangle":
         q_part, out_part, dout_part = [x.contiguous() for x in [q_part, out_part, dout_part]]
@@ -786,9 +854,7 @@ def cp_p2p_bwd_fused_attn(fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
             aux_tensors = [softmax_lse_, rng_states[cp_size - i - 1]]
 
         max_seqlen_q_ = max_seqlen_q // 2
-        cu_seqlens_q_padded_ = (
-            None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
-        )
+        cu_seqlens_q_padded_ = None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
 
     fp8_meta_kwargs = {}
@@ -800,9 +866,7 @@ def cp_p2p_bwd_fused_attn(fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
                 [q_part, k_part, v_part, out_part],
             )
         ]
-        dout_part = Float8Tensor.make_like(
-            dout_fp8, data=dout_part, dtype=bwd_nominal_dtype
-        )
+        dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
         fp8_meta_kwargs["s_quantizer"] = S_quantizer
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
         fp8_meta_kwargs["dqkv_quantizer"] = dQKV_CP_quantizer_per_step
@@ -835,14 +899,28 @@ def cp_p2p_bwd_fused_attn(fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
     return dq, dk, dv, dbias
 
 
-def cp_p2p_bwd_flash_attn(use_flash_attn_3, qkv_format,
-                          max_seqlen_q, max_seqlen_kv, cu_seqlens_q_per_step, cu_seqlens_kv_per_step,
-                          rank, i, cp_size,
-                          fa_backward_kwargs, flash_attn_bwd,
-                          rng_states,
-                          softmax_lse, softmax_lse_,
-                          q_part, k_part, v_part, out_part, dout_part,
-                          section):
+def cp_p2p_bwd_flash_attn(
+    use_flash_attn_3,
+    qkv_format,
+    max_seqlen_q,
+    max_seqlen_kv,
+    cu_seqlens_q_per_step,
+    cu_seqlens_kv_per_step,
+    rank,
+    i,
+    cp_size,
+    fa_backward_kwargs,
+    flash_attn_bwd,
+    rng_states,
+    softmax_lse,
+    softmax_lse_,
+    q_part,
+    k_part,
+    v_part,
+    out_part,
+    dout_part,
+    section,
+):
     """Per-tile backward call of CP P2P with FlashAttention backend"""
     dq, dk, dv = [torch.empty_like(x) for x in [q_part, k_part, v_part]]
     if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
@@ -857,9 +935,7 @@ def cp_p2p_bwd_flash_attn(use_flash_attn_3, qkv_format,
     softmax_lse__ = softmax_lse
     causal_ = False
     if section == "diagonal":
-        if use_flash_attn_3 or (
-            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-        ):
+        if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
             fa_backward_kwargs["window_size"] = (-1, 0)
         elif fa_utils.v2_7_0_plus:
             fa_backward_kwargs["window_size_left"] = -1
@@ -896,6 +972,7 @@ def cp_p2p_bwd_flash_attn(use_flash_attn_3, qkv_format,
     )
 
     return dq, dk, dv
+
 
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
@@ -1211,19 +1288,53 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)
                     q_part = q
 
-                    prepare_inputs = [q_part, k_part, v_part, qkv_format, pad_between_seqs,
-                                     cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                                     cu_seqlens_q_half, cu_seqlens_kv_half,
-                                     rank, i, cp_size]
+                    prepare_inputs = [
+                        q_part,
+                        k_part,
+                        v_part,
+                        qkv_format,
+                        pad_between_seqs,
+                        cu_seqlens_q,
+                        cu_seqlens_kv,
+                        cu_seqlens_q_padded,
+                        cu_seqlens_kv_padded,
+                        cu_seqlens_q_half,
+                        cu_seqlens_kv_half,
+                        rank,
+                        i,
+                        cp_size,
+                    ]
                     if use_fused_attention:
-                        fused_attn_inputs = [attn_bias,
-                                             is_training, max_seqlen_q, max_seqlen_kv,
-                                             cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                                             fused_attn_backend, softmax_scale, dropout_p, qkv_layout, attn_mask_type, attn_bias_type,
-                                             fp8, q_fp8, k_fp8, v_fp8, fwd_nominal_dtype, S_quantizer_per_step[i], O_CP_quantizer_per_step[i]]
+                        fused_attn_inputs = [
+                            attn_bias,
+                            is_training,
+                            max_seqlen_q,
+                            max_seqlen_kv,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                            fused_attn_backend,
+                            softmax_scale,
+                            dropout_p,
+                            qkv_layout,
+                            attn_mask_type,
+                            attn_bias_type,
+                            fp8,
+                            q_fp8,
+                            k_fp8,
+                            v_fp8,
+                            fwd_nominal_dtype,
+                            S_quantizer_per_step[i],
+                            O_CP_quantizer_per_step[i],
+                        ]
                     else:
-                        flash_attn_inputs = [use_flash_attn_3, qkv_format, fa_forward_kwargs, flash_attn_fwd,
-                                             max_seqlen_q, max_seqlen_kv]
+                        flash_attn_inputs = [
+                            use_flash_attn_3,
+                            qkv_format,
+                            fa_forward_kwargs,
+                            flash_attn_fwd,
+                            max_seqlen_q,
+                            max_seqlen_kv,
+                        ]
 
                     # P2P requires cp_size steps on each GPU to go through all KV
                     # there are cp_size x cp_size tiles in the P2P Q x KV (GPU x cp step) matrix
@@ -1231,40 +1342,104 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         if i == 0:
                             section = "diagonal"
                             prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
-                            q_part, k_part, v_part, cu_seqlens_q_per_step[i], cu_seqlens_kv_per_step[i] = prepare_outputs
+                            (
+                                q_part,
+                                k_part,
+                                v_part,
+                                cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv_per_step[i],
+                            ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i], attn_biases[i] = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                ) = cp_p2p_fwd_fused_attn(
+                                    *fused_attn_inputs, *prepare_outputs, section
+                                )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                    cp_p2p_fwd_flash_attn(
+                                        *flash_attn_inputs, *prepare_outputs, section
+                                    )
+                                )
                         elif i <= rank:
                             section = "lower-triangle"
                             prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
-                            q_part, k_part, v_part, cu_seqlens_q_per_step[i], cu_seqlens_kv_per_step[i] = prepare_outputs
+                            (
+                                q_part,
+                                k_part,
+                                v_part,
+                                cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv_per_step[i],
+                            ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i], attn_biases[i] = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                ) = cp_p2p_fwd_fused_attn(
+                                    *fused_attn_inputs, *prepare_outputs, section
+                                )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                    cp_p2p_fwd_flash_attn(
+                                        *flash_attn_inputs, *prepare_outputs, section
+                                    )
+                                )
                         else:
                             section = "upper-triangle"
                             prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
-                            q_part, k_part, v_part, cu_seqlens_q_per_step[i], cu_seqlens_kv_per_step[i] = prepare_outputs
+                            (
+                                q_part,
+                                k_part,
+                                v_part,
+                                cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv_per_step[i],
+                            ) = prepare_outputs
                             q_inputs[i % 2] = q_part
                             if use_fused_attention:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i], attn_biases[i] = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                                (
+                                    out_per_step[i],
+                                    softmax_lse_per_step[i],
+                                    rng_states[i],
+                                    attn_biases[i],
+                                ) = cp_p2p_fwd_fused_attn(
+                                    *fused_attn_inputs, *prepare_outputs, section
+                                )
                             else:
-                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                                out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                    cp_p2p_fwd_flash_attn(
+                                        *flash_attn_inputs, *prepare_outputs, section
+                                    )
+                                )
                     else:
                         # all tiles
                         section = "all"
                         prepare_outputs = cp_p2p_fwd_prepare_qkv(*prepare_inputs, section)
-                        q_part, k_part, v_part, cu_seqlens_q_per_step[i], cu_seqlens_kv_per_step[i] = prepare_outputs
+                        (
+                            q_part,
+                            k_part,
+                            v_part,
+                            cu_seqlens_q_per_step[i],
+                            cu_seqlens_kv_per_step[i],
+                        ) = prepare_outputs
                         q_inputs[i % 2] = q_part
                         if use_fused_attention:
-                            out_per_step[i], softmax_lse_per_step[i], rng_states[i], attn_biases[i] = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                            (
+                                out_per_step[i],
+                                softmax_lse_per_step[i],
+                                rng_states[i],
+                                attn_biases[i],
+                            ) = cp_p2p_fwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
                         else:
-                            out_per_step[i], softmax_lse_per_step[i], rng_states[i] = cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                            out_per_step[i], softmax_lse_per_step[i], rng_states[i] = (
+                                cp_p2p_fwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                            )
 
             # softmax_lse correction
             if i > 0:
@@ -1504,7 +1679,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}")
 
         return out_ret
-
 
     @staticmethod
     def backward(ctx, dout):
@@ -1781,19 +1955,57 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             prepare_inputs = [q_part, k_part, v_part, out_part, dout_part, ctx.qkv_format]
             if ctx.use_fused_attention:
-                fused_attn_inputs = [ctx.fp8, q_fp8, kv_fp8, out_fp8, dout_fp8,
-                                     softmax_lse, softmax_lse_, rng_states, attn_dbias, attn_biases,
-                                     ctx.max_seqlen_q, ctx.max_seqlen_kv, rank, i, cp_size,
-                                     cu_seqlens_q_per_step, cu_seqlens_kv_per_step, cu_seqlens_q_padded, cu_seqlens_kv_padded,
-                                     fused_attn_backend, ctx.softmax_scale, ctx.dropout_p, qkv_layout, ctx.attn_mask_type, ctx.attn_bias_type, ctx.deterministic,
-                                     ctx.fwd_nominal_dtype, bwd_nominal_dtype, bwd_output_te_dtype, ctx.S_quantizer, dP_quantizer_per_step[i], dQKV_CP_quantizer_per_step[i]]
+                fused_attn_inputs = [
+                    ctx.fp8,
+                    q_fp8,
+                    kv_fp8,
+                    out_fp8,
+                    dout_fp8,
+                    softmax_lse,
+                    softmax_lse_,
+                    rng_states,
+                    attn_dbias,
+                    attn_biases,
+                    ctx.max_seqlen_q,
+                    ctx.max_seqlen_kv,
+                    rank,
+                    i,
+                    cp_size,
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                    fused_attn_backend,
+                    ctx.softmax_scale,
+                    ctx.dropout_p,
+                    qkv_layout,
+                    ctx.attn_mask_type,
+                    ctx.attn_bias_type,
+                    ctx.deterministic,
+                    ctx.fwd_nominal_dtype,
+                    bwd_nominal_dtype,
+                    bwd_output_te_dtype,
+                    ctx.S_quantizer,
+                    dP_quantizer_per_step[i],
+                    dQKV_CP_quantizer_per_step[i],
+                ]
             else:
-                flash_attn_inputs = [ctx.use_flash_attn_3, ctx.qkv_format,
-                                     ctx.max_seqlen_q, ctx.max_seqlen_kv, cu_seqlens_q_per_step, cu_seqlens_kv_per_step,
-                                     rank, i, cp_size,
-                                     fa_backward_kwargs, flash_attn_bwd,
-                                     rng_states,
-                                     softmax_lse, softmax_lse_]
+                flash_attn_inputs = [
+                    ctx.use_flash_attn_3,
+                    ctx.qkv_format,
+                    ctx.max_seqlen_q,
+                    ctx.max_seqlen_kv,
+                    cu_seqlens_q_per_step,
+                    cu_seqlens_kv_per_step,
+                    rank,
+                    i,
+                    cp_size,
+                    fa_backward_kwargs,
+                    flash_attn_bwd,
+                    rng_states,
+                    softmax_lse,
+                    softmax_lse_,
+                ]
 
             # In reverse order of forward over the cp_size x cp_size tiles of the P2P Q x KV (GPU x cp step) matrix
             if causal:
@@ -1801,30 +2013,46 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     section = "diagonal"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                            *fused_attn_inputs, *prepare_outputs, section
+                        )
                     else:
-                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
+                            *flash_attn_inputs, *prepare_outputs, section
+                        )
                 elif i >= (cp_size - rank - 1):
                     section = "lower-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                            *fused_attn_inputs, *prepare_outputs, section
+                        )
                     else:
-                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
+                            *flash_attn_inputs, *prepare_outputs, section
+                        )
                 else:
                     section = "upper-triangle"
                     prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                     if ctx.use_fused_attention:
-                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                            *fused_attn_inputs, *prepare_outputs, section
+                        )
                     else:
-                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                        dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
+                            *flash_attn_inputs, *prepare_outputs, section
+                        )
             else:
                 section = "all"
                 prepare_outputs = cp_p2p_bwd_prepare_qkv(*prepare_inputs, section)
                 if ctx.use_fused_attention:
-                    dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(*fused_attn_inputs, *prepare_outputs, section)
+                    dq_, dk_, dv_, dbias_ = cp_p2p_bwd_fused_attn(
+                        *fused_attn_inputs, *prepare_outputs, section
+                    )
                 else:
-                    dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(*flash_attn_inputs, *prepare_outputs, section)
+                    dq_, dk_, dv_ = cp_p2p_bwd_flash_attn(
+                        *flash_attn_inputs, *prepare_outputs, section
+                    )
 
             # dq, dk, dv are reduced across steps in higher precision
             # DelayedScaling: collect all results in uint8 to one tensor, dequantize to float32, reduce
