@@ -558,6 +558,9 @@ def cp_p2p_fwd_fused_attn(
     fwd_nominal_dtype,
     S_quantizer_per_step,
     O_CP_quantizer_per_step,
+    rank,
+    i,
+    cp_size,
     q_part,
     k_part,
     v_part,
@@ -567,7 +570,7 @@ def cp_p2p_fwd_fused_attn(
 ):
     """Per-tile forward call of CP P2P with FusedAttention backend"""
     attn_bias_inputs = None
-    if section == "diagonal":
+    if section in ["diagonal", "all"]:
         if attn_bias is not None:
             idx = (rank - i) % cp_size
             attn_bias_inputs = torch.cat(
@@ -723,7 +726,7 @@ def cp_p2p_fwd_flash_attn(
     return out_per_step, softmax_lse_per_step, rng_states
 
 
-def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_format, section):
+def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_format, cu_seqlens_q_padded, cu_seqlens_kv_padded, section):
     """Prepare q, k, v and cu_seqlens for CP P2P backward"""
     if section in ["diagonal", "all"]:
         if qkv_format == "bshd":
@@ -772,7 +775,7 @@ def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_form
         elif qkv_format == "thd":
             # [t, h, d] -> [t/2, h, d]
             q_part, out_part, dout_part = [
-                tex.thd_partread_parthalf_parttensor(x, cu_partseqlens_partq_partpadded, 1)
+                tex.thd_read_half_tensor(x, cu_seqlens_q_padded, 1)
                 for x in [q_part, out_part, dout_part]
             ]
 
@@ -1325,6 +1328,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fwd_nominal_dtype,
                             S_quantizer_per_step[i],
                             O_CP_quantizer_per_step[i],
+                            rank,
+                            i,
+                            cp_size,
                         ]
                     else:
                         flash_attn_inputs = [
@@ -1779,6 +1785,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         buffer_dtype = torch.uint8  # None if ctx.fp8_meta["recipe"].delayed() else torch.float32
         # buffer_fp8_data_dtype = torch.uint8
         dq_buffer = None
+        dout_fp8 = None
         if ctx.fp8:
             assert ctx.use_fused_attention, "FP8 is only supported with Fused Attention!"
             fused_attn_backend = FusedAttnBackend["FP8"]
@@ -1953,7 +1960,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             v_part = kv[ctx.k_numel :].view(*ctx.v_shape)
             q_part, out_part, dout_part = q, out, dout
 
-            prepare_inputs = [q_part, k_part, v_part, out_part, dout_part, ctx.qkv_format]
+            prepare_inputs = [q_part, k_part, v_part, out_part, dout_part, ctx.qkv_format, cu_seqlens_q_padded, cu_seqlens_kv_padded]
             if ctx.use_fused_attention:
                 fused_attn_inputs = [
                     ctx.fp8,
