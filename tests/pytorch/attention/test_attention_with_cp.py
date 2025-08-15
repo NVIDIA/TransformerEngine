@@ -128,19 +128,38 @@ model_configs_fused_attn = {
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64),  # MLA
     "cp_4_0": ModelConfig(
-        2, 4096, 12, 128, attn_mask_type="causal", head_dim_v=64,
-        kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_mask_type="causal",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA
     "cp_4_1": ModelConfig(
         2, 4096, 12, 128, head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
     ),  # MLA
     "cp_4_2": ModelConfig(
-        2, 4096, 12, 128, attn_mask_type="causal", attn_bias_type="post_scale_bias",
-        head_dim_v=64, kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_mask_type="causal",
+        attn_bias_type="post_scale_bias",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA
     "cp_4_3": ModelConfig(
-        2, 4096, 12, 128, attn_bias_type="post_scale_bias", head_dim_v=64,
-        kv_lora_rank=512, qk_pos_emb_head_dim=32
+        2,
+        4096,
+        12,
+        128,
+        attn_bias_type="post_scale_bias",
+        head_dim_v=64,
+        kv_lora_rank=512,
+        qk_pos_emb_head_dim=32,
     ),  # MLA
 }
 

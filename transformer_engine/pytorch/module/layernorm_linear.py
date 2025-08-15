@@ -161,8 +161,7 @@ class _LayerNormLinear(torch.autograd.Function):
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather = (
-            parallel_mode == "column" and sequence_parallel
-            and not input_pre_gathered_for_column_sp
+            parallel_mode == "column" and sequence_parallel and not input_pre_gathered_for_column_sp
         )
 
         # Configure Userbuffers communication (comm+GEMM overlap)
@@ -389,7 +388,9 @@ class _LayerNormLinear(torch.autograd.Function):
         if is_grad_enabled:
             ctx.weight_quantizer = weight_quantizer
             ctx.ln_out_needs_gather = (
-                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+                weight.requires_grad
+                and parallel_mode == "column"
+                and sequence_parallel
                 and not input_pre_gathered_for_column_sp
             )
 
@@ -1782,7 +1783,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ), "blockwise scaling recipe quantizer customization here"
         if fwd:
             if (
-                self.sequence_parallel and self.parallel_mode == "column"
+                self.sequence_parallel
+                and self.parallel_mode == "column"
                 and not self.input_pre_gathered_for_column_sp
             ):
                 self.quantizers["scaling_fwd"][
