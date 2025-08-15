@@ -21,29 +21,34 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8CurrentScalingQuantizer,
 )
 from transformer_engine.common.recipe import DelayedScaling, Float8CurrentScaling
-from utils import get_available_attention_backends
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
-def run_each_config(
-    rank,
-    world_size,
-    cp_group,
-    cp_comm_ranks,
-    model,
-    config,
-    dtype,
-    qkv_format,
-    kernel_backend,
-    cp_comm_type,
-    fp8_dpa,
-    fp8_mha,
-    scaling_mode,
-    fp8_recipe,
+def run_dpa_with_cp(
+    dtype="bf16",
+    model=None,
+    qkv_format="bshd",
+    kernel_backend="FlashAttention",
+    cp_comm_type="p2p",
+    fp8_dpa="False",
+    fp8_mha="False",
+    scaling_mode="delayed",
 ):
-    torch.cuda.synchronize()
-    cp_comm_group = cp_group[0] if cp_comm_type == "a2a+p2p" else cp_group
+    """Test DotProductAttention module with context parallelism"""
+
+    # args are passed as strings
+    fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
+    fp8_mha = fp8_mha == "True" and dtype == "fp8"
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "0"
+    if kernel_backend == "FlashAttention":
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+        config = model_configs_flash_attn[model]
+    if kernel_backend == "FusedAttention":
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        config = model_configs_fused_attn[model]
+
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
@@ -54,8 +59,42 @@ def run_each_config(
         else:
             config.attn_mask_type = "padding"
 
-    if rank == 0:
-        logging.info(f"Running model {model}")
+    rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+
+    if dist.is_initialized():
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        device_count = torch.cuda.device_count()
+        device = rank % device_count
+        torch.cuda.set_device(device)
+
+    print(f"[INFO] world_size:{world_size}, rank:{rank}")
+
+    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+
+    # create flash attn comm group for CP
+    cp_comm_ranks = range(world_size)
+    assert rank in cp_comm_ranks
+    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    if cp_comm_type == "a2a+p2p":
+        assert (
+            world_size % 2 == 0
+        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+        cp_comm_sub_groups = [cp_comm_group]
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                cp_comm_sub_groups.append(sub_group)
+
+    if dtype == "fp8":
+        if scaling_mode == "delayed":
+            fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
+        if scaling_mode == "current":
+            fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -255,7 +294,7 @@ def run_each_config(
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
-        cp_group,
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
         cp_comm_ranks,
         torch.cuda.Stream(),
         cp_comm_type,
@@ -419,201 +458,6 @@ def run_each_config(
             _error(a, b)
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
-
-
-def run_dpa_with_cp(
-    dtype="bf16",
-    qkv_format="bshd",
-    kernel_backend="FlashAttention",
-    cp_comm_type="p2p",
-    fp8_dpa="False",
-    fp8_mha="False",
-    scaling_mode="delayed",
-    log_level=logging.WARNING,
-):
-    """Test DotProductAttention module with context parallelism"""
-    logging.basicConfig(level=log_level)
-
-    # initialize torch.distributed
-    rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
-    if dist.is_initialized():
-        world_size = dist.get_world_size()
-        rank = dist.get_rank()
-    else:
-        device_count = torch.cuda.device_count()
-        device = rank % device_count
-        torch.cuda.set_device(device)
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
-
-    # set up process groups
-    cp_comm_ranks = range(world_size)
-    assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
-    if cp_comm_type == "a2a+p2p":
-        assert (
-            world_size % 2 == 0
-        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
-        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
-        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        cp_comm_sub_groups = [cp_comm_group]
-        for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
-            if rank in sub_ranks:
-                cp_comm_sub_groups.append(sub_group)
-    cp_group = cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group
-
-    # create fp8_recipe
-    fp8_dpa = fp8_dpa == "True" and dtype == "fp8"
-    fp8_mha = fp8_mha == "True" and dtype == "fp8"
-    fp8_recipe = None
-    if dtype == "fp8":
-        if scaling_mode == "delayed":
-            fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
-        if scaling_mode == "current":
-            fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
-
-    # run configs based on backend
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "0"
-    if kernel_backend == "FlashAttention":
-        os.environ["NVTE_FLASH_ATTN"] = "1"
-        model_configs = model_configs_flash_attn
-        for model in model_configs:
-            config = model_configs[model]
-            if (
-                "p2p" in cp_comm_type
-                and config.window_size != (-1, 0)
-                and config.window_size != (-1, -1)
-            ):
-                logging.info(
-                    f"Skip model {model}: CP implementation with KV P2P does not support sliding"
-                    " window yet!"
-                )
-                continue
-            if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-                logging.info(
-                    f"Skip model {model}: CP implementation with KV all-gather does not support"
-                    " bias yet!"
-                )
-                continue
-            if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-                logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A does not support bias"
-                    " yet!"
-                )
-                continue
-            if "a2a" in cp_comm_type and (
-                config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
-            ):
-                logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads"
-                    f" ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be"
-                    " divisible by cp_size (2)!"
-                )
-                continue
-            run_each_config(
-                rank,
-                world_size,
-                cp_group,
-                cp_comm_ranks,
-                model,
-                config,
-                dtype,
-                qkv_format,
-                kernel_backend,
-                cp_comm_type,
-                fp8_dpa,
-                fp8_mha,
-                scaling_mode,
-                fp8_recipe,
-            )
-
-    if kernel_backend == "FusedAttention":
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-        model_configs = model_configs_fused_attn
-        for model in model_configs:
-            config = model_configs[model]
-            if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
-                logging.info(
-                    f"Skip model {model}: THD format does not support post_scale_bias yet!"
-                )
-                continue
-            if dtype == "fp8" and config.attn_bias_type != "no_bias":
-                logging.info(f"Skip model {model}: FP8 attention cannot work with bias yet!")
-                continue
-            if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-                logging.info(
-                    f"Skip model {model}: FP8 attention cannot work with sliding window yet!"
-                )
-                continue
-            if (
-                "p2p" in cp_comm_type
-                and config.window_size != (-1, 0)
-                and config.window_size != (-1, -1)
-            ):
-                logging.info(
-                    f"Skip model {model}: CP implementation with KV P2P does not support sliding"
-                    " window yet!"
-                )
-                continue
-            if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-                logging.info(
-                    f"Skip model {model}: CP implementation with KV all-gather does not support"
-                    " bias yet!"
-                )
-                continue
-            if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
-                logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A does not support bias"
-                    " yet!"
-                )
-                continue
-            if "a2a" in cp_comm_type and (
-                config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0
-            ):
-                logging.info(
-                    f"Skip model {model}: CP implementation with QKVO A2A requires num_heads"
-                    f" ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be"
-                    " divisible by cp_size (2)!"
-                )
-                continue
-            if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
-                logging.info(f"Skip model {model}: MLA CP currently only support KV P2P!")
-                continue
-            if dtype == "fp8" and config.head_dim_qk != config.head_dim_v:
-                logging.info(
-                    f"Skip model {model}: MLA CP currently does not support FP8 attention!"
-                )
-                continue
-            dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
-            available_backends, _, fused_attn_backends = get_available_attention_backends(
-                config,
-                qkv_dtype=dtypes[dtype],
-                qkv_layout="_".join([qkv_format] * 3),
-                window_size=config.window_size,
-                context_parallel=True,
-            )
-            _, fused_attn_supported, _ = available_backends
-            if not fused_attn_supported:
-                logging.info(f"Skip model {model}: No attention backend available.")
-                continue
-            run_each_config(
-                rank,
-                world_size,
-                cp_group,
-                cp_comm_ranks,
-                model,
-                config,
-                dtype,
-                qkv_format,
-                kernel_backend,
-                cp_comm_type,
-                fp8_dpa,
-                fp8_mha,
-                scaling_mode,
-                fp8_recipe,
-            )
 
     dist.destroy_process_group()
 
