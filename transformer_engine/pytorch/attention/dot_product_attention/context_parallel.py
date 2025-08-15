@@ -726,7 +726,17 @@ def cp_p2p_fwd_flash_attn(
     return out_per_step, softmax_lse_per_step, rng_states
 
 
-def cp_p2p_bwd_prepare_qkv(q_part, k_part, v_part, out_part, dout_part, qkv_format, cu_seqlens_q_padded, cu_seqlens_kv_padded, section):
+def cp_p2p_bwd_prepare_qkv(
+    q_part,
+    k_part,
+    v_part,
+    out_part,
+    dout_part,
+    qkv_format,
+    cu_seqlens_q_padded,
+    cu_seqlens_kv_padded,
+    section,
+):
     """Prepare q, k, v and cu_seqlens for CP P2P backward"""
     if section in ["diagonal", "all"]:
         if qkv_format == "bshd":
@@ -1960,7 +1970,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             v_part = kv[ctx.k_numel :].view(*ctx.v_shape)
             q_part, out_part, dout_part = q, out, dout
 
-            prepare_inputs = [q_part, k_part, v_part, out_part, dout_part, ctx.qkv_format, cu_seqlens_q_padded, cu_seqlens_kv_padded]
+            prepare_inputs = [
+                q_part,
+                k_part,
+                v_part,
+                out_part,
+                dout_part,
+                ctx.qkv_format,
+                cu_seqlens_q_padded,
+                cu_seqlens_kv_padded,
+            ]
             if ctx.use_fused_attention:
                 fused_attn_inputs = [
                     ctx.fp8,
