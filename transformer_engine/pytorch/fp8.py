@@ -660,7 +660,8 @@ def fp8_autocast(
                distributed group over which amaxes for the fp8 tensors
                are reduced at the end of each training step.
     """
-    check_recipe_support(fp8_recipe)
+    if enabled:
+        check_recipe_support(fp8_recipe)
     fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
     FP8GlobalStateManager.fp8_autocast_enter(
         enabled=enabled,
