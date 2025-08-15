@@ -140,8 +140,10 @@ struct BackwardKernelParams : public KernelParamsBase {
   void* dgamma;
 };
 
+using BackwardAddKernelParams = BackwardKernelParams;
+
 enum class NVTE_Norm_Backend { Te, Cudnn };
-enum class NVTE_Norm_Stage { Forward, Backward };
+enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
 
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
 struct TupleHash {

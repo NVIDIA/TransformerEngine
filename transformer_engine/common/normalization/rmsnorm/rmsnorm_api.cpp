@@ -212,7 +212,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   bool gamma_in_weight_dtype = false;
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
-      norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Backward,
+      norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::BackwardAdd,
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
       gamma.data.dtype,  // otype
