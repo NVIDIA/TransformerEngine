@@ -145,10 +145,9 @@ def load_framework_extension(framework: str) -> None:
             raise RuntimeError("Could not find `transformer-engine`.")
         if not found_core_module:
             raise RuntimeError("Could not find `transformer-engine-cu*`.")
-        if (
-            version(module_name) != version("transformer-engine")
-            or version(core_module_name) != version("transformer-engine")
-        ):
+        if version(module_name) != version("transformer-engine") or version(
+            core_module_name
+        ) != version("transformer-engine"):
             raise RuntimeError(
                 "TransformerEngine package version mismatch. Found"
                 f" {module_name} v{version(module_name)}, transformer-engine"
