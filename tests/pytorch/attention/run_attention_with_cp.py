@@ -435,22 +435,11 @@ def run_dpa_with_cp(
             )
 
     if qkv_format == "bshd":
-        count = 0
         for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-            if torch.cuda.current_device() == 0:
-                _error(a[:, 0], b[:, 0])
-                _error(a[:, 1], b[:, 1])
-                count += 2
+            _error(a[:, 0], b[:, 0])
+            _error(a[:, 1], b[:, 1])
     elif qkv_format == "sbhd":
-        # for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
-        for a, b in zip(
-            [
-                out_,
-            ],
-            [
-                out,
-            ],
-        ):
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
             _error(a[0], b[0])
             _error(a[1], b[1])
     elif qkv_format == "thd":
