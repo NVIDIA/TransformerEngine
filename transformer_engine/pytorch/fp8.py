@@ -21,6 +21,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    CustomRecipe,
 )
 
 from .constants import dist_group_type
@@ -823,6 +824,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif isinstance(recipe, CustomRecipe):
+            cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
         return cls(
@@ -1070,3 +1073,59 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class CustomRecipeState(RecipeState):
+    """State for CustomRecipe: produce quantizers per tensor."""
+
+    recipe: CustomRecipe
+    mode: str
+    num_quantizers: int
+    device: Optional[torch.device]
+
+    def __init__(
+        self,
+        recipe: CustomRecipe,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+        if getattr(recipe, "qfactories", None) is None:
+            raise ValueError("CustomRecipe requires `qfactories` with factories.")
+
+    def make_quantizers(self) -> list:
+        qfactories = self.recipe.qfactories
+        # Build a canonical, per-mode pool of factories and cycle it to match num_quantizers.
+        if self.mode == "forward":
+            pool = [
+                qfactories.input_factory,
+                qfactories.weight_factory,
+                qfactories.output_factory,
+            ]
+        else:
+            pool = [
+                qfactories.grad_output_factory,
+                qfactories.grad_input_factory,
+            ]
+
+        # Filter out None entries; allow partial factories and reuse as needed.
+        pool = [factory for factory in pool if factory is not None]
+        if len(pool) == 0:
+            raise ValueError(
+                "CustomRecipe requires at least one factory for the requested mode; "
+                f"got none for mode={self.mode}."
+            )
+
+        out = []
+        for i in range(self.num_quantizers):
+            factory = pool[i % len(pool)]
+            out.append(factory())
+        return out

@@ -5,7 +5,7 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+from typing import Callable, Optional, Tuple, Iterable, Any, Dict, Union
 import abc
 import copy
 import warnings
@@ -178,7 +178,6 @@ class Quantizer(abc.ABC):
             ")"
         )
 
-    @abc.abstractmethod
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -187,6 +186,9 @@ class Quantizer(abc.ABC):
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Quantize tensor in-place"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_quantized"
+        )
 
     def quantize(
         self,
@@ -199,8 +201,12 @@ class Quantizer(abc.ABC):
         if out is not None:
             return self.update_quantized(tensor, out)
         if (not self.internal) and torch.is_grad_enabled():
-            return _QuantizeFunc.apply(tensor, self)
-        return _QuantizeFunc.forward(None, tensor, self)
+            return _QuantizeFunc.apply(tensor, self.quantize_impl)
+        return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+
+    @abc.abstractmethod
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
 
     def multi_quantize(self, list_of_tensors):
         """Quantize multiple tensors"""
@@ -213,7 +219,6 @@ class Quantizer(abc.ABC):
         """Quantize tensor"""
         return self.quantize(tensor)
 
-    @abc.abstractmethod
     def make_empty(
         self,
         shape: Iterable[int],
@@ -222,8 +227,11 @@ class Quantizer(abc.ABC):
         device: Optional[torch.device] = None,
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement make_empty function, "
+            "required for construction of unintialized quantized tensor"
+        )
 
-    @abc.abstractmethod
     def calibrate(self, tensor: torch.Tensor) -> None:
         """Calibrate quantizer state
 
@@ -252,13 +260,21 @@ class Quantizer(abc.ABC):
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_quantize"
+        )
 
     def onnx_dequantize(self, tensor) -> torch.Tensor:
         """Symbolic function for ONNX export"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement onnx_dequantize"
+        )
 
-    @abc.abstractmethod
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         """Returns recipe class that is compatible with this quantizer"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement _get_compatible_recipe"
+        )
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Returns True if the quantizer supports only rowwise all-gather"""
@@ -266,20 +282,21 @@ class Quantizer(abc.ABC):
 
 
 class _QuantizeFunc(torch.autograd.Function):
-    """Cast to FP8 from other dtype"""
+    """Quantize tensor"""
 
     @staticmethod
     def forward(
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
         tensor: torch.Tensor,
-        quantizer: Quantizer,
+        quantize_impl: Callable,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
-        return tex.quantize(tensor, quantizer)
+        return quantize_impl(tensor)
 
     @staticmethod
     def backward(
-        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
+        _ctx: torch.autograd.function.FunctionCtx,  # unused
+        grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision

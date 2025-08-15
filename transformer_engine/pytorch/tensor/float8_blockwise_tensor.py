@@ -14,7 +14,11 @@ from transformer_engine_torch import Float8BlockScaleTensorFormat
 
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from ._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
-from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
+from .quantized_tensor import (
+    QuantizedTensor,
+    Quantizer,
+    _IdentityFunc,
+)
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 aten = torch.ops.aten
@@ -100,6 +104,10 @@ class Float8BlockQuantizer(Quantizer):
 
         dst._fp8_dtype = self.dtype
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        return tex.quantize(tensor, self)
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Calculate the shape of the scaling tensor for blockwise quantization.

@@ -109,8 +109,8 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
         }
     # no activation fusion written yet
-    # Per-tensor current scaling or fp8 blockwise scaling: []
-    if recipe.float8_current_scaling() or recipe.float8_block_scaling():
+    # Per-tensor current scaling, fp8 blockwise scaling, or custom factories: []
+    if recipe.float8_current_scaling() or recipe.float8_block_scaling() or recipe.custom():
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "relu": (tex.relu, tex.drelu, None),

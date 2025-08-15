@@ -7,7 +7,8 @@ from __future__ import annotations
 import warnings
 import os
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Any, Literal, Optional, Union, Callable, NamedTuple
+from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
@@ -85,6 +86,10 @@ class Recipe:
     def float8_block_scaling(self):
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
+
+    def custom(self):
+        """Whether the given recipe is custom."""
+        return isinstance(self, CustomRecipe)
 
 
 @dataclass()
@@ -351,3 +356,36 @@ class Float8BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class CustomQuantizerFactories:
+    """Quantizer factories used by CustomRecipe.
+
+    Each field is a callable that returns a fresh quantizer instance when invoked.
+    If a factory is None, that tensor is left unquantized.
+    Keep factories simple: no required args; use closures to share state (e.g., RNG).
+    """
+
+    input_factory: Optional[Callable[[], Any]] = None
+    weight_factory: Optional[Callable[[], Any]] = None
+    output_factory: Optional[Callable[[], Any]] = None
+    grad_input_factory: Optional[Callable[[], Any]] = None
+    grad_output_factory: Optional[Callable[[], Any]] = None
+
+
+@dataclass()
+class CustomRecipe(Recipe):
+    """
+    Custom recipe that allows users to provide quantizer factories.
+
+    Parameters
+    ----------
+    qfactories : CustomQuantizerFactories
+                 Quantization factories.
+    """
+
+    qfactories: CustomQuantizerFactories = field(default_factory=CustomQuantizerFactories)
+
+    def __repr__(self) -> str:
+        return f"recipe_type={self.__class__.__name__}, qfactories={self.qfactories}"
