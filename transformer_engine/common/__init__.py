@@ -130,38 +130,42 @@ def load_framework_extension(framework: str) -> None:
     if framework == "torch":
         extra_dep_name = "pytorch"
 
+    # Check if the core package is installed via PyPI.
+    found_core_module = False
+    for core_module_name in ("transformer_engine_cu13", "transformer_engine_cu12"):
+        if _is_pip_package_installed(core_module_name):
+            found_core_module = True
+            break
+
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching version.
     if _is_pip_package_installed(module_name):
-        assert _is_pip_package_installed(
-            "transformer_engine"
-        ), "Could not find `transformer-engine`."
-        assert _is_pip_package_installed(
-            "transformer_engine_cu12"
-        ), "Could not find `transformer-engine-cu12`."
-        assert (
-            version(module_name)
-            == version("transformer-engine")
-            == version("transformer-engine-cu12")
-        ), (
-            "TransformerEngine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
-            f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
-        )
+        if not _is_pip_package_installed("transformer_engine"):
+            raise RuntimeError("Could not find `transformer-engine`.")
+        if not found_core_module:
+            raise RuntimeError("Could not find `transformer-engine-cu*`.")
+        if (
+            version(module_name) != version("transformer-engine")
+            or version(core_module_name) != version("transformer-engine")
+        ):
+            raise RuntimeError(
+                "TransformerEngine package version mismatch. Found"
+                f" {module_name} v{version(module_name)}, transformer-engine"
+                f" v{version('transformer-engine')}, and {core_module_name}"
+                f" v{version(core_module_name)}. Install transformer-engine using "
+                f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'"
+            )
 
     # If the core package is installed via PyPI, log if
     # the framework extension is not found from PyPI.
     # Note: Should we error? This is a rare use case.
-    if _is_pip_package_installed("transformer-engine-cu12"):
-        if not _is_pip_package_installed(module_name):
-            _logger.info(
-                "Could not find package %s. Install transformer-engine using "
-                f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'",
-                module_name,
-            )
+    if found_core_module and not _is_pip_package_installed(module_name):
+        _logger.info(
+            "Could not find package %s. Install transformer-engine using "
+            f"'pip3 install transformer-engine[{extra_dep_name}]==VERSION'",
+            module_name,
+        )
 
     # After all checks are completed, load the shared object file.
     spec = importlib.util.spec_from_file_location(module_name, _get_shared_object_file(framework))
