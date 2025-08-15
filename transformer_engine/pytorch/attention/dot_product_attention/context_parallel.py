@@ -540,6 +540,7 @@ def cp_p2p_fwd_prepare_qkv(
 
 def cp_p2p_fwd_fused_attn(
     attn_bias,
+    attn_bias_,
     is_training,
     max_seqlen_q,
     max_seqlen_kv,
@@ -848,6 +849,7 @@ def cp_p2p_bwd_fused_attn(
     max_seqlen_kv_ = max_seqlen_kv
     cu_seqlens_q_padded_ = cu_seqlens_q_padded
     cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
+    attn_mask_type_ = attn_mask_type
 
     if section == "lower-triangle":
         k_part = k_part.contiguous()
@@ -903,7 +905,7 @@ def cp_p2p_bwd_fused_attn(
         attn_scale=softmax_scale,
         dropout=dropout_p,
         qkv_layout=qkv_layout,
-        attn_mask_type=attn_mask_type,
+        attn_mask_type=attn_mask_type_,
         attn_bias_type=attn_bias_type,
         deterministic=deterministic,
         **fp8_meta_kwargs,
@@ -1180,6 +1182,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             elif qkv_format == "sbhd":
                 # [s, b, h, d] -> [2, s//2, b, h, d]
                 q, k, v = [x.view(2, x.shape[0] // 2, *x.shape[1:]) for x in [q, k, v]]
+        attn_bias_ = None
         if attn_bias is not None:
             assert len(attn_bias.shape) == 4, (
                 "Only support bias shape of [b, h, sq, sk] for forward, "
@@ -1320,6 +1323,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if use_fused_attention:
                         fused_attn_inputs = [
                             attn_bias,
+                            attn_bias_,
                             is_training,
                             max_seqlen_q,
                             max_seqlen_kv,
