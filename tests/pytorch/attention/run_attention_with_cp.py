@@ -480,7 +480,7 @@ def run_dpa_with_cp(
         os.environ["NVTE_FLASH_ATTN"] = "1"
         model_configs = model_configs_flash_attn
         for model in model_configs:
-            config = model_configs_fused_attn[model]
+            config = model_configs[model]
             if (
                 "p2p" in cp_comm_type
                 and config.window_size != (-1, 0)
@@ -533,7 +533,7 @@ def run_dpa_with_cp(
         os.environ["NVTE_FUSED_ATTN"] = "1"
         model_configs = model_configs_fused_attn
         for model in model_configs:
-            config = model_configs_fused_attn[model]
+            config = model_configs[model]
             if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
                 logging.info(
                     f"Skip model {model}: THD format does not support post_scale_bias yet!"
