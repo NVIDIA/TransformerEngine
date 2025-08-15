@@ -25,6 +25,7 @@ DTYPES = [jnp.bfloat16, jnp.float32]
 
 NORM_INPUT_SHAPES = {
     "L0": [[64, 64]],
+    "L1": [[64, 64]],
     "L2": [[64, 64]],
 }
 
