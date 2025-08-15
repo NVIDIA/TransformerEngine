@@ -110,6 +110,12 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/userbuffers/userbuffers.cu
      comm_gemm_overlap/comm_gemm_overlap.cpp)
+
+if (NVTE_WITH_CUBLASMP)
+list(APPEND transformer_engine_SOURCES
+     comm_gemm/comm_gemm.cpp)
+endif()
+
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -123,6 +129,8 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine SYSTEM PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
@@ -139,6 +147,25 @@ if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
+endif()
+
+option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
+if (NVTE_WITH_CUBLASMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    find_library(CUBLASMP_LIB
+                 NAMES cublasmp libcublasmp
+                 PATHS ${CUBLASMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NVSHMEM_HOST_LIB
+                 NAMES nvshmem_host libnvshmem_host.so.3
+                 PATHS ${NVSHMEM_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
