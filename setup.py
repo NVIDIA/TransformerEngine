@@ -125,6 +125,7 @@ if __name__ == "__main__":
         ext_modules = []
         package_data = {}
         include_package_data = False
+        install_requires = []
         extras_require = {
             "pytorch": [
                 f"transformer_engine_torch=={__version__}",
