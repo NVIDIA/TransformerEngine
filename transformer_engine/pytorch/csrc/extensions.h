@@ -77,6 +77,11 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
     size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
     size_t head_dim_v, int64_t window_size_left, int64_t window_size_right);
 
+std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
+                                                      const std::vector<size_t> &shape, DType dtype,
+                                                      bool create_hp_tensor_for_cs,
+                                                      std::optional<at::Tensor> data);
+
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,

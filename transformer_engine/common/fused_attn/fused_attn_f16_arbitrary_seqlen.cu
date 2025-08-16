@@ -126,6 +126,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                window_size_right,
                                true,
                                tensorType,
+                               tensorType,
                                tensorType};
 
     namespace fe = cudnn_frontend;
@@ -559,6 +560,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                window_size_left,
                                window_size_right,
                                deterministic,
+                               tensorType,
                                tensorType,
                                tensorType};
 
