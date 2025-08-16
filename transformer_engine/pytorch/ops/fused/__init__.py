@@ -8,6 +8,10 @@ from .backward_activation_bias import (
     BackwardActivationBias,
     fuse_backward_activation_bias,
 )
+from .backward_add_rmsnorm import (
+    BackwardAddRMSNorm,
+    fuse_backward_add_rmsnorm,
+)
 from .backward_linear_add import (
     BackwardLinearAdd,
     fuse_backward_linear_add,

@@ -162,7 +162,74 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
     plan->execute(x.data.dptr, gamma.data.dptr, nullptr /*mu*/, rsigma.data.dptr, dx->data.dptr,
-                  dz.data.dptr, nullptr /*dbeta*/, dgamma->data.dptr, workspace->data.dptr, stream);
+                  dz.data.dptr, nullptr /*add*/, nullptr /*dbeta*/, dgamma->data.dptr,
+                  workspace->data.dptr, stream);
+  }
+  return;
+}
+
+void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const Tensor &rsigma,
+                     const Tensor &gamma, Tensor *dx, Tensor *dgamma, Tensor *workspace,
+                     const int multiprocessorCount, const bool zero_centered_gamma,
+                     cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(dz.data.dtype == gamma.data.dtype);
+  NVTE_CHECK(add.data.dtype == gamma.data.dtype);
+  NVTE_CHECK(rsigma.data.dtype == DType::kFloat32);
+
+  NVTE_CHECK(x.data.shape.size() == 2);
+  NVTE_CHECK(dz.data.shape == x.data.shape);
+  NVTE_CHECK(add.data.shape == x.data.shape);
+
+  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
+
+  NVTE_CHECK(dx->data.shape == x.data.shape);
+  NVTE_CHECK(dx->data.dtype == x.data.dtype);
+
+  NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
+  NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
+
+  if (!workspace->data.shape.empty()) {
+    CheckInputTensor(dz, "dz");
+    CheckInputTensor(x, "x");
+    CheckInputTensor(add, "add");
+    CheckInputTensor(rsigma, "rsigma");
+    CheckInputTensor(gamma, "gamma");
+    CheckOutputTensor(*dx, "dx");
+    CheckOutputTensor(*dgamma, "dgamma");
+  }
+
+  // cuDNN does not currently support fused backward+add
+  NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
+
+  // TE backend does not currently support zero_centered_gamma_in_weight_dtype
+  NVTE_CHECK(!use_zero_centered_gamma_in_weight_dtype(),
+             "zero_centered_gamma_in_weight_dtype is currently not supported for rmsnorm_bwd_add");
+
+  bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
+                                   dz.data.dptr, dgamma->data.dptr, add.data.dptr);
+  bool gamma_in_weight_dtype = false;
+
+  auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+      norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::BackwardAdd,
+      gamma.data.dtype,  // wtype
+      x.data.dtype,      // itype
+      gamma.data.dtype,  // otype
+      x.data.shape[0],   // batch_size
+      x.data.shape[1],   // hidden_size
+      multiprocessorCount, zero_centered_gamma, is_aligned, NVTE_DELAYED_TENSOR_SCALING, true,
+      gamma_in_weight_dtype);
+
+  if (workspace->data.shape.empty()) {
+    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+    plan->execute(x.data.dptr, gamma.data.dptr, nullptr /*mu*/, rsigma.data.dptr, dx->data.dptr,
+                  dz.data.dptr, add.data.dptr, nullptr /*dbeta*/, dgamma->data.dptr,
+                  workspace->data.dptr, stream);
   }
   return;
 }
@@ -194,4 +261,20 @@ void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
               *convertNVTETensorCheck(rsigma), *convertNVTETensorCheck(gamma),
               convertNVTETensor(dx), convertNVTETensor(dgamma), convertNVTETensor(workspace),
               multiprocessorCount, zero_centered_gamma, stream);
+}
+
+void nvte_rmsnorm_bwd_add(const NVTETensor dz,      // Nxhidden_size
+                          const NVTETensor x,       // Nxhidden_size
+                          const NVTETensor add,     // Nxhidden_size
+                          const NVTETensor rsigma,  // N, FP32!
+                          const NVTETensor gamma,   // hidden_size
+                          NVTETensor dx, NVTETensor dgamma, NVTETensor workspace,
+                          const int multiprocessorCount, const bool zero_centered_gamma,
+                          cudaStream_t stream) {
+  NVTE_API_CALL(nvte_rmsnorm_bwd_add);
+  using namespace transformer_engine;
+  rmsnorm_bwd_add(*convertNVTETensorCheck(dz), *convertNVTETensorCheck(x),
+                  *convertNVTETensorCheck(add), *convertNVTETensorCheck(rsigma),
+                  *convertNVTETensorCheck(gamma), convertNVTETensor(dx), convertNVTETensor(dgamma),
+                  convertNVTETensor(workspace), multiprocessorCount, zero_centered_gamma, stream);
 }

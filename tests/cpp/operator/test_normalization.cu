@@ -27,10 +27,19 @@ namespace {
 
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
-                 NormType norm_type, bool use_cudnn, const bool zero_centered_gamma_in_weight_dtype) {
+                 const NormType norm_type, const bool use_cudnn,
+                 const bool zero_centered_gamma_in_weight_dtype, const bool fused_bwd_add) {
   if (sizeof(InputType) < sizeof(OutputType)) {
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
-    return;
+  }
+
+  if (norm_type == LayerNorm && fused_bwd_add) {
+    GTEST_SKIP() << "Fused LN backward+add not currently supported";
+  }
+
+  if (fused_bwd_add && zero_centered_gamma_in_weight_dtype) {
+    GTEST_SKIP() << "zero_centered_gamma_in_weight_dtype not currently supported "
+                 << "in fused norm backward+add";
   }
 
   if (getDeviceComputeCapability() < hopperComputeCapability && use_cudnn) {
@@ -45,7 +54,6 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if ((itype == DType::kBFloat16 && otype == DType::kFloat16) ||
       (itype == DType::kFloat16 && otype == DType::kBFloat16)) {
     GTEST_SKIP() << "LN kernel does not support mixing Float16 and BFloat16";
-    return;
   }
 
   Tensor input("input", std::vector<size_t>{ N, H }, itype);
@@ -55,6 +63,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   Tensor mu("mu", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor rsigma("rsigma", std::vector<size_t>{ N }, DType::kFloat32);
   Tensor dz("dz", std::vector<size_t>{ N, H }, wtype);
+  Tensor bwd_add("bwd_add", std::vector<size_t>{ N, H }, wtype);
   Tensor dx("dx", std::vector<size_t>{ N, H }, itype);
   Tensor dgamma("dgamma", std::vector<size_t>{ H }, wtype);
   Tensor dbeta("dbeta", std::vector<size_t>{ H }, wtype);
@@ -65,6 +74,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   fillUniform(&beta);
   setRandomScale(&z);
   fillUniform(&dz);
+  if (fused_bwd_add) {
+    fillUniform(&bwd_add);
+  } else {
+    fillCase<WeightType>(&bwd_add, zeros);
+  }
 
   std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(N * H);
   std::unique_ptr<float[]> ref_mu = std::make_unique<float[]>(N);
@@ -84,7 +98,6 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   if (use_cudnn){
     nvte_enable_cudnn_norm_fwd(true);
     nvte_enable_cudnn_norm_bwd(true);
-
 
     // Zero-centered gamma in weight dtype only supported by CuDNN backend currently
     if (zero_centered_gamma_in_weight_dtype) {
@@ -125,15 +138,23 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      z.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
 
-    nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(),
-                     workspace_bwd.data(),
-                     prop.multiProcessorCount, zero_centered_gamma, 0);
-    workspace_bwd = Tensor("workspace", workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
-    nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(),
-                     workspace_bwd.data(),
-                     prop.multiProcessorCount, zero_centered_gamma, 0);
+    if (fused_bwd_add) {
+      nvte_rmsnorm_bwd_add(dz.data(), input.data(), bwd_add.data(), rsigma.data(), gamma.data(),
+                           dx.data(), dgamma.data(), workspace_bwd.data(),
+                           prop.multiProcessorCount, zero_centered_gamma, 0);
+      workspace_bwd = Tensor("workspace", workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
+      nvte_rmsnorm_bwd_add(dz.data(), input.data(), bwd_add.data(), rsigma.data(), gamma.data(),
+                           dx.data(), dgamma.data(), workspace_bwd.data(),
+                           prop.multiProcessorCount, zero_centered_gamma, 0);
+    } else {
+      nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
+                       dx.data(), dgamma.data(), workspace_bwd.data(), prop.multiProcessorCount,
+                       zero_centered_gamma, 0);
+      workspace_bwd = Tensor("workspace", workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
+      nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
+                       dx.data(), dgamma.data(), workspace_bwd.data(), prop.multiProcessorCount,
+                       zero_centered_gamma, 0);
+    }
   }
 
   if (use_cudnn){
@@ -167,6 +188,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      use_cudnn,
                      zero_centered_gamma_in_weight_dtype);
   compute_ref_backward(norm_type, dz.rowwise_cpu_dptr<WeightType>(),
+                       bwd_add.rowwise_cpu_dptr<WeightType>(),
                        input.rowwise_cpu_dptr<InputType>(),
                        mu.rowwise_cpu_dptr<float>(), rsigma.rowwise_cpu_dptr<float>(),
                        gamma.rowwise_cpu_dptr<WeightType>(),
@@ -214,30 +236,40 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
 }  // namespace
 
 class NormTestSuite : public ::testing::TestWithParam<std::tuple<bool,
-NormType,
-transformer_engine::DType,
-                                                               transformer_engine::DType,
-                                                               std::pair<size_t, size_t>,
-                                                               bool,
-                                                               bool>> {};
+                                                                 NormType,
+                                                                 transformer_engine::DType,
+                                                                 transformer_engine::DType,
+                                                                 std::pair<size_t, size_t>,
+                                                                 bool,
+                                                                 bool,
+                                                                 bool>> {};
 
 TEST_P(NormTestSuite, TestNorm) {
-    using namespace transformer_engine;
-    using namespace test;
+  using namespace transformer_engine;
+  using namespace test;
 
   const bool use_cudnn = std::get<0>(GetParam());
   const NormType norm_type = std::get<1>(GetParam());
-    const DType input_type = std::get<2>(GetParam());
-    const DType output_type = std::get<3>(GetParam());
-    const auto size = std::get<4>(GetParam());
-    const bool zero_centered_gamma = std::get<5>(GetParam());
-    const bool cudnn_zero_centered_gamm_in_weight_dtype = std::get<6>(GetParam());
+  const DType input_type = std::get<2>(GetParam());
+  const DType output_type = std::get<3>(GetParam());
+  const auto size = std::get<4>(GetParam());
+  const bool zero_centered_gamma = std::get<5>(GetParam());
+  const bool cudnn_zero_centered_gamma_in_weight_dtype = std::get<6>(GetParam());
+  const bool fused_bwd_add = std::get<7>(GetParam());
 
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, use_cudnn, cudnn_zero_centered_gamm_in_weight_dtype);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+      performTest<InputType, OutputType>(
+        size.first,
+        size.second,
+        zero_centered_gamma,
+        norm_type,
+        use_cudnn,
+        cudnn_zero_centered_gamma_in_weight_dtype,
+        fused_bwd_add
       );
     );
+  );
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -250,6 +282,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
     ::testing::ValuesIn(test_cases),
     ::testing::Values(false, true),
+    ::testing::Values(false, true),
     ::testing::Values(false, true)),
   [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
@@ -261,6 +294,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<4>(info.param).first) + "X" +
       std::to_string(std::get<4>(info.param).second) + "X" +
       std::to_string(std::get<5>(info.param)) + "X" +
-      std::to_string(std::get<6>(info.param));
+      std::to_string(std::get<6>(info.param)) + "X" +
+      std::to_string(std::get<7>(info.param));
     return name;
   });

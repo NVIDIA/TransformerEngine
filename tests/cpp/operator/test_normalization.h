@@ -126,7 +126,8 @@ void compute_ref_output(NormType norm_type,
 
 
 template <typename InputType, typename OutputType>
-void compute_ref_backward(const NormType norm_type, const OutputType *output_grad, const InputType *data,
+void compute_ref_backward(const NormType norm_type, const OutputType *output_grad,
+                          const OutputType *add, const InputType *data,
                           const float *mu, const float *rsigma,
                           const InputType *gamma,
                           InputType *data_grad,
@@ -165,7 +166,8 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
       compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn, cudnn_zero_centered_gamma_in_weight_dtype);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
-      const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
+      const compute_t a = static_cast<compute_t>(add[i * H + j]);
+      const compute_t dx = a + rsigma[i] * (dy - mdyy * y - mdy);
       data_grad[i * H + j] = static_cast<InputType>(dx);
     }
   }
