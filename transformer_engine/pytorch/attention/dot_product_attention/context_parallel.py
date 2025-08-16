@@ -842,8 +842,6 @@ def cp_p2p_bwd_fused_attn(
         ]
     else:
         aux_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
-    if attn_dbias is not None:
-        aux_tensors += [attn_biases[cp_size - i - 1]]
 
     max_seqlen_q_ = max_seqlen_q
     max_seqlen_kv_ = max_seqlen_kv
@@ -871,6 +869,9 @@ def cp_p2p_bwd_fused_attn(
         max_seqlen_q_ = max_seqlen_q // 2
         cu_seqlens_q_padded_ = None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
+
+    if attn_dbias is not None:
+        aux_tensors += [attn_biases[cp_size - i - 1]]
 
     fp8_meta_kwargs = {}
     if fp8:
