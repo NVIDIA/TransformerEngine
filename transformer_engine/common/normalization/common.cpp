@@ -138,8 +138,8 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
           reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
-      cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
-                      _launch_params.stream);
+      NVTE_CHECK_CUDA(cudaMemsetAsync(_launch_params.params.barrier, 0,
+                                      _launch_params.barrier_bytes, _launch_params.stream));
     }
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
       _launch_params.params.dgamma_part =
