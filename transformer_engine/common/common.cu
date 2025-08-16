@@ -198,6 +198,64 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
 
+// TMA descriptor with swizzle
+void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
+                          CUtensorMapSwizzle swizzle, const uint64_t globalY,
+                          const uint64_t globalX, const uint32_t shmemY, const uint32_t shmemX,
+                          const uint32_t stride_elems, const uint32_t offset_elems,
+                          const size_t type_num_bits) {
+  static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
+    void *driver_ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
+    return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(driver_ptr);
+  }();
+
+  constexpr uint32_t rank = 2;
+  uint64_t size[rank] = {globalX, globalY};
+
+  uint64_t stride[rank - 1] = {(stride_elems * type_num_bits) / 8};
+  NVTE_CHECK(stride[0] % 16u == 0, "Stride must be 16B aligned");
+
+  uint32_t boxSize[rank] = {shmemX, shmemY};
+  NVTE_CHECK(boxSize[0] <= 256u, "Box size must be less than 256");
+  NVTE_CHECK(boxSize[1] <= 256u, "Box size must be less than 256");
+
+  uint32_t elemStride[rank] = {1, 1};
+
+  const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
+  void *dataPtr = reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) +
+                                           (offset_elems * type_num_bits) / 8);
+
+  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_GMEM_ALIGNMENT),
+             "Tensor data pointer must be 16B aligned");
+  const int32_t TMA_needed_size = (TMA_GMEM_ALIGNMENT * 8) / type_num_bits;
+  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_num_bits,
+             "-bit data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
+
+  int32_t swizzle_size = [&]() {
+    switch (swizzle) {
+      case CU_TENSOR_MAP_SWIZZLE_32B:
+        return 32;
+      case CU_TENSOR_MAP_SWIZZLE_64B:
+        return 64;
+      case CU_TENSOR_MAP_SWIZZLE_128B:
+        return 128;
+      case CU_TENSOR_MAP_SWIZZLE_NONE:
+      default:
+        return 0;
+    }
+  }();
+  if (swizzle != CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE) {
+    NVTE_CHECK(boxSize[0] * (type_num_bits / 8) <= swizzle_size, "boxSize[0]:", boxSize[0],
+               " must be less than swizzle size:", swizzle_size);
+  }
+
+  NVTE_CHECK_CUDA_DRIVER(
+      cuDriverTensorMapEncodeTiled(&tensorMap, tensorDataType, rank, dataPtr, size, stride, boxSize,
+                                   elemStride, CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   swizzle, CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                   CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
+
 bool is_supported_by_CC_100() {
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
 
