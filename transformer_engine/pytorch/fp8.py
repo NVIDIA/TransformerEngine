@@ -64,14 +64,26 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     return False, "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
 
 
+def check_recipe_support(recipe: Recipe) -> None:
+    """Check if the given recipe is supported."""
+    recipe_supported = True
+    unsupported_reason = ""
+    if isinstance(recipe, (DelayedScaling, Float8CurrentScaling)):
+        recipe_supported, unsupported_reason = check_fp8_support()
+    elif isinstance(recipe, Float8BlockScaling):
+        recipe_supported, unsupported_reason = check_fp8_block_scaling_support()
+    elif isinstance(recipe, MXFP8BlockScaling):
+        recipe_supported, unsupported_reason = check_mxfp8_support()
+    assert recipe_supported, unsupported_reason
+
+
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     if check_mxfp8_support()[0]:
-        # This is a temporary restriction until MXFP8 is supported for all
-        # gemm layouts.
-        if get_device_compute_capability() >= (12, 0):
-            return Float8BlockScaling()
         return MXFP8BlockScaling()
+    if get_device_compute_capability() >= (12, 0):
+        # This is a temporary restriction until MXFP8 is supported for all gemm layouts.
+        return Float8CurrentScaling()
     return DelayedScaling()
 
 
@@ -648,6 +660,8 @@ def fp8_autocast(
                distributed group over which amaxes for the fp8 tensors
                are reduced at the end of each training step.
     """
+    if enabled:
+        check_recipe_support(fp8_recipe)
     fp8_state = FP8GlobalStateManager.get_fp8_autocast_state()
     FP8GlobalStateManager.fp8_autocast_enter(
         enabled=enabled,
