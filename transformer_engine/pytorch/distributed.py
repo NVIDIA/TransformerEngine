@@ -1139,6 +1139,10 @@ def _all_gather_fp8_blockwise(
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
         inp = quantizer(inp.dequantize())
+
+    # Construct Float8BlockwiseQTensor output tensor
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
     quantizer.all_gather_usage = orig_all_gather_usage
 
     # Begin to do network communication, need to make sure compact format
@@ -1147,9 +1151,6 @@ def _all_gather_fp8_blockwise(
             "All-gather with FP8 block-wise quantized tensor requires compact data format, "
             f"but found data_format={inp._data_format}"
         )
-
-    # Construct Float8BlockwiseQTensor output tensor
-    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
     # Coalesce NCCL collectives
     with torch.distributed._coalescing_manager(
@@ -1226,14 +1227,12 @@ def _all_gather_mxfp8(
         if inp._rowwise_data is not None:
             in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
-            dtype = inp._rowwise_data.dtype
         elif inp._columnwise_data is not None:
             in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
-            dtype = inp._columnwise_data.dtype
         else:
             raise ValueError("Got MXFP8 input tensor without any data")
-        dtype = torch.bfloat16
+        dtype = torch.bfloat16  # Guess high-precision dtype.
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorBase, "

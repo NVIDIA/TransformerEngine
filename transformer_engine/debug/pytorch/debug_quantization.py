@@ -156,7 +156,6 @@ class DebugQuantizer(Quantizer):
                 gemm=self.columnwise_gemm_name,
             )
         )
-
         return (
             inspect_tensor_enabled,
             inspect_tensor_postquantize_enabled_rowwise,
@@ -259,12 +258,19 @@ class DebugQuantizer(Quantizer):
             "tensor_name": self.tensor_name,
             "iteration": TEDebugState.get_iteration(),
             "tp_group": self.tp_group,
+            "columnwise_quantized_tensor": columnwise_gemm_tensor,
+            "rowwise_quantized_tensor": rowwise_gemm_tensor,
+            "quantizer": self.parent_quantizer,
         }
         if tensor is not None and self.inspect_tensor_enabled:
             debug_api.transformer_engine.inspect_tensor(**args)
 
         if self.output_tensor:
             return
+
+        del args["columnwise_quantized_tensor"]
+        del args["rowwise_quantized_tensor"]
+        del args["quantizer"]
 
         if (
             self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
@@ -273,6 +279,7 @@ class DebugQuantizer(Quantizer):
             args["tensor"] = rowwise_gemm_tensor
             args["rowwise"] = True
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
+
         if (
             self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
             and self.inspect_tensor_postquantize_enabled_columnwise
@@ -398,6 +405,7 @@ class DebugQuantizer(Quantizer):
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
+        # pylint: disable=too-many-boolean-expressions
         if (
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled_rowwise
