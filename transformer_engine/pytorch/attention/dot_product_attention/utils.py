@@ -1817,16 +1817,16 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
         dP_quantizer.set_usage(rowwise=True, columnwise=False)
         dP_quantizer.interal = True
-        # These values can be set to validate DS vs CS
-        S_quantizer.scale.fill_(448.0)
-        O_quantizer.scale.fill_(1.0)
-        dP_quantizer.scale.fill_(1.0)
-        dQKV_quantizer.scale.fill_(1.0)
+
+        # these values can be set to validate between DS and CS
+        # S_quantizer.scale.fill_(448.0)
+        # O_quantizer.scale.fill_(1.0)
+        # dP_quantizer.scale.fill_(1.0)
+        # dQKV_quantizer.scale.fill_(1.0)
+
     if fp8_meta["recipe"].float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
-        # O_quantizer.scale.fill_(1.0)
-        # dQKV_quantizer.scale.fill_(1.0)
         dP_quantizer = quantizers["scaling_bwd"][META_DP]
 
         # two options:
@@ -1834,9 +1834,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         #    dP.scale_inv gets updated as 1.0/dP.scale in Float8Quantizer.create_tensor();
         #    mixed amax reduction/scale update is required: dP in DS stype and other tensors in CS;
         dP_quantizer = Float8Quantizer(dP_quantizer.scale, dP_quantizer.amax, dP_quantizer.dtype)
-        # dP_quantizer.scale.fill_(448/0.1361) #1.0)
-        # dP_quantizer.amax.fill_(0.1361) #0.0)
-        dP_quantizer.scale.fill_(1.0)
+        dP_quantizer.scale.fill_(float(os.getenv("NVTE_CS_dP_SCALE", 1.0)))
         dP_quantizer.amax.fill_(0.0)
 
         # 2) stay with Float8CurrentScalingQuantizer;

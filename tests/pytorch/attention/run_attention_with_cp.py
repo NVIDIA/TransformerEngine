@@ -303,9 +303,6 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         if scaling_mode == "delayed":
             core_attn.reset_fp8_meta_tensors()
-        # core_attn.fp8_meta_tensors_initialized = False
-        # core_attn.init_fp8_meta_tensors()
-        # FP8GlobalStateManager.reset()
         else:
             core_attn.fp8_meta_tensors_initialized = False
             core_attn.init_fp8_meta_tensors(fp8_recipe)

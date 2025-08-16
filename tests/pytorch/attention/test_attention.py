@@ -1580,10 +1580,8 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 model_configs_fp8_vs_f16 = {
     #  test:             b,   sq, hq,   d
     "fp8_9": ModelConfig(2, 2048, 16, 128),
-    # "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
-    "fp8_10": ModelConfig(1, 4096, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
-    "fp8_11": ModelConfig(1, 4096, 32, 128, max_seqlen_kv=2048, num_gqa_groups=8),
-    # "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
+    "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
+    "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
     "fp8_12": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal"),
     "fp8_13": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12, attn_mask_type="causal"),
     "fp8_14": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4, attn_mask_type="causal"),
@@ -1605,10 +1603,6 @@ def _rmse(a, b):
 
 
 def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    print(name_a)
-    print(a.view(-1)[:10])
-    print(name_b)
-    print(b.view(-1)[:10])
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:

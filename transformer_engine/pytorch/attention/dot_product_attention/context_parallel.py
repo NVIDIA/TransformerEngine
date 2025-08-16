@@ -704,7 +704,6 @@ def cp_p2p_fwd_flash_attn(
         max_seqlen_q=max_seqlen_q_,
         max_seqlen_kv=max_seqlen_kv_,
     )
-    # Need to add MLA support once Flash Attention supports MLA
     fa_outputs = flash_attn_fwd(
         q_part,
         k_part,
@@ -1357,8 +1356,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             max_seqlen_kv,
                         ]
 
-                    # P2P requires cp_size steps on each GPU to go through all KV
-                    # there are cp_size x cp_size tiles in the P2P Q x KV (GPU x cp step) matrix
+                    # Each GPU has a slice of Q and KV. To compute attention of a Q slice with all KV slices,
+                    # P2P runs cp_size steps on each GPU in a point-to-point fashion. For attn_mask_type = causal,
+                    # distinctive attention patterns exist in these three sections of the cp_size x cp_size
+                    # (i.e. GPU x step) matrix: the diagonal tiles, lower-triangle tiles, and upper-triangle tiles.
+                    # For attn_mask_type != causal, the pattern is the same for all cp_size x cp_size tiles.
                     if causal:
                         if i == 0:
                             section = "diagonal"
@@ -1599,7 +1601,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         elif not use_fused_attention:
             out = out.view(-1, *out.shape[-2:])
 
-        # update FP8 quantizers: amax across cp ranks
+        # update FP8 quantizers: amax across cp_size steps
         if fp8 and use_fused_attention:
             amax_cp_fwd = amax_per_step.amax(dim=1)
             if fp8_meta["recipe"].delayed():
@@ -1797,8 +1799,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         dP_quantizer_per_step = [None for _ in range(cp_size)]
         dQKV_CP_quantizer_per_step = [None for _ in range(cp_size)]
         dq_fp8_, dk_fp8_, dv_fp8_ = [[None for _ in range(cp_size)] for _ in range(3)]
-        buffer_dtype = torch.uint8  # None if ctx.fp8_meta["recipe"].delayed() else torch.float32
-        # buffer_fp8_data_dtype = torch.uint8
+        buffer_dtype = torch.uint8
         dq_buffer = None
         dout_fp8 = None
         if ctx.fp8:
@@ -2038,7 +2039,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     softmax_lse_,
                 ]
 
-            # In reverse order of forward over the cp_size x cp_size tiles of the P2P Q x KV (GPU x cp step) matrix
+            # Reverse the steps in forward on each GPU to calcualte gradients.
+            # In the GPU x CP step (cp_size x cp_size) matrix, three are still three distinct
+            # attention patterns based on their section for causal mask. One for non-causal masks.
             if causal:
                 if i == (cp_size - 1):
                     section = "diagonal"
@@ -2087,7 +2090,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             # dq, dk, dv are reduced across steps in higher precision
             # DelayedScaling: collect all results in uint8 to one tensor, dequantize to float32, reduce
-            # CurrentScaling: dequantize results from each step to float32, reduce float32 values
+            # CurrentScaling: dequantize results from each step to float32, reduce the float32 values
             if ctx.fp8 and ctx.use_fused_attention:
                 if ctx.fp8_meta["recipe"].delayed():
                     dq_, dk_, dv_ = [x._data for x in [dq_, dk_, dv_]]
@@ -2173,9 +2176,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             # dkv correction
             if ctx.fp8 and ctx.fp8_meta["recipe"].delayed():
-                # if i < cp_size - 1:
-                #    dkv = dkv_recv_buffer[(rank + i + 1) % cp_size]
-                # else:
                 dkv = dkv_recv_buffer[(rank + i + 1) % cp_size]
             elif ctx.fp8 and ctx.fp8_meta["recipe"].float8_current_scaling():
                 dkv = dkv_buffer
