@@ -2590,6 +2590,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     if use_cutlass:
         os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
 
+
 @pytest.mark.parametrize(
     "shape",
     [
