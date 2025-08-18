@@ -67,7 +67,7 @@ def setup_common_extension() -> CMakeExtension:
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
-    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "1"))):
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "0"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
         cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution(
             "nvidia-cublasmp-cu12"
