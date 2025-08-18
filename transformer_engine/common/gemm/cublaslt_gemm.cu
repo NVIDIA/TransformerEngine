@@ -771,7 +771,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   // Currently only supports the case when bias is null, in this case the grad flag can be ignored.
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
-                              current_device, math_sm_count, stream);
+                         current_device, math_sm_count, stream);
   } else {
     NVTE_WARN(
         "Falling back to cuBLAS: CUTLASS Grouped GEMM not supported "
