@@ -65,7 +65,6 @@ void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* 
 
   auto A_type = grouped_gemm::get_cuda_dtype(inputA->data.dtype);
   auto B_type = grouped_gemm::get_cuda_dtype(inputB->data.dtype);
-  NVTE_CHECK(A_type == B_type, "A/B dtype mismatch in cutlass_grouped_gemm.");
 
   float one = 1.0;
   float zero = 0.0;

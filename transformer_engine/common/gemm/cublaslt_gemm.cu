@@ -784,8 +784,17 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     return true;
   };
 
+  auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+  auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+  auto A_type = get_cuda_dtype(inputA->data.dtype);
+  auto B_type = get_cuda_dtype(inputB->data.dtype);
+
+  NVTE_CHECK(A_type == B_type, "A/B dtype mismatch in cutlass_grouped_gemm.");
+  bool supported_data_type_flag = (A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F);
+
   // Currently only supports the case when bias is null, in this case the grad flag can be ignored.
-  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator) {
+  if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator &&
+      supported_data_type_flag) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
   } else {
