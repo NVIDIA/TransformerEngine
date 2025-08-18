@@ -2517,7 +2517,8 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm(shape, dtype, layout, accumulate):
+@pytest.mark.parametrize("use_cutlass", [False, True])
+def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     torch.manual_seed(0)
     z, m, k, n = shape
 
@@ -2552,6 +2553,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         grad = True
         single_output = False
 
+    if use_cutlass:
+        os.environ["NVTE_USE_CUTLASS_GROUPGEMM"] = "1"
+
     for i in range(z):
         general_gemm(
             A[i],
@@ -2583,6 +2587,8 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
+    if use_cutlass:
+        os.environ.pop("NVTE_USE_CUTLASS_GROUPGEMM", None)
 
 @pytest.mark.parametrize(
     "shape",
