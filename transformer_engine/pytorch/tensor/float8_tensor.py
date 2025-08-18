@@ -441,19 +441,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             return _FromFloat8Func.apply(self, dtype)
         return _FromFloat8Func.forward(None, self, dtype)
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self._quantizer is not None:
-            return self._quantizer
-        # Now the quantizer for Float8Tensor can be not just Float8Quantizer (delayed scaling)
-        raise ValueError(
-            "Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable"
-        )
-
     def quantize_(
         self,
         tensor: torch.Tensor,
@@ -472,8 +459,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize(), noop_flag=noop_flag)
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def detach(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring

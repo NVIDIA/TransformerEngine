@@ -13,7 +13,6 @@ import warnings
 import torch
 from torch.utils._pytree import tree_map
 
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 
@@ -72,6 +71,26 @@ class QuantizedTensorBase:
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement restore_from_saved function"
         )
+
+    def _get_quantizer(self) -> Quantizer:
+        """Get builder for quantized tensor
+
+        Quantizer can be used for in-place operations.
+
+        """
+        if self._quantizer is not None:
+            return self._quantizer
+        return self._build_default_quantizer()
+
+    def _build_default_quantizer(self) -> Quantizer:
+        """Build default quantizer for the tensor"""
+        raise ValueError(f"{self.__class__.__name__} has no quantizer "
+        "and no default quantizer is available defined in the subclass.")
+
+    def quantize_(self, tensor: torch.Tensor, *, noop_flag: Optional[torch.Tensor] = None) -> QuantizedTensor:
+        """Quantize tensor in-place"""
+        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
+        return self
 
     def update_quantizer(self, quantizer: Quantizer):
         """Update quantizer for the tensor"""
@@ -204,9 +223,11 @@ class Quantizer(abc.ABC):
             return _QuantizeFunc.apply(tensor, self.quantize_impl)
         return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
 
-    @abc.abstractmethod
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement quantize_impl function"
+        )
 
     def multi_quantize(self, list_of_tensors):
         """Quantize multiple tensors"""

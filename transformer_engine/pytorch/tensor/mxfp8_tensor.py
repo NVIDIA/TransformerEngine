@@ -245,17 +245,9 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             return _FromMXFP8Func.apply(self, dtype)
         return _FromMXFP8Func.forward(None, self, dtype)
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        if self._quantizer is not None:
-            return self._quantizer
-        return MXFP8Quantizer(
-            fp8_dtype=self._fp8_dtype,
-        )
+    def _build_default_quantizer(self) -> Optional[Quantizer]:
+        """Build default quantizer for the tensor"""
+        return MXFP8Quantizer(fp8_dtype=self._fp8_dtype)
 
     def quantize_(
         self,
@@ -275,8 +267,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def detach(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring

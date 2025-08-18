@@ -342,15 +342,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             f" data_format={self._data_format}"
         )
 
-    def _get_quantizer(self) -> Quantizer:
-        """Get builder for quantized tensor
-
-        Quantizer can be used for in-place operations.
-
-        """
-        assert self._quantizer is not None
-        return self._quantizer
-
     def quantize_(
         self,
         tensor: torch.Tensor,
@@ -369,8 +360,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         """
         if isinstance(tensor, QuantizedTensor):
             return self.quantize_(tensor.dequantize())
-        self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
-        return self
+        return super().quantize_(tensor, noop_flag=noop_flag)
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """

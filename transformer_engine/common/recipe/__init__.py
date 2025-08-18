@@ -386,6 +386,8 @@ class CustomRecipe(Recipe):
     """
 
     qfactories: CustomQuantizerFactories = field(default_factory=CustomQuantizerFactories)
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
 
     def __repr__(self) -> str:
         return f"recipe_type={self.__class__.__name__}, qfactories={self.qfactories}"

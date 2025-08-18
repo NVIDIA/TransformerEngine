@@ -195,6 +195,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
+            and not FP8GlobalStateManager.get_fp8_recipe().custom()
         )
 
         # Apply normalization
