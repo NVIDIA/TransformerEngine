@@ -1011,7 +1011,10 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 if ctx.fp8:
                     # TODO: For blockwise (as well as custom quantizers), fused bgrad+quantize is unsupported.
-                    if (isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer) or ctx.fp8_recipe.custom()):
+                    if (
+                        isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer)
+                        or ctx.fp8_recipe.custom()
+                    ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                         dact = ctx.fc1_grad_output_quantizer(dact)
                     else:

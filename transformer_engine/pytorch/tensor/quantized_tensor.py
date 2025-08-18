@@ -84,10 +84,14 @@ class QuantizedTensorBase:
 
     def _build_default_quantizer(self) -> Quantizer:
         """Build default quantizer for the tensor"""
-        raise ValueError(f"{self.__class__.__name__} has no quantizer "
-        "and no default quantizer is available defined in the subclass.")
+        raise ValueError(
+            f"{self.__class__.__name__} has no quantizer "
+            "and no default quantizer is available defined in the subclass."
+        )
 
-    def quantize_(self, tensor: torch.Tensor, *, noop_flag: Optional[torch.Tensor] = None) -> QuantizedTensor:
+    def quantize_(
+        self, tensor: torch.Tensor, *, noop_flag: Optional[torch.Tensor] = None
+    ) -> QuantizedTensor:
         """Quantize tensor in-place"""
         self._get_quantizer().update_quantized(tensor, self, noop_flag=noop_flag)
         return self
