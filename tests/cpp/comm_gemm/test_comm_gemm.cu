@@ -223,10 +223,6 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                  dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      if (rand() % 100 < 3) {
-        // std::cerr << "== at " << rank_ << ": " << i << ": " << static_cast<float>(out[i]) << " "
-        //           << static_cast<float>(out_golden[i]) << std::endl;
-      }
       EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol * k);
     }
   }
