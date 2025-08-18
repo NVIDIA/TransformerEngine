@@ -1,3 +1,9 @@
+/***************************************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ **************************************************************************************************/
+
 //
 // Copyright (c) 2025 Shopee Inc. All Rights Reserved.
 //
@@ -320,7 +326,6 @@ void CutlassGroupedGemm(bool transa, bool transb, const NVTETensor* A, const NVT
 
 }  // namespace grouped_gemm
 
-void nvte_cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
-                               int num_gemms, bool transa, bool transb, bool grad,
-                               NVTETensor* workspace, bool accumulate, int device,
-                               int math_sm_count, cudaStream_t stream);
+void cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D, int num_gemms,
+                          bool transa, bool transb, bool grad, NVTETensor* workspace,
+                          bool accumulate, int device, int math_sm_count, cudaStream_t stream);

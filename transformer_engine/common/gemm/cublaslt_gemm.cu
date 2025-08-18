@@ -677,20 +677,12 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
               inputCounter, stream);
 }
 
-void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
-                                   const int num_gemms, bool transa, bool transb, bool grad,
-                                   NVTETensor *workspace, bool accumulate,
-                                   bool use_split_accumulator, int math_sm_count,
-                                   cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
+void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                              const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
+                              bool transa, bool transb, bool grad, NVTETensor *workspace,
+                              bool accumulate, bool use_split_accumulator, int math_sm_count,
+                              cudaStream_t stream) {
   using namespace transformer_engine;
-
-  // Deprecation warning
-  NVTE_WARN(
-      "nvte_multi_stream_cublas_gemm is deprecated and will be removed in a future release. "
-      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support where "
-      "applicable).");
 
   int num_streams = nvte_get_num_compute_streams();
 
@@ -719,6 +711,25 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
   }
 }
 
+void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+                                   const NVTETensor *bias, NVTETensor *pre_gelu_out,
+                                   const int num_gemms, bool transa, bool transb, bool grad,
+                                   NVTETensor *workspace, bool accumulate,
+                                   bool use_split_accumulator, int math_sm_count,
+                                   cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_stream_cublas_gemm);
+  using namespace transformer_engine;
+
+  // Deprecation warning
+  NVTE_WARN(
+      "nvte_multi_stream_cublas_gemm is deprecated and will be removed in a future release. "
+      "Please migrate to nvte_multi_tensor_gemm (with CUTLASS Grouped GEMM support where "
+      "applicable).");
+
+  multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad, workspace,
+                           accumulate, use_split_accumulator, math_sm_count, stream);
+}
+
 namespace transformer_engine {
 
 using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
@@ -739,9 +750,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPGEMM", false);
 
   auto cublas_path = [&]() {
-    nvte_multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
-                                  workspace, accumulate, use_split_accumulator, math_sm_count,
-                                  stream);
+    multi_stream_cublas_gemm(A, B, D, bias, pre_gelu_out, num_gemms, transa, transb, grad,
+                             workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
   // Currently only support cutlass group gemm on Hopper Arch
@@ -758,9 +768,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     return true;
   };
 
-  // Currently only supports the case when bias is not null, in this case the grad flag can be ignored.
+  // Currently only supports the case when bias is null, in this case the grad flag can be ignored.
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && !use_split_accumulator) {
-    nvte_cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+    cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                               current_device, math_sm_count, stream);
   } else {
     NVTE_WARN(
