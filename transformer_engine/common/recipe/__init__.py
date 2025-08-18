@@ -379,6 +379,10 @@ class CustomRecipe(Recipe):
     """
     Custom recipe that allows users to provide quantizer factories.
 
+    .. warning::
+        **EXPERIMENTAL**: Custom recipe is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
     Parameters
     ----------
     qfactories : CustomQuantizerFactories

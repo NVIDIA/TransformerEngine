@@ -434,10 +434,18 @@ class _LayerNormMLP(torch.autograd.Function):
             act_out = fc2_input_quantizer(act_out)
         else:
             fc1_out, *_ = fc1_outputs
-            if fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_block_scaling():
-                # tex.quantize does not support GELU fusion for blockwise.
-                act_out = activation_func(fc1_out, None)
-                act_out = tex.quantize(act_out, fc2_input_quantizer)
+            if fp8:
+                recipe = FP8GlobalStateManager.get_fp8_recipe()
+                if recipe.float8_block_scaling():
+                    # tex.quantize does not support GELU fusion for blockwise
+                    act_out = activation_func(fc1_out, None)
+                    act_out = tex.quantize(act_out, fc2_input_quantizer)
+                elif recipe.custom():
+                    # tex.quantize does not support custom quantizers
+                    act_out = activation_func(fc1_out, None)
+                    act_out = fc2_input_quantizer(act_out)
+                else:
+                    act_out = activation_func(fc1_out, fc2_input_quantizer)
             else:
                 act_out = activation_func(fc1_out, fc2_input_quantizer)
 
@@ -1002,8 +1010,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     )  # activation in high precision
 
                 if ctx.fp8:
-                    # TODO float8 blockwise current scaling has no bgrad fusion for now
-                    if isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer):
+                    # TODO: For blockwise (as well as custom quantizers), fused bgrad+quantize is unsupported.
+                    if (isinstance(ctx.fc1_grad_output_quantizer, Float8BlockQuantizer) or ctx.fp8_recipe.custom()):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                         dact = ctx.fc1_grad_output_quantizer(dact)
                     else:
