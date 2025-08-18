@@ -23,15 +23,33 @@ cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
 }
 
 // 显式实例化，配合 .cuh 中的 extern template
-template void CutlassGroupedGemm<false,false, cutlass::half_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
-template void CutlassGroupedGemm<true ,false, cutlass::half_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
-template void CutlassGroupedGemm<false,true , cutlass::half_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
+template void CutlassGroupedGemm<false, false, cutlass::half_t>(bool, bool, const NVTETensor*,
+                                                                const NVTETensor*, NVTETensor*,
+                                                                NVTETensor*, float, float, int,
+                                                                cudaStream_t, int, int);
+template void CutlassGroupedGemm<true, false, cutlass::half_t>(bool, bool, const NVTETensor*,
+                                                               const NVTETensor*, NVTETensor*,
+                                                               NVTETensor*, float, float, int,
+                                                               cudaStream_t, int, int);
+template void CutlassGroupedGemm<false, true, cutlass::half_t>(bool, bool, const NVTETensor*,
+                                                               const NVTETensor*, NVTETensor*,
+                                                               NVTETensor*, float, float, int,
+                                                               cudaStream_t, int, int);
 
-template void CutlassGroupedGemm<false,false, cutlass::bfloat16_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
-template void CutlassGroupedGemm<true ,false, cutlass::bfloat16_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
-template void CutlassGroupedGemm<false,true , cutlass::bfloat16_t>(bool,bool,const NVTETensor*,const NVTETensor*,NVTETensor*,NVTETensor*,float,float,int,cudaStream_t,int,int);
+template void CutlassGroupedGemm<false, false, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+                                                                    const NVTETensor*, NVTETensor*,
+                                                                    NVTETensor*, float, float, int,
+                                                                    cudaStream_t, int, int);
+template void CutlassGroupedGemm<true, false, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+                                                                   const NVTETensor*, NVTETensor*,
+                                                                   NVTETensor*, float, float, int,
+                                                                   cudaStream_t, int, int);
+template void CutlassGroupedGemm<false, true, cutlass::bfloat16_t>(bool, bool, const NVTETensor*,
+                                                                   const NVTETensor*, NVTETensor*,
+                                                                   NVTETensor*, float, float, int,
+                                                                   cudaStream_t, int, int);
 
-} // namespace grouped_gemm
+}  // namespace grouped_gemm
 
 void nvte_cutlass_grouped_gemm(const NVTETensor* A, const NVTETensor* B, NVTETensor* D,
                                int num_gemms, bool transa, bool transb, bool grad,

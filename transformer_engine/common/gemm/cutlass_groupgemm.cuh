@@ -14,6 +14,9 @@
 #include <cub/cub.cuh>
 #include <type_traits>
 
+#include "../common.h"
+#include "../util/logging.h"
+#include "common/util/system.h"
 #include "cute/tensor.hpp"
 #include "cutlass/bfloat16.h"
 #include "cutlass/complex.h"
@@ -28,10 +31,6 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/util/device_memory.h"
 #include "cutlass/util/packed_stride.hpp"
-
-#include "../common.h"
-#include "../util/logging.h"
-#include "common/util/system.h"
 
 namespace grouped_gemm {
 
