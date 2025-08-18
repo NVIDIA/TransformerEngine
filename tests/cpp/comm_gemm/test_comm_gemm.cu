@@ -231,7 +231,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     }
   }
 
-  CommGemmCtx* ctx_{};
+  NVTECommGemmCtx* ctx_{};
   int nranks_{};
   int rank_{};
   ncclComm_t comm_{};

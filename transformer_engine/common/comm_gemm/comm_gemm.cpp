@@ -99,7 +99,7 @@ CublasMpMatmulDesc CublasMpMatmulDescCreate(cublasComputeType_t compute_type) {
 
 }  // namespace
 
-struct CommGemmCtx {
+struct NVTECommGemmCtx {
   int64_t nranks;
   int64_t rank;
   ncclComm_t comm;
@@ -118,12 +118,12 @@ struct CommGemmCtx {
 
 namespace {
 
-int64_t block_size(CommGemmCtx* ctx, int64_t global_size) {
+int64_t block_size(NVTECommGemmCtx* ctx, int64_t global_size) {
   // Use non-cyclic layout to maximize opportunity for comm overlap.
   return (global_size + ctx->nranks - 1) / ctx->nranks;
 }
 
-void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
+void AgGemmInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
   const auto a0 = a->flat_first_dim();
@@ -162,7 +162,7 @@ void AgGemmInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, in
                                                    ctx->grid_col_major.get(), ctx->d_desc.get()));
 }
 
-void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
+void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
   const auto a0 = a->flat_first_dim();
@@ -201,7 +201,7 @@ void GemmRsInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, in
                                                    ctx->grid_row_major.get(), ctx->d_desc.get()));
 }
 
-void GemmArInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
+void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
                         const Tensor* a, const Tensor* b, const Tensor* d, bool transa,
                         bool transb) {
   const auto a0 = a->flat_first_dim();
@@ -239,10 +239,10 @@ void GemmArInitMatrices(CommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, in
       sizeof epilogue));
 }
 
-using InitMatricesFn = void (*)(CommGemmCtx*, int64_t*, int64_t, int64_t, int64_t, const Tensor*,
+using InitMatricesFn = void (*)(NVTECommGemmCtx*, int64_t*, int64_t, int64_t, int64_t, const Tensor*,
                                 const Tensor*, const Tensor*, bool, bool);
 
-void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo,
+void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, cublasMpMatmulAlgoType_t algo,
                    int64_t m, int64_t n, int64_t k, const Tensor* a, const Tensor* b,
                    const Tensor* d, const Tensor* bias, const Tensor* pre_act_out, bool transa,
                    bool transb, bool grad, bool accumulate, int comm_sm_count,
@@ -422,7 +422,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, CommGemmCtx* ctx, cublasMpMa
 
 }  // namespace
 
-CommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, int local_device) {
+NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, int local_device) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_create);
   auto stream = CudaStreamCreate();
   auto event = CudaEventCreate(cudaEventDisableTiming);
@@ -438,7 +438,7 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, in
 
   auto matmul_desc = CublasMpMatmulDescCreate(CUBLAS_COMPUTE_32F);
 
-  return new CommGemmCtx{
+  return new NVTECommGemmCtx{
       .nranks = nranks,
       .rank = rank,
       .comm = comm,
@@ -454,13 +454,13 @@ CommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank, in
   };
 }
 
-void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) {
+void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
   NVTE_API_CALL(nvte_comm_gemm_ctx_destroy);
   nvshmemx_sync_all_on_stream(ctx->stream.get());
   delete ctx;
 }
 
-void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
@@ -472,7 +472,7 @@ void nvte_all_gather_gemm(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                 comm_sm_count, main_stream);
 }
 
-void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                               const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                               const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                               bool accumulate, int comm_sm_count, cudaStream_t main_stream,
@@ -484,7 +484,7 @@ void nvte_gemm_reduce_scatter(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
                 comm_sm_count, main_stream);
 }
 
-void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
                           const NVTETensor b, const NVTETensor d, const NVTETensor bias,
                           const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
                           bool accumulate, int comm_sm_count, cudaStream_t main_stream,
@@ -496,7 +496,7 @@ void nvte_gemm_all_reduce(CommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, con
                 comm_sm_count, main_stream);
 }
 
-int64_t nvte_comm_gemm_numroc(CommGemmCtx* ctx, int64_t global_size) {
+int64_t nvte_comm_gemm_numroc(NVTECommGemmCtx* ctx, int64_t global_size) {
   NVTE_API_CALL(nvte_comm_gemm_numroc);
   return cublasMpNumroc(global_size, block_size(ctx, global_size), ctx->rank, 0, ctx->nranks);
 }
