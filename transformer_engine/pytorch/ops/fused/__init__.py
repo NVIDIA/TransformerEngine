@@ -12,6 +12,10 @@ from .backward_linear_add import (
     BackwardLinearAdd,
     fuse_backward_linear_add,
 )
+from .backward_linear_scale import (
+    BackwardLinearScale,
+    fuse_backward_linear_scale,
+)
 from .forward_linear_bias_activation import (
     ForwardLinearBiasActivation,
     fuse_forward_linear_bias_activation,
@@ -19,6 +23,10 @@ from .forward_linear_bias_activation import (
 from .forward_linear_bias_add import (
     ForwardLinearBiasAdd,
     fuse_forward_linear_bias_add,
+)
+from .forward_linear_scale_add import (
+    ForwardLinearScaleAdd,
+    fuse_forward_linear_scale_add,
 )
 from .userbuffers_backward_linear import (
     UserbuffersBackwardLinear,

@@ -337,21 +337,28 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
     Base class of transformer engine
     """
 
-    def generate_quantizer_set(self, postfix: str = ""):
+    def generate_quantizer_set(
+        self, postfix: str = "", variable_collection: str = None, fp8_recipe=None
+    ):
         """
         Generate a set of FP8 meta for a GEMM.
         """
 
         def generate_quantize_meta(quantizer_name: str):
+            collection_name = (
+                variable_collection
+                if variable_collection is not None
+                else QuantizeConfig.COLLECTION_NAME
+            )
             scale = self.variable(
-                QuantizeConfig.COLLECTION_NAME,
+                collection_name,
                 f"{quantizer_name}{postfix}_scale",
                 jnp.ones,
                 (1,),
                 jnp.float32,
             ).value
             amax_history = self.variable(
-                QuantizeConfig.COLLECTION_NAME,
+                collection_name,
                 f"{quantizer_name}{postfix}_amax_history",
                 jnp.zeros,
                 (QuantizeConfig.AMAX_HISTORY_LEN,),
@@ -368,7 +375,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         else:
             kwargs = {}
 
-        quantizer_set = QuantizerFactory.create_set(**kwargs)
+        quantizer_set = QuantizerFactory.create_set(fp8_recipe=fp8_recipe, **kwargs)
         return quantizer_set
 
 

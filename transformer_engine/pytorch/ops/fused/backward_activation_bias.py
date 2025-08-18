@@ -104,7 +104,7 @@ def fuse_backward_activation_bias(
     """
 
     # Check if recipe supports bias activation fusion
-    if recipe is None or not (recipe.delayed() or recipe.mxfp8()):
+    if recipe is None:
         return ops
 
     # Scan through ops, fusing if possible
