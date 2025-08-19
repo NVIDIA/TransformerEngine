@@ -9,11 +9,12 @@ from functools import partial
 from collections import OrderedDict
 
 import torch
+from torch.cuda.amp import autocast
+
 import transformer_engine as te
 from transformer_engine.pytorch.attention import InferenceParams, RotaryPositionEmbedding
 from transformer_engine.common.recipe import Format, DelayedScaling
-from torch.cuda.amp import autocast
-
+from transformer_engine.pytorch.fp8 import get_default_fp8_recipe
 import transformers
 from transformers.models.gemma.modeling_gemma import GemmaForCausalLM, GemmaConfig, GemmaModel
 
@@ -208,9 +209,7 @@ class TEGemmaForCausalLM(GemmaForCausalLM):
         self._model_context_phase = StaticGemmaModel(self.model, dtype, self.lm_head)
 
         if self.config.fp8:
-            self.fp8_recipe = DelayedScaling(
-                fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
-            )
+            self.fp8_recipe = get_default_fp8_recipe()
 
         # Rotary position embedding remains the same for all the layers and so
         # created here. This makes it compatible with CUDA Graphs too.
@@ -523,11 +522,9 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
     @torch.no_grad()
     def record_graph(self, function, input_tensor, **sample_kwargs):
         # function is invoked on argument (self.hidden_states,) and all kernels are recorded.
-        # record_graph() returns captured function, which can be run later with lower of th CPU.
+        # record_graph() returns captured function, which can be run later with lower of the CPU.
         fp8_format = Format.HYBRID
-        fp8_recipe = DelayedScaling(
-            fp8_format=fp8_format, amax_history_len=1024, amax_compute_algo="max"
-        )
+        fp8_recipe = get_default_fp8_recipe()
 
         # We need both autocasts: FP8 for operations that can run in lower precision
         # and BF16 for those that cannot.
