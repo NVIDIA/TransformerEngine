@@ -20,6 +20,7 @@ from .quantize import (
     ScaledTensor,
     Quantizer,
 )
+from .sharding import global_mesh_resource, global_shard_guard
 
 
 def canonicalize_norm_type(x):
@@ -63,12 +64,17 @@ def layernorm(
     Returns:
         Normalized output tensor
     """
-    output = _layernorm(x, gamma, beta, norm_type, zero_centered_gamma, epsilon, quantizer)
+    mesh_resource = global_mesh_resource()
+    output = _layernorm(
+        x, gamma, beta, norm_type, zero_centered_gamma, epsilon, quantizer, mesh_resource
+    )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
-def _layernorm(x, gamma, beta, norm_type: str, zero_centered_gamma, epsilon, quantizer):
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 7))
+def _layernorm(
+    x, gamma, beta, norm_type: str, zero_centered_gamma, epsilon, quantizer, mesh_resource
+):
     """Internal implementation of layer normalization with custom VJP.
 
     This function implements the core layer normalization logic with support
@@ -82,17 +88,20 @@ def _layernorm(x, gamma, beta, norm_type: str, zero_centered_gamma, epsilon, qua
         zero_centered_gamma: Whether to use zero-centered gamma
         epsilon: Small constant for numerical stability
         quantizer: Optional quantizer
+        mesh_resource: Mesh resource for sharding
 
     Returns:
         Normalized tensor
     """
     output, _ = _layernorm_fwd_rule(
-        x, gamma, beta, norm_type, zero_centered_gamma, epsilon, quantizer
+        x, gamma, beta, norm_type, zero_centered_gamma, epsilon, quantizer, mesh_resource
     )
     return output
 
 
-def _layernorm_fwd_rule(x, gamma, beta, norm_type: str, zero_centered_gamma, epsilon, quantizer):
+def _layernorm_fwd_rule(
+    x, gamma, beta, norm_type: str, zero_centered_gamma, epsilon, quantizer, mesh_resource
+):
     """Forward pass rule for layer normalization.
 
     Args:
@@ -103,22 +112,24 @@ def _layernorm_fwd_rule(x, gamma, beta, norm_type: str, zero_centered_gamma, eps
         zero_centered_gamma: Whether to use zero-centered gamma
         epsilon: Small constant for numerical stability
         quantizer: Optional quantizer
+        mesh_resource: Mesh resource for sharding
 
     Returns:
         Tuple of (output, context) for backward pass
     """
 
-    norm_type = canonicalize_norm_type(norm_type)
-    output, mu, rsigma = tex.normalization_fwd(
-        x, gamma, beta, zero_centered_gamma, epsilon, norm_type, quantizer
-    )
-    if isinstance(output, ScaledTensor):
-        output = output.dequantize()
+    with global_shard_guard(mesh_resource):
+        norm_type = canonicalize_norm_type(norm_type)
+        output, mu, rsigma = tex.normalization_fwd(
+            x, gamma, beta, zero_centered_gamma, epsilon, norm_type, quantizer
+        )
+        if isinstance(output, ScaledTensor):
+            output = output.dequantize()
 
-    return output, (x, mu, rsigma, gamma, beta, quantizer)
+        return output, (x, mu, rsigma, gamma, beta, quantizer)
 
 
-def _layernorm_bwd_rule(norm_type, zero_centered_gamma, epsilon, ctx, dz):
+def _layernorm_bwd_rule(norm_type, zero_centered_gamma, epsilon, mesh_resource, ctx, dz):
     """Backward pass rule for layer normalization.
 
     Args:
@@ -131,11 +142,11 @@ def _layernorm_bwd_rule(norm_type, zero_centered_gamma, epsilon, ctx, dz):
     Returns:
         Tuple of gradients with respect to inputs
     """
-    x, mu, rsigma, gamma, beta, quantizer = ctx
-
-    dx, dgamma, dbeta = tex.normalization_bwd(
-        dz, x, mu, rsigma, gamma, beta, zero_centered_gamma, epsilon, norm_type
-    )
+    with global_shard_guard(mesh_resource):
+        x, mu, rsigma, gamma, beta, quantizer = ctx
+        dx, dgamma, dbeta = tex.normalization_bwd(
+            dz, x, mu, rsigma, gamma, beta, zero_centered_gamma, epsilon, norm_type
+        )
     return dx, dgamma, dbeta, quantizer
 
 

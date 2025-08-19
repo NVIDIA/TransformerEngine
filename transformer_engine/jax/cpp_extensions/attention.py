@@ -716,7 +716,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
     name = "te_fused_attn_backward_ffi"
     multiple_results = True
-    impl_static_args = (16,)
+    impl_static_args = (16, 17)
     inner_primitive = None
     outer_primitive = None
 
@@ -740,6 +740,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         _kv_segment_pos,
         *,
         config,
+        mesh_resource,
     ):
         """
         Fused attention bwd abstract
@@ -835,6 +836,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         kv_segment_pos,
         *,
         config,
+        mesh_resource,
     ):
         """
         Fused attention bwd lowering rules
@@ -924,6 +926,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         _q_segment_pos,
         _kv_segment_pos,
         config,
+        mesh_resource,
     ):
         assert FusedAttnBwdPrimitive.inner_primitive is not None
 
@@ -1017,23 +1020,26 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             _q_segment_pos,
             _kv_segment_pos,
             config=config,
+            mesh_resource=mesh_resource,
         )
         return dq, dk, dv, dbias
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, config):
+    def batcher(batched_args, batch_dims, *, config, mesh_resource):
         check_valid_batch_dims(batch_dims)
         assert FusedAttnBwdPrimitive.outer_primitive is not None
         q_bdim, k_bdim, v_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, k_bdim, v_bdim, q_bdim
         return (
-            FusedAttnBwdPrimitive.outer_primitive.bind(*batched_args, config=config),
+            FusedAttnBwdPrimitive.outer_primitive.bind(
+                *batched_args, config=config, mesh_resource=mesh_resource
+            ),
             out_bdims,
         )
 
     @staticmethod
-    def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
+    def infer_sharding_from_operands(config, mesh_resource, mesh, arg_infos, result_infos):
         del config, result_infos
         q_spec = get_padded_spec(arg_infos[0])
         k_spec = get_padded_spec(arg_infos[1])
@@ -1046,7 +1052,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         return (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
 
     @staticmethod
-    def partition(config, mesh, arg_infos, result_infos):
+    def partition(config, mesh, mesh_resource, arg_infos, result_infos):
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
         k_spec = get_padded_spec(arg_infos[1])
@@ -1098,16 +1104,17 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                 _q_segment_pos,
                 _kv_segment_pos,
                 config=config,
+                mesh_resource=mesh_resource,
             )
             global_dbias = local_dbias
             if config.attn_bias_type is not AttnBiasType.NO_BIAS:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh, mesh_resource)
             return local_dq, local_dk, local_dv, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
     @staticmethod
-    def shardy_sharding_rule(config, mesh, value_types, result_types):
+    def shardy_sharding_rule(config, mesh_resource, mesh, value_types, result_types):
         del config, mesh
         # We only care about the four first arguments.
         # Keep in sync with `infer_sharding_from_operands`.
@@ -1480,7 +1487,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
     """
 
     @staticmethod
-    def partition(config, mesh, arg_infos, result_infos):
+    def partition(config, mesh_resource, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         assert (
@@ -1586,6 +1593,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                         _q_segment_pos,
                         _kv_segment_pos,
                         config=helper.get_step_config(),
+                        mesh_resource=mesh_resource,
                     )
 
                     # pad dk/dv to be unsliced shape so we can reduce scatter over all ranks.
@@ -1980,7 +1988,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
     """
 
     @staticmethod
-    def partition(config, mesh, arg_infos, result_infos):
+    def partition(config, mesh_resource, mesh, arg_infos, result_infos):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         assert (
             not is_context_parallel or config.window_size[0] == -1
@@ -2069,6 +2077,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         _q_segment_pos,
                         _kv_segment_pos,
                         config=helper.get_step_config(attn_mask_type),
+                        mesh_resource=mesh_resource,
                     )
                     return dq_per_step, dk_dv_per_step, dbias_per_step
 
@@ -2097,6 +2106,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         _q_segment_pos,
                         _kv_segment_pos,
                         config=helper.get_step_config(AttnMaskType.NO_MASK),
+                        mesh_resource=mesh_resource,
                     )
                     dk_dv_per_step = jnp.concat(
                         [dk_dv_per_step, jnp.zeros_like(dk_dv_per_step)], axis=1
@@ -2135,6 +2145,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
                         _q_segment_pos,
                         _kv_segment_pos,
                         config=helper.get_step_config(AttnMaskType.NO_MASK),
+                        mesh_resource=mesh_resource,
                     )
                     dq_per_step = jnp.concat([jnp.zeros_like(dq_per_step), dq_per_step], axis=1)
                     return dq_per_step, dk_dv_per_step, dbias_per_step
@@ -2178,7 +2189,7 @@ class FusedRingAttnBwdPrimitive(FusedAttnBwdPrimitive):
 
             global_dbias = dbias
             if config.attn_bias_type is not AttnBiasType.NO_BIAS:
-                global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh, mesh_resource)
 
             dk, dv = helper.unstack_kv(dk_dv)
             return dq, dk, dv, global_dbias
@@ -2404,7 +2415,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
     """
 
     @staticmethod
-    def partition(config, mesh, arg_infos, result_infos):
+    def partition(config, mesh_resource, mesh, arg_infos, result_infos):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
@@ -2486,6 +2497,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                         q_segment_pos,
                         kv_segment_pos,
                         config=config,
+                        mesh_resource=mesh_resource,
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
@@ -2523,7 +2535,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
 
             global_dbias = dbias
             if config.attn_bias_type is not AttnBiasType.NO_BIAS:
-                global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh, mesh_resource)
 
             dk, dv = helper.unstack_kv(dkv)
             return dq, dk, dv, global_dbias
@@ -2779,5 +2791,6 @@ def fused_attn_bwd(
         doutput,
         *seq_desc_flatten,
         config=fused_config,
+        mesh_resource=global_mesh_resource(),
     )
     return tuple(qkv_grads[: len(qkv)]), bias_grad

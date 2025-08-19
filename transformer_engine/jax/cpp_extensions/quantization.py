@@ -27,7 +27,11 @@ from .misc import (
     get_min_device_compute_capability,
     NamedSharding,
 )
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp,
+    global_mesh_resource,
+)
 from ..quantize import (
     ScaledTensor2x,
     ScaledTensor,
@@ -64,7 +68,8 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         6,
         7,
         8,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, is_outer
+        9,
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, mesh_resource, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -79,6 +84,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -175,6 +181,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -204,6 +211,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -228,6 +236,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
             is_dbias=is_dbias,
+            mesh_resource=mesh_resource,
             is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -260,6 +269,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -283,6 +293,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
                 is_dbias=is_dbias,
+                mesh_resource=mesh_resource,
             ),
             out_bdims,
         )
@@ -295,6 +306,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -367,6 +379,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         flatten_axis,
         scale_dtype,
         is_dbias,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -449,16 +462,19 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
                 is_dbias=is_dbias,
+                mesh_resource=mesh_resource,
                 is_outer=True,
             )
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_amax, mesh, mesh_resource
+                )
             else:
                 global_updated_amax = local_amax
 
             if is_dbias:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh, mesh_resource)
             else:
                 global_dbias = local_dbias
 
@@ -482,6 +498,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         scale_dtype,
         is_dbias,
         is_outer,
+        mesh_resource,
         mesh,
         value_types,
         result_types,
@@ -666,6 +683,7 @@ def _quantize_dbias_impl(
         scale_dtype=quantizer.get_scale_dtype(),
         is_dbias=is_dbias,
         is_outer=True,
+        mesh_resource=global_mesh_resource(),
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
     if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
@@ -774,7 +792,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
         6,
         7,
         8,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
+        9,
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, mesh_resource
     inner_primitive = None
     outer_primitive = None
 
@@ -790,6 +809,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         flatten_axis,
         group_axis,
         scale_dtype,
+        mesh_resource,
     ):
         """
         te_dbias_quantize_p abstract
@@ -868,6 +888,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         flatten_axis,
         group_axis,
         scale_dtype,
+        mesh_resource,
     ):
         """
         te_dbias_quantize_p lowering rules
@@ -899,6 +920,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         flatten_axis,
         group_axis,
         scale_dtype,
+        mesh_resource,
     ):
         """
         te_dbias_quantize_p implementation
@@ -920,6 +942,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
             group_axis=group_axis,
             scale_dtype=scale_dtype,
+            mesh_resource=mesh_resource,
         )
         return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
@@ -1018,6 +1041,7 @@ def grouped_quantize(
         flatten_axis=flatten_axis,
         group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
+        mesh_resource=global_mesh_resource(),
     )
 
     # For DelayedScaling2x and CurrentScaling2x, the scale buffer

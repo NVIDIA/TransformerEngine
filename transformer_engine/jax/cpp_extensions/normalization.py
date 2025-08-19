@@ -29,7 +29,11 @@ from .misc import (
     get_cudnn_version,
 )
 from .quantization import _quantize_dbias_impl
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp,
+    global_mesh_resource,
+)
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
@@ -98,7 +102,7 @@ class NormFwdPrimitive(BasePrimitive):
 
     name = "te_norm_forward_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11)
+    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12)
     inner_primitive = None
     outer_primitive = None
 
@@ -116,6 +120,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -236,6 +241,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -284,6 +290,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -312,6 +319,7 @@ class NormFwdPrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             is_2x=is_2x,
             scale_dtype=scale_dtype,
+            mesh_resource=mesh_resource,
             is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -347,6 +355,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -380,6 +389,7 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                mesh_resource=mesh_resource,
             ),
             out_bdims,
         )
@@ -393,6 +403,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -451,6 +462,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -544,10 +556,13 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                mesh_resource=mesh_resource,
                 is_outer=True,
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_amax, mesh, mesh_resource
+                )
             else:
                 global_updated_amax = local_amax
 
@@ -572,6 +587,7 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         value_types,
@@ -623,12 +639,21 @@ class NormBwdPrimitive(BasePrimitive):
 
     name = "te_norm_backward_ffi"
     multiple_results = True
-    impl_static_args = (5, 6)  # norm_type, zero_centered_gamma
+    impl_static_args = (5, 6, 7)  # norm_type, zero_centered_gamma, mesh_resource
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(dz_aval, x_aval, mu_aval, rsigma_aval, gamma_aval, norm_type, zero_centered_gamma):
+    def abstract(
+        dz_aval,
+        x_aval,
+        mu_aval,
+        rsigma_aval,
+        gamma_aval,
+        norm_type,
+        zero_centered_gamma,
+        mesh_resource,
+    ):
         """
         bwd inner primitive abstract
         """
@@ -677,7 +702,7 @@ class NormBwdPrimitive(BasePrimitive):
         return dx_aval, dgamma_aval, dbeta_aval
 
     @staticmethod
-    def lowering(ctx, dz, x, mu, rsigma, gamma, *, norm_type, zero_centered_gamma):
+    def lowering(ctx, dz, x, mu, rsigma, gamma, *, norm_type, zero_centered_gamma, mesh_resource):
         """
         bwd lowering rules
         """
@@ -702,15 +727,22 @@ class NormBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(dz, x, mu, rsigma, gamma, norm_type, zero_centered_gamma):
+    def impl(dz, x, mu, rsigma, gamma, norm_type, zero_centered_gamma, mesh_resource):
         assert NormBwdPrimitive.inner_primitive is not None
         dx, dgamma, dbeta, _ = NormBwdPrimitive.inner_primitive.bind(
-            dz, x, mu, rsigma, gamma, norm_type=norm_type, zero_centered_gamma=zero_centered_gamma
+            dz,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            norm_type=norm_type,
+            zero_centered_gamma=zero_centered_gamma,
+            mesh_resource=mesh_resource,
         )
         return dx, dgamma, dbeta
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, norm_type, zero_centered_gamma):
+    def batcher(batched_args, batch_dims, *, norm_type, zero_centered_gamma, mesh_resource):
         check_valid_batch_dims(batch_dims)
         assert NormBwdPrimitive.outer_primitive is not None
         dz, x, mu, rsigma, gamma = batched_args
@@ -726,12 +758,15 @@ class NormBwdPrimitive(BasePrimitive):
                 gamma,
                 norm_type=norm_type,
                 zero_centered_gamma=zero_centered_gamma,
+                mesh_resource=mesh_resource,
             ),
             out_bdims,
         )
 
     @staticmethod
-    def infer_sharding_from_operands(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
+    def infer_sharding_from_operands(
+        norm_type, zero_centered_gamma, mesh_resource, mesh, arg_infos, result_infos
+    ):
         del norm_type, zero_centered_gamma, result_infos
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
@@ -757,7 +792,7 @@ class NormBwdPrimitive(BasePrimitive):
         return dx_sharding, dgamma_sharding, dbeta_sharding
 
     @staticmethod
-    def partition(norm_type, zero_centered_gamma, mesh, arg_infos, result_infos):
+    def partition(norm_type, zero_centered_gamma, mesh_resource, mesh, arg_infos, result_infos):
         del result_infos
         x_spec = get_padded_spec(arg_infos[1])
         if x_spec[-1] is not None:
@@ -805,10 +840,11 @@ class NormBwdPrimitive(BasePrimitive):
                 gamma,
                 norm_type=norm_type,
                 zero_centered_gamma=zero_centered_gamma,
+                mesh_resource=mesh_resource,
             )
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh, mesh_resource)
             if norm_type == NVTE_Norm_Type.LayerNorm:
-                global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta, mesh)
+                global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta, mesh, mesh_resource)
             else:
                 global_dbeta = local_dbeta
             return local_dx, global_dgamma, global_dbeta
@@ -928,6 +964,7 @@ def layernorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
+            mesh_resource=global_mesh_resource(),
             is_outer=True,
         )
         return output, mu, rsigma
@@ -979,6 +1016,7 @@ def layernorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
+        mesh_resource=global_mesh_resource(),
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1073,6 +1111,7 @@ def layernorm_bwd(
         gamma,
         norm_type=NVTE_Norm_Type.LayerNorm,
         zero_centered_gamma=zero_centered_gamma,
+        mesh_resource=global_mesh_resource(),
     )
 
 
@@ -1131,6 +1170,7 @@ def rmsnorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
+            mesh_resource=global_mesh_resource(),
             is_outer=True,
         )
         return output, rsigma
@@ -1179,6 +1219,7 @@ def rmsnorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
+        mesh_resource=global_mesh_resource(),
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1264,6 +1305,7 @@ def rmsnorm_bwd(
         gamma,
         norm_type=NVTE_Norm_Type.RMSNorm,
         zero_centered_gamma=zero_centered_gamma,
+        mesh_resource=global_mesh_resource(),
     )
     return (dx, dgamma)
 

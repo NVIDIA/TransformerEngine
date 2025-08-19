@@ -34,6 +34,7 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
 )
+from ..sharding import global_mesh_resource
 from .misc import get_padded_spec
 
 
@@ -490,7 +491,8 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             rhs_non_cspecs = tuple(
-                None if spec is not None and "fsdp" in spec else spec for spec in rhs_non_cspecs
+                None if spec is not None and global_mesh_resource().fsdp_resource in spec else spec
+                for spec in rhs_non_cspecs
             )
 
         # Non-contracting dims of LHS to be gathered along the SP axis.

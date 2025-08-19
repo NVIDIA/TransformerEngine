@@ -28,7 +28,11 @@ from .misc import (
     NamedSharding,
 )
 from .quantization import _jax_dbias, _quantize_dbias_impl
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from ..sharding import (
+    all_reduce_max_along_all_axes_except_PP,
+    all_reduce_sum_along_dp_fsdp,
+    global_mesh_resource,
+)
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
@@ -89,7 +93,8 @@ class ActLuPrimitive(BasePrimitive):
         6,
         7,
         8,
-    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, is_outer
+        9,
+    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, mesh_resource, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -104,6 +109,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -154,6 +160,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -179,6 +186,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -197,6 +205,7 @@ class ActLuPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                mesh_resource=mesh_resource,
                 is_outer=False,
             )
         )
@@ -225,6 +234,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -247,6 +257,7 @@ class ActLuPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                mesh_resource=mesh_resource,
             ),
             out_bdims,
         )
@@ -259,6 +270,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -322,6 +334,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -382,12 +395,15 @@ class ActLuPrimitive(BasePrimitive):
                     scaling_mode=scaling_mode,
                     is_2x=is_2x,
                     scale_dtype=scale_dtype,
+                    mesh_resource=mesh_resource,
                     is_outer=True,
                 )
             )
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_amax, mesh, mesh_resource
+                )
             else:
                 global_updated_amax = local_amax
 
@@ -409,6 +425,7 @@ class ActLuPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        mesh_resource,
         is_outer,
         mesh,
         value_types,
@@ -458,8 +475,8 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
 
     name = "te_dact_dbias_quantize_ffi"
     multiple_results = True
-    # out_dtype, scaling_mode, is_2x, scale_dtype, is_dbias, act_enum, act_len, is_outer
-    impl_static_args = (3, 4, 5, 6, 7, 8, 9, 10)
+    # out_dtype, scaling_mode, is_2x, scale_dtype, is_dbias, act_enum, act_len, mesh_resource, is_outer
+    impl_static_args = (3, 4, 5, 6, 7, 8, 9, 10, 11)
     inner_primitive = None
     outer_primitive = None
 
@@ -476,6 +493,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -577,6 +595,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -610,6 +629,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -629,6 +649,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 is_dbias=is_dbias,
                 act_enum=act_enum,
                 act_len=act_len,
+                mesh_resource=mesh_resource,
                 is_outer=False,
             )
         )
@@ -657,6 +678,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
     ):
         """
@@ -688,6 +710,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 is_dbias=is_dbias,
                 act_enum=act_enum,
                 act_len=act_len,
+                mesh_resource=mesh_resource,
             ),
             out_bdims,
         )
@@ -701,6 +724,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -776,6 +800,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
         mesh,
         arg_infos,
@@ -856,16 +881,19 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                     is_dbias=is_dbias,
                     act_enum=act_enum,
                     act_len=act_len,
+                    mesh_resource=mesh_resource,
                     is_outer=True,
                 )
             )
             if is_dbias:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh, mesh_resource)
             else:
                 global_dbias = local_dbias
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_amax, mesh, mesh_resource
+                )
             else:
                 global_updated_amax = local_amax
 
@@ -882,6 +910,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         is_dbias,
         act_enum,
         act_len,
+        mesh_resource,
         is_outer,
         mesh,
         value_types,
@@ -1032,6 +1061,7 @@ def act_lu(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
+            mesh_resource=global_mesh_resource(),
             is_outer=True,
         )
         out = out.reshape(output_shape)
@@ -1069,6 +1099,7 @@ def act_lu(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
+        mesh_resource=global_mesh_resource(),
         is_outer=True,
     )
 
@@ -1139,6 +1170,7 @@ def quantize_dact_dbias(
             is_dbias=False,
             act_enum=act_type_id,
             act_len=act_len,
+            mesh_resource=global_mesh_resource(),
             is_outer=True,
         )
         output = output.astype(x.dtype)
@@ -1229,6 +1261,7 @@ def quantize_dact_dbias(
         is_dbias=is_dbias,
         act_enum=act_type_id,
         act_len=act_len,
+        mesh_resource=global_mesh_resource(),
         is_outer=True,
     )
 

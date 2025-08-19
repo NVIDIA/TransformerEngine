@@ -28,6 +28,7 @@ from .quantize import (
     noop_quantizer_set,
     TensorUsage,
 )
+from .sharding import global_mesh_resource, global_shard_guard
 
 
 def layernorm_mlp(
@@ -104,6 +105,7 @@ def layernorm_mlp(
             not zero_centered_gamma
         ), "zero_centered_gamma is not supported if norm_type is 'rmsnorm'"
 
+    mesh_resource = global_mesh_resource()
     output = _layernorm_mlp(
         x,
         gamma,
@@ -124,11 +126,12 @@ def layernorm_mlp(
         ffn2_ckpt_name,
         activation_type,
         quantizer_sets,
+        mesh_resource,
     )
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -149,6 +152,7 @@ def _layernorm_mlp(
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
     quantizer_sets,
+    mesh_resource,
 ):
     """Internal implementation of layernorm_mlp with custom VJP.
 
@@ -174,6 +178,7 @@ def _layernorm_mlp(
         ffn2_ckpt_name: Name for second feed-forward network checkpointing
         activation_type: Activation function(s)
         quantizer_sets: Tuple of quantizer sets
+        mesh_resource: Mesh resource for sharding
 
     Returns:
         Output tensor from the combined operations
@@ -198,6 +203,7 @@ def _layernorm_mlp(
         ffn2_ckpt_name,
         activation_type,
         quantizer_sets,
+        mesh_resource,
     )
     return output
 
@@ -222,6 +228,7 @@ def _layernorm_mlp_fwd_rule(
     ffn2_ckpt_name,
     activation_type,
     quantizer_sets,
+    mesh_resource,
 ):
     """Forward pass rule for layernorm_mlp.
 
@@ -237,109 +244,110 @@ def _layernorm_mlp_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
-    del kernel_1_axes, kernel_2_axes
+    with global_shard_guard(mesh_resource):
+        del kernel_1_axes, kernel_2_axes
 
-    ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
+        ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
-    # x should be in shape of (batch..., hidden)
-    # Kernel_1 should be in shape of (hidden_in, activation_len, intermediate)
-    # Kernel_2 should be in shape of (intermediate, hidden_in)
-    assert len(kernel_1.shape) == 3
-    assert len(kernel_2.shape) == 2
-    assert kernel_1.shape[-2] == len(activation_type)
+        # x should be in shape of (batch..., hidden)
+        # Kernel_1 should be in shape of (hidden_in, activation_len, intermediate)
+        # Kernel_2 should be in shape of (intermediate, hidden_in)
+        assert len(kernel_1.shape) == 3
+        assert len(kernel_2.shape) == 2
+        assert kernel_1.shape[-2] == len(activation_type)
 
-    x_contracting_dims = (len(x.shape) - 1,)
-    k_contracting_dims = (0,)
+        x_contracting_dims = (len(x.shape) - 1,)
+        k_contracting_dims = (0,)
 
-    assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
+        assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
 
-    use_bias_1 = bias_1 is not None
-    use_bias_2 = bias_1 is not None
+        use_bias_1 = bias_1 is not None
+        use_bias_2 = bias_1 is not None
 
-    x = with_sharding_constraint_by_logical_axes(x, norm_input_axes)
+        x = with_sharding_constraint_by_logical_axes(x, norm_input_axes)
 
-    casted_ln_out, mu, rsigma = tex.normalization_fwd(
-        x,
-        gamma,
-        beta,
-        zero_centered_gamma,
-        epsilon,
-        norm_type,
-        quantizer=ffn1_quantizer_set.x,
-        noop_scaled_tensor=True,
-    )
-    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
+        casted_ln_out, mu, rsigma = tex.normalization_fwd(
+            x,
+            gamma,
+            beta,
+            zero_centered_gamma,
+            epsilon,
+            norm_type,
+            quantizer=ffn1_quantizer_set.x,
+            noop_scaled_tensor=True,
+        )
+        casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
-    casted_kernel_1 = tex.quantize(
-        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
-    )
+        casted_kernel_1 = tex.quantize(
+            kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, noop_scaled_tensor=True
+        )
 
-    # NN GEMM
-    # (batch..., hidden_in) x (hidden_in, hidden_out)
-    dot_1_output = tex.gemm(
-        casted_ln_out.get_tensor(TensorUsage.LHS),
-        casted_kernel_1.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_contracting_dims, k_contracting_dims),
-        bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
-    )
+        # NN GEMM
+        # (batch..., hidden_in) x (hidden_in, hidden_out)
+        dot_1_output = tex.gemm(
+            casted_ln_out.get_tensor(TensorUsage.LHS),
+            casted_kernel_1.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_contracting_dims, k_contracting_dims),
+            bias=bias_1 if not tex.gemm_uses_jax_dot() else None,
+            fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
+        )
 
-    if use_bias_1 and tex.gemm_uses_jax_dot():
-        bias_1_shape = bias_1.shape
-        bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
-        dot_1_output += jnp.reshape(bias_1, bias_1_new_shape)
+        if use_bias_1 and tex.gemm_uses_jax_dot():
+            bias_1_shape = bias_1.shape
+            bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
+            dot_1_output += jnp.reshape(bias_1, bias_1_new_shape)
 
-    dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
+        dot_1_output = checkpoint_name(dot_1_output, ffn1_ckpt_name)
 
-    # (batch..., hidden_in) -> (batch..., hidden)
-    casted_act_out = tex.act_lu(
-        dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
-    )
+        # (batch..., hidden_in) -> (batch..., hidden)
+        casted_act_out = tex.act_lu(
+            dot_1_output, activation_type, quantizer=ffn2_quantizer_set.x, noop_scaled_tensor=True
+        )
 
-    casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
+        casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
 
-    casted_kernel_2 = tex.quantize(
-        kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
-    )
+        casted_kernel_2 = tex.quantize(
+            kernel_2, quantizer=ffn2_quantizer_set.kernel, noop_scaled_tensor=True
+        )
 
-    # NN GEMM
-    # (batch..., hidden_in) x (hidden_out, hidden_in)
-    dot_2_output = tex.gemm(
-        casted_act_out.get_tensor(TensorUsage.LHS),
-        casted_kernel_2.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_contracting_dims, k_contracting_dims),
-        bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
-    )
+        # NN GEMM
+        # (batch..., hidden_in) x (hidden_out, hidden_in)
+        dot_2_output = tex.gemm(
+            casted_act_out.get_tensor(TensorUsage.LHS),
+            casted_kernel_2.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_contracting_dims, k_contracting_dims),
+            bias=bias_2 if not tex.gemm_uses_jax_dot() else None,
+            fuse_bias=use_bias_2 if not tex.gemm_uses_jax_dot() else False,
+        )
 
-    if use_bias_2 and tex.gemm_uses_jax_dot():
-        bias_2_shape = bias_2.shape
-        bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
-        dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
+        if use_bias_2 and tex.gemm_uses_jax_dot():
+            bias_2_shape = bias_2.shape
+            bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
+            dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
 
-    dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
+        dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
-    ctx = (
-        x,
-        mu,
-        rsigma,
-        gamma,
-        beta,
-        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel_1.get_tensor(TensorUsage.RHS_TRANS),
-        dot_1_output,
-        casted_act_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel_2.get_tensor(TensorUsage.RHS_TRANS),
-        x_contracting_dims,
-        k_contracting_dims,
-        kernel_1.shape,
-        kernel_2.shape,
-        use_bias_1,
-        use_bias_2,
-        quantizer_sets,
-    )
+        ctx = (
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
+            casted_kernel_1.get_tensor(TensorUsage.RHS_TRANS),
+            dot_1_output,
+            casted_act_out.get_tensor(TensorUsage.LHS_TRANS),
+            casted_kernel_2.get_tensor(TensorUsage.RHS_TRANS),
+            x_contracting_dims,
+            k_contracting_dims,
+            kernel_1.shape,
+            kernel_2.shape,
+            use_bias_1,
+            use_bias_2,
+            quantizer_sets,
+        )
 
-    return dot_2_output, ctx
+        return dot_2_output, ctx
 
 
 def _layernorm_mlp_bwd_rule(
@@ -354,6 +362,7 @@ def _layernorm_mlp_bwd_rule(
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
+    mesh_resource,
     ctx,
     grad,
 ):
@@ -370,119 +379,123 @@ def _layernorm_mlp_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
-    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name
-    (
-        x,
-        mu,
-        rsigma,
-        gamma,
-        beta,
-        casted_ln_out,
-        casted_kernel_1,
-        dot_1_output,
-        casted_act_out,
-        casted_kernel_2,
-        x_contracting_dims_in_fwd,
-        k_contracting_dims_in_fwd,
-        kernel_1_shape,
-        kernel_2_shape,
-        use_bias_1,
-        use_bias_2,
-        quantizer_sets,
-    ) = ctx
 
-    ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
+    with global_shard_guard(mesh_resource):
+        del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name
+        (
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            casted_ln_out,
+            casted_kernel_1,
+            dot_1_output,
+            casted_act_out,
+            casted_kernel_2,
+            x_contracting_dims_in_fwd,
+            k_contracting_dims_in_fwd,
+            kernel_1_shape,
+            kernel_2_shape,
+            use_bias_1,
+            use_bias_2,
+            quantizer_sets,
+        ) = ctx
 
-    # Since the sharding of outputs should be the same as dot_1's input
-    grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
+        ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
-    casted_grad, dbias_2 = tex.quantize_dbias(
-        grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
-    )
+        # Since the sharding of outputs should be the same as dot_1's input
+        grad = with_sharding_constraint_by_logical_axes(grad, dot_1_input_axes)
 
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
-    g_contracting_dims_2 = tuple(
-        range(grad.ndim - len(kernel_2_shape) + len(k_contracting_dims_in_fwd), grad.ndim)
-    )
-    # k_non_contracting_dims
-    k_contracting_dims_2 = tuple(
-        dim for dim in range(len(kernel_2_shape)) if dim not in k_contracting_dims_in_fwd
-    )
+        casted_grad, dbias_2 = tex.quantize_dbias(
+            grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
+        )
 
-    # NT GEMM
-    # (batch..., hidden_out) x (hidden_in, hidden_out)
-    dgrad_2 = tex.gemm(
-        casted_grad.get_tensor(TensorUsage.LHS),
-        casted_kernel_2,
-        contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
-    )
+        # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
+        g_contracting_dims_2 = tuple(
+            range(grad.ndim - len(kernel_2_shape) + len(k_contracting_dims_in_fwd), grad.ndim)
+        )
+        # k_non_contracting_dims
+        k_contracting_dims_2 = tuple(
+            dim for dim in range(len(kernel_2_shape)) if dim not in k_contracting_dims_in_fwd
+        )
 
-    dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
+        # NT GEMM
+        # (batch..., hidden_out) x (hidden_in, hidden_out)
+        dgrad_2 = tex.gemm(
+            casted_grad.get_tensor(TensorUsage.LHS),
+            casted_kernel_2,
+            contracting_dims=(g_contracting_dims_2, k_contracting_dims_2),
+        )
 
-    x_contracting_dims = g_contracting_dims = tuple(
-        range(0, len(x.shape) - len(x_contracting_dims_in_fwd))
-    )
+        dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
-    # TN GEMM
-    # (hidden, batch...,) x (hidden, batch...)
-    wgrad_2 = tex.gemm(
-        casted_act_out,
-        casted_grad.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_contracting_dims, g_contracting_dims),
-    )
-    wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
+        x_contracting_dims = g_contracting_dims = tuple(
+            range(0, len(x.shape) - len(x_contracting_dims_in_fwd))
+        )
 
-    casted_dact_out, dbias_1 = tex.quantize_dact_dbias(
-        dgrad_2,
-        dot_1_output,
-        activation_type=activation_type,
-        is_dbias=use_bias_1,
-        quantizer=ffn2_quantizer_set.dgrad,
-        noop_scaled_tensor=True,
-    )
+        # TN GEMM
+        # (hidden, batch...,) x (hidden, batch...)
+        wgrad_2 = tex.gemm(
+            casted_act_out,
+            casted_grad.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_contracting_dims, g_contracting_dims),
+        )
+        wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
-    dact_out_ndim = casted_dact_out.get_tensor(TensorUsage.LHS).data.ndim
-    g_contracting_dims_1 = tuple(
-        range(dact_out_ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dact_out_ndim)
-    )
-    # k_non_contracting_dims
-    k_contracting_dims_1 = tuple(
-        dim for dim in range(len(kernel_1_shape)) if dim not in k_contracting_dims_in_fwd
-    )
+        casted_dact_out, dbias_1 = tex.quantize_dact_dbias(
+            dgrad_2,
+            dot_1_output,
+            activation_type=activation_type,
+            is_dbias=use_bias_1,
+            quantizer=ffn2_quantizer_set.dgrad,
+            noop_scaled_tensor=True,
+        )
 
-    # NT GEMM
-    dgrad_1 = tex.gemm(
-        casted_dact_out.get_tensor(TensorUsage.LHS),
-        casted_kernel_1,
-        contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
-    )
+        # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
+        dact_out_ndim = casted_dact_out.get_tensor(TensorUsage.LHS).data.ndim
+        g_contracting_dims_1 = tuple(
+            range(
+                dact_out_ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dact_out_ndim
+            )
+        )
+        # k_non_contracting_dims
+        k_contracting_dims_1 = tuple(
+            dim for dim in range(len(kernel_1_shape)) if dim not in k_contracting_dims_in_fwd
+        )
 
-    dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
+        # NT GEMM
+        dgrad_1 = tex.gemm(
+            casted_dact_out.get_tensor(TensorUsage.LHS),
+            casted_kernel_1,
+            contracting_dims=(g_contracting_dims_1, k_contracting_dims_1),
+        )
 
-    # TN GEMM
-    # (hidden, batch...) x (hidden, batch...)
-    wgrad_1 = tex.gemm(
-        casted_ln_out,
-        casted_dact_out.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_contracting_dims, g_contracting_dims),
-    )
+        dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
 
-    wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
+        # TN GEMM
+        # (hidden, batch...) x (hidden, batch...)
+        wgrad_1 = tex.gemm(
+            casted_ln_out,
+            casted_dact_out.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_contracting_dims, g_contracting_dims),
+        )
 
-    dx, dgamma, dbeta = tex.normalization_bwd(
-        dgrad_1,
-        x,
-        mu,
-        rsigma,
-        gamma,
-        beta,
-        zero_centered_gamma=zero_centered_gamma,
-        epsilon=epsilon,
-        norm_type=norm_type,
-    )
+        wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
 
-    return (dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, quantizer_sets)
+        dx, dgamma, dbeta = tex.normalization_bwd(
+            dgrad_1,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            norm_type=norm_type,
+        )
+
+        return (dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, quantizer_sets)
 
 
 _layernorm_mlp.defvjp(_layernorm_mlp_fwd_rule, _layernorm_mlp_bwd_rule)

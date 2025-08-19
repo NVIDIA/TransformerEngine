@@ -23,6 +23,7 @@ from .quantize import (
     with_sharding_constraint_by_logical_axes,
     TensorUsage,
 )
+from .sharding import global_mesh_resource, global_shard_guard
 
 
 def layernorm_dense(
@@ -68,6 +69,7 @@ def layernorm_dense(
         - The function supports automatic differentiation through JAX's custom VJP
         - Quantization is applied to both the normalized input and kernel
     """
+    mesh_resource = global_mesh_resource()
     output = _layernorm_dense(
         x,
         kernel,
@@ -81,20 +83,14 @@ def layernorm_dense(
         dot_input_axes,
         kernel_axes,
         quantizer_set,
+        mesh_resource,
     )
     return output
 
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-    ),
+    nondiff_argnums=(5, 6, 7, 8, 9, 10, 11),
 )
 def _layernorm_dense(
     x: jnp.ndarray,
@@ -109,6 +105,7 @@ def _layernorm_dense(
     dot_input_axes: Tuple[str, ...],
     kernel_axes: Tuple[str, ...],
     quantizer_set,
+    mesh_resource,
 ):
     """Internal implementation of layernorm_dense with custom VJP.
 
@@ -145,6 +142,7 @@ def _layernorm_dense(
         dot_input_axes,
         kernel_axes,
         quantizer_set,
+        mesh_resource,
     )
     return output
 
@@ -162,6 +160,7 @@ def _layernorm_dense_fwd_rule(
     dot_input_axes,
     kernel_axes,
     quantizer_set,
+    mesh_resource,
 ):
     """Forward pass rule for layernorm_dense.
 
@@ -174,64 +173,68 @@ def _layernorm_dense_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
-    x_contracting_dims = (len(x.shape) - 1,)
-    k_contracting_dims = (0,)
-    assert x.shape[-1] == kernel.shape[0]
+    with global_shard_guard(mesh_resource):
+        x_contracting_dims = (len(x.shape) - 1,)
+        k_contracting_dims = (0,)
+        assert x.shape[-1] == kernel.shape[0]
 
-    x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
+        x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
-    casted_ln_out, mu, rsigma = tex.normalization_fwd(
-        x,
-        gamma,
-        beta,
-        zero_centered_gamma,
-        epsilon,
-        norm_type,
-        quantizer=quantizer_set.x,
-        noop_scaled_tensor=True,
-    )
-    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
+        casted_ln_out, mu, rsigma = tex.normalization_fwd(
+            x,
+            gamma,
+            beta,
+            zero_centered_gamma,
+            epsilon,
+            norm_type,
+            quantizer=quantizer_set.x,
+            noop_scaled_tensor=True,
+        )
+        casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
-    # Kernel in (hidden_in, hidden_out...)
-    flatten_axis = 1 - len(kernel.shape)
-    casted_kernel = tex.quantize(
-        kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel, noop_scaled_tensor=True
-    )
-    casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
+        # Kernel in (hidden_in, hidden_out...)
+        flatten_axis = 1 - len(kernel.shape)
+        casted_kernel = tex.quantize(
+            kernel,
+            flatten_axis=flatten_axis,
+            quantizer=quantizer_set.kernel,
+            noop_scaled_tensor=True,
+        )
+        casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
-    # NN GEMM
-    # (batch..., hidden_in) x (hidden_in, hidden_out...)
-    use_bias = bias is not None
-    output = tex.gemm(
-        casted_ln_out.get_tensor(TensorUsage.LHS),
-        casted_kernel.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_contracting_dims, k_contracting_dims),
-        bias=bias if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
-    )
+        # NN GEMM
+        # (batch..., hidden_in) x (hidden_in, hidden_out...)
+        use_bias = bias is not None
+        output = tex.gemm(
+            casted_ln_out.get_tensor(TensorUsage.LHS),
+            casted_kernel.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_contracting_dims, k_contracting_dims),
+            bias=bias if not tex.gemm_uses_jax_dot() else None,
+            fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
+        )
 
-    if use_bias and tex.gemm_uses_jax_dot():
-        bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
-        output += jnp.reshape(bias, bias_new_shape)
+        if use_bias and tex.gemm_uses_jax_dot():
+            bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
+            output += jnp.reshape(bias, bias_new_shape)
 
-    ctx = (
-        casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
-        casted_kernel.get_tensor(TensorUsage.RHS_TRANS),
-        x.shape,
-        kernel.shape,
-        mu,
-        rsigma,
-        x,
-        gamma,
-        beta,
-        x_contracting_dims,
-        k_contracting_dims,
-        use_bias,
-        quantizer_set,
-        flatten_axis,
-    )
+        ctx = (
+            casted_ln_out.get_tensor(TensorUsage.LHS_TRANS),
+            casted_kernel.get_tensor(TensorUsage.RHS_TRANS),
+            x.shape,
+            kernel.shape,
+            mu,
+            rsigma,
+            x,
+            gamma,
+            beta,
+            x_contracting_dims,
+            k_contracting_dims,
+            use_bias,
+            quantizer_set,
+            flatten_axis,
+        )
 
-    return output, ctx
+        return output, ctx
 
 
 def _layernorm_dense_bwd_rule(
@@ -241,6 +244,7 @@ def _layernorm_dense_bwd_rule(
     layernorm_input_axes,
     dot_input_axes,
     kernel_axes,
+    mesh_resource,
     ctx,
     grad,
 ):
@@ -273,58 +277,59 @@ def _layernorm_dense_bwd_rule(
         flatten_axis,
     ) = ctx
 
-    casted_grad, dbias = tex.quantize_dbias(
-        grad,
-        is_dbias=use_bias,
-        flatten_axis=flatten_axis,
-        quantizer=quantizer_set.dgrad,
-        noop_scaled_tensor=True,
-    )
+    with global_shard_guard(mesh_resource):
+        casted_grad, dbias = tex.quantize_dbias(
+            grad,
+            is_dbias=use_bias,
+            flatten_axis=flatten_axis,
+            quantizer=quantizer_set.dgrad,
+            noop_scaled_tensor=True,
+        )
 
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_constracting_dim = tuple(
-        range(grad.ndim - len(kernel_shape) + len(k_contracting_dims_in_fwd), grad.ndim)
-    )
-    # k_non_contracting_dims
-    k_constracting_dim = tuple(
-        dim for dim in range(len(kernel_shape)) if dim not in k_contracting_dims_in_fwd
-    )
+        # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
+        g_constracting_dim = tuple(
+            range(grad.ndim - len(kernel_shape) + len(k_contracting_dims_in_fwd), grad.ndim)
+        )
+        # k_non_contracting_dims
+        k_constracting_dim = tuple(
+            dim for dim in range(len(kernel_shape)) if dim not in k_contracting_dims_in_fwd
+        )
 
-    # NT GEMM
-    dgrad = tex.gemm(
-        casted_grad.get_tensor(TensorUsage.LHS),
-        casted_kernel,
-        contracting_dims=(g_constracting_dim, k_constracting_dim),
-    )
+        # NT GEMM
+        dgrad = tex.gemm(
+            casted_grad.get_tensor(TensorUsage.LHS),
+            casted_kernel,
+            contracting_dims=(g_constracting_dim, k_constracting_dim),
+        )
 
-    dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
+        dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
 
-    g_constracting_dim = x_constracting_dim = tuple(
-        range(0, len(x_shape) - len(x_contracting_dims_in_fwd))
-    )
+        g_constracting_dim = x_constracting_dim = tuple(
+            range(0, len(x_shape) - len(x_contracting_dims_in_fwd))
+        )
 
-    # TN GEMM
-    wgrad = tex.gemm(
-        casted_ln_out,
-        casted_grad.get_tensor(TensorUsage.RHS),
-        contracting_dims=(x_constracting_dim, g_constracting_dim),
-    )
+        # TN GEMM
+        wgrad = tex.gemm(
+            casted_ln_out,
+            casted_grad.get_tensor(TensorUsage.RHS),
+            contracting_dims=(x_constracting_dim, g_constracting_dim),
+        )
 
-    wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
+        wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
-    dx, dgamma, dbeta = tex.normalization_bwd(
-        dgrad,
-        x,
-        mu,
-        rsigma,
-        gamma,
-        beta,
-        zero_centered_gamma=zero_centered_gamma,
-        epsilon=epsilon,
-        norm_type=norm_type,
-    )
+        dx, dgamma, dbeta = tex.normalization_bwd(
+            dgrad,
+            x,
+            mu,
+            rsigma,
+            gamma,
+            beta,
+            zero_centered_gamma=zero_centered_gamma,
+            epsilon=epsilon,
+            norm_type=norm_type,
+        )
 
-    return dx, wgrad, dgamma, dbeta, dbias, quantizer_set
+        return dx, wgrad, dgamma, dbeta, dbias, quantizer_set
 
 
 _layernorm_dense.defvjp(_layernorm_dense_fwd_rule, _layernorm_dense_bwd_rule)

@@ -20,6 +20,7 @@ from transformer_engine_jax import NVTE_QKV_Format
 from transformer_engine_jax import nvte_get_qkv_format
 
 from . import cpp_extensions as tex
+from .sharding import MeshResource, global_mesh_resource, global_shard_guard
 
 
 class AttnBiasType(Enum):
@@ -773,6 +774,7 @@ def _legacy_fused_attn(
         window_size=window_size,
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        mesh_resource=global_mesh_resource(),
         context_parallel_axis=context_parallel_axis,
     )
 
@@ -849,13 +851,14 @@ def fused_attn_thd(
         window_size=window_size,
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        mesh_resource=global_mesh_resource(),
         context_parallel_axis=context_parallel_axis,
     )
 
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -872,6 +875,7 @@ def _fused_attn(
     context_parallel_strategy: CPStrategy,
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
+    mesh_resource: MeshResource,
     context_checkpoint_name: str = "context",
 ):
     output, _ = _fused_attn_fwd_rule(
@@ -890,6 +894,7 @@ def _fused_attn(
         context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
+        mesh_resource,
         context_checkpoint_name=context_checkpoint_name,
     )
     return output
@@ -911,36 +916,38 @@ def _fused_attn_fwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    mesh_resource,
     context_checkpoint_name,
 ):
-    output, softmax_aux, rng_state = tex.fused_attn_fwd(
-        qkv,
-        bias,
-        sequence_descriptor,
-        seed,
-        attn_bias_type=attn_bias_type,
-        attn_mask_type=attn_mask_type,
-        qkv_layout=qkv_layout,
-        scaling_factor=scaling_factor,
-        dropout_probability=dropout_probability,
-        is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
-        context_parallel_strategy=context_parallel_strategy,
-        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
-        context_parallel_axis=context_parallel_axis,
-    )
-    output = checkpoint_name(output, context_checkpoint_name)
-    softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
-    rng_state = checkpoint_name(rng_state, context_checkpoint_name)
-    return output, (
-        qkv,
-        bias,
-        sequence_descriptor,
-        softmax_aux,
-        rng_state,
-        output,
-    )
+    with global_shard_guard(mesh_resource):
+        output, softmax_aux, rng_state = tex.fused_attn_fwd(
+            qkv,
+            bias,
+            sequence_descriptor,
+            seed,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+            window_size=window_size,
+            context_parallel_strategy=context_parallel_strategy,
+            context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+            context_parallel_axis=context_parallel_axis,
+        )
+        output = checkpoint_name(output, context_checkpoint_name)
+        softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
+        rng_state = checkpoint_name(rng_state, context_checkpoint_name)
+        return output, (
+            qkv,
+            bias,
+            sequence_descriptor,
+            softmax_aux,
+            rng_state,
+            output,
+        )
 
 
 def _fused_attn_bwd_rule(
@@ -955,47 +962,49 @@ def _fused_attn_bwd_rule(
     context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
+    mesh_resource,
     context_checkpoint_name,
     ctx,
     dz,
 ):
-    del context_checkpoint_name
-    (
-        qkv,
-        bias,
-        sequence_descriptor,
-        softmax_aux,
-        rng_state,
-        output,
-    ) = ctx
-    grad_qkv, grad_bias = tex.fused_attn_bwd(
-        qkv,
-        bias,
-        softmax_aux,
-        rng_state,
-        output,
-        dz,
-        sequence_descriptor,
-        attn_bias_type=attn_bias_type,
-        attn_mask_type=attn_mask_type,
-        qkv_layout=qkv_layout,
-        scaling_factor=scaling_factor,
-        dropout_probability=dropout_probability,
-        is_training=is_training,
-        max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
-        context_parallel_strategy=context_parallel_strategy,
-        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
-        context_parallel_axis=context_parallel_axis,
-    )
-    if attn_bias_type == AttnBiasType.NO_BIAS:
-        grad_bias = None
-    return (
-        grad_qkv,
-        grad_bias,
-        None,
-        None,
-    )
+    with global_shard_guard(mesh_resource):
+        del context_checkpoint_name
+        (
+            qkv,
+            bias,
+            sequence_descriptor,
+            softmax_aux,
+            rng_state,
+            output,
+        ) = ctx
+        grad_qkv, grad_bias = tex.fused_attn_bwd(
+            qkv,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            dz,
+            sequence_descriptor,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            max_segments_per_seq=max_segments_per_seq,
+            window_size=window_size,
+            context_parallel_strategy=context_parallel_strategy,
+            context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+            context_parallel_axis=context_parallel_axis,
+        )
+        if attn_bias_type == AttnBiasType.NO_BIAS:
+            grad_bias = None
+        return (
+            grad_qkv,
+            grad_bias,
+            None,
+            None,
+        )
 
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
@@ -1123,6 +1132,7 @@ def fused_attn(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        mesh_resource=global_mesh_resource(),
         context_checkpoint_name=context_checkpoint_name,
     )
 

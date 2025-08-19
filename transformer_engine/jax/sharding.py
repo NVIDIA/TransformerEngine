@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
+from jax.tree_util import register_pytree_node_class
 import numpy as np
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
@@ -264,7 +265,8 @@ def get_mesh_axis_rank_host(axis, mesh) -> int:
     return int(rank)
 
 
-@dataclass
+@register_pytree_node_class
+@dataclass(frozen=True)
 class MeshResource:
     """A data container for managing mesh resources in distributed training.
 
@@ -285,8 +287,37 @@ class MeshResource:
     pp_resource: str = None
     cp_resource: str = None
 
+    def tree_flatten(self):
+        """Flatten the MeshResource for JAX tree operations.
 
-_GLOBAL_MESH_RESOURCE = MeshResource()
+        Returns:
+            Tuple of (children, aux_data) for tree operations
+        """
+        children = ()
+        aux_data = (
+            self.dp_resource,
+            self.tp_resource,
+            self.fsdp_resource,
+            self.pp_resource,
+            self.cp_resource,
+        )
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        """Reconstruct a MeshResource from its flattened representation.
+
+        Args:
+            aux_data: Auxiliary data containing parameters
+            children: Unused children data
+
+        Returns:
+            A reconstructed MeshResource instance
+        """
+        return cls(*aux_data, *children)
+
+
+_GLOBAL_MESH_RESOURCE = None
 
 
 @contextmanager
@@ -314,36 +345,51 @@ def global_mesh_resource() -> MeshResource:
     Returns:
         The current MeshResource instance
     """
+    assert _GLOBAL_MESH_RESOURCE is not None, (
+        "Global mesh resource is not set. Please set the MeshResource via a global_shard_guard"
+        " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
+        " wrapping your code in 'with global_shard_guard(MeshResource()):'"
+    )
     return _GLOBAL_MESH_RESOURCE
 
 
-def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
+def all_reduce_sum_along_dp_fsdp(
+    x: jnp.array, mesh: jax.sharding.Mesh, mesh_resource: Optional[MeshResource] = None
+):
     """Perform all-reduce sum operation along data parallelism and FSDP axes.
 
     Args:
         x: Input tensor to reduce
         mesh: JAX mesh for distributed computation
+        mesh_resource: MeshResource to specify which physical axes to use. If None, will default to the global MeshResource set by global_shard_guard.
 
     Returns:
         Reduced tensor
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
+    if mesh_resource is None:
+        mesh_resource = global_mesh_resource()
+    x = lax_paral_op(x, jax.lax.psum, mesh_resource.dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, mesh_resource.fsdp_resource, mesh)
 
 
-def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
+def all_reduce_max_along_all_axes_except_PP(
+    x: jnp.array, mesh: jax.sharding.Mesh, mesh_resource: Optional[MeshResource] = None
+):
     """Perform all-reduce max operation along all axes except pipeline parallelism.
 
     Args:
         x: Input tensor to reduce
         mesh: JAX mesh for distributed computation
+        mesh_resource: MeshResource to specify which physical axes to use. If None, will default to the global MeshResource set by global_shard_guard.
 
     Returns:
         Reduced tensor
     """
+    if mesh_resource is None:
+        mesh_resource = global_mesh_resource()
     all_axes = get_all_mesh_axes()
     for axis in all_axes:
-        if axis != global_mesh_resource().pp_resource:
+        if axis != mesh_resource.pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
 
