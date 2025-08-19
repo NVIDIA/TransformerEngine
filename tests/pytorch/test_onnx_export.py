@@ -114,7 +114,7 @@ def trt_fp8_dequantize(t, scale):
 
 
 @onnx_op(
-    op_type="trt::TRT_MXFP8QuantizeLinear",
+    op_type="trt::TRT_MXFP8DynamicQuantize",
     domain="trt",
     inputs=[
         PyCustomOpDef.dt_float,
