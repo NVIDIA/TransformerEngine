@@ -142,6 +142,7 @@ def ensure_model_is_downloaded(hyperparams):
         repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir
     )
 
+
 def init_baseline_model(hyperparams):
     # Download and cache the weights if not already downloaded
     ensure_model_is_downloaded(hyperparams)
