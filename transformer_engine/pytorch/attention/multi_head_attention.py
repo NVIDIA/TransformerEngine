@@ -895,12 +895,19 @@ class MultiheadAttention(torch.nn.Module):
                 inference_params.get_seqlens_pre_step() if inference_params is not None else None
             )
 
+            if pad_between_seqs:
+                rotary_pos_cu_seq_lens_q = cu_seqlens_q_padded
+                rotary_pos_cu_seq_lens_kv = cu_seqlens_kv_padded
+            else:
+                rotary_pos_cu_seq_lens_q = cu_seqlens_q
+                rotary_pos_cu_seq_lens_kv = cu_seqlens_kv
+
             query_layer = apply_rotary_pos_emb(
                 query_layer,
                 q_pos_emb,
                 self.qkv_format,
                 fused=True,
-                cu_seqlens=cu_seqlens_q,
+                cu_seqlens=rotary_pos_cu_seq_lens_q,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 start_positions=sequence_start_positions,
@@ -911,7 +918,7 @@ class MultiheadAttention(torch.nn.Module):
                 k_pos_emb,
                 self.qkv_format,
                 fused=True,
-                cu_seqlens=cu_seqlens_kv,
+                cu_seqlens=rotary_pos_cu_seq_lens_kv,
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 start_positions=sequence_start_positions,
