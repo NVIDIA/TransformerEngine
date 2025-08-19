@@ -1022,9 +1022,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # save appropriate tensors
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8) if is_bwd_fp8 else (None, None, None, None)
             if not is_bwd_fp8 and is_input_fp8:
-                q, k, v = combine_and_dequantize(
-                    primary_recipe, qkv_layout, q_fp8, k_fp8, v_fp8
-                )
+                q, k, v = combine_and_dequantize(primary_recipe, qkv_layout, q_fp8, k_fp8, v_fp8)
             qkvo_tensors = (q, k, v, out)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16

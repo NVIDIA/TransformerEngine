@@ -475,8 +475,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             if primary_recipe.float8_current_scaling():
                 # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
                 self.fp8_meta["recipe"] = fake_secondary_recipe
-                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(fake_secondary_recipe, fp8_group)
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (fake_secondary_recipe, fp8_group)
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    fake_secondary_recipe, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    fake_secondary_recipe,
+                    fp8_group,
+                )
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
@@ -507,8 +512,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             if primary_recipe.float8_current_scaling():
                 # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
                 self.fp8_meta["recipe"] = fake_secondary_recipe
-                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(fake_secondary_recipe, fp8_group)
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (fake_secondary_recipe, fp8_group)
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
+                    fake_secondary_recipe, fp8_group
+                )
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                    fake_secondary_recipe,
+                    fp8_group,
+                )
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
@@ -553,7 +563,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         if not is_current_scaling:
             # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
             # 2 (grad_output and grad_input) for bwd
-            num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+            num_fp8_tensors = (
+                self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+            )
 
             # Initialize recipe state and quantizers
             recipe_state = RecipeState.create(
@@ -571,11 +583,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             num_fp8_tensors = [x * 3 if fwd else x * 2 for x in num_gemms]
 
             # Initialize recipe state and quantizers
-            recipe_states = [RecipeState.create(
-                recipe[i],
-                mode=("forward" if fwd else "backward"),
-                num_quantizers=num_fp8_tensors[i],
-            ) for i in range(2)]
+            recipe_states = [
+                RecipeState.create(
+                    recipe[i],
+                    mode=("forward" if fwd else "backward"),
+                    num_quantizers=num_fp8_tensors[i],
+                )
+                for i in range(2)
+            ]
 
             self.fp8_meta[fp8_meta_tensor_key] = recipe_states[1]
             self.quantizers[fp8_meta_tensor_key] = []
