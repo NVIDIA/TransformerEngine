@@ -119,7 +119,8 @@ class StaticGemmaModel(torch.nn.Module):
         hidden_states.copy_(self.model.norm(hidden_states))  # static copy - for CUDA graphs
         logits = self.lm_head(hidden_states)
 
-        # @sudhakars: This is probably not needed, need to check.
+        # This is not needed for generation but is needed for training
+        # or finetuning.
         # logits = logits.float()
         return logits
 
@@ -452,7 +453,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
             head_dim_k=self.config.head_dim,
             dtype=torch.bfloat16,
             is_paged=self.config.is_paged,
-            page_size=64,  # @sudhakars: Try 16 or 1 even
+            page_size=64,
             total_num_pages=self.config.cuda_graphs_static_batch_size
             * self.config.cuda_graphs_static_max_context_len
             // 64,
@@ -476,7 +477,7 @@ class TEGemmaForCausalLMCudaGraphs(TEGemmaForCausalLM):
 
         # Forcing the inputs to be the same as lengths_tensor from TEGemmaForCausalLM
         lengths = torch.tensor(input_shape[0] * [input_shape[1]], device="cuda", dtype=torch.int32)
-        # @sudhakars: Hardcoded value. Remove this.
+        # Hardcoded value for the context length.
         lengths.data[:] = torch.tensor([9] * self.config.cuda_graphs_static_batch_size)
         self.inference_params.pre_step(
             OrderedDict(zip(list(range(len(lengths))), lengths.tolist()))

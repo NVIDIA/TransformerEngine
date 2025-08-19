@@ -51,8 +51,8 @@ class HyperParameters:
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
-        self.batch_size = 8
-        self.max_seq_length = 256
+        self.batch_size = 64
+        self.max_seq_length = 512
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
         self.num_training_steps = 10
@@ -142,9 +142,6 @@ def ensure_model_is_downloaded(hyperparams):
         repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir
     )
 
-    print(f"Model cache directory : {hyperparams.weights_cache_dir}")
-
-
 def init_baseline_model(hyperparams):
     # Download and cache the weights if not already downloaded
     ensure_model_is_downloaded(hyperparams)
@@ -157,8 +154,8 @@ def init_baseline_model(hyperparams):
         hyperparams.model_name,
         config=config,
         torch_dtype=torch.bfloat16,
-    )
-    return model.cuda()
+    ).cuda()
+    return model
 
 
 def init_te_gemma_model(hyperparams):
@@ -286,8 +283,6 @@ def run_forward_pass(model, hyperparams, num_iters):
     )
     train_dataloader = get_dataloaders(accelerator, hyperparams)
 
-    # @sudhakars: what's the point of calling `model.train` inside `no_grad`
-    # context?
     model.train()
     train_dataloader = enumerate(train_dataloader)
 
