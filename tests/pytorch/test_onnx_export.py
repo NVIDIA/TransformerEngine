@@ -1144,7 +1144,7 @@ def test_export_ctx_manager(enabled):
 
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 def test_trt_integration(fp8_recipe: recipe.Recipe):
-    
+
     model = te.TransformerLayer(
         hidden_size=128,
         ffn_hidden_size=128,
@@ -1154,8 +1154,7 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
 
     with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
         out_ref = model(*inps)
-        
-    
+
     onnx_fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
     os.close(onnx_fd)
     try:
@@ -1167,9 +1166,9 @@ def test_trt_integration(fp8_recipe: recipe.Recipe):
                     onnx_path,
                     output_names=["output"],
                     dynamo=True,
-                    custom_translation_table=te_translation_table
+                    custom_translation_table=te_translation_table,
                 )
-        
+
         os.system(f"trtexec --onnx={onnx_path} --saveEngine={onnx_path}.engine")
 
         # Run TRT engine
