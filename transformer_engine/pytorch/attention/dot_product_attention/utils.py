@@ -37,7 +37,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, FP8GlobalStateManager
 from transformer_engine.pytorch.constants import TE_DType
 
 
@@ -1810,7 +1810,8 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
 
     S_quantizer = None
     dP_quantizer = None
-    if fp8_meta["recipe"].delayed():
+    primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+    if primary_recipe.delayed():
         S_quantizer = quantizers["scaling_fwd"][META_S]
         S_quantizer.internal = True
         S_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1824,7 +1825,7 @@ def get_attention_quantizers(fp8, fp8_meta, quantizers, cp_specific_quantizers=F
         # dP_quantizer.scale.fill_(1.0)
         # dQKV_quantizer.scale.fill_(1.0)
 
-    if fp8_meta["recipe"].float8_current_scaling():
+    if primary_recipe.float8_current_scaling():
         from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 
         dP_quantizer = quantizers["scaling_bwd"][META_DP]

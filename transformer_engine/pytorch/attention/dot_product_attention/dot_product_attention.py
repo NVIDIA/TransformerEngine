@@ -12,9 +12,18 @@ import logging
 
 import torch
 
+from transformer_engine.common.recipe import Recipe, Format, DelayedScaling, Float8CurrentScaling
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.utils import get_cudnn_version
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.fp8 import (
+    get_fp8_te_dtype,
+    FP8GlobalStateManager,
+    RecipeState,
+    DelayedScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
+    Float8CurrentScalingRecipeState,
+    Float8BlockScalingRecipeState,
+)
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
@@ -432,6 +441,146 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
+
+    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
+        """Initialize fp8 related metadata and tensors during fprop."""
+        _original_recipe = self.fp8_meta.get("recipe", None)
+        primary_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        fake_secondary_recipe = DelayedScaling(
+            margin=0,
+            fp8_format=primary_recipe.fp8_format,
+            amax_history_len=1014,
+            amax_compute_algo="most_recent",
+            fp8_dpa=primary_recipe.fp8_dpa,
+            fp8_mha=primary_recipe.fp8_mha,
+        )
+        fp8_group = FP8GlobalStateManager.get_fp8_group()
+
+        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
+        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        fp8_enabled = self.fp8 or self.fp8_calibration
+        self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+
+        if self.fp8_parameters or fp8_enabled:
+            if (
+                self.fp8_initialized
+                and FP8GlobalStateManager.get_fp8_recipe() == self.fp8_meta["recipe"]
+                and FP8GlobalStateManager.get_fp8_recipe().delayed()
+            ):
+                # FP8 init has already been run and recipe is the same, don't do anything.
+                return
+            if primary_recipe.delayed():
+                self.fp8_meta["recipe"] = primary_recipe
+            if primary_recipe.float8_current_scaling():
+                # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
+                self.fp8_meta["recipe"] = fake_secondary_recipe
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(fake_secondary_recipe, fp8_group)
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (fake_secondary_recipe, fp8_group)
+        else:
+            # If fp8 isn't enabled, turn off and return.
+            self.fp8_initialized = False
+            return
+
+        if self.fp8_parameters and not self.fp8_initialized:
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
+
+        if fp8_enabled:
+            # Set FP8 and other FP8 metadata
+            self.fp8_meta["num_gemms"] = num_gemms
+            self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
+
+            # Set FP8_MAX per tensor according to recipe
+            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+
+            # Allocate scales and amaxes
+            if primary_recipe.delayed():
+                self.init_fp8_meta_tensors(primary_recipe)
+            if primary_recipe.float8_current_scaling():
+                self.init_fp8_meta_tensors([primary_recipe, fake_secondary_recipe])
+            self.fp8_initialized = True
+
+            if primary_recipe.delayed():
+                self.fp8_meta["recipe"] = primary_recipe
+            if primary_recipe.float8_current_scaling():
+                # Manipulate DPA.fp8_meta["recipe"] so some of its quantizers get reduced in DS-style
+                self.fp8_meta["recipe"] = fake_secondary_recipe
+                autocast_key = FP8GlobalStateManager.get_unique_autocast_key(fake_secondary_recipe, fp8_group)
+                FP8GlobalStateManager.autocast_arguments[autocast_key] = (fake_secondary_recipe, fp8_group)
+
+        _current_recipe = self.fp8_meta["recipe"]
+        if _original_recipe is not None and not (
+            issubclass(_current_recipe.__class__, _original_recipe.__class__)
+            or issubclass(_original_recipe.__class__, _current_recipe.__class__)
+        ):
+            warnings.warn(
+                f"Recipe type changed from {_original_recipe.__class__.__name__} "
+                f"to {_current_recipe.__class__.__name__}. "
+                "This may affect model behavior."
+            )
+            # Clear cached workspaces as they were created with the old recipe/quantizer type
+            self._fp8_workspaces.clear()
+
+    def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
+        """Init scales and amaxes for fwd | bwd."""
+        is_current_scaling = isinstance(recipe, List) and len(recipe) == 2
+        if is_current_scaling:
+            primary_recipe, fake_secondary_recipe = recipe
+            recipe_ = recipe[1]
+        else:
+            recipe_ = recipe[0] if isinstance(recipe, List) else recipe
+        fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
+
+        # Return early if recipe state matches recipe
+        if self.fp8_meta_tensors_initialized:
+            recipe_state = self.fp8_meta[fp8_meta_tensor_key]
+            if recipe_.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
+                self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
+                return
+            if recipe_.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if recipe_.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
+                return
+            if recipe_.float8_block_scaling() and isinstance(
+                recipe_state, Float8BlockScalingRecipeState
+            ):
+                return
+
+        if not is_current_scaling:
+            # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
+            # 2 (grad_output and grad_input) for bwd
+            num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+
+            # Initialize recipe state and quantizers
+            recipe_state = RecipeState.create(
+                recipe_,
+                mode=("forward" if fwd else "backward"),
+                num_quantizers=num_fp8_tensors,
+            )
+
+            self.fp8_meta[fp8_meta_tensor_key] = recipe_state
+            self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+        else:
+            # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
+            # 2 (grad_output and grad_input) for bwd
+            num_gemms = [2, 1]
+            num_fp8_tensors = [x * 3 if fwd else x * 2 for x in num_gemms]
+
+            # Initialize recipe state and quantizers
+            recipe_states = [RecipeState.create(
+                recipe[i],
+                mode=("forward" if fwd else "backward"),
+                num_quantizers=num_fp8_tensors[i],
+            ) for i in range(2)]
+
+            self.fp8_meta[fp8_meta_tensor_key] = recipe_states[1]
+            self.quantizers[fp8_meta_tensor_key] = []
+            for recipe_state in recipe_states:
+                self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
 
     @no_torch_dynamo(recursive=False)
     def forward(
