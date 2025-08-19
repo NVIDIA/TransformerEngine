@@ -31,6 +31,8 @@
 
 #ifdef __cplusplus
 extern "C" {
+#else
+#include <stdbool.h>
 #endif
 
 typedef struct NVTECommGemmCtx NVTECommGemmCtx;
