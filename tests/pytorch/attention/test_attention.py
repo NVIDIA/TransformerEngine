@@ -1605,8 +1605,6 @@ def _rmse(a, b):
 def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
-    print(a.view(-1)[:10])
-    print(b.view(-1)[:10])
     try:
         if a.dtype != b.dtype:
             a = a.to(b.dtype)

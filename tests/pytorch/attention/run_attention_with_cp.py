@@ -415,9 +415,6 @@ def run_dpa_with_cp(
         return torch.sqrt((a - b).square().mean()).item()
 
     def _error(a, b):
-        if torch.cuda.current_device() == 0:
-            print(a.reshape(-1)[:10])
-            print(b.reshape(-1)[:10])
         if dtype != "fp8":
             torch.testing.assert_close(a, b, **tols)
         else:
