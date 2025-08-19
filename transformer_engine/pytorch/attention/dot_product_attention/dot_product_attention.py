@@ -547,7 +547,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if self.fp8_meta_tensors_initialized:
             recipe_state = self.fp8_meta[fp8_meta_tensor_key]
             if recipe_.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
-                self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
+                self.adjust_amax_history_length(recipe_.amax_history_len, fwd=fwd)
                 return
             if recipe_.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
