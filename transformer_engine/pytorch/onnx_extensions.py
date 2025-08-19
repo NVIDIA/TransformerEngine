@@ -194,12 +194,12 @@ def onnx_quantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType,
 ) -> Tuple[onnxscript.onnx_types.TensorType, onnxscript.onnx_types.TensorType]:
     """Symbolic quantize to MXFP8Tensor used for inference."""
-    tensor_out, scale_inv_out = TRT_MXFP8QuantizeLinear(tensor)
+    tensor_out, scale_inv_out = TRT_MXFP8DynamicQuantize(tensor)
     return tensor_out, scale_inv_out
 
 
 schema = defs.OpSchema(
-    name="TRT_MXFP8QuantizeLinear",
+    name="TRT_MXFP8DynamicQuantize",
     domain="trt",
     since_version=1,
     doc="TRT MXFP8 Quantize Linear used for inference.",
@@ -214,8 +214,8 @@ schema = defs.OpSchema(
     ],
 )
 
-TRT_MXFP8QuantizeLinear = onnxscript.values.Op(
-    opset=trt_opset, name="TRT_MXFP8QuantizeLinear", op_schema=schema
+TRT_MXFP8DynamicQuantize = onnxscript.values.Op(
+    opset=trt_opset, name="TRT_MXFP8DynamicQuantize", op_schema=schema
 )
 
 
