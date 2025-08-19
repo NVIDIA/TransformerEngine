@@ -111,7 +111,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
         py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
         py::arg("ag_on_B"), py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
-        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
+        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
+        py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
         py::arg("quantizer"));
   m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
